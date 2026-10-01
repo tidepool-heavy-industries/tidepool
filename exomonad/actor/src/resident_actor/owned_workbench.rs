@@ -1311,6 +1311,90 @@ where
             .parked_effect
             .take()
             .expect("one captured effect wait");
+        let pending = match pending.wait {
+            OwnedWorkbenchWait::CapturedCommit(prepared) => {
+                let environment = self.environment.clone();
+                let readiness_kernel = kernel.clone();
+                return Self::owned_step_task(
+                    owned,
+                    move |_| {
+                        Box::pin(captured_commit::await_ready(
+                            environment,
+                            readiness_kernel,
+                            prepared,
+                        ))
+                    },
+                    move |behavior, kernel, owned, ready| {
+                        let release = behavior.apply_captured_commit(kernel, ready);
+                        let environment = behavior.environment.clone();
+                        let release_kernel = kernel.clone();
+                        Ok(WorkbenchAdvance::Park(Self::owned_step_task(
+                            owned,
+                            move |_| {
+                                Box::pin(captured_commit::await_release(
+                                    environment,
+                                    release_kernel,
+                                    release,
+                                ))
+                            },
+                            move |behavior, kernel, owned, completed| {
+                                let resume = behavior.settle_captured_commit(completed);
+                                let operation = Box::pin(captured_commit::resume(
+                                    behavior.environment.clone(),
+                                    kernel.clone(),
+                                    resume,
+                                ));
+                                let pending = ParkedWorkbenchEffect {
+                                    wait: OwnedWorkbenchWait::Prepared(operation),
+                                    ordinal: pending.ordinal,
+                                    effect: pending.effect,
+                                    started: pending.started,
+                                };
+                                Ok(WorkbenchAdvance::Park(behavior.resume_owned_effect_task(
+                                    owned,
+                                    kernel.clone(),
+                                    pending,
+                                )))
+                            },
+                        )))
+                    },
+                );
+            }
+            OwnedWorkbenchWait::Launch(prepared) => {
+                let environment = self.environment.clone();
+                let launch_kernel = kernel.clone();
+                return Self::owned_step_task(
+                    owned,
+                    move |_| {
+                        Box::pin(child_launch::await_launch(
+                            environment,
+                            launch_kernel,
+                            prepared,
+                        ))
+                    },
+                    move |behavior, kernel, owned, completed| {
+                        let resume = behavior.apply_child_launch(kernel, completed);
+                        let operation = Box::pin(child_launch::resume_launch(
+                            behavior.environment.clone(),
+                            kernel.clone(),
+                            resume,
+                        ));
+                        let pending = ParkedWorkbenchEffect {
+                            wait: OwnedWorkbenchWait::Prepared(operation),
+                            ordinal: pending.ordinal,
+                            effect: pending.effect,
+                            started: pending.started,
+                        };
+                        Ok(WorkbenchAdvance::Park(behavior.resume_owned_effect_task(
+                            owned,
+                            kernel.clone(),
+                            pending,
+                        )))
+                    },
+                );
+            }
+            wait => ParkedWorkbenchEffect { wait, ..pending },
+        };
         if let OwnedWorkbenchWait::Command {
             request: crate::generated::commands::CommandsReq::CommandPresentWith(job, presentation),
             ..
@@ -1809,6 +1893,9 @@ where
     O: OutputSink + Sync + 'static,
 {
     let result = match wait {
+        OwnedWorkbenchWait::Launch(_) | OwnedWorkbenchWait::CapturedCommit(_) => {
+            unreachable!("child launch requires fenced actor application")
+        }
         OwnedWorkbenchWait::Prepared(operation) => operation.await,
         OwnedWorkbenchWait::Drain {
             continuation,

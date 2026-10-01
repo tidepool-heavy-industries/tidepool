@@ -2028,16 +2028,7 @@ fn start_tool<B: KernelBehavior>(
         return;
     };
     state.next_task_generation = generation;
-    let execution = invocation
-        .context
-        .as_ref()
-        .map(|context| {
-            crate::resident_tools::execution_id(
-                state.context.identity,
-                &crate::resident_tools::WorkbenchCallKey::from(context.clone()),
-            )
-        })
-        .unwrap_or_else(|| untracked_tool_execution(state.context.identity, generation));
+    let execution = control.execution_id(state.context.identity);
     let pending = PendingActorTask::Tool(PendingTool {
         step: crate::WorkbenchStepKey::new(state.context.identity, generation, Some(execution)),
         reply,
@@ -2066,20 +2057,6 @@ fn start_tool<B: KernelBehavior>(
     let key = pending.generation();
     state.pending_tasks.insert(key, pending);
     spawn_actor_task(myself, state, generation, task);
-}
-
-fn untracked_tool_execution(
-    actor: ActorRef,
-    generation: u64,
-) -> tidepool_runtime::session::WorkbenchExecutionId {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"tidepool.untracked-tool-execution.v1\0");
-    hasher.update(&actor.id.0.to_le_bytes());
-    hasher.update(&actor.incarnation.0.to_le_bytes());
-    hasher.update(&generation.to_le_bytes());
-    let mut digest = [0_u8; 16];
-    digest.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
-    tidepool_runtime::session::WorkbenchExecutionId::from_digest(digest)
 }
 
 async fn start_kernel_task<B: KernelBehavior>(

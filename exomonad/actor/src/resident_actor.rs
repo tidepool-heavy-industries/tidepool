@@ -1440,6 +1440,8 @@ struct ParkedWorkbenchEffect {
 }
 
 enum OwnedWorkbenchWait {
+    Launch(child_launch::PreparedChildLaunch),
+    CapturedCommit(captured_commit::PreparedCapturedCommit),
     Prepared(
         futures_util::future::BoxFuture<
             'static,
@@ -1630,7 +1632,7 @@ impl ForkPublication {
             Self::Workbench {
                 boundary: Some(boundary),
                 ..
-            } => Some(boundary),
+            } => boundary.hosted().map(|_| boundary),
             Self::Resident | Self::Workbench { .. } | Self::Route(_) => None,
         }
     }
@@ -1699,7 +1701,15 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         effect_owner: &CurrentEffectOwner<'_>,
         target: ActorRef,
     ) -> bool {
-        effect_owner.publication().boundary().is_some()
+        effect_owner
+            .publication()
+            .boundary()
+            .is_some_and(|boundary| {
+                !matches!(
+                    boundary,
+                    tidepool_runtime::session::WorkbenchForkBoundary::Execution { .. }
+                )
+            })
             && self.environment.fork_groups.is_pending_child(target)
     }
 
@@ -1865,7 +1875,21 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         O: OutputSink + Sync + 'static,
     {
         let mut context = self.context(actor);
-        let request = invocation.request;
+        let execution = invocation
+            .request
+            .execution_id()
+            .cloned()
+            .unwrap_or_else(|| WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes()));
+        let mut request = invocation.request.with_execution_id(execution.clone());
+        if request.fork_boundary().is_none() {
+            request = request.with_fork_boundary(
+                tidepool_runtime::session::WorkbenchForkBoundary::Execution {
+                    actor_id: actor.id.0,
+                    incarnation: actor.incarnation.0,
+                    execution_id: execution,
+                },
+            );
+        }
         let installed_tools = match invocation.installed_tools {
             Some(lease) if lease.actor() != context.actor => {
                 return Err(KernelInvocationFailure::Rejected {
@@ -3088,7 +3112,9 @@ where
                     checkpoint_lease
                         .as_ref()
                         .map(|lease| lease.boundary.clone())
-                        .or_else(|| effect_owner.publication().boundary().cloned()),
+                        .or_else(|| effect_owner.publication().boundary().filter(|boundary|
+                            !matches!(boundary, tidepool_runtime::session::WorkbenchForkBoundary::Execution { .. })
+                        ).cloned()),
                 );
                 if let Some(lease) = &checkpoint_lease {
                     descriptor = descriptor.with_context_parent(lease.issuer);
@@ -3511,6 +3537,7 @@ where
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
+        effect_owner: &CurrentEffectOwner<'_>,
         boundary: ResidentActorBoundary,
     ) -> Result<
         futures_util::future::BoxFuture<
@@ -3529,10 +3556,218 @@ where
         let workbench = self
             .active_workbench()
             .unwrap_or_else(|| environment.runner.application_workbench());
+        let publication = effect_owner.publication().clone();
+        let control = effect_owner.control();
         let operation: futures_util::future::BoxFuture<
             'static,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
+            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
+                continuation,
+                relative,
+                group,
+                branches,
+            }) => {
+                let admitted = (|| {
+                    let group = if relative {
+                        let parent = descriptor.actor_path().ok_or_else(|| {
+                            "relative subgroup requires an allocated parent actor path".to_string()
+                        })?;
+                        let segment = crate::ActorPathSegment::new(group)
+                            .map_err(|error| error.to_string())?;
+                        parent.child(segment).map_err(|error| error.to_string())?
+                    } else {
+                        crate::ActorPath::parse(&group).map_err(|error| error.to_string())?
+                    };
+                    let branches = branches
+                        .into_iter()
+                        .map(crate::ActorPathSegment::new)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|error| error.to_string())?;
+                    let budget = descriptor.effective_role().descendants();
+                    if budget.maximum_depth == 0 {
+                        return Err(
+                            "cannot unfold context: descendant depth budget is exhausted".into(),
+                        );
+                    }
+                    let group_path = group.to_string();
+                    let maximum = budget.maximum_active_children.map(usize::from);
+                    let (group_id, reservations) = match publication.boundary().cloned() {
+                        Some(boundary) => environment.fork_groups.begin_at_boundary(
+                            context.actor,
+                            group,
+                            branches,
+                            maximum,
+                            boundary,
+                        ),
+                        None => {
+                            environment
+                                .fork_groups
+                                .begin(context.actor, group, branches, maximum)
+                        }
+                    }
+                    .map_err(|error| self.name_coordinator(error))?;
+                    Ok::<_, String>((group_id, group_path, reservations))
+                })();
+                if matches!(publication, ForkPublication::Route(_)) {
+                    if let (Ok((group, _, _)), Some((_, groups))) =
+                        (&admitted, &mut self.active_route)
+                    {
+                        groups.push(*group);
+                    }
+                }
+                Box::pin(async move {
+                    match admitted {
+                        Ok((group_id, group_path, reservations)) => {
+                            environment
+                                .runner
+                                .resume_fork_group(
+                                    context.clone(),
+                                    continuation,
+                                    group_id,
+                                    group_path,
+                                    reservations
+                                        .into_iter()
+                                        .map(|reservation| reservation.allocated.to_string())
+                                        .collect(),
+                                )
+                                .await
+                        }
+                        Err(detail) => {
+                            environment
+                                .runner
+                                .resume_fork_failure(context.clone(), continuation, detail)
+                                .await
+                        }
+                    }
+                })
+            }
+            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Commit {
+                continuation,
+                group,
+            }) => Box::pin(async move {
+                let owned_boundary = environment
+                    .fork_groups
+                    .completion_boundary(group, context.actor);
+                if !matches!(&owned_boundary, Ok(boundary) if boundary.as_ref() == publication.boundary())
+                {
+                    return environment
+                        .runner
+                        .resume_fork_failure(
+                            context.clone(),
+                            continuation,
+                            "fork group belongs to another execution boundary".into(),
+                        )
+                        .await;
+                }
+                let mut phase = match environment.fork_groups.request_commit(group, context.actor) {
+                    Ok(phase) => phase,
+                    Err(error) => {
+                        return environment
+                            .runner
+                            .resume_fork_failure(context.clone(), continuation, error.to_string())
+                            .await;
+                    }
+                };
+                loop {
+                    let current = *phase.borrow();
+                    match current {
+                        crate::ForkGroupPhase::Ready | crate::ForkGroupPhase::Committed => break,
+                        crate::ForkGroupPhase::Aborted => {
+                            let children = environment
+                                .fork_groups
+                                .cleanup_failed(group, context.actor)
+                                .map_err(|error| {
+                                    ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                                })?;
+                            for child in children {
+                                if let Some(child) = kernel.resolve(child) {
+                                    // A child already gone from a failed fork-group admission is
+                                    // the common case here; log anything else so an actor that
+                                    // refused shutdown does not silently linger.
+                                    if let Err(error) = child
+                                        .shutdown(ActorTerminal {
+                                            kind: ActorExitKind::Cancelled,
+                                            summary: "fork group admission failed".into(),
+                                        })
+                                        .await
+                                    {
+                                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
+                                    }
+                                }
+                            }
+                            return environment
+                                .runner
+                                .resume_fork_failure(
+                                    context.clone(),
+                                    continuation,
+                                    format!(
+                                        "fork group {} was aborted while awaiting readiness",
+                                        group.0
+                                    ),
+                                )
+                                .await;
+                        }
+                        crate::ForkGroupPhase::Staging => {}
+                    }
+                    let cancelled = async {
+                        match &control {
+                            Some(control) => control.wait_for_cancellation().await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    };
+                    let changed = tokio::select! {
+                        changed = phase.changed() => changed,
+                        () = cancelled => return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "fork readiness interrupted by invocation cancellation".into(),
+                        )),
+                    };
+                    if changed.is_err() {
+                        return environment
+                            .runner
+                            .resume_fork_failure(
+                                context.clone(),
+                                continuation,
+                                format!("fork group {} readiness channel closed", group.0),
+                            )
+                            .await;
+                    }
+                }
+                if control
+                    .as_ref()
+                    .is_some_and(|control| control.cancellation_requested())
+                {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "fork readiness interrupted by invocation cancellation".into(),
+                    ));
+                }
+                // Resident actor handlers have no provider tool completion to
+                // publish their children. Publish this admission before resuming
+                // the handler, which may immediately await a child's reply.
+                // Notebook groups remain fenced by their completion boundary.
+                if matches!(
+                    publication,
+                    ForkPublication::Resident
+                        | ForkPublication::Workbench {
+                            boundary: Some(
+                                tidepool_runtime::session::WorkbenchForkBoundary::Execution { .. }
+                            ),
+                            ..
+                        }
+                ) {
+                    environment
+                        .fork_groups
+                        .publish_groups(&[group], context.actor)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                        })?;
+                    tracing::info!(actor = ?context.actor, group = group.0, "resident fork admission published");
+                }
+                environment
+                    .runner
+                    .resume_fork_unit(context.clone(), continuation)
+                    .await
+            }),
             ResidentActorBoundary::Console { continuation, text } => Box::pin(async move {
                 tracing::debug!(actor = ?context.actor, output = %crate::workbench_display::bounded_output(&text, 8192), "actor console");
                 environment
@@ -3875,10 +4110,11 @@ where
         ancestry: &crate::CallAncestry,
         boundary: ResidentActorBoundary,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        let boundary = match self.prepare_independent_effect(kernel, context, boundary) {
-            Ok(operation) => return operation.await,
-            Err(boundary) => boundary,
-        };
+        let boundary =
+            match self.prepare_independent_effect(kernel, context, &effect_owner, boundary) {
+                Ok(operation) => return operation.await,
+                Err(boundary) => boundary,
+            };
         // Keep each interpreter branch in its own future. A child can execute
         // an effect during Ractor startup on the caller's poll stack; embedding
         // every branch here makes that ordinary nesting exhaust a debug stack.
@@ -4549,82 +4785,6 @@ where
                     .resume_value(context.clone(), continuation, preview)
                     .await
             }),
-            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
-                continuation,
-                relative,
-                group,
-                branches,
-            }) => Box::pin(async move {
-                let admitted = (|| {
-                    let group = if relative {
-                        let parent = self.descriptor.actor_path().ok_or_else(|| {
-                            "relative subgroup requires an allocated parent actor path".to_string()
-                        })?;
-                        let segment = crate::ActorPathSegment::new(group)
-                            .map_err(|error| error.to_string())?;
-                        parent.child(segment).map_err(|error| error.to_string())?
-                    } else {
-                        crate::ActorPath::parse(&group).map_err(|error| error.to_string())?
-                    };
-                    let branches = branches
-                        .into_iter()
-                        .map(crate::ActorPathSegment::new)
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(|error| error.to_string())?;
-                    let budget = self.descriptor.effective_role().descendants();
-                    if budget.maximum_depth == 0 {
-                        return Err(
-                            "cannot unfold context: descendant depth budget is exhausted".into(),
-                        );
-                    }
-                    let group_path = group.to_string();
-                    let maximum = budget.maximum_active_children.map(usize::from);
-                    let (group_id, reservations) =
-                        match effect_owner.publication().boundary().cloned() {
-                            Some(boundary) => self.environment.fork_groups.begin_at_boundary(
-                                context.actor,
-                                group,
-                                branches,
-                                maximum,
-                                boundary,
-                            ),
-                            None => self.environment.fork_groups.begin(
-                                context.actor,
-                                group,
-                                branches,
-                                maximum,
-                            ),
-                        }
-                        .map_err(|error| self.name_coordinator(error))?;
-                    Ok::<_, String>((group_id, group_path, reservations))
-                })();
-                match admitted {
-                    Ok((group_id, group_path, reservations)) => {
-                        if let Some((_, groups)) = &mut self.active_route {
-                            groups.push(group_id);
-                        }
-                        self.environment
-                            .runner
-                            .resume_fork_group(
-                                context.clone(),
-                                continuation,
-                                group_id,
-                                group_path,
-                                reservations
-                                    .into_iter()
-                                    .map(|reservation| reservation.allocated.to_string())
-                                    .collect(),
-                            )
-                            .await
-                    }
-                    Err(detail) => {
-                        self.environment
-                            .runner
-                            .resume_fork_failure(context.clone(), continuation, detail)
-                            .await
-                    }
-                }
-            }),
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::CommitCaptured {
                 continuation,
                 group,
@@ -4638,97 +4798,6 @@ where
                     group,
                 )
                 .await
-            }),
-            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Commit {
-                continuation,
-                group,
-            }) => Box::pin(async move {
-                let mut phase = match self
-                    .environment
-                    .fork_groups
-                    .request_commit(group, context.actor)
-                {
-                    Ok(phase) => phase,
-                    Err(error) => {
-                        return self
-                            .environment
-                            .runner
-                            .resume_fork_failure(context.clone(), continuation, error.to_string())
-                            .await;
-                    }
-                };
-                loop {
-                    let current = *phase.borrow();
-                    match current {
-                        crate::ForkGroupPhase::Ready | crate::ForkGroupPhase::Committed => break,
-                        crate::ForkGroupPhase::Aborted => {
-                            let children = self
-                                .environment
-                                .fork_groups
-                                .cleanup_failed(group, context.actor)
-                                .map_err(|error| {
-                                    ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                                })?;
-                            for child in children {
-                                if let Some(child) = kernel.resolve(child) {
-                                    // A child already gone from a failed fork-group admission is
-                                    // the common case here; log anything else so an actor that
-                                    // refused shutdown does not silently linger.
-                                    if let Err(error) = child
-                                        .shutdown(ActorTerminal {
-                                            kind: ActorExitKind::Cancelled,
-                                            summary: "fork group admission failed".into(),
-                                        })
-                                        .await
-                                    {
-                                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-                                    }
-                                }
-                            }
-                            return self
-                                .environment
-                                .runner
-                                .resume_fork_failure(
-                                    context.clone(),
-                                    continuation,
-                                    format!(
-                                        "fork group {} was aborted while awaiting readiness",
-                                        group.0
-                                    ),
-                                )
-                                .await;
-                        }
-                        crate::ForkGroupPhase::Staging => {}
-                    }
-                    if phase.changed().await.is_err() {
-                        return self
-                            .environment
-                            .runner
-                            .resume_fork_failure(
-                                context.clone(),
-                                continuation,
-                                format!("fork group {} readiness channel closed", group.0),
-                            )
-                            .await;
-                    }
-                }
-                // Resident actor handlers have no provider tool completion to
-                // publish their children. Publish this admission before resuming
-                // the handler, which may immediately await a child's reply.
-                // Notebook groups remain fenced by their completion boundary.
-                if matches!(effect_owner.publication(), ForkPublication::Resident) {
-                    self.environment
-                        .fork_groups
-                        .publish_groups(&[group], context.actor)
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                        })?;
-                    tracing::info!(actor = ?context.actor, group = group.0, "resident fork admission published");
-                }
-                self.environment
-                    .runner
-                    .resume_fork_unit(context.clone(), continuation)
-                    .await
             }),
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Abort {
                 continuation,
@@ -6961,6 +7030,27 @@ where
                     }
                     let boundary = if execution_state.park_effects {
                         let captured = match boundary {
+                            ResidentActorBoundary::ForkGroup(
+                                ForkGroupBoundary::CommitCaptured {
+                                    continuation,
+                                    group,
+                                },
+                            ) => Ok(OwnedWorkbenchWait::CapturedCommit(
+                                self.prepare_captured_commit(
+                                    context,
+                                    &execution_state.publication,
+                                    execution_state.control.clone(),
+                                    continuation,
+                                    group,
+                                ),
+                            )),
+                            ResidentActorBoundary::Start(start) => {
+                                Ok(OwnedWorkbenchWait::Launch(self.prepare_child_launch(
+                                    context,
+                                    CurrentEffectOwner::Workbench(execution_state),
+                                    start,
+                                )))
+                            }
                             ResidentActorBoundary::Drain {
                                 continuation,
                                 target,
@@ -6991,7 +7081,12 @@ where
                                 })
                             }
                             boundary => {
-                                match self.prepare_independent_effect(kernel, context, boundary) {
+                                match self.prepare_independent_effect(
+                                    kernel,
+                                    context,
+                                    &CurrentEffectOwner::Workbench(execution_state),
+                                    boundary,
+                                ) {
                                     Ok(operation) => Ok(OwnedWorkbenchWait::Prepared(operation)),
                                     Err(boundary) => OwnedWorkbenchWait::capture(boundary),
                                 }
@@ -7906,12 +8001,14 @@ where
                             cursor.cell_display_remaining.saturating_sub(spent);
                     }
                     if self.has_ready_groups(context.actor, effects.publication.boundary()) {
-                        let publication = if effects.publication.boundary().is_none() {
-                            self.environment
-                                .fork_groups
-                                .publish_ready_in_resident(context.actor)
-                        } else {
-                            Ok(Vec::new())
+                        let publication = match effects.publication.boundary() {
+                            None => self.environment.fork_groups.publish_ready_in_resident(context.actor),
+                            Some(boundary @ tidepool_runtime::session::WorkbenchForkBoundary::Execution { .. }) => {
+                                let groups = self.environment.fork_groups.ready_groups_at_boundary(context.actor, boundary)
+                                    .into_iter().map(|(group, _)| group).collect::<Vec<_>>();
+                                self.environment.fork_groups.publish_groups(&groups, context.actor).map(|_| groups)
+                            }
+                            Some(_) => Ok(Vec::new()),
                         };
                         if let Err(source) = publication {
                             settle_prepared_operations(
@@ -9599,16 +9696,29 @@ where
     ) -> crate::OwnedActorTask<Self, serde_json::Value> {
         let actor = kernel.identity();
         let key = control.invocation.clone();
-        let execution = key
-            .as_ref()
-            .map(|key| crate::resident_tools::execution_id(actor, key));
+        let execution = Some(control.execution_id(actor));
         let request = execution.as_ref().map(|execution| {
             let arguments = match &invocation.arguments {
                 exomonad_tool::ToolArguments::Raw(text) => serde_json::Value::String(text.clone()),
                 exomonad_tool::ToolArguments::Structured(value) => value.clone(),
             };
+            let boundary = invocation
+                .context
+                .as_ref()
+                .and_then(|context| context.model_operation())
+                .map(|operation| {
+                    tidepool_runtime::session::WorkbenchForkBoundary::Hosted(operation.clone())
+                })
+                .unwrap_or_else(
+                    || tidepool_runtime::session::WorkbenchForkBoundary::Execution {
+                        actor_id: actor.id.0,
+                        incarnation: actor.incarnation.0,
+                        execution_id: execution.clone(),
+                    },
+                );
             WorkbenchRequest::for_tool(invocation.name.clone(), arguments)
                 .with_execution_id(execution.clone())
+                .with_fork_boundary(boundary)
         });
         if let (Some(execution), Some(request)) = (&execution, &request) {
             match self
@@ -9760,7 +9870,15 @@ where
                 exomonad_tool::ToolArguments::Structured(value) => value,
             };
             self.fork_publication = ForkPublication::Workbench {
-                boundary: hosted_boundary,
+                boundary: hosted_boundary.or_else(|| {
+                    crate::resident_workbench::execution_control().map(|control| {
+                        tidepool_runtime::session::WorkbenchForkBoundary::Execution {
+                            actor_id: context.actor.id.0,
+                            incarnation: context.actor.incarnation.0,
+                            execution_id: control.execution_id(context.actor),
+                        }
+                    })
+                }),
                 capture: hosted_checkpoint_capture,
             };
             let mut outcome = self
@@ -12212,6 +12330,28 @@ mod tests {
         assert!(super::ForkPublication::Workbench {
             boundary: Some(boundary),
             capture: None,
+        }
+        .hosted_boundary()
+        .is_none());
+        let direct = tidepool_runtime::session::WorkbenchForkBoundary::Execution {
+            actor_id: 1,
+            incarnation: 1,
+            execution_id: WorkbenchExecutionId::from_digest([7; 16]),
+        };
+        assert!(super::ForkPublication::Workbench {
+            boundary: Some(direct),
+            capture: None
+        }
+        .hosted_boundary()
+        .is_none());
+        let hosted = tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "thread".into(),
+            "request".into(),
+            "call".into(),
+        );
+        assert!(super::ForkPublication::Workbench {
+            boundary: Some(hosted),
+            capture: None
         }
         .hosted_boundary()
         .is_some());

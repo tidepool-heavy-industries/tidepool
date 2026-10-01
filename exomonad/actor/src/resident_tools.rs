@@ -62,6 +62,7 @@ pub struct WorkbenchExecutionControl {
     publication: Arc<PublicationDecision>,
     native_cancel: Arc<std::sync::atomic::AtomicBool>,
     reservation_attempt: crate::request::WorkbenchReservationAttempt,
+    execution: std::sync::OnceLock<WorkbenchExecutionId>,
     publication_waited: std::sync::atomic::AtomicBool,
     phase: std::sync::atomic::AtomicU8,
     sleep_outcome: std::sync::atomic::AtomicU8,
@@ -102,6 +103,7 @@ impl WorkbenchExecutionControl {
             publication: PublicationDecision::new(),
             native_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reservation_attempt: crate::request::WorkbenchReservationAttempt::fresh(),
+            execution: std::sync::OnceLock::new(),
             publication_waited: std::sync::atomic::AtomicBool::new(false),
             phase: std::sync::atomic::AtomicU8::new(WORKBENCH_IDLE),
             sleep_outcome: std::sync::atomic::AtomicU8::new(SLEEP_NONE),
@@ -116,15 +118,24 @@ impl WorkbenchExecutionControl {
         Arc::clone(&self.publication)
     }
 
+    pub(crate) fn execution_id(&self, actor: crate::ActorRef) -> WorkbenchExecutionId {
+        self.execution
+            .get_or_init(|| {
+                self.invocation.as_ref().map_or_else(
+                    || WorkbenchExecutionId::from_digest(*uuid::Uuid::new_v4().as_bytes()),
+                    |invocation| execution_id(actor, invocation),
+                )
+            })
+            .clone()
+    }
+
     pub(crate) fn reservation_owner(
         &self,
         actor: crate::ActorRef,
     ) -> Option<crate::request::RequestReservationOwner> {
-        self.invocation.as_ref().map(|invocation| {
-            crate::request::RequestReservationOwner::Workbench {
-                execution: execution_id(actor, invocation),
-                attempt: self.reservation_attempt.clone(),
-            }
+        Some(crate::request::RequestReservationOwner::Workbench {
+            execution: self.execution_id(actor),
+            attempt: self.reservation_attempt.clone(),
         })
     }
 
@@ -1254,6 +1265,20 @@ mod tests {
             next_index: 0,
             total: 1,
         })
+    }
+
+    #[test]
+    fn direct_controls_retain_distinct_reservation_owners() {
+        let actor = crate::ActorRef::first(crate::ActorId(9));
+        let first = WorkbenchExecutionControl::untracked();
+        let sibling = WorkbenchExecutionControl::untracked();
+        let original = first
+            .reservation_owner(actor)
+            .expect("direct execution owner");
+        assert_eq!(first.reservation_owner(actor), Some(original.clone()));
+        assert_ne!(sibling.reservation_owner(actor), Some(original));
+        first.request_cancellation();
+        assert!(!sibling.cancellation_requested());
     }
 
     #[test]
