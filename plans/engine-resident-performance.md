@@ -173,7 +173,8 @@ existing battery owner. Enter the pinned dev shell and admitted resource scope,
 set `CARGO_TARGET_DIR`, `TIDEPOOL_EXTRACT`, `TIDEPOOL_EXTRACT_WORKER`, and
 `TIDEPOOL_COMPILER_DEPLOYMENT` to the frozen matching pair and manifest. The
 runner records exact source OID, dirty paths, command argv, file SHA256 values,
-exit code and scope memory peak. It uses two workers with 10240 MiB ceilings,
+exit code, exactly two executed tests, and scope memory peak. A missing summary
+or a different execution count refuses the baseline. It uses two workers with 10240 MiB ceilings,
 retains compiler/test logs, and verifies the selected files did not change.
 It makes no packaged-product latency claim. The later durable scaling tests
 `resident_durable_growing_prefix_10_baseline_0` and
