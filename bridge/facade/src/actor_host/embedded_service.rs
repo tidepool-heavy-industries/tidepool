@@ -7,7 +7,7 @@ use harness::{
     engine::EngineConfig,
     model::{AgentPath, Effort},
     server::{QueuedCommand, ServerConfig, ServerControl, SessionSecret},
-    transport::{ResponsesClient, auth::CodexFileAuth},
+    transport::{auth::CodexFileAuth, ResponsesClient},
 };
 use tokio::{
     net::TcpListener,
@@ -448,7 +448,7 @@ where
                     if changed.is_err() || *cancellation.borrow() { return Ok(()); }
                     continue;
                 }
-                wake = incoming.recv() => match wake { Some(wake) => wake, None => return Ok(()) },
+                wake = incoming.recv() => match wake { Some(_) => continue, None => return Ok(()) },
             },
         };
         let head = store
@@ -512,16 +512,24 @@ where
             }
             _ => None,
         };
+        let rejected = matches!(
+            &result,
+            Err(harness::engine::EngineError::RequestRejected { .. })
+        );
         let durable_head = match result {
             Ok(completion) => Some(completion.head_request),
+            Err(harness::engine::EngineError::RequestRejected { head_request, .. }) => {
+                Some(head_request)
+            }
             Err(error) => match cancelled_head(&error) {
                 Some(request_head) => request_head.or_else(|| head.clone()),
                 None => return Err(error.to_string()),
             },
         };
-        if !store
-            .advance_agent_head(&actor, head.as_ref(), durable_head.as_ref())
-            .map_err(|error| error.to_string())?
+        if !rejected
+            && !store
+                .advance_agent_head(&actor, head.as_ref(), durable_head.as_ref())
+                .map_err(|error| error.to_string())?
         {
             return Err(format!(
                 "embedded conversation {} lost its durable head",

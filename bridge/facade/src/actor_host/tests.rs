@@ -223,20 +223,44 @@ fn later_host_requires_missing_journals_when_prior_evidence_exists() {
 
 #[test]
 fn root_never_bound_is_true_exactly_when_the_binding_file_is_absent() {
-    // Regression: a root coordination failure before this run's root ever
-    // reached a queue-ready binding used to leave the host running,
-    // holding the host incarnation lease and every worktree binding lock a
-    // fresh run of the same workspace needs, sometimes for minutes.
     let root = tempfile::tempdir().unwrap();
     let binding_path = root.path().join("root-binding.json");
-    assert!(root_never_bound(&binding_path));
+    assert!(root_never_bound(None, &binding_path));
 
     std::fs::write(
         &binding_path,
         "not even a real binding, just proof of writing",
     )
     .unwrap();
-    assert!(!root_never_bound(&binding_path));
+    assert!(!root_never_bound(None, &binding_path));
+}
+
+#[test]
+fn embedded_application_binding_does_not_require_native_launch_proof() {
+    use exomonad_actor::{ApplicationConversation, DurableActorApplication};
+    let root = tempfile::tempdir().unwrap();
+    let binding_path = root.path().join("root-binding.json");
+    let conversation = ApplicationConversation::Embedded {
+        run: "run".into(),
+        agent_path: "/root".into(),
+        incarnation: "1".into(),
+    };
+    assert!(!native_exit_required(Some(&conversation)));
+    assert!(native_exit_required(None));
+    assert!(native_exit_required(Some(
+        &ApplicationConversation::Codex {
+            thread_id: "thread".into()
+        }
+    )));
+    let mut application = DurableActorApplication {
+        binding_path: binding_path.clone(),
+        conversation: Some(conversation.clone()),
+        intended_conversation: Some(conversation),
+        accepted_source: None,
+    };
+    assert!(!root_never_bound(Some(&application), &binding_path));
+    application.conversation = None;
+    assert!(root_never_bound(Some(&application), &binding_path));
 }
 
 #[test]

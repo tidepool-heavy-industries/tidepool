@@ -3340,7 +3340,12 @@ async fn run_owned(
                 result = &mut root_task, if root_active => {
                     result.map_err(join_error)?;
                     let terminal = root_actor.terminal().get().ok_or_else(|| runtime_error("root stopped without terminal"))?;
-                    if terminal.kind == ActorExitKind::Failed {
+                    let application = actor_recovery.records().into_iter()
+                        .find(|record| record.admission.actor == root_actor.identity())
+                        .and_then(|record| record.application);
+                    let conversation = application.as_ref().and_then(|application|
+                        application.conversation.as_ref().or(application.intended_conversation.as_ref()));
+                    if terminal.kind == ActorExitKind::Failed && native_exit_required(conversation) {
                         let pane = application_owners.lock().get(&root_actor.identity())
                             .and_then(|owner| owner.pane.lock().clone());
                         if let Err(error) = confirm_native_exit(&tmux, pane.as_ref()).await {
@@ -3348,7 +3353,7 @@ async fn run_owned(
                                 root: root_actor.identity(),
                                 error: terminal.summary.clone(),
                             }).ok();
-                            if root_never_bound(&config.root_binding_path) {
+                            if root_never_bound(application.as_ref(), &config.root_binding_path) {
                                 // The root never reached a queue-ready binding in
                                 // this run, so there is no live conversation this
                                 // host could be retained to preserve. Staying up
@@ -3384,7 +3389,7 @@ async fn run_owned(
                                 root: root_actor.identity(),
                                 error: error.to_string(),
                             }).ok();
-                            if root_never_bound(&config.root_binding_path) {
+                            if root_never_bound(application.as_ref(), &config.root_binding_path) {
                                 // Same reasoning as the unconfirmed-native-exit
                                 // case above: nothing was ever bound in this run,
                                 // so there is nothing worth staying up for. Exit
@@ -3421,14 +3426,23 @@ async fn run_owned(
     handoff_application_owners(application_owners, applications_task, cleanup, result)
 }
 
-/// True when this run's root has never reached a queue-ready binding —
-/// `root_binding_path` is written the moment the interactive application's
-/// session callback certifies queue readiness, so its absence is proof, not
-/// inference. A root that fails before that point has no live conversation a
-/// lingering host could be retained to preserve, so a coordination failure at
-/// that point must end the host rather than hold its locks indefinitely.
-fn root_never_bound(root_binding_path: &Path) -> bool {
-    !root_binding_path.exists()
+/// An embedded application has no independently running native process.
+/// Unknown ownership retains the native exit guard until its exit is proven.
+fn native_exit_required(conversation: Option<&exomonad_actor::ApplicationConversation>) -> bool {
+    !matches!(
+        conversation,
+        Some(exomonad_actor::ApplicationConversation::Embedded { .. })
+    )
+}
+
+fn root_never_bound(
+    application: Option<&exomonad_actor::DurableActorApplication>,
+    root_binding_path: &Path,
+) -> bool {
+    match application.and_then(|application| application.conversation.as_ref()) {
+        Some(exomonad_actor::ApplicationConversation::Embedded { .. }) => false,
+        _ => !root_binding_path.exists(),
+    }
 }
 
 async fn confirm_native_exit(tmux: &TmuxSession, pane: Option<&TmuxPaneId>) -> Result<(), String> {
