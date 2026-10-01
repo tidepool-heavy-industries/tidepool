@@ -97,7 +97,11 @@ import os, pathlib, sys
 args = sys.argv[1:]
 with open('received-nix-args', 'a') as stream:
     stream.write(repr(args) + '\\n')
-if '--expr' in args:
+if args[:1] == ['path-info']:
+    print(args[1])
+elif args[:3] == ['hash', 'path', '--sri']:
+    print(os.environ.get('OVERRIDE_HASH', 'sha256-matched-source'))
+elif '--expr' in args:
     print('x86_64-linux')
 elif any('buck-matched-harness-source.outPath' in arg for arg in args):
     print(os.environ['EXPECTED_NIX_OUTPUT'])
@@ -229,6 +233,48 @@ else:
         buck = (self.root / "third-party/rust/BUCK").read_text()
         self.assertIn("git_fetch(", buck)
         self.assertNotIn('load("@toolchains//:tidepool.bzl", "nix_directory")', buck)
+
+    def test_immutable_override_preserves_the_locked_source_and_generated_graph(self):
+        self.prepare_local_harness_fixture()
+        lock_path = self.root / 'flake.lock'
+        lock = json.loads(lock_path.read_text())
+        lock['nodes']['harnessWeb']['locked']['narHash'] = 'sha256-matched-source'
+        lock_path.write_text(json.dumps(lock))
+        source = '/nix/store/22222222222222222222222222222222-source'
+        before = self.contents()
+        result = self.run_script('--local-harness-source', '--harness-source-override', source, MATCHED_HARNESS='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.contents(), before)
+        self.assertEqual(json.loads(lock_path.read_text()), lock)
+        invocations = (self.root / 'received-nix-args').read_text()
+        self.assertIn(repr(['path-info', source]), invocations)
+        self.assertIn(repr(['hash', 'path', '--sri', source]), invocations)
+        self.assertIn("'--override-input', 'harnessWeb', " + repr(source), invocations)
+        self.assertIn("'--no-write-lock-file'", invocations)
+
+    def test_override_hash_mismatch_refuses_without_publication(self):
+        self.prepare_local_harness_fixture()
+        lock_path = self.root / 'flake.lock'
+        lock = json.loads(lock_path.read_text())
+        lock['nodes']['harnessWeb']['locked']['narHash'] = 'sha256-matched-source'
+        lock_path.write_text(json.dumps(lock))
+        before = self.contents()
+        result = self.run_script('--local-harness-source', '--harness-source-override',
+                                 '/nix/store/22222222222222222222222222222222-source',
+                                 MATCHED_HARNESS='1', OVERRIDE_HASH='sha256-foreign-source')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('override hash differs from the canonical locked narHash', result.stderr)
+        self.assertEqual(self.contents(), before)
+
+    def test_override_requires_immutable_store_source_and_explicit_source_mode(self):
+        self.prepare_local_harness_fixture()
+        before = self.contents()
+        for args in [('--harness-source-override', '/tmp/mutable-source'),
+                     ('--local-harness-source', '--harness-source-override', ''),
+                     ('--local-harness-source', '--harness-source-override', '/tmp/mutable-source')]:
+            result = self.run_script(*args, MATCHED_HARNESS='1')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(self.contents(), before)
 
     def test_source_lock_mismatch_refuses_without_publishing(self):
         self.prepare_local_harness_fixture()

@@ -1,5 +1,59 @@
 # Native Buck build migration
 
+## Author locally, execute on swarm-01
+
+The isolated project worker advertises its own platform identity. Copy that
+identity through authenticated SSH; the bootstrap worker's
+`/etc/swarm-build/platform` does not include the project's Rust/GHC closure.
+Keep the forwarding command running in another terminal:
+
+```sh
+ssh -N -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:50071:127.0.0.1:50051 swarm-01
+ssh swarm-01 cat /home/inanna/remote-buck-infra/worker-result/platform \
+  > /tmp/tidepool-buck-platform
+```
+
+Each local checkout needs its own output directory and real bind mount. On
+Linux, an unprivileged mount namespace can supply it without changing the
+host's mounts. Run from the checkout root:
+
+```sh
+mkdir -p buck-out "$HOME/.cache/tidepool/buck-local"
+export TIDEPOOL_BUCK_OUTPUT_DIRECTORY="$HOME/.cache/tidepool/buck-local"
+unshare --user --map-root-user --mount bash -c '
+  set -euo pipefail
+  mount --bind "$TIDEPOOL_BUCK_OUTPUT_DIRECTORY" buck-out
+  export TIDEPOOL_BUCK_REMOTE=true
+  export TIDEPOOL_BUCK_PLATFORM_FILE=/tmp/tidepool-buck-platform
+  export TIDEPOOL_BUCK_REMOTE_ADDRESS=grpc://127.0.0.1:50071
+  bash scripts/buck2-configure.sh
+  bash scripts/buck2-run.sh build //bridge/atomic-write:tidepool_atomic_write
+  bash scripts/buck2-run.sh test --remote-only //bridge/atomic-write:tidepool_atomic_write_unit_tests
+  bash scripts/buck2-run.sh build //bridge/haskell:assignment_internal
+'
+```
+
+Choose a distinct output directory for every checkout. Later invocations still
+enter a mount namespace and mount the same owned directory before calling
+`buck2-run.sh`. The worker closure and local toolchain inputs must match.
+The client accepts a loopback endpoint and a platform file; both remain local
+configuration and are not committed. Editing source locally uploads changed
+inputs through Buck's CAS protocol.
+
+The focused readiness run on 2026-09-30 used Tidepool
+`d9d82f46ff5f702a16257c2dd9e42fe745e27265` and harness
+`814b1697226344e8fd16196666e41c184a73531d`, Rust 1.93.0 and GHC 9.12.2.
+Rust compilation executed 36 remote actions; the unit test target compiled with
+20 remote actions; the Haskell library executed two remote actions. All three
+builds had zero local actions. The default remote test profile then executed
+the test binary on the worker with `--remote-only`: all eight tests passed,
+and the worker journal records the binary's invocation. A second independent local checkout reused 36
+actions from cache. Changing its Rust source executed two new remote actions;
+restoring that source and requesting the Rust and Haskell libraries reused all
+four required actions from cache. This qualifies these focused targets; broader
+extractor, browser, runtime and cancellation gates remain separate.
+
 The Buck graph is being introduced alongside the existing `just` workflows.
 Cargo metadata and `Cargo.lock` remain authoritative for Rust package versions
 and dependency edges. `scripts/buck2-first-party.py --package NAME` generates a
@@ -18,6 +72,13 @@ bash scripts/dev-shell.sh scripts/buck2-reindeer.sh
 
 Add `--check` to either command to verify generated inputs without retaining
 regenerated output.
+
+For an unpublished review join, `buck2-reindeer.sh --local-harness-source
+--harness-source-override /nix/store/...-source` accepts an exported immutable
+source only when its NAR hash matches the canonical `harnessWeb` lock. The
+configured `matched_harness_source` must still equal the existing Nix producer's
+output for those bytes. This override leaves canonical dependency URLs and the
+default Git-fetch generation unchanged; it does not publish the reviewed commit.
 
 The initial accepted native test slice covers `tidepool-atomic-write`,
 `tidepool-repr`, and `tidepool-heap`:

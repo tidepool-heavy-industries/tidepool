@@ -36,7 +36,7 @@ pub use review::{
 use serde::Serialize;
 pub use trace::{
     ActorLifecycle, CallTiming, Cancellation, CorrelationCounts, DurationSummary, RunProvenance,
-    TimingLink, TraceSummary,
+    TimelineEvent, TimelineFilter, TimingLink, TraceSummary,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,7 +48,7 @@ pub enum Evidence<T> {
 }
 
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -182,6 +182,18 @@ pub fn read_observed_run(
     window: TimeWindow,
     observation: &Observation,
 ) -> io::Result<RunMap> {
+    read_observed_run_filtered(run, limits, window, observation, &TimelineFilter::default())
+}
+
+/// Read a run and apply selectors to the bounded timeline projection only.
+/// The actor inventory, review, and summary retain their existing semantics.
+pub fn read_observed_run_filtered(
+    run: &Path,
+    limits: Limits,
+    window: TimeWindow,
+    observation: &Observation,
+    timeline_filter: &TimelineFilter,
+) -> io::Result<RunMap> {
     window.validate()?;
     let read_bound = u64::try_from(limits.bytes_per_record)
         .ok()
@@ -200,7 +212,9 @@ pub fn read_observed_run(
         actors: Vec::new(),
         diagnostics: Vec::new(),
         usage: Evidence::Unknown {
-            reason: "Per-response usage reconciliation not implemented".into(),
+            reason:
+                "No read-only harness export of stored response usage is available to this reader"
+                    .into(),
         },
         acceptance: Evidence::Unknown {
             reason: "No structured acceptance evidence consumed".into(),
@@ -397,7 +411,13 @@ pub fn read_observed_run(
     let mut events = None;
     let mut trace_unavailable = String::new();
     if let Some(path) = trace_path {
-        let (summary, read) = trace::read_trace(&path, limits, window, &mut report.diagnostics);
+        let (summary, read) = trace::read_trace(
+            &path,
+            limits,
+            window,
+            &mut report.diagnostics,
+            timeline_filter,
+        );
         report.trace = summary;
         if report.trace.unclassified_dispatch_failures > 0 {
             report.diagnostics.push(format!(
@@ -433,6 +453,72 @@ pub fn read_observed_run(
     Ok(report)
 }
 impl RunMap {
+    /// Perfetto JSON trace. Exported payloads contain metadata and source
+    /// references only; source content must be retrieved separately.
+    pub fn perfetto_trace(&self) -> serde_json::Value {
+        let track_key = |event: &TimelineEvent| {
+            if let Some(call_id) = &event.call_id {
+                format!("{}:call:{call_id}", event.actor.as_deref().unwrap_or(""))
+            } else if let Some(execution) = &event.execution {
+                format!(
+                    "{}:execution:{execution}",
+                    event.actor.as_deref().unwrap_or("")
+                )
+            } else if let Some(actor) = &event.actor {
+                format!("actor:{actor}")
+            } else {
+                format!("record:{}", event.source)
+            }
+        };
+        let tracks = self
+            .trace
+            .timeline
+            .iter()
+            .map(track_key)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| (key, u64::try_from(index + 1).unwrap_or(u64::MAX)))
+            .collect::<BTreeMap<_, _>>();
+        let events: Vec<serde_json::Value> = self.trace.timeline.iter().map(|event| {
+            let mut args = serde_json::Map::new();
+            args.insert("certainty".into(), serde_json::Value::String(event.certainty.into()));
+            args.insert("source".into(), serde_json::Value::String(event.source.clone()));
+            if let Some(value) = &event.actor { args.insert("actor".into(), value.clone().into()); }
+            if let Some(value) = &event.execution { args.insert("execution".into(), value.clone().into()); }
+            if let Some(value) = &event.call_id { args.insert("call_id".into(), value.clone().into()); }
+            if let Some(value) = event.duration_ms { args.insert("duration_ms".into(), value.into()); }
+            let interval = event.interval_start_unix_ms.zip(event.duration_ms);
+            let mut row = serde_json::json!({
+                "name": event.name, "cat": event.category,
+                "ph": if interval.is_some() { "X" } else { "i" },
+                "ts": interval.map_or(event.at_unix_ms, |(start, _)| start).saturating_mul(1000),
+                "pid": 1,
+                "tid": tracks[&track_key(event)], "args": args,
+            });
+            if let Some((_, duration)) = interval {
+                row["dur"] = serde_json::json!(duration.saturating_mul(1000));
+            } else {
+                row["s"] = serde_json::json!("t");
+            }
+            row
+        }).collect();
+        serde_json::json!({
+            "displayTimeUnit":"ms",
+            "traceEvents": events,
+            "metadata": { "run_map": {
+                "from_unix_ms": self.window.from_unix_ms,
+                "until_unix_ms": self.window.until_unix_ms,
+                "omitted_timeline_events": self.trace.omitted_timeline_events,
+                "timeline_filtered_events": self.trace.timeline_filtered_events,
+                "timeline_outside_window_events": self.trace.timeline_outside_window_events,
+                "timeline_unclassified_events": self.trace.timeline_unclassified_events,
+                "diagnostic_count": self.diagnostics.len(),
+                "source": self.source
+            }}
+        })
+    }
+
     pub fn concise(&self) -> String {
         let mut output = format!("{}: {} observed actor directories, {} recorded events, {} diagnostics; usage and acceptance unknown (not peak concurrency)", self.source, self.actors.len(), self.actors.iter().map(|actor| actor.events.len()).sum::<usize>(), self.diagnostics.len());
         if let (Evidence::Observed { value: run_id, .. }, Evidence::Observed { value: model, .. }) =
@@ -498,6 +584,120 @@ impl RunMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn perfetto_export_uses_completed_span_times_safe_names_and_distinct_tracks() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let workspace = dir.path().join("workspace");
+        let trace_path = workspace.join(".exomonad/logs/wave.jsonl");
+        fs::create_dir_all(&run).unwrap();
+        fs::create_dir_all(trace_path.parent().unwrap()).unwrap();
+        fs::write(
+            run.join("status.json"),
+            serde_json::json!({
+                "version": 4, "run_id": "wave", "workspace": workspace,
+                "session": "session", "agent": {"model":"test", "effort":"low"},
+                "phase": {"state":"ready", "root_actor":{"id":1,"incarnation":1}, "root_thread":"thread-1"}
+            }).to_string(),
+        ).unwrap();
+        let base = 1_790_157_608_000_u64;
+        let records = [
+            serde_json::json!({"timestamp":"2026-09-23T10:00:08.500Z","target":"tidepool::host_dynamic_tools","fields":{"message":"close","actor":"1@1","execution":"exec-a","time.busy":"9s","time.idle":"1s"},"span":{"name":"tool_call","call_id":"call-a"}}),
+            serde_json::json!({"timestamp":"2026-09-23T10:00:09.500Z","target":"tidepool::host_dynamic_tools","fields":{"message":"close","actor":"1@1","execution":"exec-b","time.busy":"7s","time.idle":"0ms"},"span":{"name":"tool_call","call_id":"call-b"}}),
+            serde_json::json!({"timestamp":"2026-09-23T10:00:08.600Z","target":"exomonad_actor::resident_actor","fields":{"message":"jev call answered","elapsed_ms":"20"},"spans":[{"name":"cell","actor":"1@1","execution":"exec-a"}]}),
+            serde_json::json!({"timestamp":"2026-09-23T10:00:08.700Z","target":"exomonad_actor::resident_actor","fields":{"message":"jev call answered","elapsed_ms":"30"},"spans":[{"name":"cell","actor":"1@1","execution":"exec-b"}]}),
+            serde_json::json!({"timestamp":"2026-09-23T10:00:09.000Z","target":"exomonad_actor::call_timing","fields":{"message":"call timing","actor":1,"incarnation":1,"total_ms":700,"tool":"cell"}}),
+            serde_json::json!({"timestamp":"2026-09-23T10:00:09.100Z","target":"exomonad_actor::call_timing","fields":{"message":"call timing","actor":2,"incarnation":1,"total_ms":800,"tool":"cell"}}),
+            serde_json::json!({"timestamp":"2026-09-23T10:00:09.200Z","target":"exomonad_actor::resident_actor","fields":{"message":"actor notification sent","actor":"1@1","target":"2@1","reason":"SECRET REASON"}}),
+            serde_json::json!({"timestamp":"2026-09-23T10:00:09.300Z","target":"unknown::target","fields":{"message":"SECRET USER MESSAGE"}}),
+            serde_json::json!({"timestamp":"2026-09-23T10:00:11.000Z","target":"exomonad_actor::call_timing","fields":{"message":"call timing","actor":1,"incarnation":1,"total_ms":1}}),
+        ];
+        fs::write(
+            &trace_path,
+            records
+                .iter()
+                .map(|record| format!("{record}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let report = read_observed_run_filtered(
+            &run,
+            Limits::default(),
+            TimeWindow {
+                from_unix_ms: Some(base),
+                until_unix_ms: Some(base + 2_000),
+            },
+            &Observation::at(base + 20_000),
+            &TimelineFilter::default(),
+        )
+        .unwrap();
+        let export = report.perfetto_trace();
+        let events = export["traceEvents"].as_array().unwrap();
+        let span = events
+            .iter()
+            .find(|event| event["name"] == "hosted tool call")
+            .unwrap();
+        assert_eq!(span["ph"], "X");
+        assert_eq!(span["ts"], (base - 9_500) * 1_000);
+        assert_eq!(span["dur"], 10_000_000);
+        let call_tracks = events
+            .iter()
+            .filter(|event| event["name"] == "hosted tool call")
+            .map(|event| event["tid"].as_u64().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(call_tracks.len(), 2);
+        let execution_tracks = events
+            .iter()
+            .filter(|event| event["name"] == "Jev call answered")
+            .map(|event| event["tid"].as_u64().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(execution_tracks.len(), 2);
+        let instant = events
+            .iter()
+            .find(|event| event["name"] == "hosted call timing")
+            .unwrap();
+        assert_eq!(instant["ph"], "i");
+        assert_eq!(instant["s"], "t");
+        assert_eq!(instant["args"]["duration_ms"], 700);
+        let notification = events
+            .iter()
+            .find(|event| event["name"] == "notification sent")
+            .unwrap();
+        assert!(!notification.to_string().contains("SECRET REASON"));
+        assert!(!export.to_string().contains("SECRET USER MESSAGE"));
+        let tracks = events
+            .iter()
+            .filter(|event| event["name"] == "hosted call timing")
+            .map(|event| event["tid"].as_u64().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(tracks.len(), 2);
+        let metadata = &export["metadata"]["run_map"];
+        assert_eq!(metadata["timeline_filtered_events"], 0);
+        assert_eq!(metadata["timeline_outside_window_events"], 1);
+        assert_eq!(metadata["timeline_unclassified_events"], 1);
+        assert!(metadata["diagnostic_count"].as_u64().is_some());
+        let filtered = read_observed_run_filtered(
+            &run,
+            Limits::default(),
+            TimeWindow {
+                from_unix_ms: Some(base),
+                until_unix_ms: Some(base + 2_000),
+            },
+            &Observation::at(base + 20_000),
+            &TimelineFilter {
+                actor: Some("1@1".into()),
+                ..TimelineFilter::default()
+            },
+        )
+        .unwrap()
+        .perfetto_trace();
+        assert_eq!(
+            filtered["metadata"]["run_map"]["timeline_filtered_events"],
+            1
+        );
+    }
+
     #[test]
     fn partial_map_preserves_unbound_actor_and_rejects_torn_tail() {
         let dir = tempfile::tempdir().unwrap();
