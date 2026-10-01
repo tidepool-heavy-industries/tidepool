@@ -802,14 +802,7 @@ unfoldDeferred path plan = do
     Left failure -> error (Text.unpack (renderUnfoldError failure))
     Right result -> pure result
 
--- | What an admission refusal says, in the words the host used.
---
--- The host already composes one clean sentence for each of these — which
--- coordinator's ceiling is full, which branch was rejected and why. Showing
--- the constructor instead wrapped that sentence in Haskell source syntax and
--- buried it, which is what a dogfood run 7 node read when its reviewer was
--- refused. The label is kept for the branch case, because a plan that admits
--- several children needs to know which one was refused.
+-- | Preserve host refusal details and the exact branch label for correlation.
 renderUnfoldError :: UnfoldError -> Text
 renderUnfoldError failure = case failure of
   UnfoldBeginRejected detail -> detail
