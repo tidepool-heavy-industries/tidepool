@@ -416,20 +416,46 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
             arguments: ToolArguments::Structured(arguments),
         })
     };
-    let invalid = call(
-        "bash",
-        serde_json::json!({"cmd":"never", "yield_time_ms":-1}),
-    )
-    .await
-    .unwrap();
-    assert_eq!(invalid["status"], "committed", "{invalid}");
-    assert!(
-        invalid["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("nothing started or sent · yield_time_ms must be 0..300000"),
-        "{invalid}"
-    );
+    for (arguments, reason) in [
+        (
+            serde_json::json!({"cmd":"never", "yield_time_ms":-1}),
+            "yield_time_ms must be 0..300000",
+        ),
+        (
+            serde_json::json!({"cmd":"never", "yield_time_ms":300001}),
+            "yield_time_ms must be 0..300000",
+        ),
+        (
+            serde_json::json!({"cmd":"never", "max_output_bytes":0}),
+            "max_output_bytes must be positive",
+        ),
+        (
+            serde_json::json!({"cmd":"never", "memory_mib":0}),
+            "memory_mib must be positive and fit Int bytes",
+        ),
+        (
+            serde_json::json!({"cmd":"never", "memory_mib":-1}),
+            "memory_mib must be positive and fit Int bytes",
+        ),
+        (
+            serde_json::json!({"cmd":"never", "memory_mib":(i64::MAX / (1024 * 1024)) + 1}),
+            "memory_mib must be positive and fit Int bytes",
+        ),
+        (
+            serde_json::json!({"cmd":"never", "tty":true, "stdin":true}),
+            "tty and stdin cannot both be true",
+        ),
+    ] {
+        let invalid = call("bash", arguments).await.unwrap();
+        assert_eq!(invalid["status"], "committed", "{invalid}");
+        assert!(
+            invalid["items"][0]["output"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("nothing started or sent · {reason}")),
+            "{invalid}"
+        );
+    }
     let running = tokio::spawn(call(
         "bash",
         serde_json::json!({
@@ -452,6 +478,69 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
         .next()
         .unwrap();
     let session = session.to_owned();
+    let initial_reads = backend
+        .slice_reads
+        .load(std::sync::atomic::Ordering::Acquire);
+    let initial_observations = backend.output_budgets().len();
+    for (name, arguments, reason) in [
+        (
+            "write_stdin",
+            serde_json::json!({"session_id":session,"chars":"never","close_stdin":true,"yield_time_ms":-1}),
+            "yield_time_ms must be 0..300000",
+        ),
+        (
+            "write_stdin",
+            serde_json::json!({"session_id":session,"chars":"never","close_stdin":true,"max_output_bytes":0}),
+            "max_output_bytes must be positive",
+        ),
+        (
+            "cancel_command",
+            serde_json::json!({"session_id":session,"yield_time_ms":300001}),
+            "yield_time_ms must be 0..300000",
+        ),
+        (
+            "cancel_command",
+            serde_json::json!({"session_id":session,"max_output_bytes":0}),
+            "max_output_bytes must be positive",
+        ),
+        (
+            "read_output",
+            serde_json::json!({"session_id":session,"offset":-1}),
+            "offset must be nonnegative",
+        ),
+        (
+            "read_output",
+            serde_json::json!({"session_id":session,"max_output_bytes":0}),
+            "max_output_bytes must be positive",
+        ),
+    ] {
+        let invalid = call(name, arguments).await.unwrap();
+        assert_eq!(invalid["status"], "committed", "{invalid}");
+        assert!(
+            invalid["items"][0]["output"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("nothing started or sent · {reason}")),
+            "{invalid}"
+        );
+    }
+    assert_eq!(
+        backend.control_count(),
+        0,
+        "rejected calls sent input or cancellation"
+    );
+    assert_eq!(
+        backend
+            .slice_reads
+            .load(std::sync::atomic::Ordering::Acquire),
+        initial_reads,
+        "rejected calls read retained output"
+    );
+    assert_eq!(
+        backend.output_budgets().len(),
+        initial_observations,
+        "rejected calls observed output"
+    );
     let binding = receipt["items"][0]["installedBindings"][0]
         .as_str()
         .expect("bash names a retained binding even with small output")
