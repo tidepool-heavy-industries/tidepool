@@ -12,7 +12,7 @@ changes :: Member RecipeCheck effects => Eff effects ()
 changes = do
   owner <- root
   void $ turn owner "import Project.AssumptionExamples"
-  void $ turn owner "(producer, updates) <- unfold (batch (\"assumption-design\" :: CampaignLabel) (\"checks\" :: ForkGroupLabel)) (childWithProgress @Int @Text (coding projectHead (assignment [label|producer|] (\"report observed build failures\" :: Text))))"
+  void $ turn owner "(producer, updates) <- unfoldDeferred (batch (\"assumption-design\" :: CampaignLabel) (\"checks\" :: ForkGroupLabel)) (childWithProgress @Int @Text (withLifetime ActorOwned (coding projectHead (assignment [label|producer|] (\"report observed build failures\" :: Text)))))"
   producer <- activation
   void $ turn owner "let project observation = case observation of { ProgressUpdate _ value -> Just value; _ -> Nothing }\nwatcher <- watchAssumption me (0 :: Int) (R.progress updates) project (pure . regression id \"new build failures: revisit the pending work\")"
   void $ turn (checkActor producer) "reportProgress (2 :: Int)"

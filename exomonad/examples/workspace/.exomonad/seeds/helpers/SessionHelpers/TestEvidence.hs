@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 -- | Remix this session seed for the current component. Keep evidence parsing
 -- and acceptance rules in the shared owner; specialize commands and policy here.
@@ -29,12 +30,13 @@ checkAt candidate definition = FocusedSpec
 
 runCheck :: (Member Actor effects, Member Commands effects) => AgentRef -> GitOid -> Cmd.Memory -> CheckDefinition -> Eff effects GateStart
 runCheck owner candidate memory definition =
-  startGate owner (checkIntent definition) memory (checkAt candidate definition)
+  startGate ["scripts/cargo-focused-test"] owner (checkIntent definition) memory (checkAt candidate definition)
 
 -- | Adapt one reusable project definition to the shared check plan.
 plannedCheck :: CheckDefinition -> Cmd.Memory -> CheckPreparation -> PlanCheck
 plannedCheck definition memory preparation = PlanCheck
   { planName = checkIntent definition
+  , planRunner = ["scripts/cargo-focused-test"]
   , planSpec = (`checkAt` definition)
   , planMemory = memory
   , planPreparation = preparation
