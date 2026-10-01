@@ -191,6 +191,8 @@ pub(crate) fn parse(
     let endpoint = command
         .bind()
         .map_err(|error| CompileError::Io(crate::extract_spawn_error(error.source)))?;
+    let endpoint = crate::toolchain::AdmittedCompilerEndpoint::from_bound(endpoint)
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     let producer = *endpoint.identity().producer_bytes();
     let run = endpoint
         .execute(&command)

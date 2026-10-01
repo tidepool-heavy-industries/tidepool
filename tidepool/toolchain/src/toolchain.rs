@@ -538,6 +538,43 @@ pub fn bind_admitted_extract_endpoint(
     Ok((endpoint, location, admitted))
 }
 
+/// An exact transport endpoint admitted by the configured deployment. Raw
+/// observation cannot construct a complete-cell producer capability.
+#[derive(Debug)]
+pub struct AdmittedCompilerEndpoint {
+    endpoint: tidepool_extract_cmd::CompilerEndpoint,
+    deployment: AdmittedCompilerDeployment,
+}
+
+impl AdmittedCompilerEndpoint {
+    pub fn from_bound(
+        endpoint: tidepool_extract_cmd::CompilerEndpoint,
+    ) -> Result<Self, ToolchainError> {
+        let deployment = admit_bound_endpoint(&endpoint)?;
+        Ok(Self {
+            endpoint,
+            deployment,
+        })
+    }
+    pub fn identity(&self) -> &tidepool_extract_cmd::CompilerIdentity {
+        self.endpoint.identity()
+    }
+    pub fn deployment(&self) -> &AdmittedCompilerDeployment {
+        &self.deployment
+    }
+    pub fn execute(
+        self,
+        command: &tidepool_extract_cmd::ExtractCmd,
+    ) -> Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError> {
+        self.endpoint.execute(command)
+    }
+    pub fn transaction(
+        self,
+    ) -> Result<tidepool_extract_cmd::CompilerTransaction, tidepool_extract_cmd::SpawnError> {
+        self.endpoint.transaction()
+    }
+}
+
 /// Admit an already-bound exact endpoint at the toolchain's compile entry
 /// points. Observation never supplies missing configured deployment evidence.
 pub fn admit_bound_endpoint(

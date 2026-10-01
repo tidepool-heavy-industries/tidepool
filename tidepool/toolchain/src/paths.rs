@@ -195,7 +195,22 @@ pub fn apply_build_products_dir(
     cmd: &mut tidepool_extract_cmd::ExtractCmd,
     endpoint: &tidepool_extract_cmd::CompilerEndpoint,
 ) {
-    let bp_dir = build_products_dir(&endpoint.identity().producer_hex());
+    apply_build_products_identity(cmd, endpoint.identity());
+}
+
+/// Select build products only after configured endpoint admission.
+pub fn apply_admitted_build_products_dir(
+    cmd: &mut tidepool_extract_cmd::ExtractCmd,
+    endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+) {
+    apply_build_products_identity(cmd, endpoint.identity());
+}
+
+fn apply_build_products_identity(
+    cmd: &mut tidepool_extract_cmd::ExtractCmd,
+    identity: &tidepool_extract_cmd::CompilerIdentity,
+) {
+    let bp_dir = build_products_dir(&identity.producer_hex());
     if std::fs::create_dir_all(&bp_dir).is_ok() {
         cmd.build_products_dir(&bp_dir);
     }

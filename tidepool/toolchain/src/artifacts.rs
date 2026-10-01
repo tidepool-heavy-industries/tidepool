@@ -439,7 +439,7 @@ impl ModuleCandidateOffer {
 
     /// Reserve the complete original identity inventory before compilation.
     pub fn select_cell_program(
-        producer: &[u8],
+        endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
         include: &[PathBuf],
         scratch: &Path,
         context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
@@ -447,6 +447,7 @@ impl ModuleCandidateOffer {
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         planned: crate::checked_cell::CheckedPlannedCellSpecification,
     ) -> Result<Self, CompileError> {
+        let producer = endpoint.identity().producer_bytes();
         let expected = specification
             .injected_modules
             .iter()
