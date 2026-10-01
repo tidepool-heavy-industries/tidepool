@@ -45,7 +45,7 @@ let parserTask = "Implement the parser." :: Text
 let consumerTask = "Update its consumer." :: Text
 let reviewTask = "Review the interface." :: Text
 Right captured <- checkpoint "feature-scaffold"
-let fromScaffold = withLifetime ActorOwned . withContext (fromCheckpoint captured)
+let fromScaffold branch = withLifetime ActorOwned (withContext (fromCheckpoint captured) branch)
 (parser, consumer, review) <- unfold (batch "feature" "wave-1") $ (,,)
   <$> child @Text (fromScaffold (coding currentCheckout (assignment [label|parser|] parserTask)))
   <*> child @Text (fromScaffold (coding currentCheckout (assignment [label|consumer|] consumerTask)))
