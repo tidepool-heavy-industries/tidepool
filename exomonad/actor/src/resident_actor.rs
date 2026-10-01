@@ -78,12 +78,6 @@ pub enum ResidentRootEntry {
     Startup(tidepool_runtime::session::PreparedStartupEntry),
 }
 
-impl From<ResidentOutcome> for ResidentRootEntry {
-    fn from(outcome: ResidentOutcome) -> Self {
-        Self::Prepared(outcome)
-    }
-}
-
 /// A compiled root at the point where ownership moves into its local actor.
 pub struct ResidentActorRoot<H, O> {
     descriptor: ActorDescriptor,
@@ -101,7 +95,7 @@ impl<H, O> ResidentActorRoot<H, O> {
         Self {
             descriptor,
             machine,
-            outcome: outcome.into(),
+            outcome: ResidentRootEntry::Prepared(outcome),
         }
     }
 
@@ -1816,15 +1810,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     fn prepared(
         descriptor: ActorDescriptor,
         environment: ResidentEnvironment<H, O>,
-        outcome: impl Into<ResidentRootEntry>,
+        outcome: ResidentOutcome,
     ) -> Self {
         Self::with_boot(
             descriptor,
             environment,
-            match outcome.into() {
-                ResidentRootEntry::Prepared(outcome) => ResidentBoot::Prepared(Box::new(outcome)),
-                ResidentRootEntry::Startup(entry) => ResidentBoot::Startup(entry),
-            },
+            ResidentBoot::Prepared(Box::new(outcome)),
             Vec::new(),
         )
     }
@@ -10784,7 +10775,15 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    let (descriptor, machine, outcome) = root.into_parts();
+    let (descriptor, machine, entry) = root.into_parts();
+    let ResidentRootEntry::Prepared(outcome) = entry else {
+        return Err(ractor::SpawnErr::StartupFailed(Box::new(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "retained startup requires pending root admission with its exact intent",
+            ),
+        )));
+    };
     let (forest, receiver) = ResidentForest::new(
         source,
         descriptor.placement().session,
@@ -11839,10 +11838,24 @@ where
 
     /// Admit a prepared independent root. Its continuation and scopes must have
     /// been prepared in this forest's machine, just as for a child entry.
+    ///
+    /// A retained startup executable requires the pending transaction API.
+    ///
+    /// ```compile_fail,E0308
+    /// use exomonad_actor::{ActorDescriptor, ResidentForest};
+    /// use tidepool_effect::dispatch::DispatchEffect;
+    /// use tidepool_runtime::session::{OutputSink, PreparedStartupEntry};
+    /// async fn rejects_startup<H, O>(
+    ///     forest: &ResidentForest<H, O>, descriptor: ActorDescriptor,
+    ///     entry: PreparedStartupEntry,
+    /// ) where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
+    ///     forest.admit_root(descriptor, entry).await;
+    /// }
+    /// ```
     pub async fn admit_root(
         &self,
         descriptor: ActorDescriptor,
-        outcome: impl Into<ResidentRootEntry> + Send,
+        outcome: ResidentOutcome,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
         let admission = self.environment.root_admission_closed.read().await;
         if *admission {
@@ -11855,10 +11868,23 @@ where
     }
 
     /// Admit an initial durable root with the directory's original reserved identity.
+    /// An already executed outcome cannot enter the pending startup transaction.
+    ///
+    /// ```compile_fail,E0308
+    /// use exomonad_actor::{ActorDescriptor, ResidentForest, RootStartupIntent};
+    /// use tidepool_effect::dispatch::DispatchEffect;
+    /// use tidepool_runtime::session::{OutputSink, ResidentOutcome};
+    /// async fn rejects_preexecuted<H, O>(
+    ///     forest: &ResidentForest<H, O>, descriptor: ActorDescriptor,
+    ///     outcome: ResidentOutcome, intent: RootStartupIntent,
+    /// ) where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
+    ///     forest.admit_pending_root(descriptor, outcome, move |_| intent).await;
+    /// }
+    /// ```
     pub async fn admit_pending_root<F>(
         &self,
         descriptor: ActorDescriptor,
-        outcome: impl Into<ResidentRootEntry> + Send,
+        entry: tidepool_runtime::session::PreparedStartupEntry,
         intent: F,
     ) -> Result<
         (
@@ -11871,7 +11897,7 @@ where
     where
         F: FnOnce(ActorRef) -> crate::RootStartupIntent + Send,
     {
-        self.admit_pending_root_inner(descriptor, outcome, None, intent)
+        self.admit_pending_root_inner(descriptor, entry, None, intent)
             .await
     }
 
@@ -11880,7 +11906,7 @@ where
     pub async fn admit_pending_root_with_identity(
         &self,
         descriptor: ActorDescriptor,
-        outcome: impl Into<ResidentRootEntry> + Send,
+        entry: tidepool_runtime::session::PreparedStartupEntry,
         identity: ActorRef,
         intent: crate::RootStartupIntent,
     ) -> Result<
@@ -11891,14 +11917,14 @@ where
         ),
         ractor::SpawnErr,
     > {
-        self.admit_pending_root_inner(descriptor, outcome, Some(identity), move |_| intent)
+        self.admit_pending_root_inner(descriptor, entry, Some(identity), move |_| intent)
             .await
     }
 
     async fn admit_pending_root_inner<F>(
         &self,
         descriptor: ActorDescriptor,
-        outcome: impl Into<ResidentRootEntry> + Send,
+        entry: tidepool_runtime::session::PreparedStartupEntry,
         identity: Option<ActorRef>,
         intent: F,
     ) -> Result<
@@ -11932,21 +11958,17 @@ where
                 "pending root requires its exact independent durable placement",
             ));
         }
-        let ResidentRootEntry::Startup(entry) = outcome.into() else {
-            return Err(refuse(
-                "pending root requires its original unexecuted startup entry",
-            ));
-        };
         let placement = descriptor.placement();
         let latch = Arc::new(Mutex::new(RootStartupState::Pending));
         let mut original_intent = None;
         let build = |identity| {
             let intent = intent(identity);
             original_intent = Some(intent.clone());
-            let mut behavior = ResidentKernelBehavior::prepared(
+            let mut behavior = ResidentKernelBehavior::with_boot(
                 descriptor,
                 self.environment.clone(),
-                ResidentRootEntry::Startup(entry),
+                ResidentBoot::Startup(entry),
+                Vec::new(),
             );
             behavior.root_startup = Some((intent, Arc::clone(&latch)));
             behavior
@@ -12055,7 +12077,7 @@ where
     pub async fn admit_root_with_identity(
         &self,
         descriptor: ActorDescriptor,
-        outcome: impl Into<ResidentRootEntry> + Send,
+        outcome: ResidentOutcome,
         identity: ActorRef,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
         let admission = self.environment.root_admission_closed.read().await;
@@ -12079,7 +12101,7 @@ where
     async fn admit_prepared_root(
         &self,
         descriptor: ActorDescriptor,
-        outcome: impl Into<ResidentRootEntry> + Send,
+        outcome: ResidentOutcome,
         _admission: &tokio::sync::RwLockReadGuard<'_, bool>,
         recovery: PreparedRootAdmission,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
