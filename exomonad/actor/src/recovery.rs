@@ -867,7 +867,10 @@ fn validate_startup(
         || admission.creator.is_some()
         || admission.supervisor_parent.is_some()
         || admission.context_parent.is_some()
-        || admission.actor_path.is_none()
+        || owner_for_admission(admission).is_none()
+        || records
+            .values()
+            .any(|record| owner_for_admission(&record.admission) == owner_for_admission(admission))
     {
         return Err(std::io::Error::other(
             "startup intent requires a canonical independent root",
@@ -879,6 +882,7 @@ fn validate_startup(
             .get(&previous)
             .ok_or_else(|| std::io::Error::other("startup predecessor is absent"))?;
         if previous == admission.actor
+            || owner_for_admission(&prior.admission) == owner_for_admission(admission)
             || prior.admission.actor_path != admission.actor_path
             || prior.admission.role != "root"
             || prior
@@ -922,7 +926,7 @@ fn validate_startup(
                 "startup successor changed binding or source",
             ));
         }
-        for owner in startup.manifest_predecessor {
+        if let Some(owner) = startup.manifest_predecessor {
             if records
                 .get(&owner)
                 .and_then(|record| owner_for_admission(&record.admission))
@@ -1754,6 +1758,23 @@ mod tests {
             Some(pin.clone()),
             Some(initial.conversation.clone()),
         );
+        let mut changed_bootstrap = third.clone();
+        changed_bootstrap.bootstrap_identity = "different-bootstrap".into();
+        assert!(journal
+            .admit_with_startup(c, &root, &[], Some(changed_bootstrap))
+            .is_err());
+        let mut changed_manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        changed_manifest["public_surfaces"][0]["bindings"] =
+            serde_json::json!([{"name": "altered"}]);
+        std::fs::write(&manifest, serde_json::to_vec(&changed_manifest).unwrap()).unwrap();
+        let mut changed_content = third.clone();
+        changed_content.manifest =
+            Some(RootStartupManifestPin::capture_for_owner(&manifest, &old_owner).unwrap());
+        assert!(journal
+            .admit_with_startup(c, &root, &[], Some(changed_content))
+            .is_err());
+        write_manifest(&manifest, &old_owner, "revision", 0);
         journal
             .admit_with_startup(c, &root, &[], Some(third.clone()))
             .unwrap();
