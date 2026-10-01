@@ -792,7 +792,6 @@ impl CheckedDisplayPlan {
             .snapshot
             .compiler_prefix
             .append_display(self.proof.clone())?;
-        let interface = self.proof.value_interface_owned();
         let native = session.capture_checked_native_delta(
             scope,
             self.proof.generation(),
@@ -810,7 +809,7 @@ impl CheckedDisplayPlan {
             scope,
             compiler_prefix,
             prefix.admission.digest(),
-            Some(interface),
+            Some(self.proof.value_interface_certificate()),
             Some(outcome),
             Some(native),
         )?;
@@ -918,7 +917,7 @@ impl CheckedTurnCompletion {
             self.scope,
             compiler_prefix,
             self.prefix.admission.digest(),
-            self.execution.value_interface_owned(),
+            self.execution.value_interface_certificate(),
             None,
             Some(native),
         )?;
@@ -937,7 +936,7 @@ fn settle_checked_snapshot(
     scope: ScopeId,
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
     admission: [u8; 32],
-    interface: Option<(&str, &Arc<[u8]>)>,
+    interface: Option<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>>,
     display_settlement: Option<CheckedDisplaySettlement>,
     native_delta: Option<CapturedNativeDelta>,
 ) -> Result<(), SessionError> {
@@ -953,8 +952,9 @@ fn settle_checked_snapshot(
         .ok_or(SessionError::DeadScope(scope))?;
     let mut interfaces = state.snapshot.interfaces.clone();
     let mut added_interface = None;
-    if let Some((module, bytes)) = interface {
-        let module = checked_value_module(module)?;
+    if let Some(interface) = &interface {
+        let module = interface.owner();
+        let bytes = interface.bytes_owned();
         let digest = interfaces.interface_digest(bytes);
         match state.interface_index.get(&module.gen.0) {
             Some(existing) if existing != &digest => {
@@ -984,6 +984,9 @@ fn settle_checked_snapshot(
             .append(delta, &state.native_index)?,
         None => (state.snapshot.native_imports.clone(), Vec::new()),
     };
+    if let Some(interface) = interface {
+        session.retain_checked_value_interface(interface)?;
+    }
     let snapshot = Arc::new(checked_snapshot(
         view,
         view_digest,
@@ -1001,18 +1004,6 @@ fn settle_checked_snapshot(
     state.native_index.extend(added_native);
     state.snapshot = snapshot;
     Ok(())
-}
-
-fn checked_value_module(name: &str) -> Result<tidepool_repr::SessionModule, SessionError> {
-    let generation = name
-        .strip_prefix("Tidepool.Session.Val.G")
-        .and_then(|suffix| suffix.parse::<u64>().ok())
-        .ok_or_else(|| {
-            SessionError::Compile(crate::CompileError::ExtractFailed(
-                "checked value interface lacks its exact Val.G identity".into(),
-            ))
-        })?;
-    Ok(tidepool_repr::SessionModule::val(Generation(generation)))
 }
 
 fn checked_snapshot(
@@ -1942,10 +1933,16 @@ impl PersistentSession {
             .reachable_values()
             .iter()
             .map(|module| {
-                let path: PathBuf = view.session_root().join(module.relative_hi_path());
+                let bytes = match self.retained_value_interface(*module) {
+                    Some(bytes) => bytes.clone(),
+                    None if self.uses_legacy_value_interface(*module) => {
+                        std::fs::read(view.session_root().join(module.relative_hi_path()))?.into()
+                    }
+                    None => return Err(SessionError::MissingRetainedValueInterface(*module)),
+                };
                 Ok(AdmittedValueInterface {
                     module: *module,
-                    bytes: std::fs::read(path)?.into(),
+                    bytes,
                 })
             })
             .collect::<Result<Vec<_>, SessionError>>()?;
@@ -2522,9 +2519,7 @@ mod tests {
         // These sentinel bytes exercise runtime retention, not compiler interface
         // authority. The compiler must independently certify their input receipt.
         for module in private.view().reachable_values() {
-            let path = root.path().join(module.relative_hi_path());
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, [1, 2, 3]).unwrap();
+            session.retain_fixture_value_interface(*module, Arc::from([1, 2, 3]));
         }
         let admitted = session
             .admit_cell_for_execution(
@@ -2573,6 +2568,141 @@ mod tests {
             .bindings()
             .get(SessionVarId::from_extract(912))
             .is_some());
+    }
+
+    #[test]
+    fn next_cell_interface_owner_outlives_scratch_and_tracks_hidden_binding_leases() {
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(988), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let mut value = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "captured",
+            910,
+        );
+        value.value.identity.module = value.module.module_name();
+        let module = value.module;
+        let id = value.id;
+        session.bind_in(public, value).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let input = scratch.path().join("interface.hi");
+        std::fs::write(&input, [1, 2, 3]).unwrap();
+        // Fixture bytes test runtime custody. Production receives the opaque
+        // stamped CheckedValueArtifact after matching the actual native delta.
+        let bytes: Arc<[u8]> = std::fs::read(input).unwrap().into();
+        let weak = Arc::downgrade(&bytes);
+        session.retain_fixture_value_interface(module, bytes.clone());
+        let source = session.bindings().get(id).unwrap();
+        let mut alias_value = source.value.clone();
+        alias_value.identity.occurrence = "capturedAlias".into();
+        let alias = tidepool_codegen::binding_table::BindingEntry {
+            name: tidepool_repr::BindingName("capturedAlias".into()),
+            id: tidepool_repr::SessionVarId::from_extract(911),
+            module,
+            value: alias_value,
+            type_display: source.type_display.clone(),
+            defining_expr: None,
+            scope: public,
+        };
+        session.publish_alias_in(public, alias, id).unwrap();
+        let captured_lease = session.retain_lexical_scope(public).unwrap();
+        drop(bytes);
+        drop(scratch);
+        assert!(!root.path().join(module.relative_hi_path()).exists());
+        let private = Arc::new(session.begin_private_execution(public).unwrap());
+        let admitted = session
+            .admit_cell_for_execution(
+                private.clone(),
+                0,
+                Arc::new(()),
+                [7; 32],
+                [8; 32],
+                Vec::new(),
+            )
+            .unwrap();
+        let captured = admitted
+            .interfaces()
+            .iter()
+            .find(|interface| interface.module() == module)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            captured.bytes_owned(),
+            &weak.upgrade().unwrap()
+        ));
+        session.retire_scope(public);
+        assert!(session.bindings().get(id).is_some());
+        assert!(session.retained_value_interface(module).is_some());
+        drop(admitted);
+        drop(private);
+        session.reap_admission_leases();
+        // The captured alias keeps the hidden original and its type evidence.
+        assert!(session.bindings().get(id).is_some());
+        assert!(session.retained_value_interface(module).is_some());
+        drop(captured_lease);
+        session.reap_admission_leases();
+        assert!(session.bindings().get(id).is_none());
+        assert!(session.retained_value_interface(module).is_none());
+        assert!(weak.upgrade().is_none());
+        let lib =
+            SessionLib::open(SessionId(989), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut restarted = PersistentSession::new(Some(lib), 1024 * 1024);
+        let private = Arc::new(restarted.begin_private_execution(ScopeId::ROOT).unwrap());
+        let admitted = restarted
+            .admit_cell_for_execution(private, 0, Arc::new(()), [7; 32], [8; 32], Vec::new())
+            .unwrap();
+        assert!(admitted.interfaces().is_empty());
+    }
+
+    #[test]
+    fn checked_admission_refuses_disk_only_interface_for_live_value() {
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(987), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let mut value = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "unregistered",
+            912,
+        );
+        value.value.identity.module = value.module.module_name();
+        let module = value.module;
+        session.bind(value).unwrap();
+        let path = root.path().join(module.relative_hi_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, [9, 9, 9]).unwrap();
+        let private = Arc::new(session.begin_private_execution(ScopeId::ROOT).unwrap());
+        assert!(matches!(
+            session.admit_cell_for_execution(private, 0, Arc::new(()), [7; 32], [8; 32], Vec::new()),
+            Err(SessionError::MissingRetainedValueInterface(owner)) if owner == module
+        ));
+    }
+
+    #[test]
+    fn ordinary_fragment_interface_disk_route_requires_explicit_live_origin() {
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(986), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let mut value = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "ordinary",
+            914,
+        );
+        value.value.identity.module = value.module.module_name();
+        let module = value.module;
+        session.bind(value).unwrap();
+        session.mark_legacy_value_interface(module);
+        let path = root.path().join(module.relative_hi_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, [9, 8, 7]).unwrap();
+        let private = Arc::new(session.begin_private_execution(ScopeId::ROOT).unwrap());
+        let admitted = session
+            .admit_cell_for_execution(private, 0, Arc::new(()), [7; 32], [8; 32], Vec::new())
+            .unwrap();
+        assert_eq!(admitted.interfaces().len(), 1);
+        assert_eq!(admitted.interfaces()[0].bytes(), &[9, 8, 7]);
     }
 
     #[test]
@@ -2877,9 +3007,7 @@ mod tests {
         assert!(protected.injected_values().contains(&setup_module));
         assert!(!protected.injected_values().contains(&foreign_module));
         for module in protected.reachable_values() {
-            let path = root.path().join(module.relative_hi_path());
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, [1, 2, 3]).unwrap();
+            session.retain_fixture_value_interface(*module, Arc::from([1, 2, 3]));
         }
         let admitted = session
             .admit_cell_for_execution(

@@ -23,6 +23,7 @@
 //! is O(this turn's bindings), not O(session length).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::old_space::RootSlot;
@@ -73,6 +74,9 @@ pub(crate) struct BindingIndex {
     /// than a set. Removing one name must not make the shared interface vanish
     /// from later compiler injection while another name still imports it.
     live_modules: BTreeMap<String, usize>,
+    /// Compiler-owned thin interfaces share the exact live binding lifetime.
+    /// They carry type evidence only; native imports still resolve live roots.
+    value_interfaces: BTreeMap<String, RetainedValueInterface>,
     /// `(import identity, local generation)` pairs for every live prepared
     /// binding with a recorded identity -- `PersistentSession::prepared_retained`.
     prepared_retained: BTreeSet<(SymbolIdentity, u64)>,
@@ -91,9 +95,72 @@ pub(crate) struct BindingIndex {
     root_refs: HashMap<usize, usize>,
 }
 
+enum RetainedValueInterface {
+    LegacyDisk,
+    Certified(Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>),
+    #[cfg(test)]
+    Fixture(Arc<[u8]>),
+}
+impl RetainedValueInterface {
+    fn bytes(&self) -> Option<&Arc<[u8]>> {
+        match self {
+            Self::LegacyDisk => None,
+            Self::Certified(interface) => Some(interface.bytes_owned()),
+            #[cfg(test)]
+            Self::Fixture(bytes) => Some(bytes),
+        }
+    }
+}
+
 impl BindingIndex {
     pub(super) fn new() -> Self {
         Self::default()
+    }
+
+    pub(super) fn retain_value_interface(
+        &mut self,
+        interface: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+    ) -> bool {
+        let name = interface.owner().module_name();
+        if let Some(existing) = self.value_interfaces.get(&name) {
+            return matches!(existing, RetainedValueInterface::Certified(old)
+                if Arc::ptr_eq(old, &interface) || old == &interface);
+        }
+        // A failed display may settle type evidence without retaining a value.
+        if self.is_module_live(&name) {
+            self.value_interfaces
+                .insert(name, RetainedValueInterface::Certified(interface));
+        }
+        true
+    }
+
+    pub(super) fn value_interface(&self, module: SessionModule) -> Option<&Arc<[u8]>> {
+        self.value_interfaces
+            .get(&module.module_name())
+            .and_then(RetainedValueInterface::bytes)
+    }
+
+    pub(super) fn mark_legacy_interface(&mut self, module: SessionModule) {
+        let name = module.module_name();
+        if self.is_module_live(&name) {
+            self.value_interfaces
+                .entry(name)
+                .or_insert(RetainedValueInterface::LegacyDisk);
+        }
+    }
+
+    pub(super) fn uses_legacy_interface(&self, module: SessionModule) -> bool {
+        matches!(
+            self.value_interfaces.get(&module.module_name()),
+            Some(RetainedValueInterface::LegacyDisk)
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn retain_fixture_interface(&mut self, module: SessionModule, bytes: Arc<[u8]>) {
+        assert!(self.is_module_live(&module.module_name()));
+        self.value_interfaces
+            .insert(module.module_name(), RetainedValueInterface::Fixture(bytes));
     }
 
     /// Record a binding that just entered `live` (a fresh `bind`, `bind_in`,
@@ -149,6 +216,7 @@ impl BindingIndex {
             *count = count.saturating_sub(1);
             if *count == 0 {
                 self.live_modules.remove(&module);
+                self.value_interfaces.remove(&module);
             }
         }
         self.prepared_retained

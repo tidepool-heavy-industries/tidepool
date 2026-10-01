@@ -406,13 +406,16 @@ pub struct CheckedInputWork {
     pub output_bytes_hashed: u64,
 }
 
-#[derive(Debug)]
-struct CheckedValueArtifact {
+/// Immutable thin-interface bytes retained by the checked compiler owner.
+/// Only sealed native item/display getters expose stamped output artifacts.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CheckedValueArtifact {
     owner: tidepool_repr::SessionModule,
     module: String,
     bytes: Arc<[u8]>,
     path: std::path::PathBuf,
     digest: String,
+    authority: Option<([u8; 32], [u8; 32])>,
 }
 
 impl CheckedValueInputs {
@@ -435,6 +438,7 @@ impl CheckedValueInputs {
                 digest: hash(&bytes),
                 bytes,
                 path,
+                authority: None,
             }));
         }
         Ok(Arc::new(Self {
@@ -516,7 +520,11 @@ impl CheckedValueInputs {
         )
     }
 
-    fn capture_output(&self, generation: u64) -> Result<Arc<CheckedValueArtifact>, CompileError> {
+    fn capture_output(
+        &self,
+        generation: u64,
+        cell: &ExactCheckedCell,
+    ) -> Result<Arc<CheckedValueArtifact>, CompileError> {
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation));
         let path = self.root().join(owner.relative_hi_path());
         let bytes: Arc<[u8]> = read(&path, 32 * 1024 * 1024)?.into();
@@ -530,11 +538,22 @@ impl CheckedValueInputs {
             digest,
             bytes,
             path,
+            authority: Some((cell.producer, cell.receipt_digest)),
         }))
     }
 }
 
 impl CheckedValueArtifact {
+    pub fn owner(&self) -> tidepool_repr::SessionModule {
+        self.owner
+    }
+    pub fn bytes_owned(&self) -> &Arc<[u8]> {
+        &self.bytes
+    }
+    pub fn is_checked_output(&self) -> bool {
+        self.authority.is_some()
+    }
+
     fn authorization(&self) -> Value {
         array([
             text("main"),
@@ -920,6 +939,9 @@ impl ExactCompiledDisplay {
     pub fn value_interface_owned(&self) -> (&str, &Arc<[u8]>) {
         (&self.value_interface.module, &self.value_interface.bytes)
     }
+    pub fn value_interface_certificate(&self) -> Arc<CheckedValueArtifact> {
+        self.value_interface.clone()
+    }
     pub fn capture(&self) -> &Arc<ExactCompiledItem> {
         &self.capture
     }
@@ -1078,7 +1100,7 @@ impl CheckedDisplayOffer {
             .item
             .cell
             .value_inputs
-            .capture_output(self.generation)?;
+            .capture_output(self.generation, &self.capture.item.cell)?;
         Ok(Arc::new(ExactCompiledDisplay {
             capture: self.capture.clone(),
             target: target.clone(),
@@ -1197,6 +1219,9 @@ impl ExactCompiledItem {
         self.value_interface
             .as_ref()
             .map(|artifact| (artifact.module.as_str(), &artifact.bytes))
+    }
+    pub fn value_interface_certificate(&self) -> Option<Arc<CheckedValueArtifact>> {
+        self.value_interface.clone()
     }
 }
 
@@ -1980,7 +2005,7 @@ impl CheckedItemOffer {
                 self.item
                     .cell
                     .value_inputs
-                    .capture_output(self.generation)?,
+                    .capture_output(self.generation, &self.item.cell)?,
             )
         } else {
             None

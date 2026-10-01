@@ -1089,6 +1089,22 @@ mod failure_layer_tests {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ValueInterfaceSource {
+    Checked,
+    LegacyDisk,
+}
+
+impl ValueInterfaceSource {
+    fn for_checked(is_checked: bool) -> Self {
+        if is_checked {
+            Self::Checked
+        } else {
+            Self::LegacyDisk
+        }
+    }
+}
+
 /// What the prepared arm of a resident turn does with its settled value.
 enum PreparedTurnMode<'a> {
     /// Observe the value and return it as the turn's result.
@@ -4116,7 +4132,14 @@ where
                 "host binding mount produced a handle with no hosting program".into(),
             ))));
         };
-        self.bind_prepared(program, scope, gen, &[(binder, handle)], None)?;
+        self.bind_prepared(
+            program,
+            scope,
+            gen,
+            &[(binder, handle)],
+            None,
+            ValueInterfaceSource::LegacyDisk,
+        )?;
         self.binding_provenance
             .insert(binder.var_id, Arc::new(ProgramProvenance::default()));
         Ok(())
@@ -4146,7 +4169,14 @@ where
         };
         // `bind_prepared` owns the handle from here, releasing it on failure.
         transfer.commit();
-        self.bind_prepared(program, scope, gen, &[(binder, handle)], None)?;
+        self.bind_prepared(
+            program,
+            scope,
+            gen,
+            &[(binder, handle)],
+            None,
+            ValueInterfaceSource::LegacyDisk,
+        )?;
         self.binding_provenance.insert(binder.var_id, provenance);
         Ok(())
     }
@@ -5057,6 +5087,7 @@ where
                             generation,
                             &[(binder, handle)],
                             checked.as_deref(),
+                            ValueInterfaceSource::for_checked(checked.is_some()),
                         )?;
                         self.binding_provenance
                             .insert(binder.var_id, Arc::clone(&provenance));
@@ -5101,6 +5132,7 @@ where
                     generation,
                     &bound,
                     checked.as_deref(),
+                    ValueInterfaceSource::for_checked(checked.is_some()),
                 )?;
                 for binder in binders {
                     self.binding_provenance
@@ -5181,6 +5213,7 @@ where
         generation: Generation,
         bound: &[(&BoundBinder, PreparedHandle)],
         checked: Option<&CheckedTurnCompletion>,
+        interface_source: ValueInterfaceSource,
     ) -> Result<(), ResidentError> {
         let binders = bound.iter().map(|(binder, _)| *binder).collect::<Vec<_>>();
         let overlay_validation = checked
@@ -5250,6 +5283,12 @@ where
             )?;
         } else {
             self.state.bind_replacing_decls_in(scope, entries)?;
+        }
+        // Ordinary fragments retain their established filesystem interface
+        // contract. Checked settlements register their sealed artifact instead.
+        if matches!(interface_source, ValueInterfaceSource::LegacyDisk) {
+            self.state
+                .mark_legacy_value_interface(SessionModule::val(generation));
         }
         for _ in bound {
             self.advance_public_visibility(scope);
@@ -5400,6 +5439,7 @@ where
                 alias,
                 generation,
                 checked_display_input(checked.as_ref())?,
+                ValueInterfaceSource::for_checked(checked.is_some()),
             )
         })();
         if let Some(plan) = checked {
@@ -5609,6 +5649,7 @@ where
                 alias,
                 generation,
                 checked_display_input(checked.as_ref())?,
+                ValueInterfaceSource::for_checked(checked.is_some()),
             )
             .map(Some)
         })();
@@ -5635,6 +5676,7 @@ where
         alias: &BoundBinder,
         generation: Generation,
         presentation: Option<(i64, Vec<String>)>,
+        interface_source: ValueInterfaceSource,
     ) -> Result<ResidentDisplayBundle, ResidentError> {
         let realm = self.run_context.resource_scope;
         let lexical_scope = self.run_context.lexical_scope;
@@ -5741,6 +5783,7 @@ where
                 generation,
                 &[(page, page_handle)],
                 None,
+                interface_source,
             ) {
                 self.release_display_fields(metadata_handle, alias_handle)?;
                 return Err(error);

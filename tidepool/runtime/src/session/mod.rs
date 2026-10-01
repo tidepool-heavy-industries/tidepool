@@ -335,6 +335,8 @@ pub enum SessionError {
     DeadScope(ScopeId),
     #[error("session has no persistent declaration library")]
     MissingDeclarationLibrary,
+    #[error("live value module {0:?} has no retained compiler-certified interface")]
+    MissingRetainedValueInterface(SessionModule),
     #[error("staged public manifest belongs to a different session, actor, or manifest")]
     WrongPublicManifestTicket,
     #[error("recovery initialization for scope {scope:?}: {reason}")]

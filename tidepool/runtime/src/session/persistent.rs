@@ -312,6 +312,40 @@ impl PersistentSession {
     pub fn has_lib(&self) -> bool {
         self.lib.is_some()
     }
+    pub(super) fn retain_checked_value_interface(
+        &mut self,
+        interface: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+    ) -> Result<(), SessionError> {
+        if !interface.is_checked_output()
+            || interface.owner() != SessionModule::val(interface.owner().gen())
+            || !self.binding_index.retain_value_interface(interface)
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        Ok(())
+    }
+
+    pub(super) fn retained_value_interface(&self, module: SessionModule) -> Option<&Arc<[u8]>> {
+        self.binding_index.value_interface(module)
+    }
+
+    pub(super) fn mark_legacy_value_interface(&mut self, module: SessionModule) {
+        self.binding_index.mark_legacy_interface(module);
+    }
+
+    pub(super) fn uses_legacy_value_interface(&self, module: SessionModule) -> bool {
+        self.binding_index.uses_legacy_interface(module)
+    }
+
+    #[cfg(test)]
+    pub(super) fn retain_fixture_value_interface(
+        &mut self,
+        module: SessionModule,
+        bytes: Arc<[u8]>,
+    ) {
+        self.binding_index.retain_fixture_interface(module, bytes);
+    }
+
     /// The persistent binding table (read).
     pub fn bindings(&self) -> &BindingTable {
         &self.bindings

@@ -66,6 +66,7 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         // not a user declaration or an environment failure.
         SessionError::DeadScope(_)
         | SessionError::MissingDeclarationLibrary
+        | SessionError::MissingRetainedValueInterface(_)
         | SessionError::WrongPublicManifestTicket
         | SessionError::InvalidRecoveryInitialization { .. }
         | SessionError::UnsupportedPrivateValueReplacement
