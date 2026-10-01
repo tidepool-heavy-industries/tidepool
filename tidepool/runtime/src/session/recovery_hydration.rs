@@ -301,27 +301,18 @@ impl SessionLib {
             }
             let root = node.lexical_roots[0].clone();
             let projection = graph
-                .projection(&surface.owner, &BTreeMap::new())
+                .interface_projection(&surface.owner, &BTreeMap::new())
                 .map_err(|error| invalid(error.to_string()))?;
             let mut exports = Vec::new();
             for head in projection.values() {
                 let recovery::RecoveryHead::Available { export, .. } = head else {
                     return Err(invalid(
-                        "public declaration root retains unavailable live state".into(),
+                        "public declaration root lacks exact interface evidence".into(),
                     ));
                 };
                 exports.push(recovered_export(export).ok_or_else(|| {
                     invalid("unsupported durable declaration export identity".into())
                 })?);
-            }
-            if !matches!(
-                node.state,
-                recovery::RecoveryNodeState::ExactArtifactClosure
-            ) || !node.live_dependencies.is_empty()
-            {
-                return Err(invalid(
-                    "public declaration root retains unavailable live state".into(),
-                ));
             }
             let selected = graph
                 .artifacts

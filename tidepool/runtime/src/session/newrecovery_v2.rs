@@ -329,6 +329,12 @@ pub(crate) enum RecoveryHead {
     Tombstone(RecoveryTombstone),
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RecoveryAvailability {
+    Interface,
+    Native,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RecoveryError {
     pub path: Option<PathBuf>,
@@ -754,6 +760,26 @@ impl RecoveryGraph {
         owner: &RecoveryPublicOwner,
         artifact_losses: &BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>,
     ) -> Result<BTreeMap<RecoverySymbolIdentity, RecoveryHead>, RecoveryError> {
+        self.project_heads(owner, artifact_losses, RecoveryAvailability::Native)
+    }
+
+    /// Recover type and lexical evidence without granting native leases.
+    /// Original products retain their exact live import requirements, which
+    /// runtime admission checks only for the native groups actually demanded.
+    pub(crate) fn interface_projection(
+        &self,
+        owner: &RecoveryPublicOwner,
+        artifact_losses: &BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>,
+    ) -> Result<BTreeMap<RecoverySymbolIdentity, RecoveryHead>, RecoveryError> {
+        self.project_heads(owner, artifact_losses, RecoveryAvailability::Interface)
+    }
+
+    fn project_heads(
+        &self,
+        owner: &RecoveryPublicOwner,
+        artifact_losses: &BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>,
+        availability: RecoveryAvailability,
+    ) -> Result<BTreeMap<RecoverySymbolIdentity, RecoveryHead>, RecoveryError> {
         self.validate()?;
         let Some(root) = self
             .public_surfaces
@@ -775,10 +801,10 @@ impl RecoveryGraph {
         }
         chain.reverse();
         let mut visible = BTreeMap::new();
-        let mut availability = BTreeMap::new();
+        let mut memo = BTreeMap::new();
         for node in chain {
             let recoverability =
-                node_recoverability(node.id, &by_id, artifact_losses, &mut availability);
+                node_recoverability(node.id, &by_id, artifact_losses, availability, &mut memo);
             for identity in &node.retracts {
                 visible.remove(identity);
             }
@@ -1425,6 +1451,7 @@ fn node_recoverability(
     id: Generation,
     nodes: &BTreeMap<Generation, &RecoveryNode>,
     artifact_losses: &BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>,
+    availability: RecoveryAvailability,
     memo: &mut BTreeMap<Generation, Result<(), RecoveryLossReason>>,
 ) -> Result<(), RecoveryLossReason> {
     if let Some(result) = memo.get(&id) {
@@ -1436,14 +1463,16 @@ fn node_recoverability(
         ));
     };
     let result = match &node.state {
-        RecoveryNodeState::LiveValueDependency { reason } => {
+        RecoveryNodeState::LiveValueDependency { reason }
+            if availability == RecoveryAvailability::Native =>
+        {
             Err(RecoveryLossReason::LiveValueDependency(reason.clone()))
         }
         RecoveryNodeState::MissingArtifactClosure { reason } => {
             Err(RecoveryLossReason::MissingArtifactClosure(reason.clone()))
         }
-        RecoveryNodeState::ExactArtifactClosure => {
-            if !node.live_dependencies.is_empty() {
+        RecoveryNodeState::ExactArtifactClosure | RecoveryNodeState::LiveValueDependency { .. } => {
+            if availability == RecoveryAvailability::Native && !node.live_dependencies.is_empty() {
                 Err(RecoveryLossReason::LiveValueDependency(format!(
                     "{} live dependency record(s)",
                     node.live_dependencies.len()
@@ -1467,9 +1496,13 @@ fn node_recoverability(
                         .chain(node.implementation_refs.iter().copied());
                     let mut failure = None;
                     for dependency in dependencies {
-                        if let Err(reason) =
-                            node_recoverability(dependency, nodes, artifact_losses, memo)
-                        {
+                        if let Err(reason) = node_recoverability(
+                            dependency,
+                            nodes,
+                            artifact_losses,
+                            availability,
+                            memo,
+                        ) {
                             failure = Some(RecoveryLossReason::Dependency {
                                 generation: dependency,
                                 detail: format!("{reason:?}"),
@@ -1738,6 +1771,113 @@ mod tests {
         };
         value.artifact_id = ArtifactDescriptor::from_recovery_value_interface(&value).id;
         value
+    }
+
+    #[test]
+    fn interface_recovery_retains_native_requirements_and_selected_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut graph = fixture(dir.path());
+        let RecoveryArtifactClosure::Home(home) = &graph.artifacts[0] else {
+            unreachable!()
+        };
+        let value = value_interface_from(home, "Val1");
+        let value_id = value.artifact_id;
+        let original_id = graph.artifacts[0].artifact_id();
+        graph
+            .artifacts
+            .push(RecoveryArtifactClosure::ValueInterface(value));
+        graph
+            .artifact_dependencies
+            .push(RecoveryArtifactDependency {
+                source: original_id,
+                target: value_id,
+                dependency: ArtifactDependency::NativeBinding {
+                    dependent_ordinal: 0,
+                    generation: 1,
+                    namespace: "value".into(),
+                    occurrence: "x".into(),
+                    record_parent: None,
+                },
+            });
+        for node in &mut graph.nodes {
+            node.artifact_refs = vec![original_id, value_id];
+            node.state = RecoveryNodeState::LiveValueDependency {
+                reason: "lost x".into(),
+            };
+            node.live_dependencies = vec![RecoveryLiveDependency::NativeBinding {
+                artifact_id: value_id,
+                binding: RecoverySourceIdentity {
+                    unit: "main".into(),
+                    module: "Val1".into(),
+                    namespace: "value".into(),
+                    occurrence: "x".into(),
+                    record_parent: None,
+                },
+                generation: 1,
+            }];
+            node.instances.classes.push(RecoveryInstanceEvidence {
+                dfun: identity("dfun"),
+                class: identity("class"),
+                selected: true,
+                selected_axioms: vec![],
+            });
+        }
+        graph.public_surfaces[0]
+            .bindings
+            .push(RecoveryPublicBinding {
+                name: "x".into(),
+                owner: RecoveryBindingId {
+                    session: 41,
+                    variable: 7,
+                },
+            });
+        graph.public_surfaces[0].epoch = 1;
+        graph.seal().unwrap();
+        let before = graph.clone();
+        assert!(matches!(
+            graph.projection(&owner("root"), &BTreeMap::new()).unwrap()[&identity("answer")],
+            RecoveryHead::Tombstone(_)
+        ));
+        assert!(matches!(
+            graph
+                .interface_projection(&owner("root"), &BTreeMap::new())
+                .unwrap()[&identity("answer")],
+            RecoveryHead::Available {
+                winner: Generation(2),
+                ..
+            }
+        ));
+        assert_eq!(
+            graph.public_binding_tombstones(&owner("root")).unwrap()[0]
+                .winner
+                .variable,
+            7
+        );
+        assert_eq!(graph, before);
+
+        let losses = BTreeMap::from([(
+            original_id,
+            vec![RecoveryArtifactLoss {
+                component: RecoveryArtifactComponent::Product,
+                path: PathBuf::from("missing.product"),
+                kind: RecoveryArtifactLossKind::Missing,
+            }],
+        )]);
+        assert!(matches!(
+            graph.interface_projection(&owner("root"), &losses).unwrap()[&identity("answer")],
+            RecoveryHead::Tombstone(_)
+        ));
+        graph.nodes[1].state = RecoveryNodeState::MissingArtifactClosure {
+            reason: "missing closure".into(),
+        };
+        graph.nodes[1].live_dependencies.clear();
+        graph.seal().unwrap();
+        assert!(matches!(
+            graph
+                .interface_projection(&owner("root"), &BTreeMap::new())
+                .unwrap()[&identity("answer")],
+            RecoveryHead::Tombstone(_)
+        ));
     }
 
     #[test]
