@@ -1,9 +1,9 @@
 do
-  let childEntry :: Int -> Eff '[Core.ActorKernel, Core.AgentTools] ()
+  let childEntry :: Int -> Eff '[Core.ActorKernel, Core.AgentSession, Core.ActorLocal CaptureProtocol] ()
       childEntry _ = do
+        send (Core.AgentAttachWith Nothing)
         send Core.ActorReadyWith
-        serveToolsWith () $ \_ -> CaptureTools
-          { ping = tool "Keep the child workbench available." $ \_ -> pure (capturedValue + 1) }
+        Mailbox.serve @() @CaptureProtocol () (\() CaptureNoop -> pure ((), ()))
   started <- send (Core.ForksStartWith
     "CHILD_PATH" childEntry Nothing GROUP_ID
     Core.ActorResearchRole Core.ActorReadOnlyProfile []

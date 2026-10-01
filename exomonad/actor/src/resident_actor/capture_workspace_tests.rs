@@ -106,6 +106,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
     eval_harness::require_extract();
     let declarations = [
         tidepool_mcp::agent_tools_decl(),
+        tidepool_mcp::agent_session_decl(),
         tidepool_mcp::actor_decl(),
         tidepool_mcp::actor_kernel_decl(),
         tidepool_mcp::actor_local_decl(),
@@ -121,7 +122,10 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
         "Tidepool.Agent.Contract",
     );
     let preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Effects.Core as Core");
-    let preamble = format!("{preamble}\ndata CaptureTools mode = CaptureTools {{ ping :: mode :- Call (Map Text StructuralValue) Int }} deriving Generic\n");
+    let preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Actor as Mailbox");
+    let preamble = format!(
+        "{preamble}\ndata CaptureProtocol result where CaptureNoop :: CaptureProtocol ()\n"
+    );
     let root = tempfile::tempdir().expect("session root");
     let session = tidepool_repr::SessionId(std::process::id() as u64 * 10_000 + 184);
     let lib = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
@@ -317,7 +321,28 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
     eprintln!("checkpoint workspace fixture: both actual child policies installed");
     assert_ne!(children[0].actor.identity(), children[1].actor.identity());
     for child in &children {
-        assert_captured_reader(child).await;
+        let reply = child
+            .policy
+            .dispatch_boxed(ToolInvocation {
+                context: None,
+                name: crate::HASKELL_TOOL.into(),
+                arguments: ToolArguments::Raw("pure (capturedValue + 1)".into()),
+            })
+            .await
+            .expect("child workbench reads the original issuer checkpoint binding");
+        assert_committed(&reply);
+        assert_eq!(
+            reply["items"]
+                .as_array()
+                .expect("item receipts")
+                .last()
+                .expect("expression receipt")["output"]
+                .as_str()
+                .expect("rendered value")
+                .trim(),
+            "42",
+            "{reply:?}"
+        );
     }
     for child in children {
         let result = child
