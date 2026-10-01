@@ -77,7 +77,7 @@ collaboration = do
   void $ turn (checkActor reviewer) ("let latest = Candidate " <> gitOidLiteral amendment <> " [\"focused repair check\",\"incorporated plan check\"] [\"open product gate\"]\nrespond (Produced (Accepted (ReviewedCandidate (AssignedTask assignment) latest [\"reviewed revised source and plan\"] \"preparation only\")))")
   void $ turn owner "accepted <- pollResponse reviewer"
   assertCell owner "independent acceptance retains the updated contract and latest source"
-    ("case accepted of { ResponseReady receipt -> case responseValue receipt of { Produced (Accepted reviewed) -> candidateCommit (reviewedCandidate reviewed) == " <> gitOidLiteral amendment <> " && remainingGates (reviewedCandidate reviewed) == [\"open product gate\"] && case reviewedBasis reviewed of { AssignedTask assigned -> any (Text.isInfixOf \"Preparation retains the boundary\" . decisionSummary) (acceptedDecisions assigned); _ -> False }; _ -> False }; _ -> False }")
+    ("case accepted of { ResponseReady receipt -> case responseValue receipt of { Produced (Accepted reviewed) -> candidateCommit (reviewedCandidate reviewed) == " <> gitOidLiteral amendment <> " && remainingGates (reviewedCandidate reviewed) == [\"open product gate\"] && case reviewedBasis reviewed of { AssignedTask assigned -> any (T.isInfixOf \"Preparation retains the boundary\" . decisionSummary) (acceptedDecisions assigned); _ -> False }; _ -> False }; _ -> False }")
   void $ git owner ["merge", "--ff-only", amendment]
   feature <- readFile owner "feature.txt"
   combinedPlan <- readFile owner "plans/feature.md"

@@ -51,15 +51,12 @@ redPreserved = do
     , "Right sourceTree <- createWorktree (fromRef \"recipe/red-preserved\" \"red-source\")"
     , "Right integration <- createWorktree (fromRef \"recipe/red-preserved\" \"red-preserved\")"
     , "merger <- R.start (M.mergeInto (worktreeId integration) (Just \"recipe/red-preserved\") [\"sh\", \"-c\", \"printf 'staged-check\\n' > red-preserved.txt; git add -- red-preserved.txt; printf 'working-check\\n' > red-preserved.txt; printf intentional-red >&2; exit 7\"])"
-    , "let managedIntegration = worktreeId integration"
     , "sourceProbe <- R.start (R.withWorktree (worktreeId sourceTree) Fixture.mergeProbe)"
     , "integrationProbe <- R.start (R.withWorktree (worktreeId integration) Fixture.mergeProbe)"
     ]
-  assertCell owner "integration actor owns the allocated managed checkout"
-    "managedIntegration == worktreeId integration"
   void $ turn owner $ Text.unlines
-    [ "let commandAt probe args = R.call (Fixture.probeCommand (R.client probe)) args"
-    , "let gitAt probe args = commandAt probe ([\"git\"] ++ args)"
+    [ "let commandAt :: R.ActorHandle Fixture.MergeProbe -> [Text] -> Eff RootEffects Cmd.RunResult; commandAt probe args = R.call (Fixture.probeCommand (R.client probe)) args"
+    , "let gitAt :: R.ActorHandle Fixture.MergeProbe -> [Text] -> Eff RootEffects Cmd.RunResult; gitAt probe args = commandAt probe ([\"git\"] ++ args)"
     , "reflogBefore <- gitAt integrationProbe [\"reflog\", \"--format=%gs\"]"
     , "sourceEdit <- commandAt sourceProbe [\"sh\", \"-c\", \"printf 'candidate\\n' > red-preserved.txt\"]"
     , "sourceAdded <- gitAt sourceProbe [\"add\", \"--\", \"red-preserved.txt\"]"
@@ -74,8 +71,9 @@ redPreserved = do
     ]
   void $ turn owner $ Text.unlines
     [ "view <- R.call (M.mergeView (R.client merger)) ()"
-    , "inspectFull (case first of { M.RedPreserved _ checked evidence -> M.integrationHead evidence == checked && not (M.integrationPassed evidence) && Cmd.commandOutcome (Cmd.commandResult (M.integrationReceipt evidence)) == Cmd.CommandExited 7 && Cmd.commandCleanup (Cmd.commandResult (M.integrationReceipt evidence)) == Cmd.CommandClean && case reverse (M.mergeHistory view) of { M.MergeHistory _ _ (M.IntegrationRed _ retained) : _ -> retained == evidence; _ -> False }; _ -> False })"
     ]
+  assertCell owner "integration actor owns the allocated managed checkout"
+    "case M.mergeTree view of { Just tree -> worktreeId tree == worktreeId integration; _ -> False }"
   assertCell owner "red evidence retains terminal receipt and same history proof"
     ("(case first of { M.RedPreserved _ checked evidence -> M.integrationHead evidence == checked && not (M.integrationPassed evidence) && Cmd.commandOutcome (Cmd.commandResult (M.integrationReceipt evidence)) == Cmd.CommandExited 7 && Cmd.commandCleanup (Cmd.commandResult (M.integrationReceipt evidence)) == Cmd.CommandClean && case reverse (M.mergeHistory view) of { M.MergeHistory _ _ (M.IntegrationRed _ retained) : _ -> retained == evidence; _ -> False }; _ -> False })")
   void $ turn owner "postEdit <- commandAt integrationProbe [\"sh\", \"-c\", \"printf 'post-check-edit\\n' > post-check.txt\"]"
@@ -122,14 +120,8 @@ greenReceipt = do
     , "result <- R.call (M.publish (R.client merger)) (M.PublishRequest \"green receipt\" (worktreeId sourceTree) " <> gitOidLiteral before <> " \"green receipt\")"
     , "view <- R.call (M.mergeView (R.client merger)) ()"
     ]
-  void $ turn owner $ Text.unlines
-    [ "inspectFull (case result of { M.Published checked previous evidence -> checked == " <> gitOidLiteral before <> " && previous == checked && M.integrationHead evidence == checked && M.integrationArgv evidence == command && M.integrationPassed evidence && Cmd.stdout (M.integrationReceipt evidence) == Right \"zero-tests\" && case reverse (M.mergeHistory view) of { M.MergeHistory _ _ (M.IntegrationPublished _ retained) : _ -> retained == evidence; _ -> False }; _ -> False })"
-    ]
   assertCell owner "green publication retains exact command evidence without claiming tests"
     ("(case result of { M.Published checked previous evidence -> checked == " <> gitOidLiteral before <> " && previous == checked && M.integrationHead evidence == checked && M.integrationArgv evidence == command && M.integrationPassed evidence && Cmd.stdout (M.integrationReceipt evidence) == Right \"zero-tests\" && case reverse (M.mergeHistory view) of { M.MergeHistory _ _ (M.IntegrationPublished _ retained) : _ -> retained == evidence; _ -> False }; _ -> False })")
-  void $ turn owner $ Text.unlines
-    [ "inspectFull (case result of { M.Published _ _ evidence -> let original = M.integrationReceipt evidence; completion = Cmd.commandResult original; retained = original { Cmd.commandResult = completion { Cmd.commandCleanup = Cmd.CommandRetained } }; unknown = original { Cmd.commandResult = completion { Cmd.commandCleanup = Cmd.CommandCleanupUnknown \"unconfirmed\" } }; failed = original { Cmd.commandResult = completion { Cmd.commandOutcome = Cmd.CommandExited 9 } } in all (not . M.integrationPassed) [evidence { M.integrationReceipt = retained }, evidence { M.integrationReceipt = unknown }, evidence { M.integrationReceipt = failed }]; _ -> False })"
-    ]
   assertCell owner "retained, unknown cleanup and failed exit cannot be green"
     ("(case result of { M.Published _ _ evidence -> let original = M.integrationReceipt evidence; completion = Cmd.commandResult original; retained = original { Cmd.commandResult = completion { Cmd.commandCleanup = Cmd.CommandRetained } }; unknown = original { Cmd.commandResult = completion { Cmd.commandCleanup = Cmd.CommandCleanupUnknown \"unconfirmed\" } }; failed = original { Cmd.commandResult = completion { Cmd.commandOutcome = Cmd.CommandExited 9 } } in all (not . M.integrationPassed) [evidence { M.integrationReceipt = retained }, evidence { M.integrationReceipt = unknown }, evidence { M.integrationReceipt = failed }]; _ -> False })")
   void $ turn owner "R.finish merger"
@@ -150,7 +142,6 @@ commandFailure = do
     , "result <- R.call (M.publish (R.client merger)) request"
     , "headAfter <- worktreeHead integration"
     , "view <- R.call (M.mergeView (R.client merger)) ()"
-    , "inspectFull (headAfter == Right " <> gitOidLiteral before <> " && case result of { M.MergeFailed _ -> case M.mergeHistory view of { [M.MergeHistory _ candidate (M.PublishFailed _)] -> candidate == Just (M.publishCandidate request); _ -> False }; _ -> False })"
     ]
   assertCell owner "failed Git lookup preserves head and admits no integration command"
     ("(headAfter == Right " <> gitOidLiteral before <> " && case result of { M.MergeFailed _ -> case M.mergeHistory view of { [M.MergeHistory _ candidate (M.PublishFailed _)] -> candidate == Just (M.publishCandidate request); _ -> False }; _ -> False })")
@@ -176,7 +167,6 @@ checkedHeadChanged = do
     , "result <- R.call (M.publish (R.client merger)) (M.PublishRequest \"changed head\" (worktreeId sourceTree) " <> gitOidLiteral before <> " \"changed head\")"
     , "view <- R.call (M.mergeView (R.client merger)) ()"
     , "headAfter <- worktreeHead integration"
-    , "inspectFull (headAfter /= Right " <> gitOidLiteral before <> " && case (result, reverse (M.mergeHistory view)) of { (M.MergeBlocked _, M.MergeHistory _ _ (M.IntegrationBlocked evidence _) : _) -> M.integrationHead evidence == " <> gitOidLiteral before <> " && M.integrationPassed evidence; _ -> False })"
     ]
   assertCell owner "changed HEAD blocks publication retaining original checked receipt"
     ("(headAfter /= Right " <> gitOidLiteral before <> " && case (result, reverse (M.mergeHistory view)) of { (M.MergeBlocked _, M.MergeHistory _ _ (M.IntegrationBlocked evidence _) : _) -> M.integrationHead evidence == " <> gitOidLiteral before <> " && M.integrationPassed evidence; _ -> False })")
@@ -203,7 +193,6 @@ dirtyAfterSuccess = do
     , "result <- R.call (M.publish (R.client merger)) (M.PublishRequest \"dirty source\" (worktreeId sourceTree) " <> gitOidLiteral before <> " \"dirty source\")"
     , "view <- R.call (M.mergeView (R.client merger)) ()"
     , "headAfter <- worktreeHead integration"
-    , "inspectFull (headAfter == Right " <> gitOidLiteral before <> " && case (result, reverse (M.mergeHistory view)) of { (M.MergeBlocked _, M.MergeHistory _ _ (M.IntegrationBlocked evidence _) : _) -> M.integrationHead evidence == " <> gitOidLiteral before <> " && M.integrationArgv evidence == command && M.integrationPassed evidence && Cmd.stdout (M.integrationReceipt evidence) == Right \"successful-dirty-check\" && case M.integrationSubmission evidence of { Just submission -> case changes (workingState submission) of { DirtySummary staged unstaged untracked _ -> all (not . null) [staged, unstaged, untracked] }; Nothing -> False }; _ -> False })"
     ]
   assertCell owner "successful command retains dirty source proof and blocks publication"
     ("(headAfter == Right " <> gitOidLiteral before <> " && case (result, reverse (M.mergeHistory view)) of { (M.MergeBlocked _, M.MergeHistory _ _ (M.IntegrationBlocked evidence _) : _) -> M.integrationHead evidence == " <> gitOidLiteral before <> " && M.integrationArgv evidence == command && M.integrationPassed evidence && Cmd.stdout (M.integrationReceipt evidence) == Right \"successful-dirty-check\" && case M.integrationSubmission evidence of { Just submission -> case changes (workingState submission) of { DirtySummary staged unstaged untracked _ -> all (not . null) [staged, unstaged, untracked] }; Nothing -> False }; _ -> False })")

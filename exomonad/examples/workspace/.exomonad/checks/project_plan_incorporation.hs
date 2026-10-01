@@ -9,4 +9,4 @@ let planResponse = handedRequest planHandoff
 let planWatch = "plan-incorporated" :: WatchLabel
 planReady <- case handoffRetention planHandoff of
   Right () -> watch planWatch (awaitSettled planResponse)
-  Left issue -> error (show issue)
+  Left issue -> error (T.pack (show issue))

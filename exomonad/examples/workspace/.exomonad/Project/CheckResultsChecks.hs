@@ -166,7 +166,7 @@ completionRouting = do
   void $ turn owner
     "view <- readChecks watcher\nlet [_, entry, _] = checkEntries view\nlet Just outcome = checkOutcome entry\nlet focused = checkFocused outcome\nlet Cmd.Finished job receipt _ = focusedCommand focused\nlet unavailable = focused { focusedCommand = Cmd.Finished job receipt (Left (Cmd.CommandUnavailable \"fixture capture refused\")) }\ndiagnosis <- diagnoseFocused unavailable\n(diagnosisBranch diagnosis, diagnosisExcerpt diagnosis, Cmd.stderr (focusedCommand unavailable))"
   assertCell owner "unavailable command capture retains refusal independently of counted failure"
-    "diagnosisBranch diagnosis == AssertionsFailed 0 1 && case (diagnosisExcerpt diagnosis, Cmd.stderr (focusedCommand unavailable)) of { (Left _, Left (Cmd.OutputUnavailable refusedJob (Cmd.CommandUnavailable _))) -> refusedJob == job; _ -> False }"
+    "diagnosisBranch diagnosis == AssertionsFailed 0 1 && case (diagnosisExcerpt diagnosis, Cmd.stderr (focusedCommand unavailable)) of { (Left _, Left (Cmd.OutputUnavailable refusedJob (Cmd.CommandUnavailable detail))) -> refusedJob == job && detail == \"fixture capture refused\"; _ -> False }"
   void $ turn owner
     "view <- readChecks watcher\nlet [_, failedEntry, _] = checkEntries view\nlet Just failedOutcome = checkOutcome failedEntry\ndiagnosis <- diagnoseFocused (checkFocused failedOutcome)\n(diagnosisBranch diagnosis, diagnosisExcerpt diagnosis)"
   assertCell owner "text: assertion failure diagnosis retains bounded diagnostic excerpt"
@@ -271,7 +271,7 @@ evidenceProbe spec =
 managedEvidence :: Member RecipeCheck effects => Eff effects ()
 managedEvidence = do
   owner <- root
-  void $ turn owner "import Project.CheckResultsChecks"
+  void $ turn owner "import Project.CheckResultsChecks\nimport Tidepool.Worktree (renderWorktreeId)"
   void $ turn owner "Right focusedTree <- createWorktree (fromCurrentRepository \"focused-evidence-check\")\nworktreeId focusedTree"
   assertCell owner "managed focused evidence checkout has typed allocated identity"
     "not (T.null (renderWorktreeId (worktreeId focusedTree)))"
