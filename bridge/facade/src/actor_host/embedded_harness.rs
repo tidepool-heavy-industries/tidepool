@@ -45,6 +45,7 @@ pub(super) struct EmbeddedHarnessRuntime {
     run: String,
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,
+    output_observer: OnceLock<harness::server::ServerControl>,
     recovery: OnceLock<Arc<super::embedded_recovery::EmbeddedApplicationRecovery>>,
 }
 
@@ -55,12 +56,27 @@ impl EmbeddedHarnessRuntime {
             .map_err(|error| EmbeddedError::Binding(error.to_string()))?;
         Ok(Self {
             run: super::runtime_namespace(run_root),
+            output_observer: OnceLock::new(),
             recovery: OnceLock::new(),
             store: Arc::new(Store::open(harness_root.join("store.sqlite"))?),
             scheduler: Arc::new(
                 JobScheduler::new(concurrent_jobs)
                     .map_err(|error| EmbeddedError::Binding(error.to_string()))?,
             ),
+        })
+    }
+
+    pub(super) fn configure_output_observer(
+        &self,
+        control: harness::server::ServerControl,
+    ) -> Result<(), String> {
+        self.output_observer
+            .set(control)
+            .map_err(|_| "embedded output observer was already configured".into())
+    }
+    pub(super) fn output_observer(&self) -> Option<Arc<dyn harness::engine::ModelOutputObserver>> {
+        self.output_observer.get().map(|control| {
+            Arc::new(control.clone()) as Arc<dyn harness::engine::ModelOutputObserver>
         })
     }
 

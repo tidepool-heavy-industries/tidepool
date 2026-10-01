@@ -157,6 +157,7 @@ impl EmbeddedService {
             .map_err(|error| error.to_string())?;
         let address = listener.local_addr().map_err(|error| error.to_string())?;
         let (router, control, commands) = harness::server::server_with_config(server_config);
+        runtime.configure_output_observer(control.clone())?;
         let server_owner = Arc::clone(&owner);
         let server = tokio::spawn(async move {
             let _server_owner = server_owner;
@@ -522,6 +523,10 @@ where
             NonZeroU64::new(settings.context_capacity_tokens).ok_or("zero context capacity")?,
         )
         .map_err(|error| error.to_string())?;
+    let engine = match runtime.output_observer() {
+        Some(observer) => engine.with_output_observer(observer),
+        None => engine,
+    };
     let store = runtime.store();
     let mut recovering = true;
     loop {
