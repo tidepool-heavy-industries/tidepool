@@ -1063,7 +1063,7 @@ fn merge_package_closure(
     let mut selected = packages.clone();
     if let Some(request) = exact {
         let inherited =
-            certified_products::inherited_package_witnesses(request.context.recovery_products())
+            certified_products::inherited_package_witnesses(&request.context.recovery_products())
                 .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         for (owner, witness) in inherited {
             if selected
@@ -2107,8 +2107,8 @@ fn assemble_with_products(
             .map(|product| {
                 (
                     (
-                        product.owner().unit.as_str(),
-                        product.owner().module.as_str(),
+                        product.owner().unit.clone(),
+                        product.owner().module.clone(),
                     ),
                     product,
                 )
@@ -2124,7 +2124,7 @@ fn assemble_with_products(
         let mut emitted = std::collections::HashSet::new();
         for product in &artifacts.module_products {
             let key = (product.unit.as_str(), product.module.as_str());
-            let admitted = if let Some(original) = protected.get(&key) {
+            let admitted = if let Some(original) = protected.get(&(product.unit.clone(), product.module.clone())) {
                 let expected = protected_groups.get(&key);
                 product.interface == original.interface_bytes()
                     && product.groups.len() == expected.map_or(0, BTreeMap::len)

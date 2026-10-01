@@ -573,7 +573,7 @@ impl AcceptedJoin {
     pub fn package_imports_bytes(&self) -> &[u8] {
         self.interface.package_imports_bytes()
     }
-    pub fn recovery_products(&self) -> &[CertifiedRecoveryProduct] {
+    pub fn recovery_products(&self) -> Vec<CertifiedRecoveryProduct> {
         self.context.recovery_products()
     }
     pub fn toolchain_identity_sha256(&self) -> [u8; 32] {
@@ -592,7 +592,7 @@ impl AcceptedJoin {
         let products = crate::recovery_artifacts::materialize_certified_products(
             root,
             self.toolchain_identity_sha256(),
-            self.recovery_products(),
+            &self.recovery_products(),
         )?;
         let anchors = self
             .context
@@ -1722,7 +1722,7 @@ mod authored_tests {
         for original in extended.recovery_products() {
             let retained = next_context
                 .recovery_products()
-                .iter()
+                .into_iter()
                 .find(|product| product.owner() == original.owner())
                 .unwrap();
             assert_eq!(retained.product_bytes(), original.product_bytes());

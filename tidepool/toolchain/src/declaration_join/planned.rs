@@ -98,7 +98,7 @@ pub(super) fn admit_authored_artifact_closure(
                 .and_then(|context| {
                     context
                         .interface_owners()
-                        .iter()
+                        .into_iter()
                         .find(|entry| entry.owner == identity)
                 })
                 .ok_or_else(|| {

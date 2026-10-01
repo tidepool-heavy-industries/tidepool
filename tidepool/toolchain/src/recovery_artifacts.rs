@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -52,10 +53,10 @@ pub struct RecoveryArtifactInput<'a> {
 pub struct CertifiedRecoveryProduct {
     owner: CachedHomeOwner,
     source_sha256: Option<[u8; 32]>,
-    interface_bytes: Vec<u8>,
-    product_bytes: Vec<u8>,
-    package_imports_bytes: Vec<u8>,
-    certification_bytes: Vec<u8>,
+    interface_bytes: Arc<[u8]>,
+    product_bytes: Arc<[u8]>,
+    package_imports_bytes: Arc<[u8]>,
+    certification_bytes: Arc<[u8]>,
 }
 
 impl CertifiedRecoveryProduct {
@@ -69,10 +70,10 @@ impl CertifiedRecoveryProduct {
         Self {
             owner,
             source_sha256: None,
-            interface_bytes,
-            product_bytes,
-            package_imports_bytes,
-            certification_bytes,
+            interface_bytes: interface_bytes.into(),
+            product_bytes: product_bytes.into(),
+            package_imports_bytes: package_imports_bytes.into(),
+            certification_bytes: certification_bytes.into(),
         }
     }
 
@@ -112,8 +113,8 @@ pub struct CertifiedJoinedInterface {
     toolchain_identity_sha256: [u8; 32],
     unit: String,
     module: String,
-    interface_bytes: Vec<u8>,
-    package_imports_bytes: Vec<u8>,
+    interface_bytes: Arc<[u8]>,
+    package_imports_bytes: Arc<[u8]>,
 }
 
 impl CertifiedJoinedInterface {
@@ -139,8 +140,8 @@ impl CertifiedJoinedInterface {
             toolchain_identity_sha256: producer,
             unit,
             module,
-            interface_bytes,
-            package_imports_bytes,
+            interface_bytes: interface_bytes.into(),
+            package_imports_bytes: package_imports_bytes.into(),
         })
     }
     pub fn unit(&self) -> &str {
@@ -176,6 +177,80 @@ impl CertifiedJoinedInterface {
             &self.package_imports_bytes,
             validation,
         )
+    }
+}
+
+/// Retained typechecking evidence for an original Val module. This does not
+/// authorize any native import; execution still requires a completed lease.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CertifiedValueInterface {
+    interface: CertifiedJoinedInterface,
+    requirements: Vec<crate::declaration_join::ExactModuleIdentity>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecoveryValueInterfaceRef {
+    pub artifact_id: crate::artifact_inventory::ArtifactId,
+    pub interface: RecoveryJoinRef,
+    pub requirements: Vec<crate::declaration_join::ExactModuleIdentity>,
+}
+
+impl CertifiedValueInterface {
+    /// Only the checked-cell issuer calls this after admitting the compiler's
+    /// same-transaction output and original canonical Val identity.
+    pub(crate) fn from_checked_compilation(
+        producer: [u8; 32],
+        owner: crate::declaration_join::ExactModuleIdentity,
+        interface_bytes: Vec<u8>,
+        package_imports_bytes: Vec<u8>,
+        mut requirements: Vec<crate::declaration_join::ExactModuleIdentity>,
+    ) -> Result<Self, RecoveryArtifactError> {
+        requirements.sort();
+        requirements.dedup();
+        Ok(Self {
+            interface: CertifiedJoinedInterface::from_certification(
+                producer,
+                owner.unit,
+                owner.module,
+                interface_bytes,
+                package_imports_bytes,
+            )?,
+            requirements,
+        })
+    }
+    pub(crate) fn from_admitted_interface(
+        interface: CertifiedJoinedInterface,
+        requirements: Vec<crate::declaration_join::ExactModuleIdentity>,
+    ) -> Self {
+        Self {
+            interface,
+            requirements,
+        }
+    }
+    pub fn interface(&self) -> &CertifiedJoinedInterface {
+        &self.interface
+    }
+    pub fn requirements(&self) -> &[crate::declaration_join::ExactModuleIdentity] {
+        &self.requirements
+    }
+    pub fn artifact_id(&self) -> crate::artifact_inventory::ArtifactId {
+        crate::artifact_inventory::ArtifactEntry::interface(
+            self.interface.clone(),
+            crate::artifact_inventory::ArtifactKind::ValueInterface,
+            self.requirements.clone(),
+        )
+        .descriptor
+        .id
+    }
+    pub fn materialize(
+        &self,
+        root: &Path,
+    ) -> Result<RecoveryValueInterfaceRef, RecoveryArtifactError> {
+        Ok(RecoveryValueInterfaceRef {
+            artifact_id: self.artifact_id(),
+            interface: self.interface.materialize(root)?,
+            requirements: self.requirements.clone(),
+        })
     }
 }
 
