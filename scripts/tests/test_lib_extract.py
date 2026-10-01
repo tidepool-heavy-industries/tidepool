@@ -467,6 +467,59 @@ exit 9
         self.assertFalse(list(artifact_root.glob("*/compiler.jsonl.truncation.json")))
         self.assertFalse(list(artifact_root.glob("*/.successful-run")))
 
+    def test_raw_trace_copy_failure_never_publishes_partial_evidence(self):
+        logs = self.root / "daemon logs"
+        logs.mkdir()
+        daemon = logs / "daemon.log"
+        daemon.write_text("daemon diagnostic")
+        payload = b'{"complete":true}\n'
+        (logs / "compiler.jsonl").write_bytes(payload)
+        hook = self.root / "python hook"
+        hook.mkdir()
+        (hook / "sitecustomize.py").write_text(
+            "import shutil\n"
+            "def fail_copy(incoming, outgoing, *args, **kwargs):\n"
+            "    outgoing.write(incoming.read(3))\n"
+            "    outgoing.flush()\n"
+            "    raise OSError('injected trace copy failure')\n"
+            "shutil.copyfileobj = fail_copy\n"
+        )
+        raw = self.root / "measurement/compiler.jsonl"
+        raw.parent.mkdir()
+        artifacts = self.root / "artifacts"
+        result = self.run_shell(
+            'prepare_battery_artifacts fixture true\nfinalize_battery_artifacts 0\n',
+            PYTHONPATH=str(hook), TIDEPOOL_KEEP_TEST_LOGS="1",
+            TIDEPOOL_TEST_ARTIFACT_ROOT=str(artifacts),
+            TIDEPOOL_EXTRACT_DAEMON_LOG=str(daemon),
+            TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT=str(raw),
+        )
+        self.assertIn("could not retain", result.stderr)
+        self.assertFalse(raw.exists())
+        self.assertEqual(list(raw.parent.iterdir()), [])
+        self.assertEqual(next(artifacts.glob("*/compiler.jsonl")).read_bytes(), payload)
+
+    def test_raw_trace_copy_preserves_existing_evidence(self):
+        logs = self.root / "daemon logs"
+        logs.mkdir()
+        daemon = logs / "daemon.log"
+        daemon.write_text("daemon diagnostic")
+        (logs / "compiler.jsonl").write_bytes(b'{"new":true}\n')
+        raw = self.root / "measurement/compiler.jsonl"
+        raw.parent.mkdir()
+        original = b'{"previous":true}\n'
+        raw.write_bytes(original)
+        result = self.run_shell(
+            'prepare_battery_artifacts fixture true\nfinalize_battery_artifacts 0\n',
+            TIDEPOOL_KEEP_TEST_LOGS="1",
+            TIDEPOOL_TEST_ARTIFACT_ROOT=str(self.root / "artifacts"),
+            TIDEPOOL_EXTRACT_DAEMON_LOG=str(daemon),
+            TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT=str(raw),
+        )
+        self.assertIn("could not retain", result.stderr)
+        self.assertEqual(raw.read_bytes(), original)
+        self.assertEqual(list(raw.parent.iterdir()), [raw])
+
     def test_json_trace_truncation_omits_oversized_and_incomplete_records(self):
         logs = self.root / "daemon logs"
         logs.mkdir()

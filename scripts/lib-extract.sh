@@ -333,13 +333,20 @@ finalize_battery_artifacts() {
     if [[ -n "${TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT:-}" ]]; then
       if ! python3 - "$compiler_trace" "$TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT" "$BATTERY_ARTIFACT_DIR" <<'PYTRACE'
 from pathlib import Path
+import os
 import shutil
 import sys
+import tempfile
 source, destination, current = map(Path, sys.argv[1:])
 if not destination.is_absolute() or destination.resolve().is_relative_to(current.parent.resolve()):
     raise SystemExit("raw compiler trace must select an absolute file outside bounded battery runs")
-with source.open("rb") as incoming, destination.open("xb") as outgoing:
-    shutil.copyfileobj(incoming, outgoing)
+# Publish only a complete copy, without replacing earlier evidence. A failed
+# copy must not leave a file that a measurement can mistake for its raw trace.
+with tempfile.TemporaryDirectory(prefix=".compiler-trace-", dir=destination.parent) as scratch:
+    pending = Path(scratch) / "trace"
+    with source.open("rb") as incoming, pending.open("xb") as outgoing:
+        shutil.copyfileobj(incoming, outgoing)
+    os.link(pending, destination)
 PYTRACE
       then
         echo "warning: could not retain the explicitly selected raw compiler trace" >&2

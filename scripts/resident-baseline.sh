@@ -24,12 +24,15 @@ filter='test(=session::turn::scaling_tests::complete_cell_consumes_item_and_disp
 command=(bash scripts/battery.sh -p tidepool-runtime --lib --run-ignored all --test-threads 1 --success-output immediate --failure-output immediate -E "$filter")
 python3 - "$evidence/manifest.json" "${command[@]}" <<'PY'
 import hashlib, json, os, pathlib, subprocess, sys
+def sha256(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
 selected = {}
 for name in ('TIDEPOOL_EXTRACT', 'TIDEPOOL_EXTRACT_WORKER', 'TIDEPOOL_COMPILER_DEPLOYMENT'):
     path = pathlib.Path(os.environ[name])
     if not path.is_absolute() or not path.is_file():
         raise SystemExit(f'{name} must select a retained absolute file')
-    selected[name] = {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+    selected[name] = {'path': str(path), 'sha256': sha256(path)}
 deployment = json.loads(pathlib.Path(os.environ['TIDEPOOL_COMPILER_DEPLOYMENT']).read_text())
 for name, key in [('TIDEPOOL_EXTRACT', 'frontend_path'), ('TIDEPOOL_EXTRACT_WORKER', 'worker_path')]:
     if selected[name]['path'] != deployment.get(key):
@@ -51,6 +54,9 @@ status=${PIPESTATUS[0]}
 set -e
 python3 - "$evidence/manifest.json" "$status" <<'PY'
 import hashlib, json, pathlib, re, sys
+def sha256(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
 path = pathlib.Path(sys.argv[1])
 manifest = json.loads(path.read_text())
 manifest['battery_exit_code'] = int(sys.argv[2])
@@ -62,9 +68,9 @@ manifest['executed_test_count'] = int(summaries[-1]) if summaries else None
 manifest['test_count_matches'] = manifest['executed_test_count'] == manifest['expected_test_count']
 if not manifest['test_count_matches']:
     manifest['exit_code'] = 1
-manifest['selected_files_unchanged'] = all(hashlib.sha256(pathlib.Path(row['path']).read_bytes()).hexdigest() == row['sha256'] for row in manifest['selected_files'].values())
+manifest['selected_files_unchanged'] = all(sha256(pathlib.Path(row['path'])) == row['sha256'] for row in manifest['selected_files'].values())
 trace = path.parent / 'compiler.jsonl'
-manifest['compiler_trace'] = ({'path': str(trace), 'sha256': hashlib.sha256(trace.read_bytes()).hexdigest(), 'bytes': trace.stat().st_size} if trace.is_file() else None)
+manifest['compiler_trace'] = ({'path': str(trace), 'sha256': sha256(trace), 'bytes': trace.stat().st_size} if trace.is_file() else None)
 if manifest['battery_exit_code'] == 0 and manifest['compiler_trace'] is None:
     manifest['exit_code'] = 1
 try:
