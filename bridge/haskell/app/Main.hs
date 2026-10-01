@@ -1851,9 +1851,9 @@ checkedDisplayRecipeWithInputs generic admission template = do
         ++ metadata ++ " <- pure (T.copy (TidepoolInspection.text " ++ page ++ "), TidepoolInspection.pageHasMore "
         ++ page ++ ", TidepoolInspection.pageUnavailable " ++ page ++ ");\n"
         ++ alias ++ " <- pure " ++ page ++ ";\npure (" ++ intercalate ", " [page,metadata,alias] ++ ")\n}"
-  let spliced = (if generic then ("{-# LANGUAGE PackageImports #-}\n" ++) else id) (spliceTemplate withImports statement (intercalate ", " [page,metadata,alias]))
+  let spliced = (if generic then ("{-# LANGUAGE PackageImports, ScopedTypeVariables #-}\n" ++) else id) (spliceTemplate withImports statement (intercalate ", " [page,metadata,alias]))
   if generic then do
-    withArgument <- replaceRecipeMarker "__result = do {" "__result (__tidepoolBudget, __tidepoolPresented) = do {" spliced
+    withArgument <- replaceRecipeMarker "__result = do {" "__result ((__tidepoolBudget :: TidepoolProgramTypes.Int), (__tidepoolPresented :: [TidepoolProgramText.Text])) = do {" spliced
     prepared <- replaceRecipeMarker "__prepared = TidepoolResume.settle __result" "__prepared input = TidepoolResume.settle (__result input)" withArgument
     pure prepared
   else pure spliced

@@ -24,6 +24,7 @@ import GHC.Types.SourceError (SourceError)
 import Tidepool.Agent.Assignment.Internal (NameError (..), renderNameError)
 import Tidepool.Binders
 import Tidepool.TurnSource (spliceTemplate)
+import Tidepool.SessionArtifacts (mkBoundBinders)
 import Tidepool.DiagJson (Diag (..), diagsFromSourceError)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
@@ -53,6 +54,7 @@ main :: IO ()
 main = getArgs >>= \case
   ["--ordered-segments"] -> orderedInferenceSegments >> putStrLn "ordered inference segments: 1 passed"
   ["--program-originals"] -> programOriginalImportsCompilation >> putStrLn "program original imports: 1 passed"
+  ["--function-value-iface"] -> functionValueInterfaceCompilation >> putStrLn "function value interface: 1 passed"
   _ -> runAllTests
 
 runAllTests :: IO ()
@@ -92,6 +94,24 @@ runAllTests = do
     ["--memo-lifecycle"] -> memoLifecycleCompilation
     ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
     _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --pin-imports, --path-insensitive-witness, --memo-lifecycle, or --structural-display EFFECTS_INCLUDE"
+
+functionValueInterfaceCompilation :: IO ()
+functionValueInterfaceCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let path = root </> "FunctionValueProducer.hs"
+  writeFile path "module FunctionValueProducer where\n__result :: IO (() -> Int)\n__result = pure (\\() -> (42 :: Int))\n"
+  prepared <- runPipelineSelected PreparedStg path [root]
+  bound <- mkBoundBinders ["captured"] 1 root (pprPipelineResult prepared)
+  case bound of
+    [binder] | bbTier binder == RetainOpaque -> pure ()
+    _ -> fail "function-returning native producer did not retain its thin Val interface"
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path,handle) <- openTempFile parent "tidepool-function-value-iface"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
 
 programOriginalImportsCompilation :: IO ()
 programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
@@ -151,6 +171,11 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
 
 orderedInferenceSegments :: IO ()
 orderedInferenceSegments = do
+  forM_ ["-fdefer-type-errors", "-fdefer-typed-holes", "-fdefer-out-of-scope-variables"] $ \option -> do
+    deferred <- analyzeOrderedCell template ("{-# OPTIONS_GHC " ++ option ++ " #-}\npure missingName")
+    case deferred of
+      Left CellPrologueFailure {} -> pure ()
+      _ -> fail ("ordered program accepted deferred errors: " ++ option)
   rejected <- analyzeOrderedCell template "let { infixr 5 minus; minus = (-) :: Int -> Int -> Int }\n10 `minus` 3 `minus` 1"
   case rejected of
     Left CellUnsupportedLocalFixity {} -> pure ()

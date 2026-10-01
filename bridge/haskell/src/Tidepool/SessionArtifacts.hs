@@ -11,6 +11,7 @@ import qualified Data.Text as T
 import Codec.CBOR.Encoding (encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
 import GHC.Core.Type (tyConsOfType)
+import GHC.Builtin.Names (gHC_PRIM)
 import GHC.Core.TyCon (tyConName)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Types.Name (nameModule_maybe)
@@ -82,7 +83,7 @@ mkBoundBinders bindNames generation root result = do
       home = homeUnitAsUnit (hsc_home_unit hsc)
       requirements = [(unitString (moduleUnit owner), moduleNameString (moduleName owner))
         | owner <- owners, moduleUnit owner == home]
-  roots <- forM [owner | owner <- owners, moduleUnit owner /= home] $ \owner ->
+  roots <- forM [owner | owner <- owners, moduleUnit owner /= home, owner /= gHC_PRIM] $ \owner ->
     packageImportRoot hsc owner >>= either fail pure
   bytes <- BS.readFile path
   let digest = concatMap (\byte -> let rendered = showHex byte "" in

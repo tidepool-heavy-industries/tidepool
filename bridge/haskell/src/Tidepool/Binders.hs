@@ -442,7 +442,11 @@ cellEffectiveFlags initial template source = do
                   || any (isPrefixOf "-pgmF" . unLoc) (templateOptions ++ sourceOptions)
                   then pure (Left (CellPrologueFailure optionSpan
                     "CPP and custom preprocessors are unsupported in notebook cells"))
-                  else pure (Right effective)
+                  else if any (\flag -> gopt flag effective)
+                    [Opt_DeferTypeErrors, Opt_DeferTypedHoles, Opt_DeferOutOfScopeVariables]
+                    then pure (Left (CellPrologueFailure optionSpan
+                      "notebook cells must reject type errors, typed holes, and missing names before execution"))
+                    else pure (Right effective)
 
 collectPrologue
   :: DynFlags
