@@ -244,6 +244,7 @@ mod tests {
                 "name": "haskell",
                 "description": "Run a notebook cell",
                 "format": {"type": "text"},
+                "async": true,
             })
         );
         assert_eq!(
@@ -254,6 +255,7 @@ mod tests {
                 "description": "Look up a value",
                 "parameters": {"type": "object", "properties": {}},
                 "strict": true,
+                "async": true,
             })
         );
     }
