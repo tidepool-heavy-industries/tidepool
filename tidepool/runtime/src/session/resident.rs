@@ -447,6 +447,66 @@ pub struct BindingLease {
     cleanup: CustodyLease,
 }
 
+/// One installed startup program awaiting its actor's durable application
+/// boundary. The capsule owns its original install pin and cannot be cloned.
+#[must_use]
+#[derive(Debug)]
+pub struct PreparedStartupEntry {
+    program: Option<ProgramId>,
+    source_keys: Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
+    provenance: Arc<ProgramProvenance>,
+    admitted: super::PublicVisibilitySnapshot,
+    realm: RealmId,
+    cleanup: Arc<CustodyCleanup>,
+    _lease: BindingLease,
+    compile_identity: StartupCompileIdentity,
+}
+
+#[derive(Debug)]
+enum StartupCompileIdentity {
+    Issued(Arc<tidepool_toolchain::artifacts::SealedCompileInputIdentity>),
+    #[cfg(test)]
+    Fixture,
+}
+
+impl PreparedStartupEntry {
+    /// Stable compiler input identity for journal continuity. Native admission
+    /// still depends on this capsule's original installed program and owners.
+    pub fn compile_input_identity(&self) -> &str {
+        match &self.compile_identity {
+            StartupCompileIdentity::Issued(identity) => identity.compile_input_identity(),
+            #[cfg(test)]
+            StartupCompileIdentity::Fixture => "test-startup-fixture",
+        }
+    }
+}
+
+static_assertions::assert_not_impl_any!(PreparedStartupEntry: Clone, Copy);
+
+#[derive(Debug)]
+struct AbandonedStartupEntry {
+    program: ProgramId,
+    scope: ScopeId,
+    source_keys: Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
+}
+
+impl Drop for PreparedStartupEntry {
+    fn drop(&mut self) {
+        if let Some(program) = self.program.take() {
+            self.cleanup
+                .startup_entries
+                .lock()
+                .push(AbandonedStartupEntry {
+                    program,
+                    scope: self.admitted.scope,
+                    source_keys: std::mem::take(&mut self.source_keys),
+                });
+        }
+        // The existing binding lease releases custody and signals cleanup
+        // after the abandoned native program has entered the queue.
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum BindingAliasError {
     #[error("binding alias lease belongs to a different resident session")]
@@ -518,6 +578,7 @@ struct CustodyCleanup {
     binding_leases: Mutex<Vec<Vec<SessionVarId>>>,
     notify: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     external_leases: AtomicUsize,
+    startup_entries: Mutex<Vec<AbandonedStartupEntry>>,
 }
 
 impl CustodyCleanup {
@@ -868,6 +929,10 @@ pub enum ResidentError {
     /// by numeric coincidence.
     #[error("root custody belongs to a different resident session")]
     ForeignCustody,
+    #[error("prepared startup entry no longer has its original native authority")]
+    StaleStartupEntry,
+    #[error("startup entry lacks its sealed compiler bundle identity")]
+    UnsealedStartupEntry,
     /// A `resume`/`abort` referenced a continuation id that is not among this
     /// session's parked holes. Atomic validate-before-consume: no parked
     /// frame is touched.
@@ -4511,31 +4576,11 @@ where
         }
         let lexical_scope = self.run_context.lexical_scope;
         let install_prepared_started = std::time::Instant::now();
-        let (program, source_keys) = if let Some(certification) = code.certification.as_ref() {
-            let resolved =
-                self.state
-                    .resolve_certification_in(lexical_scope, &prepared, certification)?;
-            let registry = self.state.certified_image_registry();
-            let target = super::prepared::CertifiedTargetImage::compile_certified(
-                prepared,
-                &registry,
-                resolved.package_interfaces.clone(),
-            )
-            .map_err(PreparedRuntimeError::Compile)?;
-            let demanded = target
-                .compile_demanded(resolved.groups, &registry)
-                .map_err(PreparedRuntimeError::from)?;
-            self.install_certified_turn_in(
-                lexical_scope,
-                target,
-                &resolved.target_owners,
-                &resolved.source_evidence,
-                demanded,
-                &resolved.inherited_needed,
-            )?
-        } else {
-            (self.state.install_prepared(prepared)?, Vec::new())
-        };
+        let (program, source_keys) = self.install_turn_program_in(
+            lexical_scope,
+            prepared,
+            code.certification.as_ref().as_ref(),
+        )?;
         timing::record_stage(
             timing::NO_NODE,
             timing::NO_ROUND,
@@ -4583,6 +4628,183 @@ where
             }
         };
         self.complete_prepared(run, mode, program, lexical_scope, provenance, None, checked)
+    }
+
+    fn install_turn_program_in(
+        &mut self,
+        lexical_scope: ScopeId,
+        prepared: PreparedProgram,
+        certification: Option<&super::turn::TurnCertification>,
+    ) -> Result<
+        (
+            ProgramId,
+            Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
+        ),
+        ResidentError,
+    > {
+        if let Some(certification) = certification {
+            let resolved =
+                self.state
+                    .resolve_certification_in(lexical_scope, &prepared, certification)?;
+            let registry = self.state.certified_image_registry();
+            let target = super::prepared::CertifiedTargetImage::compile_certified(
+                prepared,
+                &registry,
+                resolved.package_interfaces.clone(),
+            )
+            .map_err(PreparedRuntimeError::Compile)?;
+            let demanded = target
+                .compile_demanded(resolved.groups, &registry)
+                .map_err(PreparedRuntimeError::from)?;
+            self.install_certified_turn_in(
+                lexical_scope,
+                target,
+                &resolved.target_owners,
+                &resolved.source_evidence,
+                demanded,
+                &resolved.inherited_needed,
+            )
+            .map_err(Into::into)
+        } else {
+            Ok((self.state.install_prepared(prepared)?, Vec::new()))
+        }
+    }
+
+    /// Install and retain the original startup program without evaluating any
+    /// authored code. Its actor must admit the application before consuming it.
+    pub fn prepare_startup_entry(
+        &mut self,
+        code: TurnCode<'_>,
+    ) -> Result<PreparedStartupEntry, ResidentError> {
+        refuse_checked_turn(&code)?;
+        let certification = code
+            .certification
+            .as_ref()
+            .as_ref()
+            .ok_or(ResidentError::UnsealedStartupEntry)?;
+        let proof = certification
+            .compile_input_identity
+            .as_ref()
+            .ok_or(ResidentError::UnsealedStartupEntry)?;
+        if !proof.matches_bundle(
+            &code.prepared,
+            &certification.groups,
+            &certification.target_owners,
+            &certification.package_interfaces,
+            &code.table,
+            &code.sites,
+        ) {
+            return Err(ResidentError::UnsealedStartupEntry);
+        }
+        let identity = StartupCompileIdentity::Issued(Arc::clone(proof));
+        self.prepare_startup_entry_installed(code, identity)
+    }
+
+    fn prepare_startup_entry_installed(
+        &mut self,
+        code: TurnCode<'_>,
+        compile_identity: StartupCompileIdentity,
+    ) -> Result<PreparedStartupEntry, ResidentError> {
+        self.settle_dropped_custody();
+        let scope = self.run_context.lexical_scope;
+        if self.state.public_visibility_snapshot_in(scope).is_none() {
+            return Err(PreparedRuntimeError::SourceScopeAdmission.into());
+        }
+        let provenance = self.provenance_for(&code.sites)?;
+        self.state
+            .merge_table(&code.table)
+            .map_err(ResidentError::TableCollision)?;
+        let (program, source_keys) = self.install_turn_program_in(
+            scope,
+            code.prepared.into_owned(),
+            code.certification.as_ref().as_ref(),
+        )?;
+        let admitted = self
+            .state
+            .public_visibility_snapshot_in(scope)
+            .expect("installation preserves its live lexical scope");
+        Ok(PreparedStartupEntry {
+            program: Some(program),
+            source_keys,
+            provenance,
+            admitted,
+            realm: self.run_context.resource_scope,
+            cleanup: Arc::clone(&self.custody_cleanup),
+            _lease: self.lease_bindings(&[]),
+            compile_identity,
+        })
+    }
+
+    /// Consume the original startup capsule under the admitted actor's current
+    /// principal and effect policy. Durable publication may advance its public
+    /// epoch, but cannot substitute native bindings or source instances.
+    pub fn run_startup_entry(
+        &mut self,
+        mut entry: PreparedStartupEntry,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        self.settle_dropped_custody();
+        if !Arc::ptr_eq(&entry.cleanup, &self.custody_cleanup) {
+            return Err(ResidentError::ForeignCustody);
+        }
+        let scope = self.run_context.lexical_scope;
+        let current = self
+            .state
+            .public_visibility_snapshot_in(scope)
+            .ok_or(ResidentError::StaleStartupEntry)?;
+        if entry.realm != self.run_context.resource_scope
+            || current.scope != entry.admitted.scope
+            || current.machine_incarnation != entry.admitted.machine_incarnation
+            || current.declaration_tip != entry.admitted.declaration_tip
+            || current.bindings != entry.admitted.bindings
+            || current.source_instances != entry.admitted.source_instances
+        {
+            return Err(ResidentError::StaleStartupEntry);
+        }
+        let program = entry.program.take().expect("startup capsule consumes once");
+        let source_keys = std::mem::take(&mut entry.source_keys);
+        let provenance = Arc::clone(&entry.provenance);
+        let realm = entry.realm;
+        let park = ParkPolicy {
+            principal: self.run_context.principal,
+            effect_policy: self.state.effect_policy(),
+            live_payload: self.state.live_payload_policy(),
+        };
+        let ran = self.on_eval_thread(move |engine, table, handlers, captured| {
+            Ok(settle_prepared(
+                engine,
+                program,
+                realm,
+                None,
+                SettlePlan::Observe,
+                park,
+                table,
+                handlers,
+                captured,
+            ))
+        });
+        if let Some(engine) = self.state.prepared_mut() {
+            engine.unpin(program);
+        }
+        let run = match ran {
+            Ok(Ok(run)) => run,
+            Ok(Err(error)) => {
+                self.retire_failed_turn_source_instances(scope, &source_keys);
+                return Err(error.into());
+            }
+            Err(error) => {
+                self.retire_failed_turn_source_instances(scope, &source_keys);
+                return Err(error);
+            }
+        };
+        self.complete_prepared(
+            run,
+            PreparedTurnMode::Value,
+            program,
+            scope,
+            provenance,
+            None,
+            None,
+        )
     }
 
     /// Whether this session already has a resident machine to snapshot an
@@ -6102,6 +6324,28 @@ where
     /// checked into a registry or otherwise unavailable to the token itself.
     fn settle_dropped_custody(&mut self) -> usize {
         self.state.reap_admission_leases();
+        let startup_entries = std::mem::take(&mut *self.custody_cleanup.startup_entries.lock());
+        let startup_count = startup_entries.len();
+        for entry in startup_entries {
+            if let Some(engine) = self.state.prepared_mut() {
+                engine.unpin(entry.program);
+            }
+            if self.state.scope_tree().is_live(entry.scope) {
+                let mut changed = false;
+                for key in &entry.source_keys {
+                    // A rejected capsule may outlive source retirement or an
+                    // owner transfer. Release only registrations still owned
+                    // by its original scope; never retire a replacement.
+                    changed |= self.state.retire_failed_turn_source_instances(
+                        entry.scope,
+                        std::slice::from_ref(key),
+                    );
+                }
+                if changed {
+                    self.advance_public_visibility(entry.scope);
+                }
+            }
+        }
         let leases = std::mem::take(&mut *self.custody_cleanup.binding_leases.lock());
         let mut released = Vec::new();
         for retained in leases {
@@ -6124,7 +6368,7 @@ where
                 engine.discard_handle(handle);
             }
         }
-        count + binding_count
+        count + binding_count + startup_count
     }
 
     /// Install the signal an owning lifecycle manager uses to resume cleanup
@@ -6559,6 +6803,241 @@ mod authored_publication_tests {
     }
 
     type TestSession = ResidentSession<frunk::HNil, EmptyOutput>;
+
+    fn startup_session() -> (tempfile::TempDir, TestSession) {
+        let root = tempfile::tempdir().unwrap();
+        let library =
+            SessionLib::open(SessionId(402), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(library));
+        (root, session)
+    }
+
+    fn startup_code(fail: bool) -> TurnCode<'static> {
+        use std::borrow::Cow;
+        use tidepool_repr::execution_schema::{
+            testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, FieldLayout,
+            Group, HeapBinding, HeapRhs, ResultContract, RuntimeRep, ValueId, ValueRef,
+        };
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        for (index, (name, fields)) in [("Done", 1), ("Suspended", 2), ("Unit", 0)]
+            .into_iter()
+            .enumerate()
+        {
+            let module = if index < 2 {
+                "Tidepool.Internal.Resume"
+            } else {
+                "Fixture"
+            };
+            let mut identity = testing::identity(module, name);
+            identity.namespace = "constructor".into();
+            let mut family = testing::identity(module, if index < 2 { "Settled" } else { "Unit" });
+            family.namespace = "type".into();
+            wire.constructors.push(ConstructorDecl {
+                identity,
+                family,
+                host_id: DataConId(900 + index as u64),
+                result_rep: RuntimeRep::LiftedRef,
+                tag: if index == 1 { 2 } else { 1 },
+                family_size: if index < 2 { 2 } else { 1 },
+                field_reps: vec![RuntimeRep::LiftedRef; fields],
+                strict_fields: vec![false; fields],
+                layout: CheckedLayout {
+                    fields: (0..fields)
+                        .map(|field| FieldLayout {
+                            rep: RuntimeRep::LiftedRef,
+                            offset: field as u32 * 8,
+                        })
+                        .collect(),
+                    alignment: if fields == 0 { 1 } else { 8 },
+                    payload_size: fields as u32 * 8,
+                    root_mask: vec![true; fields],
+                },
+            });
+        }
+        wire.expressions.nodes = if fail {
+            vec![ExprFrame::Enter {
+                callee: Atom::Rubbish(RuntimeRep::LiftedRef),
+                signature: tidepool_repr::execution_schema::SignatureId(0),
+            }]
+        } else {
+            vec![
+                ExprFrame::Construct {
+                    constructor: ConstructorId(0),
+                    fields: vec![Atom::Ref(ValueRef::Local(ValueId(1)))],
+                },
+                ExprFrame::Let {
+                    bindings: Group::NonRecursive(HeapBinding {
+                        id: ValueId(1),
+                        rhs: HeapRhs::Constructor {
+                            constructor: ConstructorId(2),
+                            fields: vec![],
+                        },
+                    }),
+                    body: 0,
+                },
+            ]
+        };
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Function { body, .. } = &mut top.binding.rhs else {
+            unreachable!()
+        };
+        *body = if fail { 0 } else { 1 };
+        let mut table = DataConTable::new();
+        for constructor in &wire.constructors {
+            table.insert(tidepool_repr::DataCon {
+                id: constructor.host_id,
+                name: constructor.identity.occurrence.clone(),
+                tag: constructor.tag,
+                rep_arity: constructor.field_reps.len() as u32,
+                field_bangs: vec![],
+                qualified_name: Some(format!(
+                    "{}.{}",
+                    constructor.identity.module, constructor.identity.occurrence
+                )),
+                type_name: constructor.family.occurrence.clone(),
+            });
+        }
+        TurnCode {
+            prepared: Cow::Owned(testing::prepare(wire).unwrap()),
+            table: Cow::Owned(table),
+            sites: Cow::Borrowed(&[]),
+            certification: Cow::Owned(None),
+        }
+    }
+
+    #[test]
+    fn startup_requires_compiler_seal_before_native_install() {
+        let (_root, mut session) = startup_session();
+        assert!(matches!(
+            session.prepare_startup_entry(startup_code(false)),
+            Err(ResidentError::UnsealedStartupEntry)
+        ));
+        assert!(!session.prepared_machine_ready());
+    }
+
+    #[test]
+    fn startup_prepare_defers_authored_failure_until_consumption() {
+        let (_root, mut session) = startup_session();
+        let entry = session
+            .prepare_startup_entry_installed(startup_code(true), StartupCompileIdentity::Fixture)
+            .unwrap();
+        assert!(
+            session.parked.is_empty(),
+            "preparation does not run an authored entry"
+        );
+        assert!(
+            session.run_startup_entry(entry).is_err(),
+            "the original native entry fails when consumed"
+        );
+    }
+
+    #[test]
+    fn startup_accepts_public_epoch_activation_but_rejects_native_mutation() {
+        let (_root, mut session) = startup_session();
+        let entry = session
+            .prepare_startup_entry_installed(startup_code(false), StartupCompileIdentity::Fixture)
+            .unwrap();
+        session.state.advance_public_visibility(ScopeId::ROOT);
+        session.state.invalidate_execution_admissions_after_owner_transfer(1);
+        assert!(matches!(
+            session.run_startup_entry(entry),
+            Ok(ResidentOutcome::Completed { .. })
+        ));
+        let entry = session
+            .prepare_startup_entry_installed(startup_code(false), StartupCompileIdentity::Fixture)
+            .unwrap();
+        let binding = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session.state,
+            "new",
+            401,
+        );
+        session.state.bind(binding).unwrap();
+        assert!(matches!(
+            session.run_startup_entry(entry),
+            Err(ResidentError::StaleStartupEntry)
+        ));
+    }
+
+    #[test]
+    fn startup_rejects_changed_original_source_inventory() {
+        let (_root, mut session) = startup_session();
+        let (producer, keys) = crate::session::prepared::tests::install_source_publication_fixture(
+            &mut session.state,
+            ScopeId::ROOT,
+        );
+        let entry = session
+            .prepare_startup_entry_installed(startup_code(false), StartupCompileIdentity::Fixture)
+            .unwrap();
+        assert!(session
+            .state
+            .retire_failed_turn_source_instances(ScopeId::ROOT, &keys));
+        assert!(matches!(
+            session.run_startup_entry(entry),
+            Err(ResidentError::StaleStartupEntry)
+        ));
+        session.state.require_prepared().unwrap().unpin(producer);
+    }
+
+    #[test]
+    fn startup_rejects_foreign_machine_scope_and_realm() {
+        let (_root, mut session) = startup_session();
+        let (_foreign_root, mut foreign) = startup_session();
+        let entry = session
+            .prepare_startup_entry_installed(startup_code(false), StartupCompileIdentity::Fixture)
+            .unwrap();
+        assert!(matches!(
+            foreign.run_startup_entry(entry),
+            Err(ResidentError::ForeignCustody)
+        ));
+        session.settle_dropped_custody();
+        let entry = session
+            .prepare_startup_entry_installed(startup_code(false), StartupCompileIdentity::Fixture)
+            .unwrap();
+        session
+            .set_run_context(SessionRunContext {
+                resource_scope: RealmId::fresh(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        assert!(matches!(
+            session.run_startup_entry(entry),
+            Err(ResidentError::StaleStartupEntry)
+        ));
+        session.set_run_context(SessionRunContext::ROOT).unwrap();
+        session.settle_dropped_custody();
+        let entry = session
+            .prepare_startup_entry_installed(startup_code(false), StartupCompileIdentity::Fixture)
+            .unwrap();
+        let scope = session.mint_isolated_scope();
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: scope,
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        assert!(matches!(
+            session.run_startup_entry(entry),
+            Err(ResidentError::StaleStartupEntry)
+        ));
+    }
+
+    #[test]
+    fn abandoned_startup_releases_original_install_pin() {
+        let (_root, mut session) = startup_session();
+        let entry = session
+            .prepare_startup_entry_installed(startup_code(false), StartupCompileIdentity::Fixture)
+            .unwrap();
+        let program = entry.program.unwrap();
+        drop(entry);
+        assert_eq!(session.settle_dropped_custody(), 1);
+        assert!(
+            !session.state.require_prepared().unwrap().unpin(program),
+            "the queued capsule already released its pin"
+        );
+    }
 
     #[test]
     fn invocation_cancel_scope_survives_bootstrap_and_restores_after_nested_panic() {

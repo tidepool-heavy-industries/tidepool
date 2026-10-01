@@ -111,9 +111,10 @@ pub use supervisor::{GraceOutcome, TurnSupervisor};
 
 pub use resident::{
     truncate_preview_at_line, HostBindingType, HostCarrier, HostPayload, PendingDisplayInstall,
-    PendingPreparedInstall, PendingPreparedMode, ProgramProvenance, ProgramProvenanceError,
-    ResidentContinuationEvent, ResidentDisplayBundle, ResidentError, ResidentHole, ResidentOutcome,
-    ResidentResumeError, ResidentSession, RootCustody, SessionRunContext,
+    PendingPreparedInstall, PendingPreparedMode, PreparedStartupEntry, ProgramProvenance,
+    ProgramProvenanceError, ResidentContinuationEvent, ResidentDisplayBundle, ResidentError,
+    ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
+    SessionRunContext,
 };
 
 pub use view::{hide_preamble_exports, SessionCompileView, SourceImports};

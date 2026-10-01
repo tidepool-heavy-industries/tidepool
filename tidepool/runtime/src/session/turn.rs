@@ -1839,6 +1839,8 @@ pub struct CompiledTurn {
 
 #[derive(Clone, Debug, Default)]
 pub struct TurnCertification {
+    pub(crate) compile_input_identity:
+        Option<Arc<tidepool_toolchain::artifacts::SealedCompileInputIdentity>>,
     pub groups: Arc<[PendingCertifiedGroup]>,
     pub target_owners: Vec<PendingImportOwner>,
     pub package_interfaces:
@@ -3164,6 +3166,7 @@ fn decode_cell_program_turn(
     let products = products.ok_or_else(missing)?;
     let prepared = prepared.ok_or_else(missing)?;
     let certification = TurnCertification {
+        compile_input_identity: None,
         groups: products.certified_groups.clone(),
         target_owners: products.pending_imports.clone(),
         package_interfaces: products.package_interfaces.clone(),
@@ -3598,6 +3601,8 @@ fn run_turn_with_pin(
                 .collect::<Vec<_>>(),
             settled_bindings,
         )?
+    } else if req.exact_context.is_none() {
+        ModuleCandidateOffer::select_admitted(&endpoint, &include, temp.path())?
     } else {
         select_module_candidate_offer(
             endpoint.identity().producer_bytes(),
@@ -3869,6 +3874,7 @@ fn read_compiled_turn(
         asks,
         prepared,
         certification: sealed.map(|sealed| TurnCertification {
+            compile_input_identity: sealed.compile_input_identity,
             groups: sealed.certified_groups,
             target_owners: sealed.pending_imports,
             package_interfaces: sealed.package_interfaces,
