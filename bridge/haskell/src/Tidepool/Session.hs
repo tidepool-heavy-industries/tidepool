@@ -116,7 +116,7 @@ import GHC.Unit.Module (ModuleName, mkModuleName, moduleNameString)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 
 import GHC.Utils.Fingerprint (fingerprint0)
-import GHC.Utils.Outputable (text, showSDoc)
+import GHC.Utils.Outputable (text, showSDocUnsafe)
 import GHC.Types.SrcLoc (noSrcSpan)
 import qualified GHC.Data.Maybe as MErr
 
@@ -321,7 +321,7 @@ injectSessionIface root sm hsc0 = liftIO $ do
     MErr.Failed err ->
       ioError (userError ("injectSessionIface: readIface failed for "
                           ++ sessionModuleString sm ++ " at " ++ path
-                          ++ ": " ++ showSDoc (hsc_dflags hsc0)
+                          ++ ": " ++ showSDocUnsafe
                                (readInterfaceErrorDiagnostic err)))
     MErr.Succeeded iface -> do
       details <- injectDetails hsc0 modNm iface
