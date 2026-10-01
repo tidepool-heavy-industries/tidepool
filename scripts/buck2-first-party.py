@@ -453,6 +453,7 @@ def source_inputs(package, target, features=(), test_target=False):
         "bridge/haskell/test-prepared-stg/fixtures/freer-retention.cbor": "//bridge/haskell:freer_retention_fixture",
         "bridge/haskell/src/Tidepool/ExtractRequest.hs": "//bridge/haskell:extract_request_source",
         "bridge/haskell/src/Tidepool/Timing.hs": "//bridge/haskell:timing_source",
+        "bridge/haskell/src/Tidepool/WorkerServer.hs": "//bridge/haskell:worker_server_source",
         "bridge/haskell/src/Tidepool/GhcPipeline.hs": "//bridge/haskell:ghc_pipeline_source",
         "bridge/haskell/src/Tidepool/Session.hs": "//bridge/haskell:session_source",
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v2.cbor": "//bridge/haskell:declaration_join_v2_cbor_fixture",

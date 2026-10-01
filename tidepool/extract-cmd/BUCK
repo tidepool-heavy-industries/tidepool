@@ -8,6 +8,7 @@ load("//build/rust:defs.bzl", "tidepool_rust_isolated_test")
 rust_filegroup(
     name = "tidepool_extract_cmd_sources",
     mapped_srcs = {
+        "//bridge/haskell:worker_server_source": "bridge/haskell/src/Tidepool/WorkerServer.hs",
         "Cargo.toml": "tidepool/extract-cmd/Cargo.toml",
         "src/daemon.rs": "tidepool/extract-cmd/src/daemon.rs",
         "src/diagnostics.rs": "tidepool/extract-cmd/src/diagnostics.rs",
@@ -44,6 +45,7 @@ rust_filegroup(
         "//bridge/haskell:extract_request_source": "bridge/haskell/src/Tidepool/ExtractRequest.hs",
         "//bridge/haskell:ghc_pipeline_source": "bridge/haskell/src/Tidepool/GhcPipeline.hs",
         "//bridge/haskell:timing_source": "bridge/haskell/src/Tidepool/Timing.hs",
+        "//bridge/haskell:worker_server_source": "bridge/haskell/src/Tidepool/WorkerServer.hs",
         "Cargo.toml": "tidepool/extract-cmd/Cargo.toml",
         "src/daemon.rs": "tidepool/extract-cmd/src/daemon.rs",
         "src/diagnostics.rs": "tidepool/extract-cmd/src/diagnostics.rs",
@@ -82,6 +84,7 @@ rust_filegroup(
         "//bridge/haskell:extract_request_source": "bridge/haskell/src/Tidepool/ExtractRequest.hs",
         "//bridge/haskell:ghc_pipeline_source": "bridge/haskell/src/Tidepool/GhcPipeline.hs",
         "//bridge/haskell:timing_source": "bridge/haskell/src/Tidepool/Timing.hs",
+        "//bridge/haskell:worker_server_source": "bridge/haskell/src/Tidepool/WorkerServer.hs",
         "Cargo.toml": "tidepool/extract-cmd/Cargo.toml",
         "src/daemon.rs": "tidepool/extract-cmd/src/daemon.rs",
         "src/diagnostics.rs": "tidepool/extract-cmd/src/diagnostics.rs",

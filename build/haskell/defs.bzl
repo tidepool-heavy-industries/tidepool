@@ -48,6 +48,8 @@ ENCODER_TEST_PACKAGES = [
     "text",
 ]
 
+WORKER_RESPONSE_TEST_PACKAGES = ["bytestring", "directory", "process"]
+
 def _package_flags(packages):
     flags = []
     for package in packages:
@@ -66,6 +68,9 @@ def extractor_binary_flags(*extra):
 def encoder_test_flags(*extra):
     return _component_flags(ENCODER_TEST_PACKAGES, extra)
 
+def worker_response_test_flags(*extra):
+    return _component_flags(WORKER_RESPONSE_TEST_PACKAGES, extra)
+
 def assignment_component_flags(*extra):
     return _component_flags(["text"], extra)
 
@@ -79,3 +84,6 @@ def extractor_binary_link_flags():
 
 def encoder_test_link_flags():
     return ["-dynamic"] + _package_flags(ENCODER_TEST_PACKAGES)
+
+def worker_response_test_link_flags():
+    return ["-dynamic"] + _package_flags(WORKER_RESPONSE_TEST_PACKAGES)

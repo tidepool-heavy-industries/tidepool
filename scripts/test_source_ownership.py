@@ -6,6 +6,9 @@ The named Cargo unit-test target owns these module and embedded fixture bytes.
 """
 
 TEST_ONLY_SOURCES = {
+    'tidepool-codegen': frozenset({
+        'tidepool/codegen/src/prepared_program/machine/literal_manifest_tests.rs',
+    }),
     'tidepool': frozenset({
         'bridge/facade/src/actor_host/m1_cancel_cell.hs',
         'bridge/facade/src/actor_host/m1_cancel_performance.rs',

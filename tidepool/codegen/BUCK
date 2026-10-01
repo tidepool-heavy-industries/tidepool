@@ -200,6 +200,7 @@ rust_filegroup(
         "src/prepared_program/lifetime_tests.rs": "tidepool/codegen/src/prepared_program/lifetime_tests.rs",
         "src/prepared_program/machine.rs": "tidepool/codegen/src/prepared_program/machine.rs",
         "src/prepared_program/machine/batch.rs": "tidepool/codegen/src/prepared_program/machine/batch.rs",
+        "src/prepared_program/machine/literal_manifest_tests.rs": "tidepool/codegen/src/prepared_program/machine/literal_manifest_tests.rs",
         "src/prepared_program/md5_kernel.rs": "tidepool/codegen/src/prepared_program/md5_kernel.rs",
         "src/prepared_program/no_success.rs": "tidepool/codegen/src/prepared_program/no_success.rs",
         "src/prepared_program/no_success_tests.rs": "tidepool/codegen/src/prepared_program/no_success_tests.rs",
