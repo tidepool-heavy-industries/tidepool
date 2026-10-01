@@ -24,6 +24,11 @@ existing lifecycle owners. Missing command release or retirement-purge evidence
 remains a gap until an executed owner check establishes it. Preserve imported
 plans/next/WaveContract.hs and the engine fixtures.
 
+Host cleanup deduplication after authored `Forget` and uncertain scope retry
+remains a hardening finding in the pending engine/host gate. Verify forget, retry
+and late admission together: cleanup of an undeployed worker must not suppress
+cleanup of an exact deployment admitted later.
+
 Typed assertion helpers, notebook indentation assistance and Jev pattern quality
 remain possible scoped experiments with no accepted new abstraction. Old unconsumed
 workflow frameworks and duplicated implementation plans are removed deliberately;
