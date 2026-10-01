@@ -305,6 +305,9 @@ workflowExample = do
   check "workflow reads exact accepted terminal state"
     ("ReviewAccepted" `Text.isInfixOf` accepted && candidate `Text.isInfixOf` accepted)
   script owner "review-flow-workflow-interview"
+  retention <- turn owner "inspectFull (show interviewRetention)"
+  check "workflow retains each original interview request in the actor lifetime"
+    ("[Right ()]" `Text.isInfixOf` output retention)
   script owner "review-flow-workflow-interview-result"
   pendingInterview <- turn owner "inspectFull (show retainedInterviews)"
   check "delivered interview request is not treated as an answer"
@@ -351,6 +354,9 @@ workflowExample = do
   check "workflow escalates without promoting Repair or requesting implementation"
     ("ReviewEscalated" `Text.isInfixOf` escalated && "0,0)" `Text.isInfixOf` escalated)
   script owner2 "review-flow-workflow-interview"
+  retention2 <- turn owner2 "inspectFull (show interviewRetention)"
+  check "escalated workflow retains its original reviewer interview request"
+    ("[Right ()]" `Text.isInfixOf` output retention2)
   interview2 <- activation
   check "escalated reviewer remains available for precleanup interview"
     (checkActor interview2 == checkActor reviewer2)

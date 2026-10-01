@@ -1,5 +1,10 @@
 # Automation design passes
 
+This file retains experimental observations from source revision `a60dc0fa8`.
+Its assertions and fingerprint describe that revision, including command handoff
+behavior that has since changed. For current workbench guidance, read
+[WORKBENCH.md](../WORKBENCH.md).
+
 ## Assumption watcher: domain values and executable policy
 
 The first draft required a fingerprint, a parallel text description, a projection

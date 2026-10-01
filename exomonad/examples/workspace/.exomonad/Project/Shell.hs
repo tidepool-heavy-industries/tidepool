@@ -122,7 +122,7 @@ splitSections tokens = go
 presentSelected ::
   (Member Commands effects, Member Jev effects, Member Reflect effects) =>
   Command.ObservationPresenter effects
-presentSelected Command.ObserveOnce _command _purpose focus observation retained = do
+presentSelected _command _purpose focus observation retained = do
   (_, prepared) <- Cmd.observeWith observation retained (prepare focus)
   pure prepared
 
