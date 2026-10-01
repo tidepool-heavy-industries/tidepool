@@ -1754,6 +1754,23 @@ mod tests {
             Some(pin.clone()),
             Some(initial.conversation.clone()),
         );
+        let mut changed_bootstrap = third.clone();
+        changed_bootstrap.bootstrap_identity = "different-bootstrap".into();
+        assert!(journal
+            .admit_with_startup(c, &root, &[], Some(changed_bootstrap))
+            .is_err());
+        let mut changed_manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        changed_manifest["public_surfaces"][0]["bindings"] =
+            serde_json::json!([{"name": "altered"}]);
+        std::fs::write(&manifest, serde_json::to_vec(&changed_manifest).unwrap()).unwrap();
+        let mut changed_content = third.clone();
+        changed_content.manifest =
+            Some(RootStartupManifestPin::capture_for_owner(&manifest, &old_owner).unwrap());
+        assert!(journal
+            .admit_with_startup(c, &root, &[], Some(changed_content))
+            .is_err());
+        write_manifest(&manifest, &old_owner, "revision", 0);
         journal
             .admit_with_startup(c, &root, &[], Some(third.clone()))
             .unwrap();
