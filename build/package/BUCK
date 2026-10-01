@@ -90,8 +90,9 @@ for library in "$RUNTIME_LIBRARIES"/*; do
     test -e "$library"
     cp -L "$library" "$OUTPUT/bin/__tidepool_extract_bin__shared_libs_symlink_tree/"
 done
+read -r GHC_LIBDIR < "$OUTPUT/share/exomonad/ghc-libdir.txt"
 TIDEPOOL_EXTRACT_WORKER="$OUTPUT/bin/tidepool-extract-bin" \
-  TIDEPOOL_GHC_LIBDIR="$(cat "$OUTPUT/share/exomonad/ghc-libdir.txt")" \
+  TIDEPOOL_GHC_LIBDIR="$GHC_LIBDIR" \
   "$OUTPUT/bin/tidepool-extract" --compiler-deployment-manifest \
     "$OUTPUT/share/exomonad/compiler-deployment.json"
 WEB="$PWD/$(location //web:dist)"
