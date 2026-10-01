@@ -807,13 +807,18 @@ impl ModuleCandidateOffer {
                     let effective = self.program_offer(program_request.clone());
                     let directory = root.join(format!("item-{index}"));
                     let output = effective.read_program_output(&directory)?;
-                    admissions.extend(
-                        effective
-                            .exact
-                            .as_ref()
-                            .expect("exact program offer")
-                            .validate_outputs(&directory)?,
-                    );
+                    let source_admissions = effective
+                        .exact
+                        .as_ref()
+                        .expect("exact program offer")
+                        .validate_outputs(&directory)?;
+                    context = self.admit_program_support(
+                        context,
+                        &output,
+                        &source_admissions,
+                        initial.producer_sha256,
+                    )?;
+                    admissions.extend(source_admissions);
                     let generation = match &planned.slots[index] {
                         CheckedPlannedCellSlot::Bind { value } => *value,
                         CheckedPlannedCellSlot::Expression { capture, .. } => *capture,
@@ -834,13 +839,18 @@ impl ModuleCandidateOffer {
                         let effective = self.program_offer(program_request.clone());
                         let directory = root.join(format!("display-{index}"));
                         let output = effective.read_program_output(&directory)?;
-                        admissions.extend(
-                            effective
-                                .exact
-                                .as_ref()
-                                .expect("exact program offer")
-                                .validate_outputs(&directory)?,
-                        );
+                        let source_admissions = effective
+                            .exact
+                            .as_ref()
+                            .expect("exact program offer")
+                            .validate_outputs(&directory)?;
+                        context = self.admit_program_support(
+                            context,
+                            &output,
+                            &source_admissions,
+                            initial.producer_sha256,
+                        )?;
+                        admissions.extend(source_admissions);
                         context = self.admit_program_value(
                             context,
                             values.root(),
@@ -1039,6 +1049,43 @@ impl ModuleCandidateOffer {
             products,
             source,
         })
+    }
+
+    fn admit_program_support(
+        &self,
+        context: Arc<crate::declaration_join::ExactDeclarationContext>,
+        output: &ProgramNativeOutput,
+        admissions: &[crate::declaration_context::ExactSourceAdmission],
+        producer: [u8; 32],
+    ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
+        let module = extract_module_name(&output.source).ok_or_else(|| {
+            CompileError::ExtractFailed("program support output has no target owner".into())
+        })?;
+        let support = output
+            .products
+            .recovery_products
+            .iter()
+            .filter(|product| product.owner().module != module)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut imports = BTreeMap::new();
+        for admission in admissions {
+            for (owner, requirements) in &admission.exact_imports {
+                if imports
+                    .insert(owner.clone(), requirements.clone())
+                    .is_some_and(|old| old != *requirements)
+                {
+                    return Err(CompileError::ExtractFailed(
+                        "program support original changed exact imports".into(),
+                    ));
+                }
+            }
+        }
+        Ok(Arc::new(
+            (*context)
+                .clone()
+                .extend_checked_original_products(producer, &support, &imports)?,
+        ))
     }
 
     fn admit_program_value(
