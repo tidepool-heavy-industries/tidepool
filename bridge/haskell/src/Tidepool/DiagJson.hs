@@ -1,3 +1,5 @@
+{-# LANGUAGE TypeFamilies #-}
+
 -- | Fixed-shape JSON diagnostics report emitted on stdout by
 -- @tidepool-extract-bin@ for EVERY invocation (success or failure) — see
 -- @app/Main.hs@. Hand-rolled serializer (no @aeson@ dependency): the shape is
@@ -8,6 +10,7 @@ module Tidepool.DiagJson
   , Diag(..)
   , SourceRejection(..), InputRejection(..), DependencyLoadFailure(..)
   , diagsFromSourceError
+  , dependencyDiagnostic
   , diagFromException
   , renderDiagsJson
   , renderDiag
@@ -20,7 +23,9 @@ import Data.List (intercalate, nub)
 import qualified Data.List.NonEmpty as NE
 
 import GHC (SrcSpan(..), srcSpanFile, srcSpanStartLine, srcSpanStartCol, srcSpanEndLine, srcSpanEndCol)
-import GHC.Types.Error (MsgEnvelope(..), Severity(..), diagnosticMessage, getMessages, NoDiagnosticOpts(..))
+import GHC.Types.Error
+  ( MsgEnvelope(..), Severity(..), Diagnostic(..), UnknownDiagnostic
+  , mkUnknownDiagnostic, mkSimpleDecorated, getMessages, NoDiagnosticOpts(..) )
 import GHC.Types.SourceError (SourceError, srcErrorMessages)
 import GHC.Driver.Errors.Types (GhcMessage(..), GhcMessageOpts(..), DriverMessageOpts(..))
 import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), TcRnMessageOpts(..))
@@ -30,7 +35,7 @@ import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Reader (GlobalRdrElt, gre_name)
 import GHC.Unit.Module (moduleName, moduleNameString)
 import GHC.Utils.Error (formatBulleted)
-import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, SDocContext(..), mkErrStyle)
+import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, SDocContext(..), mkErrStyle, text, ($$))
 import GHC.Data.FastString (unpackFS)
 import Tidepool.Json (jsonString)
 
@@ -94,6 +99,25 @@ envelopeToDiag env = Diag
     ctx = defaultSDocContext { sdocStyle = mkErrStyle (errMsgContext env) }
     rendered = renderWithContext ctx
                  (formatBulleted (diagnosticMessage diagOpts (errMsgDiagnostic env)))
+
+-- GHC's load barrier renders diagnostics before invoking LogAction. Add the
+-- same typed source hint before that erasure so DependencySourceFailure retains
+-- it, while leaving GHC's diagnostic options, reason, code and hints intact.
+dependencyDiagnostic :: GhcMessage -> UnknownDiagnostic GhcMessageOpts
+dependencyDiagnostic = mkUnknownDiagnostic . HintedDiagnostic
+
+newtype HintedDiagnostic = HintedDiagnostic GhcMessage
+
+instance Diagnostic HintedDiagnostic where
+  type DiagnosticOpts HintedDiagnostic = GhcMessageOpts
+  diagnosticMessage options (HintedDiagnostic message) =
+    case ambiguousOccurrenceHint message of
+      Nothing -> diagnosticMessage options message
+      Just hint -> mkSimpleDecorated
+        (formatBulleted (diagnosticMessage options message) $$ text hint)
+  diagnosticReason (HintedDiagnostic message) = diagnosticReason message
+  diagnosticHints (HintedDiagnostic message) = diagnosticHints message
+  diagnosticCode (HintedDiagnostic message) = diagnosticCode message
 
 -- | GHC's own "Ambiguous occurrence" rendering already names each candidate
 -- ("either 'A.candidateSummary' ... or 'B.candidateSummary' ...") but never

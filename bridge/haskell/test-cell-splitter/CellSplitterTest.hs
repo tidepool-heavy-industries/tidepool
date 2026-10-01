@@ -30,7 +30,7 @@ import Tidepool.Agent.Assignment.Internal (NameError (..), renderNameError)
 import Tidepool.Binders
 import Tidepool.TurnSource (spliceTemplate)
 import Tidepool.SessionArtifacts (mkBoundBinders)
-import Tidepool.DiagJson (Diag (..), diagsFromSourceError)
+import Tidepool.DiagJson (Diag (..), DiagSeverity(..), DependencyLoadFailure(..))
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
@@ -1340,11 +1340,17 @@ requestMemoLifecycle root = do
         assertContains "internal compile evicts its purpose-sensitive target" targetMiss warmLog
         writeFile dependencyPath invalidDependency
         (changed, changedLog) <- captureStderr root "memo-changed"
-          (try (compileIn incarnate GeneralCompile compiler) :: IO (Either SourceError PreparedPipelineResult))
+          (try (compileIn incarnate GeneralCompile compiler) :: IO (Either DependencyLoadFailure PreparedPipelineResult))
         case changed of
-          Left _ -> pure ()
+          Left (DependencySourceFailure diagnostics) ->
+            unless (any (\diagnostic -> dSeverity diagnostic == DiagError
+                && dFile diagnostic == Just (dependencyPath, 3, 14, 3, 21)) diagnostics) $
+              fail "changed invalid session dependency lost its exact source error"
+          Left DependencyWorkerFailure -> fail "changed dependency became a worker failure"
           Right _ -> fail "changed invalid session dependency reused a stale memo entry"
-        assertContains "source-sensitive memo invalidation" sessionMiss changedLog
+        -- Failure in GHC's load barrier precedes the prepared-front memo log.
+        assertContains "changed source was checked rather than a stale memo entry"
+          "Variable not in scope: missing :: Int" changedLog
       writeFile dependencyPath validDependency
       (restored, _) <- captureStderr root "memo-incarnate-restored"
         (runRequest $ \compiler -> compileIn incarnate GeneralCompile compiler)
@@ -1424,8 +1430,8 @@ renderNameErrorTeachesGroupPaths = do
 -- to do. 'Tidepool.DiagJson.envelopeToDiag' appends one line naming every
 -- candidate in copyable, fully-qualified form plus the two fixes: qualify
 -- the use, or hide one import. This compiles a genuine two-import ambiguity
--- through the same 'diagsFromSourceError' path every cell and extraction
--- error renders through (see @app/Main.hs@'s @reportDiags@) and checks the
+-- through the typed dependency-load diagnostic path that failed GHC loads
+-- render through (see @app/Main.hs@'s @reportDiags@) and checks the
 -- rendered message names both qualified candidates and both fixes.
 ambiguousOccurrenceHintCompilation :: IO ()
 ambiguousOccurrenceHintCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
@@ -1452,11 +1458,14 @@ ambiguousOccurrenceHintCompilation = bracket temporary removeDirectoryRecursive 
   withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
     rejected <- try (runRequest $ \compiler ->
         compiler CheckedEnvironment mempty GeneralCompile Nothing targetPath [root] Nothing)
-      :: IO (Either SourceError CheckedEnvironmentResult)
+      :: IO (Either DependencyLoadFailure CheckedEnvironmentResult)
     case rejected of
       Right _ -> fail "ambiguous candidateSummary occurrence unexpectedly compiled"
-      Left sourceError -> do
-        let rendered = intercalate "\n" (map dMessage (diagsFromSourceError sourceError))
+      Left DependencyWorkerFailure -> fail "ambiguous occurrence became a worker failure"
+      Left (DependencySourceFailure diagnostics) -> do
+        unless (any ((/= Nothing) . dFile) diagnostics) $
+          fail "ambiguous occurrence lost its source span"
+        let rendered = intercalate "\n" (map dMessage diagnostics)
         assertContains "ambiguous occurrence names the first qualified candidate"
           "Review.candidateSummary" rendered
         assertContains "ambiguous occurrence names the second qualified candidate"

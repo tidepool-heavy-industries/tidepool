@@ -106,7 +106,14 @@ main = withScratch $ \work -> do
     fail "checked binding did not retain the original declaration Name"
   unless (not (null (crCheckedBinderPins checked))) $
     fail "declaration, binding and expression cell did not check"
-  changed <- analyzeCell checkWrapper (authored ++ "\nother = 99\n") >>= either (fail . show) pure
+  late <- analyzeCell checkWrapper (authored ++ "\nother = 99\n") >>= either (fail . show) pure
+  unless (case preparePlannedDeclaration originalName wrapper late of
+      Left UnsupportedDeclarationOrder -> True; _ -> False) $
+    fail "narrow original-declaration operation admitted a declaration after execution"
+  -- Keep the source-inventory refusal inside this operation's leading group.
+  changed <- analyzeCell checkWrapper (unlines
+      [if line == "let value = Box 42" then "other = 99\n" ++ line else line
+      | line <- lines authored]) >>= either (fail . show) pure
   stale <- either (fail . show) pure (preparePlannedDeclaration originalName wrapper changed)
   refused <- certifyPlannedDeclaration stale (prHscEnv (pprPipelineResult original))
   unless (case refused of Left _ -> True; Right _ -> False) $

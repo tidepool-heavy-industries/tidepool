@@ -2,7 +2,7 @@ module Main where
 
 import Control.Exception (bracket, try)
 import Control.Monad (forM_, unless)
-import GHC.Types.SourceError (SourceError)
+import Tidepool.DiagJson (DependencyLoadFailure(..), Diag(..), DiagSeverity(..))
 import System.Directory (copyFile, createDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
@@ -21,7 +21,7 @@ main = forM_ cases $ \(name, modules, joinAccepted, consumerAccepted) ->
       let check file = try (runRequest $ \compile ->
             compile CheckedEnvironment mempty GeneralCompile Nothing
               (root </> file) [root] Nothing)
-            :: IO (Either SourceError CheckedEnvironmentResult)
+            :: IO (Either DependencyLoadFailure CheckedEnvironmentResult)
       join <- check "Join.hs"
       assertOutcome name "join" joinAccepted join
       consumer <- check "Consumer.hs"
@@ -36,7 +36,14 @@ main = forM_ cases $ \(name, modules, joinAccepted, consumerAccepted) ->
       , ("family-conflict", ["Common.hs", "Private.hs", "Public.hs", "Join.hs", "Consumer.hs"], False, False)
       ]
 
-    assertOutcome name phase expected result =
+    assertOutcome name phase expected result = do
+      case result of
+        Left (DependencySourceFailure diagnostics) ->
+          unless (any (\diag -> dSeverity diag == DiagError && dFile diag /= Nothing
+              && not (null (dMessage diag))) diagnostics) $
+            fail (name ++ " " ++ phase ++ " lost its source error evidence")
+        Left DependencyWorkerFailure -> fail (name ++ " " ++ phase ++ " failed in the worker")
+        Right _ -> pure ()
       unless (either (const False) (const True) result == expected) $
         fail (name ++ " " ++ phase ++ " unexpectedly " ++
           either (const "failed") (const "compiled") result)
