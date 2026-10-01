@@ -366,7 +366,7 @@ async fn production_startup_and_cold_successor_preserve_bound_conversation_witho
     let first_ready = ready(root, "first", &mut first).await;
     let old_actor: ActorRef = serde_json::from_value(first_ready["actor"].clone()).unwrap();
     let old = embedded_recovery::host_identity(&root.join("run"), "/root", old_actor);
-    let cookie = input(first_ready["address"].as_str().unwrap(), &old, None).await;
+    input(first_ready["address"].as_str().unwrap(), &old, None).await;
     wait_calls(root, "first").await;
     first.0.kill().unwrap();
     first.0.wait().unwrap();
@@ -375,6 +375,13 @@ async fn production_startup_and_cold_successor_preserve_bound_conversation_witho
         old_calls, "1",
         "first input must run exactly one provider turn"
     );
+    let retained_head = harness::store::Store::open(root.join("run/harness/store.sqlite"))
+        .unwrap()
+        .agent(&harness::model::AgentPath("/root".into()))
+        .unwrap()
+        .unwrap()
+        .head_request
+        .unwrap();
     let records = exomonad_actor::ActorRecoveryJournal::read_observed(
         &root.join("run/actor-lifecycle.v2.jsonl"),
     )
@@ -403,6 +410,15 @@ async fn production_startup_and_cold_successor_preserve_bound_conversation_witho
     let store = harness::store::Store::open(root.join("run/harness/store.sqlite")).unwrap();
     assert!(store.embedded_binding_matches(&new).unwrap());
     assert!(!store.embedded_binding_matches(&old).unwrap());
+    assert_eq!(
+        store
+            .agent(&harness::model::AgentPath("/root".into()))
+            .unwrap()
+            .unwrap()
+            .head_request,
+        Some(retained_head),
+        "cold binding transfer must preserve the exact conversation head"
+    );
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
         !root.join("second.calls").exists(),
@@ -415,7 +431,7 @@ async fn production_startup_and_cold_successor_preserve_bound_conversation_witho
     input(
         second_ready["address"].as_str().unwrap(),
         &new,
-        Some(&cookie),
+        None,
     )
     .await;
     wait_calls(root, "second").await;
