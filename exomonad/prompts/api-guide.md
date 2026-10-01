@@ -45,11 +45,10 @@ let parserTask = "Implement the parser." :: Text
 let consumerTask = "Update its consumer." :: Text
 let reviewTask = "Review the interface." :: Text
 Right captured <- checkpoint "feature-scaffold"
-let fromScaffold branch = withLifetime ActorOwned (withContext (fromCheckpoint captured) branch)
 (parser, consumer, review) <- unfold (batch "feature" "wave-1") $ (,,)
-  <$> child @Text (fromScaffold (coding currentCheckout (assignment [label|parser|] parserTask)))
-  <*> child @Text (fromScaffold (coding currentCheckout (assignment [label|consumer|] consumerTask)))
-  <*> child @Text (fromScaffold (researching currentCheckout (assignment [label|contract-review|] reviewTask)))
+  <$> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (coding currentCheckout (assignment [label|parser|] parserTask))))
+  <*> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (coding currentCheckout (assignment [label|consumer|] consumerTask))))
+  <*> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (researching currentCheckout (assignment [label|contract-review|] reviewTask))))
 ```
 A later wave from the same actor uses `subgroup "wave-2"`: it nests under
 your own path, so you pass only the new segment, never your full path.
