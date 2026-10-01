@@ -1656,12 +1656,16 @@ impl ForkPublication {
 struct PendingForkPublication {
     boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
     phase: PendingForkPublicationPhase,
-    releases: std::collections::VecDeque<(
-        ActorRef,
-        tidepool_repr::SessionId,
-        tidepool_codegen::scope::ScopeId,
-    )>,
+    releases: std::collections::VecDeque<PendingForkChildRelease>,
     unused_scopes: Vec<(tidepool_repr::SessionId, tidepool_codegen::scope::ScopeId)>,
+}
+
+#[derive(Clone)]
+struct PendingForkChildRelease {
+    child: ActorRef,
+    session: tidepool_repr::SessionId,
+    scope: tidepool_codegen::scope::ScopeId,
+    lexical: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
 }
 
 #[derive(Clone)]
@@ -8966,6 +8970,44 @@ where
             }
         }
     }
+    fn prepare_deferred_commit(
+        &mut self,
+        context: &ActorSessionContext,
+        publication: &ForkPublication,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
+        continuation: ResidentHole,
+        group: crate::ForkGroupId,
+    ) -> captured_commit::PreparedDeferredCommit {
+        captured_commit::prepare_deferred(
+            &self.environment,
+            context.clone(),
+            self.descriptor.clone(),
+            publication.clone(),
+            control,
+            continuation,
+            group,
+        )
+    }
+
+    fn apply_ready_deferred_commit(
+        &mut self,
+        kernel: &KernelContext,
+        ready: captured_commit::ReadyDeferredCommit,
+    ) -> captured_commit::PreparedDeferredScopes {
+        captured_commit::apply_ready_deferred(&self.environment, kernel, &self.descriptor, ready)
+    }
+
+    fn apply_finalized_deferred_commit(
+        &mut self,
+        kernel: &KernelContext,
+        finalized: captured_commit::FinalizedDeferredCommit,
+    ) -> captured_commit::CapturedCommitRelease {
+        let release =
+            captured_commit::apply_scopes(&self.environment, kernel, &self.descriptor, finalized);
+        captured_commit::retain_release(&mut self.pending_fork_publications, &release);
+        release
+    }
+
     fn prepare_captured_commit(
         &mut self,
         context: &ActorSessionContext,
@@ -9590,8 +9632,11 @@ where
                 children
                     .into_iter()
                     .zip(scopes)
-                    .map(|(child, scope)| {
-                        (child, actors[&child].descriptor.placement().session, scope)
+                    .map(|(child, scope)| PendingForkChildRelease {
+                        child,
+                        session: actors[&child].descriptor.placement().session,
+                        scope,
+                        lexical: None,
                     })
                     .collect()
             };
