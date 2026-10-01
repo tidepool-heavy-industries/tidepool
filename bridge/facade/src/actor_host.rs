@@ -3849,7 +3849,7 @@ pub(crate) fn spec_effect_preflight(
 ) -> Vec<String> {
     let roots = workspace.captured_source_roots().to_vec();
     let resolved = exomonad_actor::agent_spec::resolve(
-        &roots,
+        roots,
         workspace.spec.as_deref(),
         workspace.tools.as_deref(),
     );
@@ -3863,7 +3863,7 @@ pub(crate) fn spec_effect_preflight(
         .file
         .as_deref()
         .and_then(|file| std::fs::read_to_string(file).ok())
-        .or_else(|| find_module_source(&roots, entry));
+        .or_else(|| find_module_source(&resolved.searched, entry));
     let Some(source) = source else {
         return Vec::new();
     };
