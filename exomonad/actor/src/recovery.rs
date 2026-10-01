@@ -922,7 +922,7 @@ fn validate_startup(
                 "startup successor changed binding or source",
             ));
         }
-        for owner in startup.manifest_predecessor {
+        if let Some(owner) = startup.manifest_predecessor {
             if records
                 .get(&owner)
                 .and_then(|record| owner_for_admission(&record.admission))

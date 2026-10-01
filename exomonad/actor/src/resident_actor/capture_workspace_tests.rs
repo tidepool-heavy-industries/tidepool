@@ -349,3 +349,231 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
         Some(0)
     );
 }
+
+#[tokio::test]
+async fn two_captured_readers_reply_before_parent_failure_and_survive_final_checkpoint_release() {
+    eval_harness::require_extract();
+    let declarations = [
+        tidepool_mcp::agent_tools_decl(),
+        tidepool_mcp::actor_decl(),
+        tidepool_mcp::actor_kernel_decl(),
+        tidepool_mcp::actor_local_decl(),
+        tidepool_mcp::forks_decl(),
+        tidepool_mcp::fs_read_decl(),
+        tidepool_mcp::worktree_decl(),
+        tidepool_mcp::sleep_decl(),
+    ];
+    let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("effect module");
+    let mut include = effects.include_paths().to_vec();
+    include.push(eval_harness::prelude_path());
+    let preamble = insert_preamble_imports(
+        &tidepool_mcp::build_preamble(&declarations, false),
+        "Tidepool.Agent.Contract",
+    );
+    let preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Effects.Core as Core");
+    let preamble = format!("{preamble}\ndata CaptureTools mode = CaptureTools {{ ping :: mode :- Call () Int }} deriving Generic\n");
+    let root = tempfile::tempdir().expect("session root");
+    let session = tidepool_repr::SessionId(std::process::id() as u64 * 10_000 + 185);
+    let lib = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
+        .expect("declaration plane")
+        .with_validation_include(include.clone());
+    let machine = ResidentSession::unbootstrapped(
+        frunk::HNil,
+        tidepool_mcp::CapturedOutput::new(),
+        tidepool_runtime::DEFAULT_NURSERY_SIZE,
+        Some(lib),
+    );
+    let (entered, _entered_rx) = mpsc::unbounded_channel();
+    let workspaces = Arc::new(PausedWorkspace {
+        entered,
+        release: tokio::sync::Semaphore::new(2),
+    });
+    let (forest, mut deployments) = ResidentForest::new(
+        ActorWorkbenchSource::new(preamble, include),
+        session,
+        machine,
+        Some(workspaces.clone()),
+        crate::Incarnation::FIRST,
+    );
+    let role = crate::EffectiveRole::root().with_effect_keys(vec![
+        crate::ActorEffectKey::Forks,
+        crate::ActorEffectKey::Sleep,
+    ]);
+    let parent = forest
+        .new_workbench("private-capture-parent".into(), role.clone())
+        .await
+        .expect("parent");
+    assert_committed(&run_cell(parent.clone(), "let capturedValue = 41 :: Int".into()).await);
+    let context = forest
+        .directory
+        .session_context(parent.identity())
+        .expect("parent context");
+    let (scope, retained) = forest
+        .environment
+        .runner
+        .capture_retained_context_scope(context)
+        .await
+        .expect("real native private capture");
+    let token = forest
+        .environment
+        .fork_groups
+        .capture_checkpoint_with_retained_scope(
+            "completed-private".into(),
+            parent.identity(),
+            role,
+            None,
+            None,
+            crate::CheckpointSourceLayer::default(),
+            session,
+            scope,
+            WorkbenchForkBoundary::external(
+                "native-capture".into(),
+                "capture-request".into(),
+                "completed-capture".into(),
+            ),
+            Some(HostedCheckpointAttachment::captured(Arc::new(()))),
+            retained,
+            crate::ActorPersistencePolicy::Ephemeral,
+        );
+    forest
+        .environment
+        .fork_groups
+        .settle_checkpoint(&token, session, true)
+        .expect("private capture completed");
+    let source = include_str!("captured_readers_parent.hs").replace("CHECKPOINT_TOKEN", &token);
+    let endpoint = crate::ResidentInteractivePolicy::local(parent.clone());
+    let call = tokio::spawn(async move {
+        endpoint
+            .dispatch_boxed(ToolInvocation {
+                context: None,
+                name: crate::HASKELL_TOOL.into(),
+                arguments: ToolArguments::Raw(source),
+            })
+            .await
+    });
+    let mut children = Vec::new();
+    while children.len() < 2 {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(240), deployments.recv())
+            .await
+            .expect("real captured child starts before parent returns")
+            .expect("deployment stream");
+        if let LocalResidentDeployment::PolicyInstalled(installation) = event {
+            children.push(installation);
+        }
+        assert!(
+            !call.is_finished(),
+            "parent settled before captured publication/readers"
+        );
+    }
+    assert_ne!(children[0].actor.identity(), children[1].actor.identity());
+    let group = children[0].fork_group.expect("captured group identity");
+    assert_eq!(children[1].fork_group, Some(group));
+    let gate = forest
+        .environment
+        .fork_groups
+        .gate(group, children[0].actor.identity())
+        .expect("original group gate");
+    tokio::time::timeout(std::time::Duration::from_secs(240), gate.wait_committed())
+        .await
+        .expect("captured commit completes while parent remains parked")
+        .expect("actual publication");
+    assert_eq!(
+        gate.publication().expect("published group"),
+        crate::ForkGroupPublication::Captured
+    );
+    for child in &children {
+        assert_captured_reader(child).await;
+        assert!(
+            !call.is_finished(),
+            "both child replies must precede parent completion"
+        );
+    }
+    parent
+        .shutdown(ActorTerminal {
+            kind: ActorExitKind::Failed,
+            summary: "parent failed after independent capture publication".into(),
+        })
+        .await
+        .expect("real parent failure");
+    assert_eq!(parent.terminal().wait().await.kind, ActorExitKind::Failed);
+    let parent_reply = tokio::time::timeout(std::time::Duration::from_secs(30), call)
+        .await
+        .expect("failed parent call settles")
+        .expect("caller task");
+    if let Ok(reply) = parent_reply {
+        assert_ne!(reply["status"], "committed", "{reply:?}");
+    }
+    forest
+        .environment
+        .fork_groups
+        .checkpoint(&token, session)
+        .expect("completed private capture admits readers after issuer failure");
+    for child in &children {
+        assert_captured_reader(child).await;
+    }
+    let retired = forest
+        .environment
+        .fork_groups
+        .release_checkpoint(&token, session)
+        .expect("private capture release")
+        .expect("last checkpoint token retires original root");
+    assert_eq!(retired, scope);
+    forest
+        .environment
+        .runner
+        .retire_checkpoint_scopes(session, vec![scope])
+        .await
+        .expect("capture original root cleanup");
+    forest
+        .environment
+        .fork_groups
+        .confirm_checkpoint_release(&token, session, scope)
+        .expect("original root release confirmed");
+    for child in &children {
+        assert_captured_reader(child).await;
+    }
+    let first = children.remove(0);
+    let result = first
+        .actor
+        .shutdown_with_cleanup(ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "first captured reader done".into(),
+        })
+        .await
+        .expect("first reader shutdown");
+    assert!(result.cleanup.is_confirmed(), "{:?}", result.cleanup);
+    assert_captured_reader(&children[0]).await;
+    let final_reader = children.remove(0);
+    let result = final_reader
+        .actor
+        .shutdown_with_cleanup(ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "final captured reader done".into(),
+        })
+        .await
+        .expect("final reader shutdown");
+    assert!(result.cleanup.is_confirmed(), "{:?}", result.cleanup);
+    forest.shutdown().await;
+    assert_eq!(
+        forest
+            .measurement_snapshot()
+            .expect("shared native session")
+            .parked,
+        Some(0)
+    );
+}
+
+async fn assert_captured_reader(child: &LocalResidentInstallation) {
+    let reply = tokio::time::timeout(
+        std::time::Duration::from_secs(240),
+        child.policy.dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "ping".into(),
+            arguments: ToolArguments::Structured(serde_json::json!({})),
+        }),
+    )
+    .await
+    .expect("captured reader reply bounded")
+    .expect("real captured native tool reply");
+    assert_eq!(reply, serde_json::json!(42), "{reply:?}");
+}
