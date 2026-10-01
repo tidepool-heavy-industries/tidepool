@@ -10,6 +10,18 @@ preparation/recovery (6), and command shutdown (2). The offline host refuses
 notification delivery; those checks prove attempted sends and retained refusals.
 Live notice delivery and Jev judgment utility remain wave observations.
 
+## Follow-up status — finite command and browser workflows
+
+The later finite-workflow pass keeps `Project.ParallelInvestigate` as a bounded
+caller-owned probe API: `runProbeBatch` awaits exact jobs and returns terminal
+observations. `Project.BackgroundInvestigator` and its follower/resume recipes
+were removed; failure investigation now continues inline through the existing
+`followFailure` flow. Browser orchestration now uses `runBrowserScenarios` to
+return preparation and readiness receipts with each selected scenario's result
+or refusal, without a watcher actor. `AssumptionWatch` and `SlowCommandWatch`
+remain because they subscribe to ongoing events or slow jobs. The findings below
+record the earlier review and its directions; use the current APIs above.
+
 The harness seed now delegates evidence parsing and acceptance to
 `Project.TestEvidence`, removing its duplicate implementation. Ten validated
 operations are discoverable through the harness menu; first exposure is recorded
@@ -21,7 +33,7 @@ The review-loop stall was traced to an old test-driver binary not pumping fork
 readiness events; a matched run subsequently proved one full repair lifecycle,
 with additional failure-path checks still pending.
 
-## Findings and required changes
+## Findings recorded during that review
 
 | Surface | Finding | Direction |
 | --- | --- | --- |

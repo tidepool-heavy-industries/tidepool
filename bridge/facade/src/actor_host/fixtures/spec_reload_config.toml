@@ -31,7 +31,6 @@ modules = [
   "Exomonad.Contrib.CheckPlan",
   "Project.WorkflowExamples",
   "Exomonad.Contrib.ReviewFlow",
-  "Project.BackgroundInvestigator",
   "Project.BaselineIncorporation",
   "Project.WorkflowReminders",
   "Project.WorkflowReminderExamples",

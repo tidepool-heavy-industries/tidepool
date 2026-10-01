@@ -42,7 +42,7 @@ modules = [
   "Project.Service", "Project.Repository", "Exomonad.Contrib.CheckResults",
   "Exomonad.Contrib.PrepareContinue", "Exomonad.Contrib.RetainedEvidence", "Project.AssumptionWatch",
   "Project.ParallelInvestigate", "Project.SlowCommandWatch", "Project.Interview",
-  "Exomonad.Contrib.CheckPlan", "Project.TestEvidence", "Exomonad.Contrib.ReviewFlow", "Project.BackgroundInvestigator",
+  "Exomonad.Contrib.CheckPlan", "Project.TestEvidence", "Exomonad.Contrib.ReviewFlow",
   "Project.BaselineIncorporation", "Project.WorkflowReminders", "Project.WorkflowReminderExamples",
 ]
 spec = "AgentSpec.agentSpec"

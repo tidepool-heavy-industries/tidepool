@@ -20,7 +20,7 @@ modules = [
   "Project.Service", "Project.Repository", "Exomonad.Contrib.CheckResults", "Exomonad.Contrib.CheckPlan", "Project.TestEvidence",
   "Exomonad.Contrib.PrepareContinue", "Exomonad.Contrib.RetainedEvidence",
   "Project.AssumptionWatch", "Project.ParallelInvestigate", "Project.SlowCommandWatch",
-  "Project.BackgroundInvestigator", "Project.BackgroundCommandExample",
+  "Project.BackgroundCommandExample",
   "Project.NotificationTrial", "Project.WorkflowReminders", "Project.WorkflowReminderExamples",
   "Project.Interview", "Project.WorkflowExamples", "Exomonad.Contrib.ReviewFlow",
 ]
@@ -43,8 +43,6 @@ checks = [
   "Project.AutomationChecks.integration",
   "Project.CheckResultsChecks.completionRouting",
   "Project.CheckResultsChecks.retainedRecovery",
-  "Project.BackgroundInvestigatorChecks.terminalFailure",
-  "Project.BackgroundInvestigatorChecks.pendingProbe",
   "Project.RoutingChecks.routing",
   "Project.RoutingChecks.reviewedCheckpoints",
   "Project.RoutingChecks.candidateHistory",
