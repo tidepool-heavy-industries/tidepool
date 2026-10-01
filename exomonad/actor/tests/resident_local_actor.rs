@@ -648,12 +648,11 @@ async fn resident_await_watch_case(case: WatchCase) {
         })
         .await
         .expect("captured owned sleep parks after compiler preparation");
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(100), &mut cancelled_call)
-                .await
-                .is_err(),
-            "captured sleep keeps the original reply pending"
-        );
+        if let Ok(reply) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut cancelled_call).await
+        {
+            panic!("captured sleep settled before cancellation: {reply:?}");
+        }
     } else {
         let cancellation_start_bound = 180;
         tokio::time::timeout(std::time::Duration::from_secs(cancellation_start_bound), async {
