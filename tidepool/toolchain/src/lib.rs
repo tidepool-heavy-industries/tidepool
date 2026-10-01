@@ -56,6 +56,8 @@ pub enum CompileError {
     /// variant therefore denotes an extractor/runtime contract mismatch.
     #[error("extractor contract failure: {0}")]
     ExtractFailed(String),
+    #[error("artifact inventory: {0}")]
+    ArtifactInventory(#[from] crate::artifact_inventory::ArtifactInventoryError),
     /// Compiler request inputs were refused before GHC source checking.
     #[error("compiler input rejected ({} diagnostic(s))", .0.len())]
     InputRejected(Vec<crate::diag::ExtractDiag>),

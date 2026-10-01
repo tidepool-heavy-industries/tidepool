@@ -42,6 +42,51 @@ pub enum ArtifactDependency {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ArtifactInventoryFailure {
+    #[error("artifact {artifact:?} has differing metadata")]
+    MetadataConflict { artifact: ArtifactId },
+    #[error("original owner {owner:?} has differing artifacts")]
+    OwnerConflict { owner: ExactModuleIdentity },
+    #[error("{dependent:?} requires unavailable {required:?} through {dependency:?}")]
+    MissingDependency {
+        artifact: ArtifactId,
+        dependent: ExactModuleIdentity,
+        required: ExactModuleIdentity,
+        dependency: ArtifactDependency,
+    },
+}
+
+#[derive(Debug)]
+pub struct ArtifactInventoryError {
+    pub failure: ArtifactInventoryFailure,
+    pub diagnostic_artifacts: Option<std::path::PathBuf>,
+}
+
+impl std::fmt::Display for ArtifactInventoryError {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.failure.fmt(output)?;
+        if let Some(path) = &self.diagnostic_artifacts {
+            write!(
+                output,
+                "; compiler artifacts retained at {}",
+                path.display()
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ArtifactInventoryError {}
+
+fn admission_failure(failure: ArtifactInventoryFailure) -> CompileError {
+    ArtifactInventoryError {
+        failure,
+        diagnostic_artifacts: None,
+    }
+    .into()
+}
+
 /// An exact live value required by the selected original native group closure.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct NativeBindingRequirement {
@@ -359,7 +404,9 @@ impl ArtifactInventory {
             roots.insert(id);
             if let Some(previous) = state.payloads.get(&id).or_else(|| additions.get(&id)) {
                 if previous != &entry {
-                    return Err(failure("one artifact has differing metadata"));
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::MetadataConflict { artifact: id },
+                    ));
                 }
             } else {
                 additions.insert(id, entry);
@@ -383,21 +430,42 @@ impl ArtifactInventory {
                 .admission_owner_lookups
                 .fetch_add(2, Ordering::Relaxed);
             if state.owners.contains_key(&entry.descriptor.owner) {
-                return Err(failure("one original owner has differing artifacts"));
+                return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
+                    owner: entry.descriptor.owner.clone(),
+                }));
             }
             if state.modules.contains_key(&entry.descriptor.owner.module) {
                 return Err(failure("same module occurs under multiple units"));
             }
-            for owner in entry
+            for (owner, dependency) in entry
                 .requirements
                 .iter()
-                .chain(entry.native_requirements.iter().map(|(owner, _)| owner))
+                .map(|owner| (owner, ArtifactDependency::Interface))
+                .chain(
+                    entry
+                        .native_requirements
+                        .iter()
+                        .map(|(owner, dependency)| (owner, dependency.clone())),
+                )
             {
                 state
                     .admission_owner_lookups
                     .fetch_add(1, Ordering::Relaxed);
                 if !state.owners.contains_key(owner) && !owners.contains_key(owner) {
-                    return Err(failure("incomplete interface requirements"));
+                    tracing::error!(
+                        dependent = ?entry.descriptor.owner,
+                        required = ?owner,
+                        artifact = ?entry.descriptor.id,
+                        "incomplete interface requirements"
+                    );
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::MissingDependency {
+                            artifact: entry.descriptor.id,
+                            dependent: entry.descriptor.owner.clone(),
+                            required: owner.clone(),
+                            dependency,
+                        },
+                    ));
                 }
             }
         }

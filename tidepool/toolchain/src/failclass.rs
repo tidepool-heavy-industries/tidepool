@@ -131,7 +131,7 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
     match err {
         // Real GHC rejections carry `Diagnostics`. This arm is reserved for a
         // malformed extractor artifact or impossible internal request shape.
-        CompileError::ExtractFailed(_) => {
+        CompileError::ExtractFailed(_) | CompileError::ArtifactInventory(_) => {
             FailureEnvelope::new(FailureClass::VersionSkew, Phase::Compile, err.to_string())
         }
         // The extractor ran, exited non-zero, and its stdout parsed as a valid

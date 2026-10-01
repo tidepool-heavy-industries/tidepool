@@ -1231,15 +1231,10 @@ impl ModuleCandidateOffer {
             )
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?,
         );
-        let mut lexical = context.lexical_graph().to_vec();
-        lexical.push(crate::declaration_join::ExactLexicalNode {
-            owner: identity,
-            imports: requirements,
-        });
         Ok(Arc::new(
             (*context)
                 .clone()
-                .extend_with_value_interfaces(&[interface], lexical)?,
+                .extend_program_value_interface(interface)?,
         ))
     }
 
@@ -2383,6 +2378,10 @@ fn retain_compiler_failure_inner(
             }
             tracing::warn!(path = %retained.display(), "retained failed compiler artifacts");
             match error {
+                CompileError::ArtifactInventory(mut error) => {
+                    error.diagnostic_artifacts = Some(retained);
+                    CompileError::ArtifactInventory(error)
+                }
                 CompileError::ExtractFailed(message) => CompileError::ExtractFailed(format!(
                     "{message}; compiler artifacts retained at {}",
                     retained.display()
@@ -2438,6 +2437,9 @@ fn retain_failed_compiler_artifacts(
             tracing::warn!(%failure, "could not retain exact compilation receipts");
         }
     }
+    if let Err(failure) = retain_program_compile_diagnostics(directory, retained.path()) {
+        tracing::warn!(%failure, "could not retain complete program diagnostics");
+    }
     if let Ok(bytes) = std::fs::read(directory.join("dependencies.json")) {
         if let Ok(evidence) = serde_json::from_slice::<cache::DependencyEvidence>(&bytes) {
             let sources = retained.path().join("consumed-sources");
@@ -2456,6 +2458,90 @@ fn retain_failed_compiler_artifacts(
         }
     }
     Ok(retained.keep())
+}
+
+fn retain_program_compile_diagnostics(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fn entries(path: &Path) -> std::io::Result<Vec<std::fs::DirEntry>> {
+        let mut entries = std::fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
+        if entries.len() > 4096 {
+            return Err(std::io::Error::other(
+                "excessive program diagnostic entries",
+            ));
+        }
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        Ok(entries)
+    }
+    fn copy_files(source: &Path, destination: &Path, remaining: &mut u64) -> std::io::Result<()> {
+        std::fs::create_dir_all(destination)?;
+        for entry in entries(source)? {
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let length = entry.metadata()?.len();
+            if length > *remaining {
+                return Err(std::io::Error::other(
+                    "program diagnostics exceed byte bound",
+                ));
+            }
+            *remaining -= length;
+            std::fs::copy(entry.path(), destination.join(entry.file_name()))?;
+        }
+        Ok(())
+    }
+    fn copy_receipts(
+        source: &Path,
+        destination: &Path,
+        remaining: &mut u64,
+    ) -> std::io::Result<()> {
+        let receipts = source.join(".exact-compilations");
+        if !std::fs::symlink_metadata(&receipts).is_ok_and(|metadata| metadata.file_type().is_dir())
+        {
+            return Ok(());
+        }
+        for entry in entries(&receipts)? {
+            if entry.file_type()?.is_dir() {
+                copy_files(
+                    &entry.path(),
+                    &destination
+                        .join(".exact-compilations")
+                        .join(entry.file_name()),
+                    remaining,
+                )?;
+            }
+        }
+        Ok(())
+    }
+    let mut remaining = 128 * 1024 * 1024;
+    let mut admitted = 0;
+    for entry in entries(source)? {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let selected = ["segment-", "item-", "display-"]
+            .iter()
+            .filter_map(|prefix| name.strip_prefix(prefix))
+            .any(|ordinal| {
+                !ordinal.is_empty() && ordinal.bytes().all(|byte| byte.is_ascii_digit())
+            });
+        if !selected || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        admitted += 1;
+        if admitted > 4096 {
+            return Err(std::io::Error::other(
+                "excessive program diagnostic outputs",
+            ));
+        }
+        let output = destination.join(name);
+        copy_files(&entry.path(), &output, &mut remaining)?;
+        copy_receipts(&entry.path(), &output, &mut remaining)?;
+        let planned = entry.path().join("planned-declaration");
+        if std::fs::symlink_metadata(&planned).is_ok_and(|metadata| metadata.file_type().is_dir()) {
+            let output = output.join("planned-declaration");
+            copy_files(&planned, &output, &mut remaining)?;
+            copy_receipts(&planned, &output, &mut remaining)?;
+        }
+    }
+    Ok(())
 }
 
 fn retain_exact_compile_receipts(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -3272,6 +3358,56 @@ mod module_product_tests {
     use super::*;
     use crate::certified_products::ProductOrigin;
     use std::io::Write;
+
+    #[test]
+    fn program_failure_diagnostics_retain_nested_receipts_without_following_links() {
+        use std::os::unix::fs::symlink;
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let planned = source.path().join("segment-0/planned-declaration");
+        let receipt = planned.join(".exact-compilations/checked");
+        std::fs::create_dir_all(&receipt).unwrap();
+        std::fs::write(planned.join("dependencies.json"), b"typed source evidence").unwrap();
+        std::fs::write(receipt.join("receipt.cbor"), b"exact receipt").unwrap();
+        std::fs::write(receipt.join("source.hs"), b"module Original where").unwrap();
+        let item = source.path().join("item-0");
+        std::fs::create_dir(&item).unwrap();
+        std::fs::write(item.join("value.hi.requirements"), b"private type owners").unwrap();
+        symlink(
+            planned.join("dependencies.json"),
+            item.join("foreign-input"),
+        )
+        .unwrap();
+        symlink(&planned, source.path().join("segment-1")).unwrap();
+        std::fs::create_dir(source.path().join("unrelated")).unwrap();
+        std::fs::write(source.path().join("unrelated/secret"), b"unrelated").unwrap();
+        retain_program_compile_diagnostics(source.path(), destination.path()).unwrap();
+        assert_eq!(
+            std::fs::read(
+                destination
+                    .path()
+                    .join("segment-0/planned-declaration/dependencies.json")
+            )
+            .unwrap(),
+            b"typed source evidence"
+        );
+        assert_eq!(
+            std::fs::read(
+                destination
+                    .path()
+                    .join("segment-0/planned-declaration/.exact-compilations/checked/receipt.cbor")
+            )
+            .unwrap(),
+            b"exact receipt"
+        );
+        assert!(destination
+            .path()
+            .join("item-0/value.hi.requirements")
+            .is_file());
+        assert!(!destination.path().join("item-0/foreign-input").exists());
+        assert!(!destination.path().join("segment-1").exists());
+        assert!(!destination.path().join("unrelated").exists());
+    }
 
     #[test]
     fn ready_zero_group_module_requires_a_receipt_even_without_products() {

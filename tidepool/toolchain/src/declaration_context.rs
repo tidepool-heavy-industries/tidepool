@@ -1104,6 +1104,30 @@ impl ExactDeclarationContext {
         Ok(self)
     }
 
+    pub(crate) fn extend_program_value_interface(
+        self,
+        value: Arc<CertifiedValueInterface>,
+    ) -> Result<Self, CompileError> {
+        let selected = self
+            .lexical
+            .iter()
+            .map(|node| node.owner.clone())
+            .collect::<BTreeSet<_>>();
+        let mut lexical = self.lexical.clone();
+        lexical.push(ExactLexicalNode {
+            owner: identity(value.interface().unit(), value.interface().module()),
+            // Type-owner evidence retains hydration dependencies without
+            // granting their names or instances public lexical selection.
+            imports: value
+                .requirements()
+                .iter()
+                .filter(|owner| selected.contains(*owner))
+                .cloned()
+                .collect(),
+        });
+        self.extend_with_value_interfaces(&[value], lexical)
+    }
+
     /// Logical identity is independent of materialization paths and of the
     /// optional source bytes retained only by a fresh authored certificate.
     pub fn semantic_sha256(&self) -> [u8; 32] {
@@ -2079,6 +2103,98 @@ mod tests {
             .modules
             .push(admission.evidence.modules[0].clone());
         assert!(admission.home_imports().is_err());
+    }
+
+    #[test]
+    fn program_values_retain_private_type_owners_without_selecting_their_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let baseline = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_checked_original_products(
+                    [2; 32],
+                    &[support_product("Public")],
+                    &BTreeMap::new(),
+                )
+                .unwrap(),
+        );
+        let mut baseline = (*baseline).clone();
+        baseline.lexical.push(ExactLexicalNode {
+            owner: identity("fixture", "Public"),
+            imports: vec![],
+        });
+        let baseline = Arc::new(baseline);
+        let mut request = program_request(directory.path(), baseline.clone());
+        let context = request
+            .admit_program_support(
+                baseline,
+                &[
+                    support_product("InstanceOwner"),
+                    support_product("InstanceRelay"),
+                ],
+                &[support_admission(directory.path())],
+            )
+            .unwrap();
+        let value = |module: &str, requirements| {
+            let evidence = support_product(module);
+            Arc::new(
+                CertifiedValueInterface::from_checked_compilation(
+                    [2; 32],
+                    identity("fixture", module),
+                    evidence.interface_bytes().to_vec(),
+                    evidence.package_imports_bytes().to_vec(),
+                    requirements,
+                )
+                .unwrap(),
+            )
+        };
+        let first = value(
+            "ValFirst",
+            vec![
+                identity("fixture", "Public"),
+                identity("fixture", "InstanceRelay"),
+            ],
+        );
+        let context = (*context)
+            .clone()
+            .extend_program_value_interface(first)
+            .unwrap();
+        assert_eq!(
+            context.lexical_graph()[1].imports,
+            vec![identity("fixture", "Public")]
+        );
+        let entry = context
+            .artifact_view()
+            .entries_for_owners(std::iter::once(identity("fixture", "ValFirst")));
+        assert_eq!(
+            entry[&identity("fixture", "ValFirst")].requirements,
+            vec![
+                identity("fixture", "InstanceRelay"),
+                identity("fixture", "Public")
+            ]
+        );
+        let second = value(
+            "ValSecond",
+            vec![
+                identity("fixture", "ValFirst"),
+                identity("fixture", "InstanceOwner"),
+            ],
+        );
+        let context = context.extend_program_value_interface(second).unwrap();
+        assert_eq!(
+            context.lexical_graph()[2].imports,
+            vec![identity("fixture", "ValFirst")]
+        );
+        assert!(!context
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner.module.starts_with("Instance")));
+        let forged = value("ValForged", vec![identity("fixture", "Absent")]);
+        let error = context.extend_program_value_interface(forged).unwrap_err();
+        assert!(matches!(error, CompileError::ArtifactInventory(error)
+            if matches!(&error.failure, crate::artifact_inventory::ArtifactInventoryFailure::MissingDependency {
+                required, dependency: crate::artifact_inventory::ArtifactDependency::Interface, ..
+            } if required == &identity("fixture", "Absent"))));
     }
 
     #[test]
