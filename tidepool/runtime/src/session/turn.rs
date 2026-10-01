@@ -7327,11 +7327,51 @@ mod tests {
         }
     }
 
+    /// The compiled-cell inference fixtures are acceptance gates. Require the
+    /// matched frontend and worker explicitly so an unconfigured run cannot
+    /// report their early return as a passing test.
+    fn required_cell_test_paths(
+        frontend: Option<std::ffi::OsString>,
+        worker: Option<std::ffi::OsString>,
+    ) -> (std::ffi::OsString, std::ffi::OsString) {
+        let frontend = frontend
+            .expect("TIDEPOOL_CELL_TEST_EXTRACT is required for compiled-cell fixture tests");
+        let worker = worker
+            .expect("TIDEPOOL_EXTRACT_WORKER is required for compiled-cell fixture tests");
+        use tidepool_toolchain::toolchain::{probe_extract_binary, ExtractBinaryRole};
+
+        let frontend_role = probe_extract_binary(std::path::Path::new(&frontend));
+        assert_eq!(
+            frontend_role,
+            ExtractBinaryRole::Frontend,
+            "TIDEPOOL_CELL_TEST_EXTRACT must name the Tidepool frontend"
+        );
+        let worker_role = probe_extract_binary(std::path::Path::new(&worker));
+        assert_eq!(
+            worker_role,
+            ExtractBinaryRole::Worker,
+            "TIDEPOOL_EXTRACT_WORKER must name the matched Haskell compiler worker"
+        );
+        (frontend, worker)
+    }
+
+    fn required_cell_test_worker() -> std::ffi::OsString {
+        required_cell_test_paths(
+            std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT"),
+            std::env::var_os("TIDEPOOL_EXTRACT_WORKER"),
+        )
+        .0
+    }
+
+    #[test]
+    #[should_panic(expected = "TIDEPOOL_EXTRACT_WORKER is required")]
+    fn compiled_cell_fixture_rejects_a_missing_worker() {
+        let _ = required_cell_test_paths(Some("frontend".into()), None);
+    }
+
     #[test]
     fn whole_cell_check_harvests_downstream_fixed_local_type() {
-        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
-            return;
-        };
+        let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();
@@ -7450,9 +7490,7 @@ mod tests {
 
     #[test]
     fn whole_cell_check_harvests_same_cell_nominal_type() {
-        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
-            return;
-        };
+        let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();
@@ -7569,9 +7607,7 @@ mod tests {
 
     #[test]
     fn checked_handler_pin_carries_qualified_type_imports() {
-        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
-            return;
-        };
+        let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();
@@ -7755,9 +7791,7 @@ mod tests {
 
     #[test]
     fn whole_cell_check_reports_missing_record_fields_without_rejecting_declaration() {
-        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
-            return;
-        };
+        let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();
@@ -7845,9 +7879,7 @@ mod tests {
     /// failure participates in either decision.
     #[test]
     fn checked_expression_plans_cover_all_execution_and_presentation_quadrants() {
-        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
-            return;
-        };
+        let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();
@@ -7950,9 +7982,7 @@ mod tests {
     /// workbench effect row during the one whole-cell typecheck.
     #[test]
     fn a_final_pure_cell_is_accepted_as_effectful() {
-        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
-            return;
-        };
+        let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();
@@ -8006,9 +8036,7 @@ mod tests {
     /// retry involved.
     #[test]
     fn a_genuinely_pure_final_expression_still_takes_the_pure_path() {
-        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
-            return;
-        };
+        let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();
