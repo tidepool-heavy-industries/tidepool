@@ -122,6 +122,8 @@ main = do
         result <- try @CellOutcome action
         require label (case result of Left outcome -> outcome == expected; Right _ -> False)
   cellResult "pure assertion executes in actor scope" CellAccepted (checked "scoped true" "scopedValue == 42")
+  cellResult "case-expression assertion preserves layout" CellAccepted
+    (checked "case predicate" "case Just scopedValue of\n  Just value -> value == 42\n  Nothing -> False")
   cellResult "false actor cell fails" CellFailed (checked "false cell" "scopedValue == 0")
   cellResult "non-Bool actor cell is rejected" CellRejected (checked "wrong type" "scopedValue")
   cellResult "typed await executes in actor scope" CellAccepted (awaited "typed await" "pure (scopedValue == 42)")
@@ -134,5 +136,5 @@ main = do
       Check.assertCell actor "failed turn" "True"
       pure (42 :: Int)
   require "failed turn records zero successes" . null =<< readIORef failedCounts
-  putStrLn "executed: 15 native helper contract checks"
+  putStrLn "executed: 16 native helper contract checks"
   putStrLn "not executed: successful host counting requires the prepared-runtime JSON intrinsic"

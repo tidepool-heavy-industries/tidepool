@@ -105,12 +105,10 @@ awaitCell actor name source = do
   check name True
 
 assertionCell :: Text -> Text -> Text -> Text
-assertionCell assertion name source = Text.unlines
+assertionCell assertion name source = Text.unlines $
   [ "import qualified Tidepool.Check"
   , "Tidepool.Check." <> assertion <> " " <> literal name <> " ("
-  , source
-  , ")"
-  ]
+  ] ++ map ("  " <>) (Text.lines source) ++ ["  )"]
 
 -- Intentionally closes this model-free swarm, then captures the edited package.
 -- Earlier CheckActor values cannot address the new swarm even if IDs repeat.
