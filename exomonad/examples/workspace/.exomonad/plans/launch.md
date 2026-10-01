@@ -49,7 +49,11 @@ the changed package; old CheckActor values cannot address the new swarm.
 `script actor name` in Project.Checks runs the corresponding
 .exomonad/workspace/checks/name.hs
 expression file. Most checks are ordinary function calls, Haskell assertions and
-small turns over retained values. awaitOutput polls a retained observation while
-an automatic callback finishes; it never launches replacement work. No project
-role names or stage sequence are encoded in the Rust driver. A new composition
-needs a check of its continuation and failure path, not another worker stage.
+small turns over retained values. Use `assertCell` for typed assertions over
+retained actor state and `awaitCell` for bounded eventual conditions whose
+completion is established by typed state. When a retained job or response has an
+exact completion source, await that source in the same continuation instead of
+polling snapshots. Check results count only after the checked cell completes
+normally. No project role names or stage sequence are encoded in the Rust driver.
+A new composition needs a check of its continuation and failure path, not another
+worker stage.
