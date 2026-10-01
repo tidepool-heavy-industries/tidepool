@@ -778,14 +778,15 @@ struct ResidentMachineAccess<H, O> {
     /// a session id eligible for `ResidentActorRunner::retire_child_session`
     /// at all.
     child_sessions: Arc<std::sync::Mutex<std::collections::HashSet<tidepool_repr::SessionId>>>,
-    /// Dedicated child sessions whose actor has already retired but whose
-    /// machine still held at least one live value handle the last time
-    /// anyone checked — `retire_child_session`'s doc comment has the full
-    /// invariant. Retried when that session's custody owner signals that a
-    /// root was released; the existing checkout settlement makes the final
-    /// teardown decision.
-    pending_child_teardown:
-        Arc<std::sync::Mutex<std::collections::HashMap<tidepool_repr::SessionId, String>>>,
+    /// Dedicated child sessions whose actor has retired but whose machine
+    /// still held at least one live value handle. Each entry owns the one
+    /// cleanup worker and its custody-drop signal until checkout settlement
+    /// removes the entry.
+    pending_child_teardown: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<tidepool_repr::SessionId, Arc<PendingChildTeardown>>,
+        >,
+    >,
     // The `compile_blocking` span omits `include_roots` from every line (the
     // full search path is long and rarely changes turn to turn); this tracks
     // the last-logged roots per session so a diagnostic reader still sees
@@ -799,6 +800,29 @@ struct ResidentMachineAccess<H, O> {
     /// source-layer revision, so an edited layer is never served through a
     /// carrier compiled against its stale imports.
     carriers: HostCarrierCache,
+}
+
+/// One detached cleanup owner for a retired dedicated child session. The
+/// worker handle remains here so tests can prove the actual task finished,
+/// rather than treating session removal alone as sufficient evidence.
+struct PendingChildTeardown {
+    wake: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    initial_checkout_complete: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    worker: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl PendingChildTeardown {
+    fn new() -> Self {
+        Self {
+            wake: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            initial_checkout_complete: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            worker: std::sync::Mutex::new(None),
+        }
+    }
 }
 
 struct CancelCompilerTransactionOnDrop(Option<tidepool_runtime::CompilerTransactionCancellation>);
@@ -845,6 +869,42 @@ impl<H, O> ResidentMachineAccess<H, O> {
             pending_child_teardown: Arc::clone(&self.pending_child_teardown),
             logged_include_roots: std::sync::Mutex::new(std::collections::HashMap::new()),
             carriers: Arc::clone(&self.carriers),
+        }
+    }
+
+    fn owns_pending_child_teardown(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        owner: &Arc<PendingChildTeardown>,
+    ) -> bool {
+        self.pending_child_teardown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, owner))
+    }
+
+    fn clear_pending_child_teardown(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        owner: &Arc<PendingChildTeardown>,
+    ) {
+        let removed = {
+            let mut pending = self
+                .pending_child_teardown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if pending
+                .get(&session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, owner))
+            {
+                pending.remove(&session_id)
+            } else {
+                None
+            }
+        };
+        if removed.is_some() {
+            owner.wake.notify_one();
         }
     }
 }
@@ -2582,78 +2642,121 @@ impl<H, O> ResidentActorRunner<H, O> {
         H: DispatchEffect<O> + Send + 'static,
         O: OutputSink + Sync + 'static,
     {
-        if session_retained
-            || !self
+        if session_retained {
+            return Ok(());
+        }
+        // The map entry is also the cleanup task owner. Only the call that
+        // creates it starts a task; concurrent retirements share that task
+        // and cannot replace the session's notifier with another waiter.
+        let (owner, start_worker) = {
+            // Keep membership and pending-owner admission in one lock order.
+            // Checkout settlement removes both under this same pair, so a
+            // caller that raced a completed teardown cannot reinsert stale
+            // pending state after the machine is gone.
+            let children = self
                 .access
                 .child_sessions
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains(&session_id)
-        {
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !children.contains(&session_id) {
+                return Ok(());
+            }
+            let mut pending = self
+                .access
+                .pending_child_teardown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match pending.entry(session_id) {
+                std::collections::hash_map::Entry::Occupied(entry) => {
+                    (Arc::clone(entry.get()), false)
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let owner = Arc::new(PendingChildTeardown::new());
+                    entry.insert(Arc::clone(&owner));
+                    (owner, true)
+                }
+            }
+        };
+        if !start_worker {
             return Ok(());
         }
-        // Marked pending BEFORE the checkout, not after a separate read: the
-        // checkout's own settlement (`Self::with_host_machine`) is the ONLY
-        // place a dedicated child session is ever removed from the
-        // registry, so this reuses that one atomic decision (made while
-        // still holding the exclusive checkout) instead of a second,
-        // separately-racing read-then-remove after releasing it.
-        self.access
-            .pending_child_teardown
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                session_id,
-                "actor retired; checking for outstanding custody".to_string(),
-            );
-        let cleanup_wake = Arc::new(tokio::sync::Notify::new());
-        let session_wake = Arc::clone(&cleanup_wake);
-        self.access
-            .with_host_machine("child-teardown", session_id, None, |session, _| {
-                session.set_custody_cleanup_notifier(Arc::new(move || {
-                    session_wake.notify_one();
-                }));
-                Ok(session.outstanding_custody())
-            })
-            .await?;
-        let still_pending = self
-            .access
-            .pending_child_teardown
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&session_id);
-        if still_pending {
-            let access = self.access.sharing();
-            tokio::spawn(async move {
-                loop {
-                    cleanup_wake.notified().await;
-                    let still_pending = access
-                        .pending_child_teardown
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .contains_key(&session_id);
-                    if !still_pending {
-                        break;
-                    }
-                    if let Err(error) = access
-                        .with_host_machine(
-                            "child-teardown-custody-release",
-                            session_id,
-                            None,
-                            |_, _| Ok(()),
-                        )
-                        .await
-                    {
-                        tracing::debug!(session = ?session_id, %error,
-                            "deferred child-session cleanup could not check out its machine");
-                        break;
-                    }
+
+        // Start the owner before the first await. Cancellation of this caller
+        // may stop its initial-check response, but cannot strand the pending
+        // session after the blocking checkout settles.
+        let (start_worker_tx, start_worker_rx) = tokio::sync::oneshot::channel();
+        let (initial_check_tx, initial_check_rx) = tokio::sync::oneshot::channel();
+        let access = self.access.sharing();
+        let worker_owner = Arc::clone(&owner);
+        let worker = tokio::spawn(async move {
+            let _ = start_worker_rx.await;
+            let session_wake = Arc::clone(&worker_owner.wake);
+            let initial = access
+                .with_host_machine("child-teardown", session_id, None, move |session, _| {
+                    session.set_custody_cleanup_notifier(Arc::new(move || {
+                        session_wake.notify_one();
+                    }));
+                    Ok(session.outstanding_custody())
+                })
+                .await;
+            match initial {
+                Ok(_) => {
+                    #[cfg(test)]
+                    worker_owner
+                        .initial_checkout_complete
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    let _ = initial_check_tx.send(Ok(()));
                 }
-            });
+                Err(error) => {
+                    let still_owned = access.owns_pending_child_teardown(session_id, &worker_owner);
+                    if still_owned {
+                        access.clear_pending_child_teardown(session_id, &worker_owner);
+                    }
+                    let result = if still_owned { Err(error) } else { Ok(()) };
+                    let _ = initial_check_tx.send(result);
+                    return;
+                }
+            }
+
+            while access.owns_pending_child_teardown(session_id, &worker_owner) {
+                worker_owner.wake.notified().await;
+                if !access.owns_pending_child_teardown(session_id, &worker_owner) {
+                    break;
+                }
+                if let Err(error) = access
+                    .with_host_machine(
+                        "child-teardown-custody-release",
+                        session_id,
+                        None,
+                        |_, _| Ok(()),
+                    )
+                    .await
+                {
+                    tracing::debug!(session = ?session_id, %error,
+                        "deferred child-session cleanup could not check out its machine");
+                    access.clear_pending_child_teardown(session_id, &worker_owner);
+                    break;
+                }
+            }
+        });
+        #[cfg(test)]
+        {
+            *owner
+                .worker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
         }
-        // The initial checkout either removed the session or left it pending.
-        // In the latter case the waiter resumes this same settlement path on
-        // every deferred custody release until teardown completes.
+        #[cfg(not(test))]
+        drop(worker);
+        let _ = start_worker_tx.send(());
+
+        initial_check_rx.await.map_err(|_| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "child-session cleanup worker stopped before its initial checkout".to_string(),
+            )
+        })??;
+        // This is idempotent when several actors retire from one session: the
+        // single owner continues until checkout settlement removes its entry.
         Ok(())
     }
 
@@ -2675,11 +2778,15 @@ impl<H, O> ResidentActorRunner<H, O> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&session_id);
-        self.access
+        let owner = self
+            .access
             .pending_child_teardown
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&session_id);
+        if let Some(owner) = owner {
+            owner.wake.notify_one();
+        }
         if self
             .access
             .machines
@@ -3149,13 +3256,10 @@ where
                     }
 
                     // A dedicated child session whose actor already retired
-                    // (`ResidentActorRunner::retire_child_session` found it
-                    // still holding live custody and deferred) gets a fresh
-                    // look on every later checkout of it for any reason —
-                    // the opportunistic retry `retire_child_session`'s own
-                    // doc comment promises. Once nothing is left, the
-                    // machine is removed outright instead of settling back
-                    // to idle.
+                    // gets another look on every checkout, including the
+                    // cleanup owner's custody-release retry. Once nothing is
+                    // left, the machine is removed outright instead of
+                    // settling back to idle.
                     let still_pending_teardown = pending_child_teardown
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3163,14 +3267,18 @@ where
                     if still_pending_teardown {
                         let outstanding = session.outstanding_custody();
                         if outstanding == 0 {
-                            pending_child_teardown
+                            let mut child_sessions = child_sessions
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let owner = pending_child_teardown
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .remove(&session_id);
-                            child_sessions
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .remove(&session_id);
+                            child_sessions.remove(&session_id);
+                            drop(child_sessions);
+                            if let Some(owner) = owner {
+                                owner.wake.notify_one();
+                            }
                             machines.settle_retire(
                                 receipt,
                                 "actor retired, deferred custody now released",
@@ -14940,27 +15048,12 @@ mod request_tests {
         assert!(error.contains("no child-session factory"));
     }
 
-    /// A dedicated child session whose actor has retired, but for which a
-    /// `RootCustody` is still held OUTSIDE the session (standing in for a
-    /// reply/retained progress value not yet exported off it — parcel 6's
-    /// territory, not reconstructed here), is not torn down: the release
-    /// defers. `value_handle_count` would never reach zero here even once
-    /// released (it also counts the session's own private bindings), which
-    /// is exactly why `retire_child_session`/`with_host_machine`'s
-    /// settlement check `ResidentSession::outstanding_custody` instead —
-    /// this test is the regression pin for that distinction. Once the held
-    /// token drops, the session-owned notification wakes cleanup and the
-    /// existing checkout settlement completes teardown without another
-    /// caller entering the session. The session is then gone from the
-    /// registry. Exercises `ResidentActorRunner::retire_child_session`
-    /// directly (`child_sessions` membership is normally recorded by
-    /// `provision_child_session`; set here by hand since this test only
-    /// needs a dedicated session to already exist, not the full
-    /// parcel-crossing launch path that builds one) with
-    /// `other_actor_still_on_session: false` throughout (no directory
-    /// entries at all in this fixture).
-    #[tokio::test]
-    async fn retiring_a_child_session_defers_then_completes_once_custody_clears() {
+    fn child_session_with_outstanding_custody() -> (
+        ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
+        tidepool_repr::SessionId,
+        RootCustody,
+    ) {
         let (machines, context, source, _root) = actor_registry_fixture();
         let child_id = tidepool_repr::SessionId(context.placement.session.0.wrapping_add(11));
         let (mut child_session, _child_root) = bare_session_at(child_id);
@@ -15018,7 +15111,18 @@ mod request_tests {
             .lock()
             .unwrap()
             .insert(child_id);
+        (runner, machines, child_id, custody)
+    }
 
+    /// A dedicated child session whose actor has retired, but for which a
+    /// `RootCustody` is still held outside the session is not torn down. The
+    /// count must use outstanding custody rather than `value_handle_count`,
+    /// which includes the session's own private bindings. Once the held token
+    /// drops, its single cleanup owner checks out the session and tears it
+    /// down; the test waits for both registry removal and worker completion.
+    #[tokio::test]
+    async fn retiring_a_child_session_defers_then_completes_once_custody_clears() {
+        let (runner, machines, child_id, custody) = child_session_with_outstanding_custody();
         runner
             .retire_child_session(child_id, false)
             .await
@@ -15036,23 +15140,164 @@ mod request_tests {
                 .contains_key(&child_id),
             "the deferral must be recorded"
         );
+        let owner = Arc::clone(
+            runner
+                .access
+                .pending_child_teardown
+                .lock()
+                .unwrap()
+                .get(&child_id)
+                .expect("pending cleanup owner"),
+        );
 
         // Release the custody itself — the only thing outstanding. The
         // session owner signals cleanup, so this test makes no explicit
         // checkout after the reader drops.
         drop(custody);
         tokio::time::timeout(Duration::from_secs(2), async {
-            while machines.kind(child_id).is_some() {
+            while machines.kind(child_id).is_some()
+                || !owner
+                    .worker
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("owned cleanup waiter checks the released custody");
+        .expect("the cleanup worker checks released custody and completes");
         assert_eq!(
             machines.kind(child_id),
             None,
             "the deferred release completes once custody clears"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_child_retirements_share_one_cleanup_owner() {
+        let (runner, machines, child_id, custody) = child_session_with_outstanding_custody();
+        let (first, second) = tokio::join!(
+            runner.retire_child_session(child_id, false),
+            runner.retire_child_session(child_id, false),
+        );
+        first.expect("first retirement check");
+        second.expect("concurrent retirement shares the existing cleanup owner");
+        assert!(machines.kind(child_id).is_some(), "custody defers teardown");
+
+        let owner = Arc::clone(
+            runner
+                .access
+                .pending_child_teardown
+                .lock()
+                .unwrap()
+                .get(&child_id)
+                .expect("pending cleanup owner"),
+        );
+        drop(custody);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while machines.kind(child_id).is_some()
+                || !owner
+                    .worker
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the single cleanup owner finishes after the last reader drops");
+    }
+
+    #[tokio::test]
+    async fn canceled_child_retirement_keeps_the_cleanup_owner_until_last_reader_drops() {
+        let (runner, machines, child_id, custody) = child_session_with_outstanding_custody();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let blocker_access = runner.access.sharing();
+        let blocker_entered = Arc::clone(&entered);
+        let blocker_release = Arc::clone(&release);
+        let blocker = tokio::spawn(async move {
+            blocker_access
+                .with_host_machine("hold-child-session", child_id, None, move |_, _| {
+                    blocker_entered.notify_one();
+                    let (lock, changed) = &*blocker_release;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = changed.wait(released).unwrap();
+                    }
+                    Ok(())
+                })
+                .await
+        });
+        entered.notified().await;
+
+        let inspection_access = runner.access.sharing();
+        let retirement =
+            tokio::spawn(async move { runner.retire_child_session(child_id, false).await });
+        let owner = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(owner) = inspection_access
+                    .pending_child_teardown
+                    .lock()
+                    .unwrap()
+                    .get(&child_id)
+                    .cloned()
+                {
+                    break owner;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retirement installed its cleanup owner before waiting for checkout");
+        retirement.abort();
+        let _ = retirement.await;
+
+        {
+            let (lock, changed) = &*release;
+            *lock.lock().unwrap() = true;
+            changed.notify_all();
+        }
+        blocker
+            .await
+            .expect("blocking checkout task")
+            .expect("blocking checkout settles");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !owner
+                .initial_checkout_complete
+                .load(std::sync::atomic::Ordering::Acquire)
+                || !inspection_access
+                    .pending_child_teardown
+                    .lock()
+                    .unwrap()
+                    .contains_key(&child_id)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached cleanup checked once while custody remained outstanding");
+        drop(custody);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while machines.kind(child_id).is_some()
+                || !owner
+                    .worker
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the detached cleanup owner completes after caller cancellation and final drop");
     }
 
     /// Like [`actor_registry_fixture`], but mints a second, isolated lexical
