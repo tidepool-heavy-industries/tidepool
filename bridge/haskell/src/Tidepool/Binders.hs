@@ -352,9 +352,9 @@ cellInferenceSegments plan = map makeSegment (runs (cellPlanItems plan))
   where
     runs [] = []
     runs (item : rest) =
-      let isDecl = sbKind (cellAnalysisVerdict item) == KDecl
-          (same, remaining) = span ((== isDecl) . isDeclaration) rest
-       in (isDecl, item : same) : runs remaining
+      let declarationRun = sbKind (cellAnalysisVerdict item) == KDecl
+          (same, remaining) = span ((== declarationRun) . isDeclaration) rest
+       in (declarationRun, item : same) : runs remaining
     isDeclaration = (== KDecl) . sbKind . cellAnalysisVerdict
 
     makeSegment (declarations, items) =

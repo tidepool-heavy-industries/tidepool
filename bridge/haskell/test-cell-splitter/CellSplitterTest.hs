@@ -45,7 +45,12 @@ import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 
 main :: IO ()
-main = do
+main = getArgs >>= \case
+  ["--ordered-segments"] -> orderedInferenceSegments >> putStrLn "ordered inference segments: 1 passed"
+  _ -> runAllTests
+
+runAllTests :: IO ()
+runAllTests = do
   certificationRequestValidation
   libdir <- getLibdir
   runGhc (Just libdir) $ do

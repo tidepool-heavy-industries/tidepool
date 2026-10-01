@@ -197,12 +197,7 @@ pub(crate) fn parse(
         .map_err(|error| CompileError::Io(crate::extract_spawn_error(error.source)))?;
     crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
     let receipt = crate::checked_cell::read(output, RECEIPT_LIMIT)?;
-    admit(
-        specification,
-        include_paths,
-        &producer,
-        receipt,
-    )
+    admit(specification, include_paths, &producer, receipt)
 }
 
 fn admit(

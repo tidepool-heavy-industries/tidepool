@@ -141,11 +141,12 @@ pub struct ExactCheckedCell {
     declaration_context: Arc<crate::declaration_context::ExactDeclarationContext>,
     receipt_digest: [u8; 32],
     checked_source: String,
-    evidence: crate::cache::DependencyEvidence,
+    evidence: Vec<(String, crate::cache::DependencyEvidence)>,
     observations: Vec<u8>,
     items: Vec<CheckedItem>,
     include: Vec<std::path::PathBuf>,
     planned_declaration: Option<PlannedCheckedDeclaration>,
+    planned_declarations: BTreeMap<usize, PlannedCheckedDeclaration>,
     value_inputs: Arc<CheckedValueInputs>,
 }
 
@@ -301,31 +302,86 @@ fn planned_input_rejection(message: &str) -> CompileError {
 /// interfaces never asserts that the corresponding native binding is live.
 #[derive(Debug)]
 pub struct CellProgram {
-    checked: Arc<ExactCheckedCell>,
-    parsed: Arc<crate::cell_plan::ParsedCellPlan>,
-    slots: Vec<CheckedPlannedCellSlot>,
-    items: Vec<CellProgramItem>,
+    pub(crate) checked: Arc<ExactCheckedCell>,
+    pub(crate) parsed: Arc<crate::cell_plan::ParsedCellPlan>,
+    pub(crate) slots: Vec<CheckedPlannedCellSlot>,
+    pub(crate) items: Vec<CellProgramItem>,
 }
 
 #[derive(Debug)]
 pub struct CellProgramItem {
-    checked: ExactCheckedItem,
-    native: Option<Arc<ExactCompiledItem>>,
-    display: Option<Arc<ExactCompiledDisplay>>,
+    pub(crate) checked: ExactCheckedItem,
+    pub(crate) native: Option<Arc<ExactCompiledItem>>,
+    pub(crate) display: Option<Arc<ExactCompiledDisplay>>,
+    pub(crate) native_observations: Option<CellProgramObservations>,
+    pub(crate) display_observations: Option<CellProgramObservations>,
+}
+
+#[derive(Debug)]
+pub(crate) struct CellProgramObservations {
+    pub(crate) turn: Arc<[u8]>,
+    pub(crate) metadata: Arc<[u8]>,
+    pub(crate) products: Arc<crate::artifacts::SealedTurnProducts>,
 }
 
 impl CellProgram {
-    pub fn checked_cell(&self) -> &Arc<ExactCheckedCell> { &self.checked }
-    pub fn parsed_plan(&self) -> &Arc<crate::cell_plan::ParsedCellPlan> { &self.parsed }
-    pub fn admission_digest(&self) -> [u8; 32] { self.checked.admission_digest() }
-    pub fn slots(&self) -> &[CheckedPlannedCellSlot] { &self.slots }
-    pub fn items(&self) -> &[CellProgramItem] { &self.items }
+    pub fn checked_cell(&self) -> &Arc<ExactCheckedCell> {
+        &self.checked
+    }
+    pub fn parsed_plan(&self) -> &Arc<crate::cell_plan::ParsedCellPlan> {
+        &self.parsed
+    }
+    pub fn admission_digest(&self) -> [u8; 32] {
+        self.checked.admission_digest()
+    }
+    pub fn slots(&self) -> &[CheckedPlannedCellSlot] {
+        &self.slots
+    }
+    pub fn items(&self) -> &[CellProgramItem] {
+        &self.items
+    }
 }
 
 impl CellProgramItem {
-    pub fn checked_item(&self) -> &ExactCheckedItem { &self.checked }
-    pub fn native(&self) -> Option<&Arc<ExactCompiledItem>> { self.native.as_ref() }
-    pub fn display(&self) -> Option<&Arc<ExactCompiledDisplay>> { self.display.as_ref() }
+    pub fn checked_item(&self) -> &ExactCheckedItem {
+        &self.checked
+    }
+    pub fn native(&self) -> Option<&Arc<ExactCompiledItem>> {
+        self.native.as_ref()
+    }
+    pub fn display(&self) -> Option<&Arc<ExactCompiledDisplay>> {
+        self.display.as_ref()
+    }
+    pub fn native_turn_bytes(&self) -> Option<&[u8]> {
+        self.native_observations
+            .as_ref()
+            .map(|value| value.turn.as_ref())
+    }
+    pub fn native_metadata_bytes(&self) -> Option<&[u8]> {
+        self.native_observations
+            .as_ref()
+            .map(|value| value.metadata.as_ref())
+    }
+    pub fn native_products(&self) -> Option<&crate::artifacts::SealedTurnProducts> {
+        self.native_observations
+            .as_ref()
+            .map(|value| value.products.as_ref())
+    }
+    pub fn display_turn_bytes(&self) -> Option<&[u8]> {
+        self.display_observations
+            .as_ref()
+            .map(|value| value.turn.as_ref())
+    }
+    pub fn display_metadata_bytes(&self) -> Option<&[u8]> {
+        self.display_observations
+            .as_ref()
+            .map(|value| value.metadata.as_ref())
+    }
+    pub fn display_products(&self) -> Option<&crate::artifacts::SealedTurnProducts> {
+        self.display_observations
+            .as_ref()
+            .map(|value| value.products.as_ref())
+    }
 }
 
 /// The existing checked-cell artifact owner retains one directory for exact
@@ -526,7 +582,10 @@ impl ExactCheckedCell {
     ) -> Result<(), CompileError> {
         if self.producer != <[u8; 32]>::from(Sha256::digest(producer))
             || &self.context != context
-            || !self.evidence.valid(&self.checked_source)
+            || self
+                .evidence
+                .iter()
+                .any(|(source, evidence)| !evidence.valid(source))
         {
             return Err(failure(
                 "checked cell producer, context or consumed inputs changed",
@@ -702,6 +761,42 @@ pub(crate) struct CheckedSettledValues {
 }
 
 impl CheckedSettledValues {
+    fn validate_required<'a>(
+        &self,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+        actual: impl IntoIterator<
+            Item = (
+                &'a str,
+                &'a tidepool_repr::execution_schema::SymbolIdentity,
+                u64,
+                u64,
+            ),
+        >,
+    ) -> Result<(), CompileError> {
+        let actual = actual.into_iter().collect::<Vec<_>>();
+        for global in target.globals() {
+            let Some((name, identity, generation, identifier)) = self
+                .rows
+                .iter()
+                .find(|(_, identity, _, _)| identity == &global.identity)
+            else {
+                continue;
+            };
+            if !actual.iter().any(
+                |(actual_name, actual_identity, actual_generation, actual_id)| {
+                    *actual_name == name
+                        && *actual_identity == identity
+                        && *actual_generation == *generation
+                        && *actual_id == *identifier
+                },
+            ) {
+                return Err(failure(
+                    "prepared import lacks its exact completed native binding",
+                ));
+            }
+        }
+        Ok(())
+    }
     fn validate<'a>(
         &self,
         actual: impl IntoIterator<
@@ -769,12 +864,28 @@ pub struct ExactCompiledDisplay {
     table: tidepool_repr::DataConTable,
     generation: u64,
     admission_digest: [u8; 32],
+    program_admission: bool,
     bound_binders: Vec<Value>,
     value_interface: Arc<CheckedValueArtifact>,
     settled_values: CheckedSettledValues,
 }
 
 impl ExactCompiledDisplay {
+    pub fn target_owned(&self) -> Arc<tidepool_repr::execution_schema::PreparedProgram> {
+        self.target.clone()
+    }
+    pub fn validate_runtime_admission(
+        &self,
+        display_digest: [u8; 32],
+        cell_digest: [u8; 32],
+    ) -> Result<(), CompileError> {
+        if self.admission_digest != display_digest
+            && !(self.program_admission && self.admission_digest == cell_digest)
+        {
+            return Err(failure("display belongs to another runtime admission"));
+        }
+        Ok(())
+    }
     pub fn validate_settled_native_bindings<'a>(
         &self,
         actual: impl IntoIterator<
@@ -786,7 +897,11 @@ impl ExactCompiledDisplay {
             ),
         >,
     ) -> Result<(), CompileError> {
-        self.settled_values.validate(actual)
+        if self.program_admission {
+            self.settled_values.validate_required(&self.target, actual)
+        } else {
+            self.settled_values.validate(actual)
+        }
     }
     pub fn target_definition_identities(
         &self,
@@ -836,6 +951,7 @@ pub(crate) struct CheckedDisplayOffer {
     pub(crate) budget: u64,
     pub(crate) presented: Vec<String>,
     pub(crate) settled_values: CheckedSettledValues,
+    pub(crate) is_program: bool,
 }
 
 impl CheckedDisplayOffer {
@@ -914,7 +1030,12 @@ impl CheckedDisplayOffer {
         if string(&fields[0])? != "TPEXACTDISPLAY"
             || string(&fields[1])? != "1"
             || string(&fields[2])? != request
-            || string(&fields[3])? != hex(&self.capture.item.cell.receipt_digest)
+            || string(&fields[3])?
+                != hex(&if self.is_program {
+                    self.capture.item.admission_digest()
+                } else {
+                    self.capture.item.cell.receipt_digest
+                })
             || fields[4] != Value::Integer((self.capture.item.index as u64).into())
             || string(&fields[5])? != hex(&self.admission_digest)
             || string(&fields[6])? != hash(source.as_bytes())
@@ -964,6 +1085,7 @@ impl CheckedDisplayOffer {
             table: read_table(root)?,
             generation: self.generation,
             admission_digest: self.admission_digest,
+            program_admission: self.is_program,
             bound_binders: bound,
             value_interface: interface,
             settled_values: self.settled_values.clone(),
@@ -972,6 +1094,9 @@ impl CheckedDisplayOffer {
 }
 
 impl ExactCompiledItem {
+    pub fn target_owned(&self) -> Arc<tidepool_repr::execution_schema::PreparedProgram> {
+        self.target.clone()
+    }
     pub fn validate_runtime_admission(
         &self,
         item_digest: [u8; 32],
@@ -1005,7 +1130,11 @@ impl ExactCompiledItem {
             ),
         >,
     ) -> Result<(), CompileError> {
-        self.settled_values.validate(actual)
+        if matches!(self.admission, CheckedExecutionAdmission::CellProgram(_)) {
+            self.settled_values.validate_required(&self.target, actual)
+        } else {
+            self.settled_values.validate(actual)
+        }
     }
     pub fn target_definition_identities(
         &self,
@@ -1307,6 +1436,73 @@ impl ExactCompiledPrefix {
                 .collect(),
         ))
     }
+    pub(crate) fn prepared_value_selection(&self) -> Result<CheckedSettledValues, CompileError> {
+        let mut winners = BTreeMap::new();
+        for completed in &self.completed {
+            match completed {
+                CompletedCheckedItem::Declaration(item) => {
+                    for name in item.binders() {
+                        winners.remove(name);
+                    }
+                }
+                CompletedCheckedItem::Native(item) => {
+                    for binder in &item.bound_binders {
+                        let fields = row(binder, 7)?;
+                        let name = string(&fields[0])?.to_owned();
+                        let identity = tidepool_repr::execution_schema::SymbolIdentity {
+                            unit: "main".into(),
+                            module: string(&fields[2])?.to_owned(),
+                            namespace: "value".into(),
+                            occurrence: name.clone(),
+                            record_parent: None,
+                        };
+                        let Value::Integer(identifier) = fields[1] else {
+                            return Err(failure("binder id is not integer"));
+                        };
+                        winners.insert(
+                            name.clone(),
+                            (
+                                name,
+                                identity,
+                                item.generation,
+                                u64::try_from(identifier).map_err(failure)?,
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        for display in &self.displays {
+            for (index, binder) in display.bound_binders.iter().enumerate() {
+                if index == 1 {
+                    continue;
+                }
+                let fields = row(binder, 7)?;
+                let name = string(&fields[0])?.to_owned();
+                let identity = tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "main".into(),
+                    module: string(&fields[2])?.to_owned(),
+                    namespace: "value".into(),
+                    occurrence: name.clone(),
+                    record_parent: None,
+                };
+                let Value::Integer(identifier) = fields[1] else {
+                    return Err(failure("binder id is not integer"));
+                };
+                winners.insert(
+                    name.clone(),
+                    (
+                        name,
+                        identity,
+                        display.generation,
+                        u64::try_from(identifier).map_err(failure)?,
+                    ),
+                );
+            }
+        }
+        self.select_settled_values(winners.into_values().collect())
+    }
+
     pub(crate) fn select_settled_values(
         &self,
         rows: Vec<SettledNativeBinding>,
@@ -1471,13 +1667,23 @@ impl ExactCheckedItem {
         &self,
     ) -> Option<&Arc<crate::declaration_join::CertifiedAuthoredDeclaration>> {
         (self.kind() == CheckedItemKind::Declaration)
-            .then_some(self.cell.planned_declaration.as_ref())
+            .then_some(
+                self.cell
+                    .planned_declarations
+                    .get(&self.index)
+                    .or(self.cell.planned_declaration.as_ref()),
+            )
             .flatten()
             .map(|planned| &planned.certificate)
     }
     pub fn planned_declaration_source(&self) -> Option<&str> {
         (self.kind() == CheckedItemKind::Declaration)
-            .then_some(self.cell.planned_declaration.as_ref())
+            .then_some(
+                self.cell
+                    .planned_declarations
+                    .get(&self.index)
+                    .or(self.cell.planned_declaration.as_ref()),
+            )
             .flatten()
             .map(|planned| planned.source.as_str())
     }
@@ -1591,6 +1797,7 @@ pub(crate) fn seal_checked_fold(
         generation,
         observation_name: None,
         is_fold: true,
+        is_program: false,
         settled_values: CheckedSettledValues::default(),
     }
     .seal(root, request, source, target)
@@ -1604,6 +1811,7 @@ pub(crate) struct CheckedItemOffer {
     pub(crate) generation: u64,
     pub(crate) observation_name: Option<String>,
     pub(crate) is_fold: bool,
+    pub(crate) is_program: bool,
     pub(crate) settled_values: CheckedSettledValues,
 }
 
@@ -1715,7 +1923,12 @@ impl CheckedItemOffer {
             || string(&fields[1])? != "1"
             || string(&fields[2])? != request
             || string(&fields[3])? != hex(&self.item.admission_digest())
-            || string(&fields[4])? != hex(&self.item.cell.receipt_digest)
+            || string(&fields[4])?
+                != hex(&if self.is_program {
+                    self.item.admission_digest()
+                } else {
+                    self.item.cell.receipt_digest
+                })
             || fields[5] != Value::Integer((self.item.index as u64).into())
             || string(&fields[6])? != hash(source.as_bytes())
             || string(&fields[7])? != "tidepool-checked-recipe-2"
@@ -1781,7 +1994,9 @@ impl CheckedItemOffer {
             generation: self.generation,
             bound_binders,
             observation_name: self.observation_name.clone(),
-            admission: if self.is_fold {
+            admission: if self.is_program {
+                CheckedExecutionAdmission::CellProgram(self.item.admission_digest())
+            } else if self.is_fold {
                 CheckedExecutionAdmission::InitialFold(self.runtime_prefix_digest)
             } else {
                 CheckedExecutionAdmission::RuntimeItem(self.runtime_prefix_digest)
@@ -1865,15 +2080,22 @@ pub(crate) fn admit_checked_cell(
     include: &[std::path::PathBuf],
     planned_declaration: Option<PlannedCheckedDeclaration>,
     value_inputs: Arc<CheckedValueInputs>,
+    planned_declarations: BTreeMap<usize, PlannedCheckedDeclaration>,
+    program: Option<&CheckedPlannedCellSpecification>,
 ) -> Result<Arc<ExactCheckedCell>, CompileError> {
     let receipt = read(root.join("checked-cell.cbor"), 8 * 1024 * 1024)?;
     let value = decode(&receipt)?;
-    let header = row(&value, 10)?;
+    let header = row(&value, if program.is_some() { 11 } else { 10 })?;
     let observations = read(root.join("cell.cbor"), 32 * 1024 * 1024)?;
     let output = decode(&observations)?;
     let output = row(&output, 5)?;
     let checked_source = string(&output[2])?.to_owned();
-    if string(&header[0])? != "TPEXACTCHECK"
+    if string(&header[0])?
+        != if program.is_some() {
+            "TPEXACTPROGRAM"
+        } else {
+            "TPEXACTCHECK"
+        }
         || string(&header[1])? != "1"
         || string(&header[2])? != request_digest
         || string(&header[3])? != hex(&specification.admission_digest)
@@ -1886,22 +2108,58 @@ pub(crate) fn admit_checked_cell(
             "whole-cell receipt differs from the same admitted compiler offer",
         ));
     }
-    match (&planned_declaration, &header[9]) {
-        (Some(planned), Value::Text(digest)) if digest == &hex(&planned.receipt_digest) => {}
-        (None, Value::Null) => {}
-        _ => {
-            return Err(failure(
-                "whole-cell receipt differs from its original declaration receipt",
-            ));
+    if let Some(program) = program {
+        if string(&header[10])? != hex(&program.parsed_plan.digest()) {
+            return Err(failure("program has another parser plan"));
+        }
+        let receipts = list(&header[9], 10000)?;
+        if receipts.len() != planned_declarations.len() {
+            return Err(failure("program declaration receipts are incomplete"));
+        }
+        for value in receipts {
+            let fields = row(value, 2)?;
+            let Value::Integer(index) = fields[0] else {
+                return Err(failure("declaration index is not integer"));
+            };
+            let index = usize::try_from(index).map_err(failure)?;
+            if planned_declarations.get(&index).is_none_or(|declaration| {
+                string(&fields[1]).ok() != Some(hex(&declaration.receipt_digest).as_str())
+            }) {
+                return Err(failure("program original declaration receipt differs"));
+            }
+        }
+    } else {
+        match (&planned_declaration, &header[9]) {
+            (Some(planned), Value::Text(digest)) if digest == &hex(&planned.receipt_digest) => {}
+            (None, Value::Null) => {}
+            _ => return Err(failure("whole-cell original declaration receipt differs")),
         }
     }
-    let source = admissions
-        .into_iter()
-        .find(|source| {
-            source.witness.source_sha256()
-                == &<[u8; 32]>::from(Sha256::digest(checked_source.as_bytes()))
-        })
-        .ok_or_else(|| failure("whole-cell receipt has no final exact compilation witness"))?;
+    let evidence = if program.is_some() {
+        admissions
+            .into_iter()
+            .map(|admitted| {
+                let source = std::fs::read_to_string(admitted.witness.source_path())?;
+                if !admitted
+                    .witness
+                    .matches_source(admitted.witness.source_path(), &source)
+                    || !admitted.evidence.valid(&source)
+                {
+                    return Err(failure("compiled program source evidence changed"));
+                }
+                Ok((source, admitted.evidence))
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?
+    } else {
+        let source = admissions
+            .into_iter()
+            .find(|source| {
+                source.witness.source_sha256()
+                    == &<[u8; 32]>::from(Sha256::digest(checked_source.as_bytes()))
+            })
+            .ok_or_else(|| failure("cell has no exact final source witness"))?;
+        vec![(checked_source.clone(), source.evidence)]
+    };
     let signatures = list(&header[8], 65536)?
         .iter()
         .map(decode_signature)
@@ -1985,16 +2243,34 @@ pub(crate) fn admit_checked_cell(
         .filter(|(_, item)| item.kind == CheckedItemKind::Declaration)
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    if declaration_indices
-        != if planned_declaration.is_some() {
-            vec![0]
-        } else {
-            vec![]
+    let expected_declarations = if program.is_some() {
+        planned_declarations.keys().copied().collect::<Vec<_>>()
+    } else if planned_declaration.is_some() {
+        vec![0]
+    } else {
+        Vec::new()
+    };
+    if declaration_indices != expected_declarations {
+        return Err(failure("program lacks original declaration certificates"));
+    }
+    if let Some(program) = program {
+        if items.len() != program.slots.len() {
+            return Err(failure("program item count differs from reservations"));
         }
-    {
-        return Err(failure(
-            "initial declaration lacks its original same-offer certificate",
-        ));
+        for (item, parsed) in items.iter().zip(program.parsed_plan.items()) {
+            let kind = match parsed.kind() {
+                crate::cell_plan::ParsedCellPlanKind::Declaration
+                | crate::cell_plan::ParsedCellPlanKind::Prologue => CheckedItemKind::Declaration,
+                crate::cell_plan::ParsedCellPlanKind::Bind => CheckedItemKind::Bind,
+                crate::cell_plan::ParsedCellPlanKind::Expression => CheckedItemKind::Expression,
+            };
+            if item.kind != kind
+                || item.binders != parsed.binders()
+                || (kind != CheckedItemKind::Declaration && item.source != parsed.source())
+            {
+                return Err(failure("prepared items differ from parser plan"));
+            }
+        }
     }
     let used = items
         .iter()
@@ -2019,12 +2295,13 @@ pub(crate) fn admit_checked_cell(
         context,
         declaration_context,
         receipt_digest: Sha256::digest(&receipt).into(),
+        evidence,
         checked_source,
-        evidence: source.evidence,
         observations,
         items,
         include: include.to_vec(),
         planned_declaration,
+        planned_declarations,
         value_inputs,
     }))
 }

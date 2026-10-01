@@ -680,6 +680,7 @@ data PipelineVariant = PipelineVariant
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
   | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
   | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
+  | CellProgramCompile CompilePurpose ExactScope
   deriving (Eq, Show)
 
 transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
@@ -701,10 +702,12 @@ transformFor (CheckedItemCompile annotations original _) target env summary
 transformFor (PlannedDeclarationCheck inventory _) target env summary
   | ms_mod_name summary == target = transformPlannedDeclarationImports inventory env
   | otherwise = pure
+transformFor (CellProgramCompile purpose _) target env summary = transformFor purpose target env summary
 
 transformWithCompletedValues :: Maybe CompletedValueImports -> CompilePurpose -> ModuleName
   -> HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
 transformWithCompletedValues captured purpose target env summary = case purpose of
+  CellProgramCompile inner _ -> transformWithCompletedValues captured inner target env summary
   CheckedItemCompile annotations original requested
     | ms_mod_name summary == target && not (null requested) -> \parsed -> do
         values <- maybe (fail "completed value interfaces were not installed in this request") pure captured
@@ -3127,13 +3130,17 @@ sessionVariant :: CompilePurpose -> SessionScope -> FilePath -> IO PipelineVaria
 sessionVariant purpose scope path = do
   targetModName' <- targetModuleNameFor path
   completedValuesRef <- newIORef Nothing
-  let completedValues = case purpose of
+  let effectivePurpose = case purpose of
+        CellProgramCompile inner _ -> inner
+        _ -> purpose
+      completedValues = case effectivePurpose of
         CheckedItemCompile _ _ values -> values
         _ -> []
   capturedExact <- traverse (\manifest -> readExactScope manifest >>= either (ioError . userError) pure)
     (ssExactScope scope)
   let exact = case purpose of
         PlannedDeclarationCheck _ admitted -> Just admitted
+        CellProgramCompile _ admitted -> Just admitted
         _ -> capturedExact
   forM_ exact $ \admitted -> case capturedExact of
     Just original | scopeRequestSha256 original == scopeRequestSha256 admitted -> pure ()
@@ -3238,7 +3245,7 @@ sessionVariant purpose scope path = do
           -- ('isSessionScopeActive'); every such turn's wrapper compiles a
           -- target literally named @__result@ (scaffold-reserved, never
           -- @result@).
-        , cpKeepPrivateResult = purpose == OriginalDeclarationCompile
+        , cpKeepPrivateResult = effectivePurpose == OriginalDeclarationCompile
         , cpResultBinders = [scaffoldTargetName, scaffoldOutputBase]
         , cpBeforeModule = \modSum ->
             when (ms_mod_name modSum `Set.member` deferredMods) $ do

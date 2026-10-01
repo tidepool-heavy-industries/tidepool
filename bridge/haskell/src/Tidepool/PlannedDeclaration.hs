@@ -109,7 +109,6 @@ preparePlannedDeclaration reserved wrapper plan = do
   declaration <- case cellPlanItems plan of
     item : rest
       | sbKind (cellAnalysisVerdict item) == KDecl
-      , not (cellAnalysisPrologueOnly item)
       , all ((/= KDecl) . sbKind . cellAnalysisVerdict) rest
       , and [cellAnalysisSourceOrdinal declaration < cellAnalysisSourceOrdinal executable
             | declaration <- cellAnalysisSourceItems item

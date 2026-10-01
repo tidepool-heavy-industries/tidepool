@@ -311,9 +311,9 @@ decodeScope = do
           <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces
           <*> (Just <$> (PlannedCellAdmission <$> digestField <*> absolute <*> digestField <*> digestField
             <*> bounded 10000 (do
-              count <- decodeListLen
+              slotFields <- decodeListLen
               kind <- nonempty
-              case (kind,count) of
+              case (kind,slotFields) of
                 ("prologue",2) -> PlannedPrologue <$> decodeWord64
                 ("decl",2) -> PlannedDeclaration <$> decodeWord64
                 ("bind",2) -> PlannedBind <$> decodeWord64
