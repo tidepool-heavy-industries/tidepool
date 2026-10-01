@@ -13,7 +13,7 @@ fi
 : "${CARGO_TARGET_DIR:?select the admitted checkout target directory}"
 evidence="$1"
 mkdir "$evidence"
-export TIDEPOOL_DAEMON_ARGS='--workers 2 --rss-ceiling-mb 10240'
+export TIDEPOOL_DAEMON_ARGS="${TIDEPOOL_DAEMON_ARGS:---workers 2 --rss-ceiling-mb 10240}"
 export TIDEPOOL_TIMING=1 TIDEPOOL_KEEP_TEST_LOGS=1
 export TIDEPOOL_TEST_ARTIFACT_ROOT="$evidence/battery"
 export TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT="$evidence/compiler.jsonl"
