@@ -1,8 +1,12 @@
 do
   inheritedRefusal <- attemptUnfold (batch ("embedded-captured" :: CampaignLabel)
     ("inherited-refusal" :: ForkGroupLabel))
-    (child (researching @Int projectHead
-      (assignment [label|must-not-launch|] ("inherited context is not independent" :: Text))))
+    ((,) <$>
+      child (withContext (selected id)
+        (researching @Int projectHead
+          (assignment [label|selected-must-not-launch|] ("selected context cannot bypass preflight" :: Text))))
+      <*> child (researching @Int projectHead
+        (assignment [label|must-not-launch|] ("inherited context is not independent" :: Text))))
   Right seed <- checkpoint "same-cell captured context"
   (alpha, beta) <- unfold (batch ("embedded-captured" :: CampaignLabel)
     ("reply-workers" :: ForkGroupLabel))
