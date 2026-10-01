@@ -498,11 +498,9 @@ pub(crate) enum DaemonError {
     /// A read or write failed for a reason other than a clean EOF (a timeout,
     /// a reset connection, ...).
     Io(io::Error),
-    /// EOF before a complete frame/response arrived — the daemon crashed (or
-    /// was killed) mid-request. The wire's own framing makes this
-    /// unambiguous: a clean response is always a complete, self-describing
-    /// byte sequence, so any short read here can only mean the peer is gone.
-    Crashed,
+    /// EOF before a complete frame/response arrived. This proves loss of the
+    /// response, not the cause of the peer's termination.
+    IncompleteResponse,
     /// The daemon rejected the bound epoch or deployment before acknowledging
     /// acceptance. It guarantees this request will not execute.
     NotAccepted(String),
@@ -539,7 +537,7 @@ impl std::fmt::Display for DaemonError {
         match self {
             DaemonError::Connect(e) => write!(f, "daemon connect failed: {e}"),
             DaemonError::Io(e) => write!(f, "daemon I/O error: {e}"),
-            DaemonError::Crashed => write!(f, "daemon crashed mid-request"),
+            DaemonError::IncompleteResponse => write!(f, "compiler response ended before a complete reply"),
             DaemonError::NotAccepted(message) => {
                 write!(f, "daemon did not accept request: {message}")
             }
@@ -851,13 +849,13 @@ pub(crate) fn preflight(socket_path: &Path) -> Result<DaemonBinding, DaemonError
     }
     let producer: [u8; 32] = read_exact_or_crash(&mut stream, 32)?
         .try_into()
-        .map_err(|_| DaemonError::Crashed)?;
+        .map_err(|_| DaemonError::IncompleteResponse)?;
     let consumed_worker: [u8; 32] = read_exact_or_crash(&mut stream, 32)?
         .try_into()
-        .map_err(|_| DaemonError::Crashed)?;
+        .map_err(|_| DaemonError::IncompleteResponse)?;
     let epoch: [u8; 32] = read_exact_or_crash(&mut stream, 32)?
         .try_into()
-        .map_err(|_| DaemonError::Crashed)?;
+        .map_err(|_| DaemonError::IncompleteResponse)?;
     tracing::info!(
         phase = "compiler_preflight",
         elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -934,7 +932,7 @@ fn read_exact_or_crash<R: Read>(r: &mut R, n: usize) -> Result<Vec<u8>, DaemonEr
     let mut buf = vec![0u8; n];
     match r.read_exact(&mut buf) {
         Ok(()) => Ok(buf),
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Err(DaemonError::Crashed),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Err(DaemonError::IncompleteResponse),
         Err(e) => Err(DaemonError::Io(e)),
     }
 }
@@ -1109,15 +1107,27 @@ fn service_transaction(
                     Err(error) => {
                         let elapsed_ms =
                             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                        tracing::error!(
-                            run_id,
-                            %compile_request,
-                            elapsed_ms,
-                            phase = "compiler_service",
-                            %error,
-                            transaction,
-                            "compiler request failed"
-                        );
+                        if matches!(error, FrontendError::WorkerClientDisconnected) {
+                            tracing::info!(
+                                run_id,
+                                %compile_request,
+                                elapsed_ms,
+                                phase = "compiler_service",
+                                %error,
+                                transaction,
+                                "compiler request abandoned by client"
+                            );
+                        } else {
+                            tracing::error!(
+                                run_id,
+                                %compile_request,
+                                elapsed_ms,
+                                phase = "compiler_service",
+                                %error,
+                                transaction,
+                                "compiler request failed"
+                            );
+                        }
                         transaction_failed = Some(error);
                     }
                 }
@@ -1128,7 +1138,11 @@ fn service_transaction(
         transaction_failed = worker.end_transaction().err();
     }
     if let Some(error) = transaction_failed {
-        tracing::error!(run_id, %error, transaction, "compiler transaction failed");
+        if matches!(error, FrontendError::WorkerClientDisconnected) {
+            tracing::info!(run_id, %error, transaction, "compiler transaction abandoned by client");
+        } else {
+            tracing::error!(run_id, %error, transaction, "compiler transaction failed");
+        }
         // The accepted request(s) stay indeterminate; do not replay them.
         // Drop the connection before replacing the failed worker.
         drop(connection);
@@ -2388,11 +2402,11 @@ impl Worker {
                     if let Err(error) = crate::process::kill_process(pid) {
                         tracing::warn!(pid, %error, "failed to kill compiler worker after client disconnect");
                     }
-                    return completed_rx.recv().unwrap_or_else(|_| {
-                        Err(FrontendError::Daemon(
-                            "compiler worker stopped after client disconnect".to_owned(),
-                        ))
-                    });
+                    // EOF caused by this retirement must not be classified as
+                    // an independent worker failure. Drain the monitor before
+                    // the slot replaces the pinned worker.
+                    completed_rx.recv().ok();
+                    return Err(FrontendError::WorkerClientDisconnected);
                 }
             }
         });
@@ -2789,7 +2803,7 @@ mod tests {
         server.join().unwrap();
         assert!(!error.is_not_accepted());
         assert!(!error.was_accepted());
-        assert!(matches!(error, DaemonError::Crashed));
+        assert!(matches!(error, DaemonError::IncompleteResponse));
     }
 
     #[test]
@@ -3196,8 +3210,8 @@ tidepool-target phase=desugar module=Execute\n",
         let bytes = vec![0u8, 1u8];
         let mut cur = Cursor::new(bytes);
         match decode_response(&mut cur) {
-            Err(DaemonError::Crashed) => {}
-            other => panic!("expected Crashed, got {other:?}"),
+            Err(DaemonError::IncompleteResponse) => {}
+            other => panic!("expected IncompleteResponse, got {other:?}"),
         }
     }
 
@@ -3210,8 +3224,8 @@ tidepool-target phase=desugar module=Execute\n",
         bytes.extend_from_slice(b"abc");
         let mut cur = Cursor::new(bytes);
         match decode_response(&mut cur) {
-            Err(DaemonError::Crashed) => {}
-            other => panic!("expected Crashed, got {other:?}"),
+            Err(DaemonError::IncompleteResponse) => {}
+            other => panic!("expected IncompleteResponse, got {other:?}"),
         }
     }
 
@@ -3219,8 +3233,8 @@ tidepool-target phase=desugar module=Execute\n",
     fn decode_response_empty_stream_is_crashed() {
         let mut cur = Cursor::new(Vec::<u8>::new());
         match decode_response(&mut cur) {
-            Err(DaemonError::Crashed) => {}
-            other => panic!("expected Crashed, got {other:?}"),
+            Err(DaemonError::IncompleteResponse) => {}
+            other => panic!("expected IncompleteResponse, got {other:?}"),
         }
     }
 
@@ -3338,11 +3352,47 @@ tidepool-target phase=desugar module=Execute\n",
             &[OsString::from("request")],
             DEFAULT_REQUEST_DEADLINE,
         );
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(FrontendError::WorkerClientDisconnected)
+        ));
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "disconnect did not interrupt the worker promptly"
         );
+        worker.abort();
+    }
+
+    #[test]
+    fn independently_exited_worker_is_not_a_client_disconnect() {
+        let cwd = Path::new("/tmp");
+        let argv = [OsString::from("request")];
+        let request_bytes = encode_request(cwd, &argv).len() + 1;
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: consumes one worker request and exits without replying"
+        )]
+        let mut child = std::process::Command::new("dd")
+            .args(["bs=1", &format!("count={request_bytes}"), "of=/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut worker = Worker {
+            stdin: child.stdin.take(),
+            stdout: child.stdout.take().unwrap(),
+            child,
+        };
+        let (connection, client) = UnixStream::pair().unwrap();
+        let result =
+            worker.request_while_connected(&connection, cwd, &argv, DEFAULT_REQUEST_DEADLINE);
+        assert!(
+            matches!(result, Err(FrontendError::Daemon(_))),
+            "{result:?}"
+        );
+        assert!(!peer_disconnected(&connection));
+        drop(client);
         worker.abort();
     }
 
@@ -3388,7 +3438,7 @@ tidepool-target phase=desugar module=Execute\n",
         assert!(error.was_accepted());
         assert!(matches!(
             error,
-            DaemonError::AfterAcceptance(inner) if matches!(*inner, DaemonError::Crashed)
+            DaemonError::AfterAcceptance(inner) if matches!(*inner, DaemonError::IncompleteResponse)
         ));
         std::fs::remove_file(socket).ok();
     }

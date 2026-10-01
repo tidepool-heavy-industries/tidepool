@@ -560,6 +560,9 @@ pub enum FrontendError {
         path: PathBuf,
         worker_flag: Option<String>,
     },
+    /// The accepted caller disconnected, so the daemon retired its pinned worker.
+    /// The request remains indeterminate and must not be replayed.
+    WorkerClientDisconnected,
     Io(io::Error),
     Daemon(String),
 }
@@ -580,6 +583,9 @@ impl std::fmt::Display for FrontendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Usage(message) | Self::Daemon(message) => f.write_str(message),
+            Self::WorkerClientDisconnected => {
+                f.write_str("compiler worker retired after client disconnected")
+            }
             Self::WorkerProtocol(error) => error.fmt(f),
             Self::WorkerVersionMismatch { path, worker_flag } => {
                 let worker_version = worker_flag.as_deref().unwrap_or("an older protocol");
