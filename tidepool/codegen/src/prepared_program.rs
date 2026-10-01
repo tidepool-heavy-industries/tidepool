@@ -35,7 +35,7 @@ mod emit;
 mod image;
 mod image_registry;
 mod package_literals;
-pub use package_literals::PackageLiteral;
+pub use package_literals::{PackageLiteral, SourceLiteral};
 mod instance;
 #[cfg(test)]
 mod invocation;
@@ -220,6 +220,8 @@ pub enum CompileError {
     MissingRepresentation(ValueId),
     #[error("immutable package literal differs from the certified global {0:?}")]
     PackageLiteralContract(Box<tidepool_repr::execution_schema::SymbolIdentity>),
+    #[error("immutable source literal differs from the certified global {0:?}")]
+    SourceLiteralContract(Box<SourceBinder>),
     #[error("JSON operation was admitted without a program JSON layout")]
     MissingJsonLayout,
     #[error("JSON layout names constructor {0:?}, which this program does not declare")]

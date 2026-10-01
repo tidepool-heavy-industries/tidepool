@@ -327,7 +327,19 @@ impl DemandedImage {
         registry: &ImageRegistry,
         supplied: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
     ) -> Result<Self, DemandError> {
-        let literals = super::package_literals::GroupPackageLiterals::select(&group, supplied)?;
+        Self::compile_with_literals(group, registry, supplied, &BTreeMap::new())
+    }
+
+    /// Preserve the original dependency graph while importing only authenticated
+    /// immutable package or original-source byte storage.
+    pub fn compile_with_literals(
+        group: CertifiedGroup,
+        registry: &ImageRegistry,
+        packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
+    ) -> Result<Self, DemandError> {
+        let literals =
+            super::package_literals::GroupPackageLiterals::select(&group, packages, sources)?;
         let image = registry.get_or_compile_literal_group(&group, &literals, || {
             CompiledProgram::compile_certified_group_with_literals(&group, &literals).map(Arc::new)
         })?;
@@ -503,7 +515,7 @@ impl<'a> SealedDemand<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_repr::execution_schema::{GlobalDecl, RuntimeRep, testing};
+    use tidepool_repr::execution_schema::{testing, GlobalDecl, RuntimeRep};
 
     fn group(name: &str, ordinal: u32, imports: &[&str]) -> CertifiedGroup {
         let mut wire = testing::wire_program();
@@ -573,12 +585,10 @@ mod tests {
         assert_eq!(first.len(), 2);
         assert_eq!(registry.misses(), 2);
         let second = demand.compile(&registry).unwrap();
-        assert!(
-            first
-                .iter()
-                .zip(&second)
-                .all(|(a, b)| Arc::ptr_eq(&a.image, &b.image))
-        );
+        assert!(first
+            .iter()
+            .zip(&second)
+            .all(|(a, b)| Arc::ptr_eq(&a.image, &b.image)));
         assert_eq!(registry.hits(), 2);
     }
 

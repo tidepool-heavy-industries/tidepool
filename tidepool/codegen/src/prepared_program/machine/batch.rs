@@ -273,6 +273,19 @@ impl PreparedMachine<'_> {
                                 )));
                             }
                         }
+                        if let Some(source) = &slot.literal_source {
+                            if target.image.certified_source.as_ref().is_none_or(
+                                |(owner, ordinal)| {
+                                    owner != &source.owner || *ordinal != source.original_ordinal
+                                },
+                            ) || export.identity != source.binder.binder
+                                || source.binder.version != source.owner.module_version
+                            {
+                                return Err(ExecutionError::BatchSourceContract(Box::new(
+                                    slot.identity.clone(),
+                                )));
+                            }
+                        }
                     }
                     BatchImport::Existing {
                         handle,
