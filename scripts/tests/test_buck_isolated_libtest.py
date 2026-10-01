@@ -1,6 +1,8 @@
 import contextlib
 import importlib.util
 import io
+import json
+import hashlib
 import os
 from pathlib import Path
 import signal
@@ -42,6 +44,36 @@ class IsolatedLibtestTests(unittest.TestCase):
         if '--ignored' in argv:
             return subprocess.CompletedProcess(argv, 0, self.ignored_tests, '')
         return subprocess.CompletedProcess(argv, 0, self.all_tests, '')
+
+    def test_passing_output_is_retained_with_explicit_truncation(self):
+        retained = Path(self.tmp.name) / 'retained'
+        payload = 'witness' * 8 + '\n'
+        summary = 'test result: ok. 1 passed; 0 failed; 0 ignored;\n'
+
+        def run(argv, timeout):
+            discovered = self.discover(argv)
+            if discovered is not None:
+                return discovered
+            return subprocess.CompletedProcess(argv, 0, payload + summary, 'phase evidence')
+
+        with patch.object(runner, 'OUTPUT_LIMIT', 16):
+            result, output, _ = self.invoke([
+                '--exact', 'suite::works', '--expected-count', '1',
+                '--output-dir', str(retained),
+            ], run)
+        self.assertEqual(result, 0)
+        self.assertIn('PASS suite::works', output)
+        records = list(retained.glob('*.json'))
+        self.assertEqual(len(records), 1)
+        record = json.loads(records[0].read_text())
+        self.assertTrue(record['passed'])
+        self.assertEqual(record['test'], 'suite::works')
+        witness = record['streams']['stdout']
+        self.assertTrue(witness['truncated'])
+        self.assertEqual(witness['sha256'], hashlib.sha256((payload + summary).encode()).hexdigest())
+        self.assertEqual((retained / witness['path']).read_bytes(), (payload + summary).encode()[:16])
+        self.assertFalse(record['streams']['stderr']['truncated'])
+        self.assertEqual((retained / record['streams']['stderr']['path']).read_text(), 'phase evidence')
 
     def test_exact_selection_requires_and_enforces_expected_count(self):
         calls = []

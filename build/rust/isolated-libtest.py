@@ -3,6 +3,8 @@ import argparse
 import concurrent.futures
 from concurrent.futures import FIRST_COMPLETED, wait
 import os
+import hashlib
+import json
 from pathlib import Path
 import re
 import signal
@@ -13,6 +15,7 @@ import threading
 
 DEFAULT_TIMEOUT = 300
 DISCOVERY_TIMEOUT = 30
+OUTPUT_LIMIT = 4 << 20
 RESULT = re.compile(
     r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;.*$",
     re.MULTILINE,
@@ -150,6 +153,8 @@ def parse_args(argv):
         '--jobs', type=int,
         help='maximum concurrent test processes (focused selection defaults to 1)',
     )
+    parser.add_argument('--output-dir', type=Path,
+                        help='retain bounded stdout/stderr and outcome records for every test')
     options = parser.parse_args(argv)
     if options.timeout <= 0:
         parser.error('--timeout must be positive')
@@ -214,6 +219,27 @@ def run_one(binary, name, ignored, timeout):
         and summary.groups() == ('1', '0', '0')
     )
     return passed, result.stdout, result.stderr
+
+
+
+def retain_output(directory, name, passed, stdout, stderr):
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    key = hashlib.sha256(name.encode()).hexdigest()
+    streams = {}
+    for label, text in (("stdout", stdout), ("stderr", stderr)):
+        data = text.encode()
+        path = directory / f"{key}.{label}.log"
+        path.write_bytes(data[:OUTPUT_LIMIT])
+        streams[label] = {
+            "path": path.name,
+            "bytes": len(data),
+            "retained_bytes": min(len(data), OUTPUT_LIMIT),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "truncated": len(data) > OUTPUT_LIMIT,
+        }
+    (directory / f"{key}.json").write_text(json.dumps({
+        "version": 1, "test": name, "passed": passed, "streams": streams,
+    }, indent=2) + "\n")
 
 
 def main(argv=None):
@@ -282,6 +308,8 @@ def main(argv=None):
                     except RunnerInterrupted:
                         interrupted = INTERRUPT_SIGNAL or signal.SIGTERM
                         continue
+                    if options.output_dir is not None:
+                        retain_output(options.output_dir, name, passed, output, stderr)
                     print(f'{"PASS" if passed else "FAIL"} {name}', flush=True)
                     if not passed:
                         failures += 1
