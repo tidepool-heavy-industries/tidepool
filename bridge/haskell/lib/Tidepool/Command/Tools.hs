@@ -13,7 +13,6 @@ module Tidepool.Command.Tools
     ReadOutput (..),
     CancelCommand (..),
     Stream (..),
-    WaitMode (..),
     CommandOptionError (..),
     ObservationPresenter,
     tools,
@@ -75,9 +74,6 @@ data CancelCommand = CancelCommand
 data Stream = Stdout | Stderr
   deriving (Generic, FromJSON, JsonSchema)
 
--- | Present one deliberate snapshot after the tool's wait policy completes.
-data WaitMode = ObserveOnce
-
 data CommandOptionError
   = InvalidMemoryMiB Int
   | ConflictingInputOptions
@@ -107,7 +103,7 @@ data ShellTools mode = ShellTools
 -- | A composable policy for one command observation.  The shared shell owns
 -- validation, process/input handling and retained jobs; a workspace may only
 -- replace how a successful observation is prepared for display.
-type ObservationPresenter effects = WaitMode -> Maybe Text -> Maybe Text -> Maybe Text -> Cmd.Observation -> Cmd.Job -> Eff effects Text
+type ObservationPresenter effects = Maybe Text -> Maybe Text -> Maybe Text -> Cmd.Observation -> Cmd.Job -> Eff effects Text
 
 tools :: (Member Cmd.Commands effects) => ShellTools (AsServerT (Eff effects))
 tools = toolsWith defaultPresenter
@@ -223,9 +219,9 @@ executeWith presenter
             | otherwise -> case wait of
                 Nothing -> do
                   _ <- Cmd.await retained
-                  presenter ObserveOnce (Just script) purpose focus options retained
+                  presenter (Just script) purpose focus options retained
                 Just _ -> do
-                  shown <- presenter ObserveOnce (Just script) purpose focus options retained
+                  shown <- presenter (Just script) purpose focus options retained
                   current <- Cmd.status retained
                   case current of
                     Cmd.CommandFinished _ -> pure shown
@@ -267,7 +263,7 @@ writeInputWith presenter WriteInput {session_id = key, chars = input, close_stdi
                 then pure $ T.intercalate "\n" (filter (not . T.null) [receipt, closed])
                 -- Empty input is an observation poll and keeps the configured
                 -- presenter behavior.
-                else presenter ObserveOnce Nothing Nothing Nothing options (Job key)
+                else presenter Nothing Nothing Nothing options (Job key)
 
 cancelRetained :: (Member Cmd.Commands effects) => CancelCommand -> Eff effects Text
 cancelRetained CancelCommand {session_id = key, yield_time_ms = wait, max_output_bytes = limit} =
@@ -321,6 +317,6 @@ utf8Bytes = T.foldl' (\n c -> n + width c) 0
       | otherwise = 4
 
 defaultPresenter :: (Member Cmd.Commands effects) => ObservationPresenter effects
-defaultPresenter ObserveOnce _ _ _ options retained = do
+defaultPresenter _ _ _ options retained = do
   _ <- Cmd.observe options retained
   pure ""

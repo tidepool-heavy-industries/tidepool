@@ -40,7 +40,6 @@ module Tidepool.Command
     observe,
     observeCompletion,
     observeWith,
-    observeWithCompletion,
     quiet,
     job,
     status,
@@ -273,9 +272,10 @@ observe Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job 
   current <- checked <$> send (CommandAwaitWith key milliseconds)
   presentStatus key bytes False current
 
--- | Observe an owned job with a bounded foreground wait and a completion
--- notice if it is still running. Foreign observers can use 'observe' or
--- 'awaitFinished' with a watch. Handoff never relaunches or cancels the job.
+-- | Observe an owned job for a bounded interval and request a completion
+-- notice if it is still running. The notice does not detach the job: await it
+-- or explicitly 'detach' before leaving its invocation. Foreign observers can
+-- use 'observe' or 'awaitFinished' with a watch.
 observeCompletion :: (Member Commands effects) => Observation -> Job -> Eff effects CommandStatus
 observeCompletion Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job key) = do
   current <- checked <$> send (CommandAwaitAndNotifyWith key milliseconds)
@@ -314,19 +314,6 @@ observeWith ::
   Eff effects (CommandStatus, Text)
 observeWith options@Observation {waitMilliseconds = milliseconds} retained@(Job key) prepare = do
   current <- checked <$> send (CommandAwaitWith key milliseconds)
-  presentObserved options retained prepare current
-
--- | Wait on an owned job for a useful foreground interval. If still live, the
--- command owner arms its single completion settlement before this returns.
--- A finish racing that handoff is reported by the notice for the same job.
-observeWithCompletion ::
-  (Member Commands effects) =>
-  Observation ->
-  Job ->
-  (PresentedObservation -> Eff effects Text) ->
-  Eff effects (CommandStatus, Text)
-observeWithCompletion options@Observation {waitMilliseconds = milliseconds} retained@(Job key) prepare = do
-  current <- checked <$> send (CommandAwaitAndNotifyWith key milliseconds)
   presentObserved options retained prepare current
 
 presentObserved ::
