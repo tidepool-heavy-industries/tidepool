@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub use crate::compile_input::SealedCompileInputIdentity;
+pub use crate::turn_observations::{decode_turn_nominal_heads, decode_turn_yield_sites};
 use serde::Deserialize;
 use tempfile::TempDir;
 use tidepool_extract_cmd::ExtractCmd;
@@ -424,9 +425,15 @@ impl ModuleCandidateOffer {
             32 << 20,
         )?)?;
         let row = crate::checked_cell::row(&value, 2)?;
-        let source = match crate::checked_cell::string(&row[0])? {
-            "Bind" => crate::checked_cell::string(&crate::checked_cell::row(&row[1], 5)?[4])?,
-            "Expr" => crate::checked_cell::string(&crate::checked_cell::row(&row[1], 3)?[2])?,
+        let (source, site_observations) = match crate::checked_cell::string(&row[0])? {
+            "Bind" => {
+                let fields = crate::checked_cell::row(&row[1], 5)?;
+                (crate::checked_cell::string(&fields[4])?, &fields[3])
+            }
+            "Expr" => {
+                let fields = crate::checked_cell::row(&row[1], 3)?;
+                (crate::checked_cell::string(&fields[2])?, &fields[1])
+            }
             "Decl" => return Ok(None),
             _ => {
                 return Err(CompileError::ExtractFailed(
@@ -434,6 +441,7 @@ impl ModuleCandidateOffer {
                 ))
             }
         };
+        let sites = decode_turn_yield_sites(site_observations)?;
         let module = extract_module_name(source).ok_or_else(|| {
             CompileError::ExtractFailed("admitted turn source module missing".into())
         })?;
@@ -449,7 +457,7 @@ impl ModuleCandidateOffer {
             source,
             &target,
             "__prepared",
-            true,
+            Some(&sites),
         )?
         .and_then(|sealed| sealed.compile_input_identity))
     }
@@ -1530,7 +1538,7 @@ pub fn seal_turn_outputs(
         source,
         prepared,
         target,
-        false,
+        None,
     )
 }
 
@@ -1542,7 +1550,7 @@ fn seal_turn_outputs_inner(
     source: &str,
     prepared: &Arc<PreparedProgram>,
     target: &str,
-    issue_input_identity: bool,
+    inline_sites: Option<&[YieldSite]>,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
         return Err(CompileError::ExtractFailed(
@@ -1663,9 +1671,9 @@ fn seal_turn_outputs_inner(
         );
     }
     let certified_groups: Arc<[_]> = certified.groups.into();
-    let compile_input_identity = if issue_input_identity && offer.exact.is_none() {
+    let compile_input_identity = if let Some(sites) = inline_sites.filter(|_| offer.exact.is_none())
+    {
         let (table, _) = read_metadata(&read_sidecar("meta.cbor")?)?;
-        let sites = read_yield_sites(&output_dir.join("asks.json"))?;
         crate::compile_input::seal(
             &offer.producer,
             &offer.include,
@@ -1678,7 +1686,7 @@ fn seal_turn_outputs_inner(
             &pending_imports,
             &package_interfaces,
             table,
-            sites,
+            sites.to_vec(),
         )?
         .map(Arc::new)
     } else {

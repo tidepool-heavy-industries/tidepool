@@ -32,6 +32,7 @@ pub mod prepared_artifact;
 pub mod recovery_artifacts;
 pub mod timing;
 pub mod toolchain;
+mod turn_observations;
 
 pub use artifacts::{
     compile_targets, read_yield_sites, CompiledArtifacts, ConstructorIdentityMismatch, NominalHead,

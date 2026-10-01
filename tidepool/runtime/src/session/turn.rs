@@ -26,7 +26,10 @@ use std::sync::Arc;
 use ciborium::value::Value as CborValue;
 use tempfile::TempDir;
 use tidepool_extract_cmd::{ExtractCmd, SpawnError};
-use tidepool_toolchain::artifacts::{seal_turn_outputs, ModuleCandidateOffer};
+use tidepool_toolchain::artifacts::{
+    decode_turn_nominal_heads as decode_nominal_heads, decode_turn_yield_sites as decode_asks,
+    seal_turn_outputs, ModuleCandidateOffer,
+};
 use tidepool_toolchain::certified_products::{PendingCertifiedGroup, PendingImportOwner};
 use tidepool_toolchain::checked_cell::{
     CheckedCellSpecification, ExactCheckedCell, ExactCheckedItem, ExactCompiledItem,
@@ -41,7 +44,7 @@ use tidepool_repr::execution_schema::{
 use tidepool_repr::serial::{read_metadata, MetaWarnings};
 use tidepool_repr::DataConTable;
 
-use crate::{timing, CompileError, NominalHead, SiteType, YieldSite};
+use crate::{timing, CompileError, NominalHead, YieldSite};
 
 use super::render::ExportItem;
 
@@ -4137,68 +4140,6 @@ fn decode_bound_binders(v: &CborValue) -> Result<Vec<BoundBinder>, CompileError>
     cbor_expect_array(v, "boundBinders")?
         .iter()
         .map(decode_bound_binder)
-        .collect()
-}
-
-fn decode_ask(v: &CborValue) -> Result<YieldSite, CompileError> {
-    let arr = cbor_expect_array(v, "typed suspension site")?;
-    if arr.len() != 7 && arr.len() != 8 {
-        return Err(CompileError::ExtractFailed(format!(
-            "TurnOut CBOR: expected typed suspension site with 7 or 8 fields, got {}",
-            arr.len()
-        )));
-    }
-    let reply_declaration = match arr.get(7) {
-        None | Some(CborValue::Null) => None,
-        Some(value) => Some(cbor_expect_text(value, "reply declaration")?.to_owned()),
-    };
-    let site = cbor_as_u64(&arr[0], "Ask site")?;
-    let origin = cbor_expect_text(&arr[1], "Ask origin")?.to_string();
-    let ordinal = cbor_as_u64(&arr[2], "Ask ordinal")?;
-    let answer_type = cbor_expect_text(&arr[3], "Ask answer type")?.to_string();
-    let modules = decode_string_array(&arr[4], "Ask modules")?;
-    let heads = decode_nominal_heads(&arr[5], "Ask nominal heads")?;
-    let inputs = cbor_expect_array(&arr[6], "site input types")?
-        .iter()
-        .map(|input| {
-            let input = cbor_expect_array_len(input, 3, "site input type")?;
-            Ok(SiteType {
-                ty: cbor_expect_text(&input[0], "site input type name")?.to_string(),
-                modules: decode_string_array(&input[1], "site input type modules")?,
-                heads: decode_nominal_heads(&input[2], "site input nominal heads")?,
-            })
-        })
-        .collect::<Result<Vec<_>, CompileError>>()?;
-    Ok(YieldSite {
-        reply_declaration,
-        site,
-        origin,
-        ordinal,
-        ty: answer_type,
-        modules,
-        heads,
-        inputs,
-    })
-}
-
-fn decode_nominal_heads(value: &CborValue, what: &str) -> Result<Vec<NominalHead>, CompileError> {
-    cbor_expect_array(value, what)?
-        .iter()
-        .map(|head| {
-            let head = cbor_expect_array_len(head, 3, "nominal type head")?;
-            Ok(NominalHead {
-                unit: cbor_expect_text(&head[0], "nominal type unit")?.to_string(),
-                module: cbor_expect_text(&head[1], "nominal type module")?.to_string(),
-                name: cbor_expect_text(&head[2], "nominal type name")?.to_string(),
-            })
-        })
-        .collect()
-}
-
-fn decode_asks(v: &CborValue) -> Result<Vec<YieldSite>, CompileError> {
-    cbor_expect_array(v, "asks")?
-        .iter()
-        .map(decode_ask)
         .collect()
 }
 
@@ -8926,21 +8867,23 @@ mod tests {
             CborValue::Array(vec![]),
         ];
         assert_eq!(
-            decode_ask(&CborValue::Array(fields.clone()))
+            decode_asks(&CborValue::Array(vec![CborValue::Array(fields.clone())]))
                 .unwrap()
+                .remove(0)
                 .reply_declaration,
             None
         );
         fields.push(CborValue::Text("data Report = Report Int".into()));
         assert_eq!(
-            decode_ask(&CborValue::Array(fields.clone()))
+            decode_asks(&CborValue::Array(vec![CborValue::Array(fields.clone())]))
                 .unwrap()
+                .remove(0)
                 .reply_declaration
                 .as_deref(),
             Some("data Report = Report Int")
         );
         *fields.last_mut().unwrap() = CborValue::Integer(1.into());
-        assert!(decode_ask(&CborValue::Array(fields)).is_err());
+        assert!(decode_asks(&CborValue::Array(vec![CborValue::Array(fields)])).is_err());
     }
 
     #[test]
