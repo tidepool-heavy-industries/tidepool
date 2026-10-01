@@ -66,7 +66,7 @@ pub const CHEAP_PLUMBING_PREFERENCE: [&str; 1] = ["gpt-6-luna"];
 pub const LUNA_PREFERENCE: [&str; 1] = ["gpt-6-luna"];
 
 /// [`ModelPolicy::StrongestWorker`]'s allowlist, strongest first.
-pub const STRONGEST_WORKER_PREFERENCE: [&str; 2] = ["gpt-6-sol", "gpt-6-luna"];
+pub const STRONGEST_WORKER_PREFERENCE: [&str; 2] = ["gpt-6.1-sol", "gpt-6-luna"];
 
 /// The allowlist a policy resolves against, in preference order.
 pub(crate) fn preference_for(policy: ModelPolicy) -> &'static [&'static str] {
@@ -902,6 +902,15 @@ mod tests {
         assert_eq!(
             choose_model(ModelPolicy::CheapPlumbing, &available).unwrap(),
             "gpt-6-luna"
+        );
+    }
+
+    #[test]
+    fn strongest_worker_prefers_gpt_6_1_sol_when_available() {
+        let available = slugs(&["gpt-6-luna", "gpt-6.1-sol"]);
+        assert_eq!(
+            choose_model(ModelPolicy::StrongestWorker, &available).unwrap(),
+            "gpt-6.1-sol"
         );
     }
 

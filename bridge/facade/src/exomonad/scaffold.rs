@@ -20,12 +20,12 @@ pub(super) const DEFAULT_WORKSPACE_REV: &str = "2390d350d4583a849280370b375c8b07
 /// and prompt files match the shipped workspace; only repository-specific
 /// settings stay out of a new project.
 const CONFIG: &str = r#"[defaults]
-model = "gpt-6-sol"
+model = "gpt-6.1-sol"
 effort = "medium"
 
 [models]
 planner = "gpt-6-astra"
-executor = "gpt-6-sol"
+executor = "gpt-6.1-sol"
 luna = "gpt-6-luna"
 
 [research]

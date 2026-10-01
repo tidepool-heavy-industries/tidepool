@@ -154,7 +154,7 @@ pub enum ModelPolicy {
     CheapPlumbing,
     /// The Luna tier, pinned: `gpt-6-luna` and nothing else.
     CheapestLuna,
-    /// The strongest worker tier available: prefer `gpt-6-sol`, else
+    /// The strongest worker tier available: prefer `gpt-6.1-sol`, else
     /// `gpt-6-luna`.
     ///
     /// The coding-worker grant (operator, 2026-08-25): iteration quality on

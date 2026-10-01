@@ -194,7 +194,7 @@ otherwise, naming what was available.
 |---|---|
 | `CheapPlumbing` | `gpt-6-luna` |
 | `CheapestLuna` | `gpt-6-luna` — and nothing else |
-| `StrongestWorker` | `gpt-6-sol`, then `gpt-6-luna` |
+| `StrongestWorker` | `gpt-6.1-sol`, then `gpt-6-luna` |
 
 A banned model is unreachable **by construction**, not by a skip-branch a
 future slug could slip past. `CheapestLuna` remains a distinct policy because
