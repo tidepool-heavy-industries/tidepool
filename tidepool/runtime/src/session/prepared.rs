@@ -32,9 +32,10 @@ pub use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
-    link_program, CachedHomeOwner, CertifiedGroup, CtorRow, DefinitionsView, Group, HeapRhs,
-    ImportOwner, ImportedValue, JsonLayout, LinkError, MachineImports, ParseError, PreparedProgram,
-    RuntimeRep, Signature, SiteDelivery, SiteRow, SymbolIdentity, TypeNode, TypeNodeId, ValueId,
+    link_program, CachedHomeOwner, CertifiedGroup, CtorRow, DefinitionsView, GlobalId, Group,
+    HeapRhs, ImportOwner, ImportedValue, JsonLayout, LinkError, MachineImports, ParseError,
+    PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow, SymbolIdentity, TypeNode,
+    TypeNodeId, ValueId,
 };
 use tidepool_repr::{DataConId, DataConTable, Literal, PrincipalId, SessionVarId};
 
@@ -495,14 +496,44 @@ impl CertifiedTargetImage {
         groups: impl IntoIterator<Item = CertifiedGroup>,
         registry: &ImageRegistry,
     ) -> Result<Vec<DemandedImage>, DemandError> {
+        let groups = groups.into_iter().collect::<Vec<_>>();
+        let mut compiled = (0..groups.len()).map(|_| None).collect::<Vec<_>>();
+        let mut source_literals = BTreeMap::new();
+        // Original string-literal groups have no imports. Compile those
+        // producers first without changing the sealed group's batch position.
+        for (index, group) in groups.iter().enumerate() {
+            if !group.imports().is_empty() || !group.definitions().globals().is_empty() {
+                continue;
+            }
+            let [Group::NonRecursive(top)] = group.definitions().bindings() else {
+                continue;
+            };
+            if !matches!(top.binding.rhs, HeapRhs::Bytes(_)) {
+                continue;
+            }
+            let image = DemandedImage::compile_with_package_literals(
+                group.clone(),
+                registry,
+                &self.package_literals,
+            )?;
+            for (binder, literal) in image.source_literals() {
+                if source_literals.insert(binder.clone(), literal).is_some() {
+                    return Err(DemandError::DuplicateBinder(binder));
+                }
+            }
+            compiled[index] = Some(image);
+        }
         groups
             .into_iter()
-            .map(|group| {
-                DemandedImage::compile_with_package_literals(
+            .zip(compiled)
+            .map(|(group, compiled)| match compiled {
+                Some(image) => Ok(image),
+                None => DemandedImage::compile_with_literals(
                     group,
                     registry,
                     &self.package_literals,
-                )
+                    &source_literals,
+                ),
             })
             .collect()
     }
@@ -3182,7 +3213,7 @@ impl PreparedEngine {
                               owners: &[ImportOwner]|
              -> Result<(), PreparedRuntimeError> {
                 let mut imports = Vec::with_capacity(owners.len());
-                for (declaration, owner) in globals.iter().zip(owners) {
+                for (index, (declaration, owner)) in globals.iter().zip(owners).enumerate() {
                     let import = match owner {
                         ImportOwner::Source { version, binder } => {
                             let key = SourceBinder {
@@ -3190,7 +3221,11 @@ impl PreparedEngine {
                                 binder: binder.clone(),
                             };
                             if let Some(&(group, binding)) = source.get(&key) {
-                                source_needed.insert(key);
+                                if image.authenticated_source_literal(GlobalId(index as u32))
+                                    != Some(&key)
+                                {
+                                    source_needed.insert(key);
+                                }
                                 BatchImport::Source { group, binding }
                             } else {
                                 let lease = inherited
@@ -4958,6 +4993,206 @@ pub(super) mod tests {
                 })
             })
             .collect()
+    }
+
+    fn certified_source_literal_groups() -> [CertifiedGroup; 2] {
+        let owner = CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            module_version: tidepool_repr::execution_schema::ModuleVersion([1; 32]),
+            skinny_iface_sha256: [2; 32],
+            product_sha256: [3; 32],
+        };
+        let literal = testing::identity("Fixture", "literal");
+        let mut producer = testing::wire_program();
+        producer.expressions.nodes.clear();
+        producer.bindings[0] = Group::NonRecursive(TopBinding {
+            identity: literal.clone(),
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Bytes(b"error\0tail".to_vec()),
+            },
+        });
+        let producer = CertifiedGroup::admit(
+            owner.clone(),
+            testing::projected_group(producer, 1).unwrap(),
+            vec![],
+        )
+        .unwrap();
+        let mut reader = testing::wire_program();
+        reader.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
+        reader.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+        if let Group::NonRecursive(top) = &mut reader.bindings[0] {
+            top.identity = testing::identity("Fixture", "reader");
+            if let HeapRhs::Function { captures, .. } = &mut top.binding.rhs {
+                captures.push(ValueRef::Global(GlobalId(0)));
+            }
+        }
+        reader.globals.push(GlobalDecl {
+            identity: literal.clone(),
+            rep: RuntimeRep::Address,
+            entry_signature: None,
+            required_evaluated: true,
+            required_generation: None,
+        });
+        let reader = CertifiedGroup::admit(
+            owner.clone(),
+            testing::projected_group(reader, 38).unwrap(),
+            vec![ImportOwner::Source {
+                version: owner.module_version,
+                binder: literal,
+            }],
+        )
+        .unwrap();
+        // Sealed group order need not put literal producers before importers.
+        [reader, producer]
+    }
+
+    #[test]
+    fn certified_source_literals_require_selected_original_producers() {
+        let registry = ImageRegistry::new();
+        let target = CertifiedTargetImage::compile(
+            testing::prepare(testing::wire_program()).unwrap(),
+            &registry,
+        )
+        .unwrap();
+        let groups = certified_source_literal_groups();
+        assert!(target
+            .compile_demanded([groups[0].clone()], &registry)
+            .is_err());
+        let demanded = target.compile_demanded(groups.clone(), &registry).unwrap();
+        assert_eq!(demanded[0].group(), &groups[0]);
+        assert_eq!(demanded[1].group(), &groups[1]);
+        assert_eq!(
+            demanded[0]
+                .image()
+                .authenticated_source_literal(GlobalId(0)),
+            Some(&SourceBinder {
+                version: groups[1].owner().module_version.clone(),
+                binder: testing::identity("Fixture", "literal"),
+            }),
+        );
+        assert!(matches!(
+            target.compile_demanded([groups[1].clone(), groups[1].clone()], &registry),
+            Err(DemandError::DuplicateBinder(_))
+        ));
+    }
+
+    #[test]
+    fn certified_source_literals_validate_provenance_without_managed_byte_leases() {
+        let groups = certified_source_literal_groups();
+        let evidence = certified_source_evidence(&groups);
+        let reader = testing::identity("Fixture", "reader");
+        let owner = ImportOwner::Source {
+            version: groups[0].owner().module_version.clone(),
+            binder: reader.clone(),
+        };
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
+        wire.expressions.nodes[0] = ExprFrame::Call {
+            callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+            signature: SignatureId(0),
+            arguments: vec![],
+        };
+        wire.globals.push(GlobalDecl {
+            identity: reader,
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: Some(SignatureId(0)),
+            required_evaluated: true,
+            required_generation: None,
+        });
+        let prepared = testing::prepare(wire).unwrap();
+        let registry = ImageRegistry::new();
+        let target = || CertifiedTargetImage::compile(prepared.clone(), &registry).unwrap();
+        let demanded = || {
+            target()
+                .compile_demanded(groups.clone(), &registry)
+                .unwrap()
+        };
+        let (mut engine, _) =
+            PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
+        let before = engine.residency();
+        let literal = SourceBinder {
+            version: groups[1].owner().module_version.clone(),
+            binder: testing::identity("Fixture", "literal"),
+        };
+        for mutation in 0..6 {
+            let mut wrong = evidence.clone();
+            match mutation {
+                0 => {
+                    wrong.remove(&literal);
+                }
+                1 => wrong.get_mut(&literal).unwrap().0.product_sha256 = [9; 32],
+                2 => wrong.get_mut(&literal).unwrap().0.skinny_iface_sha256 = [9; 32],
+                3 => {
+                    wrong.get_mut(&literal).unwrap().0.module_version =
+                        tidepool_repr::execution_schema::ModuleVersion([9; 32])
+                }
+                4 => wrong.get_mut(&literal).unwrap().1 += 1,
+                5 => wrong.get_mut(&literal).unwrap().0.module = "Other".into(),
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                engine.install_certified_turn(
+                    target(),
+                    &[owner.clone()],
+                    &wrong,
+                    demanded(),
+                    &[],
+                    &BTreeMap::new(),
+                    &HashMap::new(),
+                    &BindingTable::new(),
+                ),
+                Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(_))
+            ));
+            assert_eq!(engine.residency(), before);
+        }
+        let mut installed = engine
+            .install_certified_turn(
+                target(),
+                &[owner],
+                &evidence,
+                demanded(),
+                &[],
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &BindingTable::new(),
+            )
+            .unwrap();
+        assert_eq!(installed.groups.len(), 2);
+        assert_eq!(installed.leases.len(), 1);
+        assert_eq!(installed.leases[0].binder().binder.occurrence, "reader");
+        let leases = std::mem::take(&mut installed.leases);
+        let literal_program = installed.groups[1];
+        let id = engine.commit_certified_turn(installed);
+        let result = engine
+            .machine
+            .run_entry_retained(
+                id,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: true,
+                },
+                RealmId::ROOT,
+            )
+            .unwrap();
+        let [PreparedResult::Scalar(address)] = result.values.as_slice() else {
+            panic!("literal reader returns one address");
+        };
+        engine.quiesce_and_collect_now().unwrap();
+        assert!(!engine.programs.contains_key(&literal_program));
+        // SAFETY: the pinned importer image owns the complete literal allocation.
+        let bytes = unsafe { std::slice::from_raw_parts(*address as *const u8, 11) };
+        assert_eq!(bytes, b"error\0tail\0");
+        for lease in leases {
+            assert!(engine.release(lease.handle()));
+        }
+        assert!(engine.unpin(id));
+        engine.quiesce_and_collect_now().unwrap();
+        assert_eq!(engine.residency(), before);
     }
 
     #[test]
