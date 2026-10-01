@@ -589,15 +589,35 @@ async fn host_cancellation_stops_a_real_running_haskell_cell() {
 
 struct RejectFirstRequest {
     authentication: bool,
+    tool_before_rejection: bool,
     requests: Mutex<Vec<ResponsesRequest>>,
+    successor_stalled: tokio::sync::Notify,
+    reject_successor: tokio::sync::Notify,
 }
 
 #[async_trait]
 impl ResponsesTransport for RejectFirstRequest {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
-        let mut requests = self.requests.lock();
-        requests.push(request);
-        if requests.len() == 1 {
+        let round = {
+            let mut requests = self.requests.lock();
+            requests.push(request);
+            requests.len()
+        };
+        if self.tool_before_rejection && round == 1 {
+            return Ok(ResponsesTurn {
+                response_id: "before-rejection-tool".into(),
+                items: vec![harness::item::Item(json!({
+                    "type":"custom_tool_call", "call_id":"before-rejection-cell",
+                    "name":"haskell", "input":"40 + 2 :: Int"
+                }))],
+                usage: Usage::default(),
+            });
+        }
+        if round == if self.tool_before_rejection { 2 } else { 1 } {
+            if self.tool_before_rejection {
+                self.successor_stalled.notify_one();
+                self.reject_successor.notified().await;
+            }
             return Err(if self.authentication {
                 TransportError::Authentication
             } else {
@@ -626,167 +646,251 @@ impl ResponsesTransport for RejectFirstRequest {
 #[tokio::test]
 async fn production_host_preserves_rejected_request_and_waits_for_explicit_input() {
     for authentication in [false, true] {
-        let files = tempfile::tempdir().unwrap();
-        let assets = files.path().join("assets");
-        std::fs::create_dir_all(&assets).unwrap();
-        std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
-        let secret = "offline-host-rejection-secret-is-long-enough";
-        let secret_file = files.path().join("browser-secret");
-        std::fs::write(&secret_file, secret).unwrap();
-        let auth_file = files.path().join("unused-auth.json");
-        std::fs::write(&auth_file, "{}").unwrap();
-        let settings = EmbeddedLaunchConfig {
-            listen: "127.0.0.1:0".parse().unwrap(),
-            public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
-            asset_root: assets,
-            session_secret_file: secret_file,
-            codex_auth_file: auth_file,
-            context_capacity_tokens: 200_000,
-            concurrent_jobs: 1,
-        };
-        let transport = Arc::new(RejectFirstRequest {
-            authentication,
-            requests: Mutex::new(Vec::new()),
-        });
-        let host_transport: Arc<dyn ResponsesTransport> = transport.clone();
-        let fixture = RunningBrowserHost::start(&settings, &host_transport)
-            .await
-            .unwrap();
-        let target = browser_target(&fixture.campaign);
-        let actor = fixture.campaign.actor.identity();
-        let api = format!("http://{}/api", fixture.address);
-        let origin = format!("https://{}", fixture.address);
-        let client = reqwest::Client::new();
-        let login = client
-            .post(format!("{api}/session"))
-            .header("Origin", &origin)
-            .json(&json!({"secret":secret}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(login.status(), reqwest::StatusCode::OK);
-        let cookie = login.headers()[reqwest::header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned();
-        let first = browser_input(&target, "retain rejected user input");
-        let accepted = client
-            .post(format!("{api}/commands"))
-            .header("Origin", &origin)
-            .header(reqwest::header::COOKIE, &cookie)
-            .json(&first)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
-        let store = fixture.runtime.store();
-        let failed_head = tokio::time::timeout(Duration::from_secs(30), async {
+        rejected_request_host_case(authentication, false).await;
+    }
+}
+
+#[tokio::test]
+async fn production_host_recovers_ancestor_tool_output_after_request_rejection() {
+    for authentication in [false, true] {
+        rejected_request_host_case(authentication, true).await;
+    }
+}
+
+async fn rejected_request_host_case(authentication: bool, tool_before_rejection: bool) {
+    let files = tempfile::tempdir().unwrap();
+    let assets = files.path().join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let secret = "offline-host-rejection-secret-is-long-enough";
+    let secret_file = files.path().join("browser-secret");
+    std::fs::write(&secret_file, secret).unwrap();
+    let auth_file = files.path().join("unused-auth.json");
+    std::fs::write(&auth_file, "{}").unwrap();
+    let settings = EmbeddedLaunchConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
+        asset_root: assets,
+        session_secret_file: secret_file,
+        codex_auth_file: auth_file,
+        context_capacity_tokens: 200_000,
+        concurrent_jobs: 1,
+    };
+    let transport = Arc::new(RejectFirstRequest {
+        authentication,
+        tool_before_rejection,
+        requests: Mutex::new(Vec::new()),
+        successor_stalled: tokio::sync::Notify::new(),
+        reject_successor: tokio::sync::Notify::new(),
+    });
+    let host_transport: Arc<dyn ResponsesTransport> = transport.clone();
+    let fixture = RunningBrowserHost::start(&settings, &host_transport)
+        .await
+        .unwrap();
+    let target = browser_target(&fixture.campaign);
+    let actor = fixture.campaign.actor.identity();
+    let api = format!("http://{}/api", fixture.address);
+    let origin = format!("https://{}", fixture.address);
+    let client = reqwest::Client::new();
+    let login = client
+        .post(format!("{api}/session"))
+        .header("Origin", &origin)
+        .json(&json!({"secret":secret}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login.status(), reqwest::StatusCode::OK);
+    let cookie = login.headers()[reqwest::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let first = browser_input(&target, "retain rejected user input");
+    let accepted = client
+        .post(format!("{api}/commands"))
+        .header("Origin", &origin)
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&first)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
+    let store = fixture.runtime.store();
+    if tool_before_rejection {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            transport.successor_stalled.notified(),
+        )
+        .await
+        .expect("successor request did not start while tool was pending");
+        assert!(!transport.requests.lock()[1].input.iter().any(|item| {
+            item.0["type"] == "custom_tool_call_output"
+                && item.0["call_id"] == "before-rejection-cell"
+        }));
+        // Match the existing real-cell fixture budget for its three compiler stages.
+        tokio::time::timeout(Duration::from_secs(300), async {
             loop {
-                let head = store.agent(&target.actor).unwrap().unwrap().head_request;
-                if let Some(head) = head {
-                    if store
-                        .events(Some(&head))
+                let claims = store
+                    .claims(&harness::model::CallId("before-rejection-cell".into()))
+                    .unwrap();
+                if claims.first().is_some_and(|claim| {
+                    store
+                        .replay_output_operation(&claim.operation)
+                        .unwrap()
+                        .is_some_and(|item| {
+                            cell_output_matches(&item, "before-rejection-cell", "42")
+                        })
+                }) {
+                    assert_eq!(claims.len(), 1);
+                    assert!(!store
+                        .items(&claims[0].request)
                         .unwrap()
                         .iter()
-                        .any(|event| event.kind == "request_failed")
-                    {
-                        break head;
-                    }
+                        .any(|item| { item.0["type"] == "custom_tool_call_output" }));
+                    break;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
-        .expect("provider failure never advanced the exact durable head");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(
-            transport.requests.lock().len(),
-            1,
-            "provider rejection retried without input"
-        );
-        assert!(fixture.campaign.actor.terminal().get().is_none());
-        assert_eq!(fixture.campaign.actor.identity(), actor);
-        let (mut socket, snapshot) =
-            browser_snapshot_until(fixture.address, &cookie, "waiting").await;
-        assert_eq!(snapshot["snapshot"]["conversations"][0]["state"], "idle");
-        let failed = snapshot["snapshot"]["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|request| request["id"] == failed_head.0)
-            .expect("failed request absent after reconnect");
-        assert_eq!(failed["state"], "failed");
-        assert_eq!(
-            failed["failure"]["kind"],
-            if authentication {
-                "authentication"
-            } else {
-                "http"
-            }
-        );
-        if !authentication {
-            assert_eq!(
-                failed["failure"]["diagnostic"]["code"],
-                "invalid_function_parameters"
-            );
-            assert_eq!(
-                failed["failure"]["diagnostic"]["message"],
-                "required must contain view"
-            );
-        }
-        // Replaying the same browser operation does not create another envelope or request.
-        let duplicate = client
-            .post(format!("{api}/commands"))
-            .header("Origin", &origin)
-            .header(reqwest::header::COOKIE, &cookie)
-            .json(&first)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(duplicate.status(), reqwest::StatusCode::ACCEPTED);
-        let followup = browser_input(&target, "explicit corrected followup");
-        let accepted = client
-            .post(format!("{api}/commands"))
-            .header("Origin", &origin)
-            .header(reqwest::header::COOKIE, &cookie)
-            .json(&followup)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
-        let successor = tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                let head = store.agent(&target.actor).unwrap().unwrap().head_request;
-                if let Some(head) = head.filter(|head| head != &failed_head) {
+        .expect("tool did not settle before provider rejection");
+        transport.reject_successor.notify_one();
+    }
+    let failed_head = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let head = store.agent(&target.actor).unwrap().unwrap().head_request;
+            if let Some(head) = head {
+                if store
+                    .events(Some(&head))
+                    .unwrap()
+                    .iter()
+                    .any(|event| event.kind == "request_failed")
+                {
                     break head;
                 }
-                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-        })
-        .await
-        .expect("explicit followup did not complete");
-        assert_eq!(
-            store.request(&successor).unwrap().unwrap().parent,
-            Some(failed_head)
-        );
-        let requests = transport.requests.lock();
-        assert_eq!(requests.len(), 2);
-        for text in ["retain rejected user input", "explicit corrected followup"] {
-            assert_eq!(
-                requests[1]
-                    .input
-                    .iter()
-                    .filter(|item| item.0["content"] == text)
-                    .count(),
-                1
-            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        drop(requests);
-        assert!(fixture.campaign.actor.terminal().get().is_none());
-        socket.close(None).await.unwrap();
-        fixture.stop().await.unwrap();
+    })
+    .await
+    .expect("provider failure never advanced the exact durable head");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        transport.requests.lock().len(),
+        if tool_before_rejection { 2 } else { 1 },
+        "provider rejection retried without input"
+    );
+    assert!(fixture.campaign.actor.terminal().get().is_none());
+    assert_eq!(fixture.campaign.actor.identity(), actor);
+    let (mut socket, snapshot) = browser_snapshot_until(fixture.address, &cookie, "waiting").await;
+    assert_eq!(snapshot["snapshot"]["conversations"][0]["state"], "idle");
+    let failed = snapshot["snapshot"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|request| request["id"] == failed_head.0)
+        .expect("failed request absent after reconnect");
+    assert_eq!(failed["state"], "failed");
+    assert_eq!(
+        failed["failure"]["kind"],
+        if authentication {
+            "authentication"
+        } else {
+            "http"
+        }
+    );
+    if !authentication {
+        assert_eq!(
+            failed["failure"]["diagnostic"]["code"],
+            "invalid_function_parameters"
+        );
+        assert_eq!(
+            failed["failure"]["diagnostic"]["message"],
+            "required must contain view"
+        );
     }
+    // Replaying the same browser operation does not create another envelope or request.
+    let duplicate = client
+        .post(format!("{api}/commands"))
+        .header("Origin", &origin)
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&first)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), reqwest::StatusCode::ACCEPTED);
+    let followup = browser_input(&target, "explicit corrected followup");
+    let accepted = client
+        .post(format!("{api}/commands"))
+        .header("Origin", &origin)
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&followup)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
+    let successor = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let head = store.agent(&target.actor).unwrap().unwrap().head_request;
+            if let Some(head) = head.filter(|head| head != &failed_head) {
+                break head;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("explicit followup did not complete");
+    assert_eq!(
+        store.request(&successor).unwrap().unwrap().parent,
+        Some(failed_head)
+    );
+    let requests = transport.requests.lock();
+    let expected_requests = if tool_before_rejection { 3 } else { 2 };
+    assert_eq!(requests.len(), expected_requests);
+    let followup_request = &requests[expected_requests - 1];
+    if tool_before_rejection {
+        assert_eq!(
+            followup_request
+                .input
+                .iter()
+                .filter(|item| { cell_output_matches(item, "before-rejection-cell", "42") })
+                .count(),
+            1,
+            "settled ancestor output was not recovered exactly once"
+        );
+        assert_eq!(
+            followup_request
+                .input
+                .iter()
+                .filter(|item| {
+                    item.0["type"] == "custom_tool_call"
+                        && item.0["call_id"] == "before-rejection-cell"
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            store
+                .claims(&harness::model::CallId("before-rejection-cell".into()))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    for text in ["retain rejected user input", "explicit corrected followup"] {
+        assert_eq!(
+            followup_request
+                .input
+                .iter()
+                .filter(|item| item.0["content"] == text)
+                .count(),
+            1
+        );
+    }
+    drop(requests);
+    assert!(fixture.campaign.actor.terminal().get().is_none());
+    socket.close(None).await.unwrap();
+    fixture.stop().await.unwrap();
 }

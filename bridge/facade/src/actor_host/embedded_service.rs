@@ -550,7 +550,9 @@ where
             continue;
         }
         lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
-        recovering = false;
+        // Cleanup may retain a settled tool output on an ancestor claim.
+        // Reconcile the branch lineage before the next explicit-input request.
+        recovering = rejected;
     }
 }
 
