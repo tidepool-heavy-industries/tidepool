@@ -10,9 +10,10 @@
 module Main (main) where
 
 import Control.Monad (unless, void)
-import Control.Monad.Freer (Eff, Member, interpret, run)
+import Control.Monad.Freer (Eff, Member, interpret, interpretM, run, runM)
 import qualified Control.Monad.Freer.State as State
-import Control.Exception (ErrorCall, evaluate, try)
+import Control.Exception (ErrorCall, Exception, throw, throwIO, try)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Jev.Operators as J
@@ -131,6 +132,15 @@ data Trace
   | ReadPage Text Cmd.CommandStream Cmd.CommandPosition
   deriving (Eq, Show)
 
+-- Fixture/protocol failures must never masquerade as Cmd.await's checked error.
+data ProtocolFailure
+  = UnscriptedAdmission
+  | UnknownJobIdentity Text
+  | UnexpectedFiniteEffect
+  deriving (Eq, Show)
+
+instance Exception ProtocolFailure
+
 data Script = Script
   { scriptedStarts :: [Either Cmd.CommandError Text]
   , scriptedReceipts :: [(Text, Either Cmd.CommandError Cmd.CommandResult)]
@@ -151,7 +161,7 @@ runCommands script action =
         record (Started spec)
         Service current events <- State.get
         case scriptedStarts current of
-          [] -> error "unscripted command admission"
+          [] -> throw UnscriptedAdmission
           answer : rest -> do
             State.put (Service current {scriptedStarts = rest} events)
             pure answer
@@ -160,7 +170,7 @@ runCommands script action =
         Service current _ <- State.get
         let receipt = case lookup key (scriptedReceipts current) of
               Just answer -> answer
-              Nothing -> error "await used an unknown job identity"
+              Nothing -> throw (UnknownJobIdentity key)
         pure (fmap (\result -> CommandObservation result
           (Left (Cmd.CommandUnavailable "capture transport unavailable"))) receipt)
       CommandReadWith key stream position -> do
@@ -172,7 +182,7 @@ runCommands script action =
           [] -> Right (Cmd.CommandPage key 0 (Text.length key) (Text.length key)
             0 0 True False False False)
       CommandPresentWith _ _ -> pure ()
-      _ -> error "finite workflow emitted a background, bounded-wait or control effect"
+      _ -> throw UnexpectedFiniteEffect
 
 receipt :: Cmd.CommandOutcome -> Cmd.CommandCleanup -> Cmd.CommandResult
 receipt = Cmd.CommandResult
@@ -303,8 +313,29 @@ nativeContracts = do
         (followFailureWith (\_ _ -> error "successful original must not call policy") "success" original probes)
   assert "native successful original bypasses policy and diagnostics"
     (null (starts successTrace) && case followupStop success of { OriginalNotFailed -> True; _ -> False })
-  let missing = script {scriptedReceipts = [("original", Left (Cmd.CommandUnavailable "missing"))]}
-  failed <- try (evaluate (fst (runCommands missing (followFailureWith pick "missing original" original probes))))
+  -- Mutable handler evidence survives the production checked-command error.
+  -- The refusal is supplied by the handler, never synthesized by a workflow copy.
+  refusalEvidence <- newIORef ([], Nothing)
+  let missingIssue = Cmd.CommandUnavailable "missing"
+      missingHandler :: Commands value -> IO value
+      missingHandler request = case request of
+        CommandWaitWith key -> do
+          (prior, _) <- readIORef refusalEvidence
+          if not (null prior) then throwIO UnexpectedFiniteEffect else pure ()
+          if key /= "original" then throwIO (UnknownJobIdentity key) else pure ()
+          writeIORef refusalEvidence ([Waited key], Just (key, missingIssue))
+          pure (Left missingIssue)
+        _ -> throwIO UnexpectedFiniteEffect
+  failed <- try (runM (interpretM missingHandler
+    (followFailureWith pick "missing original" original probes)))
     :: IO (Either ErrorCall FollowupReport)
   assert "native unavailable original fails the cell rather than synthesizing a result"
     (case failed of { Left _ -> True; Right _ -> False })
+  observedRefusal <- readIORef refusalEvidence
+  assert "native await failure reached the exact original refusal without downstream effects"
+    (observedRefusal == ([Waited "original"], Just ("original", missingIssue)))
+  protocol <- try (try (runM (interpretM missingHandler (Cmd.tryStart (Cmd.argv ["true"]))))
+    :: IO (Either ErrorCall (Either Cmd.CommandError Cmd.Job)))
+    :: IO (Either ProtocolFailure (Either ErrorCall (Either Cmd.CommandError Cmd.Job)))
+  assert "native protocol failures escape the checked-command ErrorCall catch"
+    (case protocol of { Left UnexpectedFiniteEffect -> True; _ -> False })
