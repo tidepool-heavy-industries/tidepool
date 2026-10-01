@@ -164,9 +164,7 @@ fn exomonad_exports_persistent_agents_and_hides_turn_lifecycle_operations() {
         "result",
         &include_refs,
     )
-    .expect(
-        "two deferred children compile with private sibling activation metadata",
-    );
+    .expect("two deferred children compile with private sibling activation metadata");
 
     compile_haskell(
         include_str!("exomonad_action_surface/research_can_unfold.hs"),

@@ -1722,7 +1722,11 @@ async fn command_run_returns_typed_output_failure_and_resumes_the_suffix() {
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
     let running = tokio::spawn(async move {
-        dispatch_haskell_script(policy.as_ref(), include_str!("command_wait_continuation.hs")).await
+        dispatch_haskell_script(
+            policy.as_ref(),
+            include_str!("command_wait_continuation.hs"),
+        )
+        .await
     });
     let backend = TestCommands::completed("first");
     backend
@@ -1783,7 +1787,11 @@ async fn command_wait_preserves_the_exact_continuation_until_terminal_completion
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
     let running = tokio::spawn(async move {
-        dispatch_haskell_script(policy.as_ref(), include_str!("command_wait_continuation.hs")).await
+        dispatch_haskell_script(
+            policy.as_ref(),
+            include_str!("command_wait_continuation.hs"),
+        )
+        .await
     });
     let backend = TestCommands::new();
     *backend.stdout.lock() = "first".into();

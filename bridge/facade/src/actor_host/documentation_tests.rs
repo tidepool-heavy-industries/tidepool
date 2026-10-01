@@ -1334,7 +1334,11 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
         .inspect_graph(campaign.actor.identity())
         .unwrap()
         .len();
-    let spawned = committed(root.as_ref(), "startAgent (withAgentLifetime ActorOwned (readonlyAgent \"observe-once\"))").await;
+    let spawned = committed(
+        root.as_ref(),
+        "startAgent (withAgentLifetime ActorOwned (readonlyAgent \"observe-once\"))",
+    )
+    .await;
     let spawned_name = spawned["items"][0]["installedBindings"][0]
         .as_str()
         .unwrap();

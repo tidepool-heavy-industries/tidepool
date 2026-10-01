@@ -5470,11 +5470,14 @@ where
                     ResidentActorWorkbenchError::ActorProtocol("route owner is unavailable".into())
                 })?;
                 let settlements = command_settlement::CommandSettlements::new(&self.environment);
-                let dependencies = settlements
-                    .resolve(registration.dependencies)
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(watch_registration_refusal(error))
-                    })?;
+                let dependencies =
+                    settlements
+                        .resolve(registration.dependencies)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(watch_registration_refusal(
+                                error,
+                            ))
+                        })?;
                 let (watch, notifications) = self
                     .environment
                     .requests
