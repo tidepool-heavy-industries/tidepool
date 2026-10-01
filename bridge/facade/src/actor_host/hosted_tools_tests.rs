@@ -75,7 +75,6 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
     for arguments in [
         serde_json::json!({"text": "x", "copies": "three"}),
         serde_json::json!({"text": "x"}),
-        serde_json::json!(17),
     ] {
         let error = call("repeat_text", ToolArguments::Structured(arguments))
             .await
@@ -90,6 +89,19 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
             "{error}"
         );
     }
+    let scalar = call(
+        "repeat_text",
+        ToolArguments::Structured(serde_json::json!(17)),
+    )
+    .await
+    .expect_err("structured transport requires an object before Haskell dispatch");
+    assert!(
+        matches!(
+            scalar,
+            exomonad_actor::ResidentToolError::InvalidInvocation(_)
+        ),
+        "{scalar}"
+    );
     let repaired = call(
         "repeat_text",
         ToolArguments::Structured(serde_json::json!({"text": "fixed", "copies": 1})),
