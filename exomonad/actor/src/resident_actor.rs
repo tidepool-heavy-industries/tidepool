@@ -3211,6 +3211,7 @@ where
             continuation: child_launch::ChildLaunchContinuation {
                 context: context.clone(),
                 parent_descriptor: self.descriptor.clone(),
+                control: effect_owner.control(),
                 parent_hole,
                 fork_group,
                 original_placement,
