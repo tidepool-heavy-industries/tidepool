@@ -2450,8 +2450,10 @@ fn settle_pending_workbench(pending: PendingWorkbench, reply: crate::KernelWorkb
     tracing::info!(target: "exomonad_actor::workbench_phase", step = ?pending.step, delivered, phase = "reply_settled", "workbench phase");
 }
 
-fn settle_pending_tool(pending: PendingTool, reply: crate::KernelInvocationReply) {
-    let control_reply = match &reply {
+pub(crate) fn tool_control_reply(
+    reply: &crate::KernelInvocationReply,
+) -> crate::KernelWorkbenchReply {
+    match reply {
         Ok(value) => Ok(WorkbenchResponse {
             status: tidepool_runtime::session::WorkbenchRunStatus::Committed,
             summary: None,
@@ -2473,8 +2475,11 @@ fn settle_pending_tool(pending: PendingTool, reply: crate::KernelInvocationReply
             total: 1,
         }),
         Err(error) => Err(error.clone()),
-    };
-    pending.control.settle(control_reply);
+    }
+}
+
+fn settle_pending_tool(pending: PendingTool, reply: crate::KernelInvocationReply) {
+    pending.control.settle(tool_control_reply(&reply));
     pending.hosted_cell.complete(&pending.control);
     let delivered = pending.reply.send(reply).is_ok();
     tracing::info!(

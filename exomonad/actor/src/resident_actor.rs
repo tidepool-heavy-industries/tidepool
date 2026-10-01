@@ -9738,6 +9738,122 @@ where
         })
     }
 
+    fn dispatch_tool(
+        &mut self,
+        kernel: &KernelContext,
+        invocation: exomonad_tool::ToolInvocation,
+        capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+        control: Arc<crate::WorkbenchExecutionControl>,
+    ) -> crate::OwnedActorTask<Self, serde_json::Value> {
+        let actor = kernel.identity();
+        let key = control.invocation.clone();
+        let execution = key
+            .as_ref()
+            .map(|key| crate::resident_tools::execution_id(actor, key));
+        let request = execution.as_ref().map(|execution| {
+            let arguments = match &invocation.arguments {
+                exomonad_tool::ToolArguments::Raw(text) => serde_json::Value::String(text.clone()),
+                exomonad_tool::ToolArguments::Structured(value) => value.clone(),
+            };
+            WorkbenchRequest::for_tool(invocation.name.clone(), arguments)
+                .with_execution_id(execution.clone())
+        });
+        if let (Some(execution), Some(request)) = (&execution, &request) {
+            match self
+                .workbench_executions
+                .lock()
+                .lookup(execution, request, key.as_ref())
+            {
+                Ok(Some(reply)) => {
+                    let result =
+                        reply.and_then(|reply| {
+                            let output = reply.items.first().ok_or_else(|| {
+                                KernelInvocationFailure::Failed {
+                                    actor,
+                                    detail: "retained tool reply has no result".into(),
+                                }
+                            })?;
+                            serde_json::from_str(&output.output)
+                                .map(KernelStep::Continue)
+                                .map_err(|error| KernelInvocationFailure::Failed {
+                                    actor,
+                                    detail: format!("retained tool result is invalid: {error}"),
+                                })
+                        });
+                    return crate::OwnedActorTask::new(Box::pin(async move {
+                        crate::OwnedActorCompletion::new(move |_| result)
+                    }));
+                }
+                Err(failure) => {
+                    let detail = match failure {
+                        WorkbenchReplayFailure::DifferentInput => "one hosted tool identity was retried with different input",
+                        WorkbenchReplayFailure::Unconfirmed => "the original tool outcome is unconfirmed; replay cannot repeat its effects",
+                    };
+                    return crate::OwnedActorTask::new(Box::pin(async move {
+                        crate::OwnedActorCompletion::new(move |_| {
+                            Err(KernelInvocationFailure::Rejected {
+                                actor,
+                                detail: detail.into(),
+                            })
+                        })
+                    }));
+                }
+                Ok(None) => {}
+            }
+            self.workbench_executions
+                .lock()
+                .begin(execution, request.clone(), key.as_ref());
+        }
+        crate::OwnedActorTask::serial(move |mut behavior: Self, kernel| {
+            Box::pin(async move {
+                let result = crate::resident_workbench::with_execution_control(
+                    control.clone(),
+                    behavior.tool(&kernel, invocation, capture),
+                )
+                .await;
+                if result.is_err() {
+                    if let Some(owner) = control.reservation_owner(actor) {
+                        let (_, notifications) = behavior
+                            .environment
+                            .requests
+                            .abort_unsubmitted(actor, &owner);
+                        publish_request_notifications(
+                            &behavior.environment.requests,
+                            &behavior.environment.deployments,
+                            notifications,
+                        )
+                        .await;
+                    }
+                }
+                let completion = crate::OwnedActorCompletion::new(move |behavior: &mut Self| {
+                    if let (Some(execution), Some(request)) = (execution, request) {
+                        let reply = crate::local_actor::tool_control_reply(
+                            &result
+                                .as_ref()
+                                .map(|step| match step {
+                                    KernelStep::Continue(value)
+                                    | KernelStep::ContinueLater(value)
+                                    | KernelStep::Stop { output: value, .. } => value.clone(),
+                                })
+                                .map_err(Clone::clone),
+                        );
+                        let cancellation =
+                            control.cancellation_outcome(execution.clone(), reply.clone());
+                        behavior.workbench_executions.lock().record(
+                            execution,
+                            request,
+                            reply,
+                            cancellation,
+                            key.as_ref(),
+                        );
+                    }
+                    result
+                });
+                (behavior, completion)
+            })
+        })
+    }
+
     fn tool<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
