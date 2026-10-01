@@ -1,6 +1,5 @@
-import GHC.Generics (Generic)
 import qualified Tidepool.Actor as Actor
-data Handoff mode = Handoff { handoffState :: mode :- State [WorkEvent Delivery], componentFinished :: mode :- Call (WorkEvent Delivery) NoReply, handoffSnapshot :: mode :- Call () (R.Reply [WorkEvent Delivery]) } deriving Generic
+data Handoff mode = Handoff { handoffState :: mode :- State [WorkEvent Delivery], componentFinished :: mode :- Call (WorkEvent Delivery) NoReply, handoffSnapshot :: mode :- Call () (R.Reply [WorkEvent Delivery]) }
 let parentDefinition = coordinationActor "parent-handoff" Handoff
       { handoffState = []
       , componentFinished = \event -> modify' (++ [event])

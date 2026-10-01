@@ -1,5 +1,4 @@
-import GHC.Generics (Generic)
-data OptionalObserver mode = OptionalObserver { observerPrivate :: mode :- State (), observeOptional :: mode :- Call (WorkEvent Text) NoReply } deriving Generic
+data OptionalObserver mode = OptionalObserver { observerPrivate :: mode :- State (), observeOptional :: mode :- Call (WorkEvent Text) NoReply }
 let optionalDefinition = coordinationActor "optional-observer" OptionalObserver { observerPrivate = (), observeOptional = \_ -> error "observer failure" }
 optional <- R.start optionalDefinition
 let staleObservation = observeOptional (R.client optional)
