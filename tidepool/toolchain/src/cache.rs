@@ -9,11 +9,42 @@ use std::path::{Path, PathBuf};
 use crate::digest::frame;
 
 /// Source snapshot identity, independent from compiler dependency selection.
-struct DependencyManifest {
+#[derive(Debug)]
+pub struct SourceRootManifest {
     files: Vec<(PathBuf, blake3::Hash)>,
 }
 
-impl DependencyManifest {
+impl SourceRootManifest {
+    /// Reuse complete file evidence produced while capturing a source root.
+    /// Header files may accompany the capture but do not contribute to the
+    /// established Haskell source identity.
+    pub fn from_file_digests(
+        files: impl IntoIterator<Item = (PathBuf, String)>,
+    ) -> Result<Self, SourceManifestError> {
+        let mut sources = std::collections::BTreeMap::new();
+        for (path, digest) in files {
+            if !is_haskell_dependency_source(&path) {
+                continue;
+            }
+            let digest = blake3::Hash::from_hex(&digest).map_err(|error| {
+                source_error(
+                    &path,
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+                )
+            })?;
+            sources.insert(path, digest);
+        }
+        Ok(Self {
+            files: sources.into_iter().collect(),
+        })
+    }
+
+    pub fn files(&self) -> impl Iterator<Item = (&Path, &blake3::Hash)> {
+        self.files
+            .iter()
+            .map(|(path, digest)| (path.as_path(), digest))
+    }
+
     fn fingerprint(&self, prefix: &Path, hasher: &mut blake3::Hasher) {
         frame(hasher, &(self.files.len() as u64).to_le_bytes());
         for (rel, digest) in &self.files {
@@ -45,8 +76,8 @@ fn source_error(path: &Path, source: std::io::Error) -> SourceManifestError {
 
 /// Enumerate Haskell home-module sources by their visible relative paths.
 /// The ancestor set breaks cycles while retaining distinct directory aliases.
-fn dependency_source_manifest(root: &Path) -> Result<DependencyManifest, SourceManifestError> {
-    let mut manifest = DependencyManifest { files: Vec::new() };
+fn dependency_source_manifest(root: &Path) -> Result<SourceRootManifest, SourceManifestError> {
+    let mut manifest = SourceRootManifest { files: Vec::new() };
     let mut ancestors = std::collections::HashSet::new();
     collect_dependency_sources(root, root, &mut manifest, &mut ancestors)?;
     manifest.files.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -71,13 +102,27 @@ pub fn source_roots_identity(
     domain: &[u8],
     roots: &[PathBuf],
 ) -> Result<String, SourceManifestError> {
-    let mut hasher = blake3::Hasher::new();
-    frame(&mut hasher, domain);
-    frame(&mut hasher, &(roots.len() as u64).to_le_bytes());
+    let mut hasher = source_identity_hasher(domain, roots.len());
     for root in roots {
         dependency_source_manifest(root)?.fingerprint(Path::new(""), &mut hasher);
     }
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Apply the same ordered-root framing to already inspected source evidence.
+pub fn source_manifests_identity(domain: &[u8], roots: &[SourceRootManifest]) -> String {
+    let mut hasher = source_identity_hasher(domain, roots.len());
+    for root in roots {
+        root.fingerprint(Path::new(""), &mut hasher);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn source_identity_hasher(domain: &[u8], roots: usize) -> blake3::Hasher {
+    let mut hasher = blake3::Hasher::new();
+    frame(&mut hasher, domain);
+    frame(&mut hasher, &(roots as u64).to_le_bytes());
+    hasher
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -92,7 +137,7 @@ fn hex_digest(bytes: &[u8]) -> String {
 fn collect_dependency_sources(
     root: &Path,
     dir: &Path,
-    out: &mut DependencyManifest,
+    out: &mut SourceRootManifest,
     ancestors: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<(), SourceManifestError> {
     let canonical = fs::canonicalize(dir).map_err(|error| source_error(dir, error))?;

@@ -833,6 +833,14 @@ fn capture_selected_runtime_libraries(
     Ok((RuntimeStdlib::Deployment { selection }, actors))
 }
 
+/// Inspect the same files and enforce the same source-tree policy as capture,
+/// without publishing or writing any source bytes.
+pub(super) fn inspect_sources(source: &Path) -> Result<BTreeMap<PathBuf, String>> {
+    let mut files = BTreeMap::new();
+    inspect_source_tree(source, Path::new(""), None, &mut files, false)?;
+    Ok(files)
+}
+
 fn capture_runtime_libraries(
     sources: &[PathBuf; 2],
     expected_identity: &str,
@@ -870,7 +878,19 @@ fn capture_tree(
     files: &mut BTreeMap<PathBuf, String>,
     all_authored: bool,
 ) -> Result<()> {
-    std::fs::create_dir_all(destination.join(relative))?;
+    inspect_source_tree(source, relative, Some(destination), files, all_authored)
+}
+
+fn inspect_source_tree(
+    source: &Path,
+    relative: &Path,
+    destination: Option<&Path>,
+    files: &mut BTreeMap<PathBuf, String>,
+    all_authored: bool,
+) -> Result<()> {
+    if let Some(destination) = destination {
+        std::fs::create_dir_all(destination.join(relative))?;
+    }
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -891,7 +911,7 @@ fn capture_tree(
         }
         let path = relative.join(&name);
         if kind.is_dir() {
-            capture_tree(&entry.path(), &path, destination, files, all_authored)?;
+            inspect_source_tree(&entry.path(), &path, destination, files, all_authored)?;
         } else if all_authored
             || matches!(
                 entry.path().extension().and_then(|x| x.to_str()),
@@ -899,7 +919,9 @@ fn capture_tree(
             )
         {
             let bytes = std::fs::read(entry.path())?;
-            tidepool_atomic_write::write_durable(&destination.join(&path), &bytes)?;
+            if let Some(destination) = destination {
+                tidepool_atomic_write::write_durable(&destination.join(&path), &bytes)?;
+            }
             files.insert(path, blake3::hash(&bytes).to_hex().to_string());
         }
     }

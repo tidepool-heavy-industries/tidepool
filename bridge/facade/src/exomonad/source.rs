@@ -22,11 +22,10 @@
 //! to immutable revision paths and issue an opaque source capsule. Its clones
 //! retain the configured run owner until every admitted capture releases.
 //!
-//! Not implemented, and why: an actor's already-installed tool record is not
-//! re-derived on reload (it is a one-shot compile at actor startup; the
-//! refresh boundary is the actor's next incarnation); `exomonad check --recipes`
-//! still compiles against the frozen capture only. A run reload that removes
-//! an authored module is rejected before the frozen floor can expose it.
+//! `exomonad check --recipes` compiles against the frozen capture. A run reload
+//! that removes an authored module is rejected before the frozen floor can
+//! expose it. Explicit AgentSpec reload independently replaces an installed
+//! dispatcher after source publication and declared-surface comparison.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -51,11 +50,9 @@ const REVISION_MODULE: &str = "Exomonad/Source/Revision.hs";
 
 /// One captured state of the workspace's source roots.
 ///
-/// `identity` is content-based, over the same per-file manifest the compiled
-/// artifact cache keys on, so equal source gives equal identity and changed
-/// source a different one. `generation` is the publication ordinal and exists
-/// only for display: it is 1-based, and 0 means "this snapshot has never been
-/// published".
+/// `identity` describes the ordered source snapshot, independently from
+/// compiler dependency selection. `generation` is the publication ordinal:
+/// it is 1-based, and 0 means "this snapshot has never been published".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SourceRevision {
     pub(crate) identity: String,
@@ -376,9 +373,14 @@ impl SourceLayer {
         domain_identity: &str,
         roots: &[PathBuf],
     ) -> Result<SourceRevision> {
-        let captured = self.capture(domain_identity, roots)?;
-        captured.directory.close()?;
-        Ok(captured.revision)
+        let manifests = roots
+            .iter()
+            .map(|root| {
+                let files = super::workspace::inspect_sources(root)?;
+                Ok(tidepool_toolchain::cache::SourceRootManifest::from_file_digests(files)?)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(source_revision(domain_identity, &manifests))
     }
 
     /// [`Self::observe_from_roots`] over the workspace's declared roots.
@@ -400,40 +402,33 @@ impl SourceLayer {
         let pending = tempfile::Builder::new()
             .prefix(".pending-")
             .tempdir_in(self.revisions())?;
+        let mut manifests = Vec::with_capacity(roots.len());
         for (index, root) in roots.iter().enumerate() {
+            let relative = PathBuf::from(index.to_string());
             let mut captured = BTreeMap::new();
-            super::workspace::capture_sources(
-                root,
-                Path::new(&index.to_string()),
-                pending.path(),
-                &mut captured,
-            )?;
+            super::workspace::capture_sources(root, &relative, pending.path(), &mut captured)?;
+            let files = captured
+                .into_iter()
+                .map(|(path, digest)| Ok((path.strip_prefix(&relative)?.to_path_buf(), digest)))
+                .collect::<Result<Vec<_>>>()?;
+            manifests
+                .push(tidepool_toolchain::cache::SourceRootManifest::from_file_digests(files)?);
         }
 
         // The identity covers the captured source only. The generated module
         // below carries that identity, so hashing it too would be circular —
         // the same ordering `freeze` uses for `Exomonad/Workspace.hs`.
-        let mut domain = DOMAIN.to_vec();
-        domain.extend_from_slice(domain_identity.as_bytes());
-        let captured_roots: Vec<PathBuf> = (0..roots.len())
-            .map(|index| pending.path().join(index.to_string()))
-            .collect();
-        let identity = tidepool_toolchain::cache::source_roots_identity(&domain, &captured_roots)?;
-        let modules = revision_modules(pending.path(), roots.len())?;
+        let revision = source_revision(domain_identity, &manifests);
 
         std::fs::create_dir_all(pending.path().join("resources/Exomonad/Source"))?;
         tidepool_atomic_write::write_durable(
             &pending.path().join("resources").join(REVISION_MODULE),
-            revision_module(&identity).as_bytes(),
+            revision_module(&revision.identity).as_bytes(),
         )?;
 
         Ok(CapturedRevision {
             directory: pending,
-            revision: SourceRevision {
-                identity,
-                generation: 0,
-                modules,
-            },
+            revision,
         })
     }
 
@@ -1786,11 +1781,33 @@ fn revision_include_paths(directory: &Path, roots: usize) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Every module `roots` provide, by module name, first root wins — exactly
-/// the shadowing GHC applies across the same include roots in the same
-/// order. Shared by a captured revision directory (whose roots are
-/// `directory/0`, `directory/1`, …, via [`revision_modules`]) and a live,
-/// uncaptured root list alike (e.g. [`ExomonadSourceReload::frozen_drift`]).
+/// Derive identity and first-root-wins module inventory from one complete
+/// inspection of each ordered source root.
+fn source_revision(
+    domain_identity: &str,
+    roots: &[tidepool_toolchain::cache::SourceRootManifest],
+) -> SourceRevision {
+    let mut domain = DOMAIN.to_vec();
+    domain.extend_from_slice(domain_identity.as_bytes());
+    let mut modules = BTreeMap::new();
+    for root in roots {
+        for (relative, digest) in root.files() {
+            if let Some(module) = module_name(relative) {
+                modules
+                    .entry(module)
+                    .or_insert_with(|| digest.to_hex().to_string());
+            }
+        }
+    }
+    SourceRevision {
+        identity: tidepool_toolchain::cache::source_manifests_identity(&domain, roots),
+        generation: 0,
+        modules: modules.into_iter().collect(),
+    }
+}
+
+/// Read every module the roots provide, with the same first-root-wins
+/// shadowing used for captured revision evidence.
 fn manifest_of_roots(roots: &[PathBuf]) -> Result<Vec<(String, String)>> {
     let mut modules: BTreeMap<String, String> = BTreeMap::new();
     for root in roots {
@@ -2182,20 +2199,98 @@ mod tests {
     }
 
     #[test]
-    fn source_observation_discards_scratch_and_retention_keeps_the_revision() {
+    fn source_observation_is_read_only_fresh_and_matches_retained_revision() {
         let run = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("A.hs"), "module A where").unwrap();
         let layer = SourceLayer::new(run.path());
         let roots = [root.path().to_path_buf()];
         let observed = layer.observe_from_roots("test", &roots).unwrap();
-        assert_eq!(std::fs::read_dir(layer.revisions()).unwrap().count(), 0);
+        assert!(!layer.revisions().exists());
         let retained = layer.capture_from_roots("test", &roots).unwrap();
         assert_eq!(retained.revision(), &observed);
         assert!(retained.directory.join("0/A.hs").is_file());
         let observed_again = layer.observe_from_roots("test", &roots).unwrap();
         assert_eq!(observed_again, observed);
         assert_eq!(std::fs::read_dir(layer.revisions()).unwrap().count(), 1);
+        std::fs::write(root.path().join("A.hs"), "module A where\na = 2").unwrap();
+        let changed = layer.observe_from_roots("test", &roots).unwrap();
+        assert_ne!(changed.identity, observed.identity);
+        assert_ne!(changed.modules, observed.modules);
+        assert_eq!(std::fs::read_dir(layer.revisions()).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_to_string(retained.directory.join("0/A.hs")).unwrap(),
+            "module A where"
+        );
+    }
+
+    #[test]
+    fn captured_manifest_preserves_identity_root_order_boots_and_header_policy() {
+        let run = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for (root, value) in [(first.path(), "1"), (second.path(), "2")] {
+            std::fs::write(root.join("A.hs"), format!("module A where\na = {value}")).unwrap();
+            std::fs::write(root.join("A.hs-boot"), "module A where\na :: Int").unwrap();
+            std::fs::write(root.join("L.lhs"), "> module L where").unwrap();
+            std::fs::write(root.join("L.lhs-boot"), "> module L where").unwrap();
+            std::fs::write(root.join("foreign.h"), "#define VALUE 1").unwrap();
+            std::fs::create_dir(root.join("target")).unwrap();
+            std::fs::write(root.join("target/Ignored.hs"), "module Ignored where").unwrap();
+        }
+        let layer = SourceLayer::new(run.path());
+        let roots = [first.path().to_path_buf(), second.path().to_path_buf()];
+        let retained = layer.capture_from_roots("test", &roots).unwrap();
+        let captured_roots: Vec<_> = (0..roots.len())
+            .map(|index| retained.directory.join(index.to_string()))
+            .collect();
+        let mut domain = DOMAIN.to_vec();
+        domain.extend_from_slice(b"test");
+        assert_eq!(
+            retained.revision().identity,
+            tidepool_toolchain::cache::source_roots_identity(&domain, &captured_roots).unwrap()
+        );
+        assert_eq!(
+            retained.revision().modules,
+            manifest_of_roots(&captured_roots).unwrap()
+        );
+        assert_eq!(retained.revision().modules.len(), 2);
+        assert!(retained.directory.join("0/foreign.h").is_file());
+        assert!(!retained.directory.join("0/target").exists());
+        let observed = layer.observe_from_roots("test", &roots).unwrap();
+        assert_eq!(observed, *retained.revision());
+        std::fs::write(first.path().join("foreign.h"), "#define VALUE 2").unwrap();
+        assert_eq!(layer.observe_from_roots("test", &roots).unwrap(), observed);
+        let reversed = layer
+            .observe_from_roots("test", &[roots[1].clone(), roots[0].clone()])
+            .unwrap();
+        assert_ne!(reversed.identity, observed.identity);
+        assert_ne!(reversed.modules, observed.modules);
+        std::fs::write(first.path().join("A.hs-boot"), "module A where\na :: Bool").unwrap();
+        let changed_boot = layer.observe_from_roots("test", &roots).unwrap();
+        assert_ne!(changed_boot.identity, observed.identity);
+        assert_eq!(changed_boot.modules, observed.modules);
+    }
+
+    #[test]
+    fn source_observation_rejects_partial_and_symlinked_inputs_without_writes() {
+        let run = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.hs"), "module A where").unwrap();
+        let layer = SourceLayer::new(run.path());
+        assert!(layer
+            .observe_from_roots(
+                "test",
+                &[root.path().to_path_buf(), root.path().join("missing")]
+            )
+            .is_err());
+        assert!(!layer.revisions().exists());
+        std::os::unix::fs::symlink(root.path().join("A.hs"), root.path().join("Alias.hs")).unwrap();
+        let error = layer
+            .observe_from_roots("test", &[root.path().to_path_buf()])
+            .unwrap_err();
+        assert!(error.to_string().contains("symlink"));
+        assert!(!layer.revisions().exists());
     }
 
     /// Identity is content, not time, path or capture: the same bytes captured
