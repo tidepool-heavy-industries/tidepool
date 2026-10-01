@@ -56,6 +56,10 @@ GHC="$(exe toolchains//:ghc)"
 cp -a "$PWD/$(location //bridge/facade:exomonad)" "$OUTPUT/bin/exomonad"
 cp -a "$PWD/$(location //tidepool/extract-cmd:tidepool-extract)" "$OUTPUT/bin/tidepool-extract"
 cp -a "$PWD/$(location //bridge/haskell:tidepool_extract_bin)" "$OUTPUT/bin/tidepool-extract-bin"
+TIDEPOOL_EXTRACT_WORKER="$OUTPUT/bin/tidepool-extract-bin" \
+  TIDEPOOL_GHC_LIBDIR="$(cat "$OUTPUT/share/exomonad/ghc-libdir.txt")" \
+  "$OUTPUT/bin/tidepool-extract" --compiler-deployment-manifest \
+    "$OUTPUT/share/exomonad/compiler-deployment.json"
 RUNTIME_LIBRARIES="$PWD/$(location :tidepool_extract_runtime_libraries)"
 for library in "$RUNTIME_LIBRARIES"/*; do
     test -e "$library"
@@ -77,6 +81,7 @@ sh_test(
         "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location :matched_runtime_bundle)/share/exomonad/web",
         "TIDEPOOL_EXTRACT": "$(location :matched_runtime_bundle)/bin/tidepool-extract",
         "TIDEPOOL_EXTRACT_WORKER": "$(location :matched_runtime_bundle)/bin/tidepool-extract-bin",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location :matched_runtime_bundle)/share/exomonad/compiler-deployment.json",
         "TIDEPOOL_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
         "PATH": read_root_config("nix", "bash").rsplit("/", 1)[0],
     },

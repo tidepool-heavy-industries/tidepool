@@ -5,6 +5,7 @@ bundle="$1"
 source="$2"
 test -x "$bundle/bin/tidepool-extract"
 test -x "$bundle/bin/tidepool-extract-bin"
+test -s "$bundle/share/exomonad/compiler-deployment.json"
 test -n "${TIDEPOOL_GHC_LIBDIR:-}"
 
 # Force a direct request to this package's worker instead of adopting any

@@ -24,8 +24,13 @@ if sys.argv[1] == "--compiler-endpoint-v1":
     # PRODUCER_BYTE parameterizes the fake producer identity so tests can
     # simulate a rebuild (a changed producer) between two probes.
     producer_byte = int(os.environ.get("PRODUCER_BYTE", "0"))
-    sys.stdout.buffer.write(b"TPCID001" + bytes([producer_byte]) * 32)
+    sys.stdout.buffer.write(b"TPCID002" + bytes([producer_byte]) * 64)
     sys.exit(2)  # EOF is deliberately not a complete compiler request.
+if sys.argv[1] == "--compiler-deployment-manifest":
+    manifest = Path(sys.argv[2])
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("{}\n")
+    sys.exit(0)
 if sys.argv[1] == "--stop-daemon":
     # Mirrors tidepool-extract's real --stop-daemon mode: send the wire's
     # STOP tag and wait (briefly) for the daemon's one-byte ack. No daemon
@@ -128,6 +133,7 @@ class ExtractHelpers(unittest.TestCase):
                         FRONTEND_FIXTURE=str(self.frontend), TEST_WORKER=str(self.worker),
                         DAEMON_PID_FILE=str(self.root / "daemon.pid"),
                         TIDEPOOL_ALLOW_STALE_EXTRACT="1", TMPDIR=str(self.root),
+                        TIDEPOOL_GHC_LIBDIR="/ghc/lib",
                         # Never observe the host's persistent compile daemon.
                         XDG_CACHE_HOME=str(self.root / "cache"))
 
@@ -157,10 +163,25 @@ class ExtractHelpers(unittest.TestCase):
         for target in (None, "relative target", str(self.root / "absolute target")):
             with self.subTest(target=target):
                 env = {} if target is None else {"CARGO_TARGET_DIR": target}
-                result = self.run_shell('resolve_tidepool_extract\nprintf "worker=%s\\n" "$TIDEPOOL_EXTRACT_WORKER"', **env)
+                result = self.run_shell(
+                    'resolve_tidepool_extract\n'
+                    'printf "worker=%s\\n" "$TIDEPOOL_EXTRACT_WORKER"\n'
+                    'printf "manifest=%s\\n" "$TIDEPOOL_COMPILER_DEPLOYMENT"',
+                    **env,
+                )
                 expected = (self.root / (target or "target") / "debug/tidepool-extract").resolve()
                 self.assertIn(f"TIDEPOOL_EXTRACT={expected}", result.stdout)
                 self.assertIn(f"worker={self.worker}", result.stdout)
+                manifest = self.root / "target/compiler-deployment.json"
+                self.assertIn(f"manifest={manifest}", result.stdout)
+                self.assertTrue(manifest.is_file())
+
+    def test_explicit_compiler_deployment_manifest_is_preserved(self):
+        manifest = self.root / "configured/compiler-deployment.json"
+        manifest.parent.mkdir()
+        manifest.write_text('{"schema": 1}\n')
+        self.run_shell("resolve_tidepool_extract", TIDEPOOL_COMPILER_DEPLOYMENT=str(manifest))
+        self.assertEqual(manifest.read_text(), '{"schema": 1}\n')
 
     def test_cargo_failure_is_not_hidden(self):
         self.run_shell("resolve_tidepool_extract", success=False, FAIL_CARGO="1")
@@ -181,7 +202,7 @@ class ExtractHelpers(unittest.TestCase):
             TIDEPOOL_KEEP_TEST_LOGS="1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.root / "cargo-calls").read_text().splitlines(),
-                         ["build -p tidepool --bin exomonad"])
+                         ["build -p tidepool --bin exomonad --bin exomonad-view-helper"])
         self.assertIn("starting per-run resident compile daemon", result.stderr)
         self.assertIn("check --recipe Project.Checks.run", (self.root / "exomonad-call").read_text())
         self.assertIn("extract.sock", (self.root / "exomonad-call").read_text())
@@ -196,7 +217,7 @@ class ExtractHelpers(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.root / "cargo-calls").read_text().splitlines(),
                          ["build -p tidepool-extract-cmd --bin tidepool-extract --message-format=json-render-diagnostics",
-                          "build -p tidepool --bin exomonad"])
+                          "build -p tidepool --bin exomonad --bin exomonad-view-helper"])
         (self.root / "cargo-calls").unlink()
         partial = self.run_exomonad_script("exomonad-build.sh", TIDEPOOL_EXTRACT=str(frontend))
         self.assertNotEqual(partial.returncode, 0)
@@ -224,7 +245,7 @@ class ExtractHelpers(unittest.TestCase):
             TIDEPOOL_EXTRACT_WORKER=str(worker), TIDEPOOL_ALLOW_STALE_EXTRACT="1")
         self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
         self.assertEqual((self.root / "cargo-calls").read_text().splitlines(),
-                         ["build -p tidepool --bin exomonad"])
+                         ["build -p tidepool --bin exomonad --bin exomonad-view-helper"])
 
     def exomonad_script_fixtures(self):
         scripts = self.root / "exomonad/scripts"
@@ -246,7 +267,7 @@ class ExtractHelpers(unittest.TestCase):
         exomonad.chmod(0o755)
         self.executable("cargo", '''#!/bin/sh
 printf "%s\\n" "$*" >> "$TEST_ROOT/cargo-calls"
-if [ "$*" = "build -p tidepool --bin exomonad" ]; then exit 0; fi
+if [ "$*" = "build -p tidepool --bin exomonad --bin exomonad-view-helper" ]; then exit 0; fi
 if [ "$*" = "build -p tidepool-extract-cmd --bin tidepool-extract --message-format=json-render-diagnostics" ]; then
   printf '{"reason":"compiler-artifact","target":{"name":"tidepool-extract"},"executable":"%s/target/debug/tidepool-extract","fresh":true}\\n' "$TEST_ROOT"
   exit 0
@@ -343,7 +364,7 @@ exit 9
 
     def test_timed_out_endpoint_is_rejected_even_after_identity(self):
         self.executable("timeout", '#!/usr/bin/env python3\nimport sys\n'
-                        'sys.stdout.buffer.write(b"TPCID001" + bytes(32))\nsys.exit(124)\n')
+                        'sys.stdout.buffer.write(b"TPCID002" + bytes(64))\nsys.exit(124)\n')
         self.run_shell("validate_tidepool_extract_endpoint", success=False,
                        TIDEPOOL_EXTRACT=str(self.frontend))
 

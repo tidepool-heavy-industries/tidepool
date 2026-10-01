@@ -408,12 +408,16 @@
               };
             in
             pkgs.runCommand "tidepool-extract" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
-              mkdir -p "$out/bin"
+              mkdir -p "$out/bin" "$out/share/exomonad"
               makeWrapper ${frontend}/bin/tidepool-extract "$out/bin/tidepool-extract" \
                 --prefix PATH : ${ghcEnv}/bin \
                 --set TIDEPOOL_EXTRACT_WORKER ${harness}/bin/tidepool-extract-bin
               # Exomonad locates the pair before retaining the frontend for a run.
               ln -s ${harness}/bin/tidepool-extract-bin "$out/bin/tidepool-extract-bin"
+              TIDEPOOL_EXTRACT_WORKER=${harness}/bin/tidepool-extract-bin \
+                TIDEPOOL_GHC_LIBDIR="$(${ghcEnv}/bin/ghc --print-libdir)" \
+                ${frontend}/bin/tidepool-extract --compiler-deployment-manifest \
+                  "$out/share/exomonad/compiler-deployment.json"
             '';
 
           packages.exomonad-embedded-assets = embeddedWebAssets;
@@ -469,6 +473,9 @@
                   )
                 } \
                 --set TIDEPOOL_EXTRACT "${self.packages.${system}.tidepool-extract}/bin/tidepool-extract" \
+                --set TIDEPOOL_COMPILER_DEPLOYMENT "${
+                  self.packages.${system}.tidepool-extract
+                }/share/exomonad/compiler-deployment.json" \
                 --set EXOMONAD_INTERACTIVE_CODEX_BIN "${interactiveCodex}/bin/codex" \
                 --set EXOMONAD_CODEX_CLOSURE "${interactiveCodex}" \
                 --set EXOMONAD_NIX_STORE_BIN "${pkgs.nix}/bin/nix-store" \
