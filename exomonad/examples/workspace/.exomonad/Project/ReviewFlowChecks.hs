@@ -199,7 +199,7 @@ effectfulRouting = do
   void $ turn (checkActor reviewer)
     "let request = sessionInput :: ReviewRequest\nrespond (Produced (Repair (reviewInput request) [\"repair changes the task contract\"]))"
   awaitCell owner "effectful route escalates valid exact-source Repair without dispatching repair"
-    "do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (case (flowStage state, flowReviewRoutes state) of { (ReviewStopped (ReviewEscalated reason), [(_, ReviewRouteResult (EscalateReview selected) DeterministicRoute)]) -> selected == reason && flowRepairCount state == 0 && null (flowRepairRequests state); _ -> False }) }"
+    "do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (case (flowStage state, flowReviewRoutes state) of { (ReviewStopped (ReviewEscalated reason), [(_, ReviewRouteResult (EscalateReview selected) DeterministicRoute)]) -> reason == \"owner must decide this scope change\" && selected == reason && flowRepairCount state == 0 && null (flowRepairRequests state); _ -> False }) }"
   void $ turn owner
     "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (length (flowNotices state))"
   assertCell owner "owner receives one escalation notice"

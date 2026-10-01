@@ -51,12 +51,9 @@ redPreserved = do
     , "Right sourceTree <- createWorktree (fromRef \"recipe/red-preserved\" \"red-source\")"
     , "Right integration <- createWorktree (fromRef \"recipe/red-preserved\" \"red-preserved\")"
     , "merger <- R.start (M.mergeInto (worktreeId integration) (Just \"recipe/red-preserved\") [\"sh\", \"-c\", \"printf 'staged-check\\n' > red-preserved.txt; git add -- red-preserved.txt; printf 'working-check\\n' > red-preserved.txt; printf intentional-red >&2; exit 7\"])"
-    , "let managedIntegration = worktreeId integration"
     , "sourceProbe <- R.start (R.withWorktree (worktreeId sourceTree) Fixture.mergeProbe)"
     , "integrationProbe <- R.start (R.withWorktree (worktreeId integration) Fixture.mergeProbe)"
     ]
-  assertCell owner "integration actor owns the allocated managed checkout"
-    "managedIntegration == worktreeId integration"
   void $ turn owner $ Text.unlines
     [ "import qualified Tidepool.Effects.Core as Core"
     , "let commandAt :: Member Core.Actor effects => R.ActorHandle Fixture.MergeProbe -> [Text] -> Eff effects Cmd.RunResult; commandAt probe args = R.call (Fixture.probeCommand (R.client probe)) args"
@@ -77,6 +74,8 @@ redPreserved = do
     [ "view <- R.call (M.mergeView (R.client merger)) ()"
     , "inspectFull (case first of { M.RedPreserved _ checked evidence -> M.integrationHead evidence == checked && not (M.integrationPassed evidence) && Cmd.commandOutcome (Cmd.commandResult (M.integrationReceipt evidence)) == Cmd.CommandExited 7 && Cmd.commandCleanup (Cmd.commandResult (M.integrationReceipt evidence)) == Cmd.CommandClean && case reverse (M.mergeHistory view) of { M.MergeHistory _ _ (M.IntegrationRed _ retained) : _ -> retained == evidence; _ -> False }; _ -> False })"
     ]
+  assertCell owner "integration actor owns the allocated managed checkout"
+    "case M.mergeTree view of { Just tree -> worktreeId tree == worktreeId integration; _ -> False }"
   assertCell owner "red evidence retains terminal receipt and same history proof"
     ("(case first of { M.RedPreserved _ checked evidence -> M.integrationHead evidence == checked && not (M.integrationPassed evidence) && Cmd.commandOutcome (Cmd.commandResult (M.integrationReceipt evidence)) == Cmd.CommandExited 7 && Cmd.commandCleanup (Cmd.commandResult (M.integrationReceipt evidence)) == Cmd.CommandClean && case reverse (M.mergeHistory view) of { M.MergeHistory _ _ (M.IntegrationRed _ retained) : _ -> retained == evidence; _ -> False }; _ -> False })")
   void $ turn owner "postEdit <- commandAt integrationProbe [\"sh\", \"-c\", \"printf 'post-check-edit\\n' > post-check.txt\"]"
