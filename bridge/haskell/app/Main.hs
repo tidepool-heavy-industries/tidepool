@@ -41,7 +41,7 @@ import qualified Data.Text.Encoding as TE
 import Tidepool.Binders
   ( extractBindersNamed
   , extractStmtBinders, classifyBlock, exportItemName
-  , analyzeCell, renderCellCheckSource, CellSplitError(..), CellSourceSpan(..)
+  , analyzeCell, analyzeOrderedCell, renderCellCheckSource, CellSplitError(..), CellSourceSpan(..)
   , CellSourcePlan(..), CellAnalysisItem(..), installCellDisplayDeclarations
   , declarationSourceWithTemplate, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
@@ -242,22 +242,32 @@ runParsedInvocation compiler caches parsedWorkerRequest = do
 dispatch
   :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
 dispatch compiler caches timing args = do
-  admitted <- trySynchronous $ forM_ (requestSessionArtifacts args) $ \manifest -> do
-    scope <- readExactScope manifest >>= either fail pure
-    forM_ (scopeIncludePaths scope) $ \includes ->
-      unless (requestIncludes args == includes)
-        (throwIO SearchInputsChanged)
-    forM_ (scopeCheckedCell scope) $ \_ ->
-      unless (requestCell args && not (requestTurn args) && not (requestClassify args)
+  admitted <- trySynchronous $ do
+    when (requestCellPlan args) $
+      unless (length (requestFiles args) == 1 && not (requestCell args)
+          && not (requestTurn args) && not (requestClassify args)
+          && null (requestInspections args) && not (isJust (requestSessionArtifacts args))
+          && not (isJust (requestDeclarationJoin args)) && not (isJust (requestModuleCandidates args))
+          && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
+          && not (requestCellFoldTurn args) && not (isJust (requestBindGen args))
+          && Map.null (requestRetainedGenerations args))
+        (throwIO InvalidCellPlanRequest)
+    forM_ (requestSessionArtifacts args) $ \manifest -> do
+      scope <- readExactScope manifest >>= either fail pure
+      forM_ (scopeIncludePaths scope) $ \includes ->
+        unless (requestIncludes args == includes)
+          (throwIO SearchInputsChanged)
+      forM_ (scopeCheckedCell scope) $ \_ ->
+        unless (requestCell args && not (requestTurn args) && not (requestClassify args)
           && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
           && not (requestCertifyHomeProducts args) && not (requestActivationPreview args))
-        (throwIO CheckedPurposeMismatch)
-    forM_ (scopeCheckedItem scope) $ \_ ->
-      unless (requestTurn args && not (requestCell args) && not (requestClassify args)
+          (throwIO CheckedPurposeMismatch)
+      forM_ (scopeCheckedItem scope) $ \_ ->
+        unless (requestTurn args && not (requestCell args) && not (requestClassify args)
           && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
           && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
           && not (isJust (requestTurnPin args)) && not (isJust (requestTarget args)))
-        (throwIO CheckedPurposeMismatch)
+          (throwIO CheckedPurposeMismatch)
   case admitted of
     Left failure -> reportDiags (Left failure)
     Right () -> case requestDeclarationJoin args of
@@ -275,6 +285,7 @@ dispatchSource compiler caches timing args =
                                                   -> reportDiags (Left (toException (userError "inspection type batch requires at least two type queries and no other query kinds")))
         | requestActivationPreview args && (not (requestTurn args) || not (isJust (requestTurnVerdict args)))
                                                   -> reportDiags (Left (toException (userError "activation requires a prepared turn with a generated bind verdict")))
+        | requestCellPlan args                    -> runCellPlanMode args file
         | requestCell args                        -> runCellMode compiler caches args file
         | requestClassify args                    -> runClassifyMode timing args
         | not (null (requestInspections args))    -> runInspectionMode compiler args file
@@ -1100,6 +1111,34 @@ runClassifyMode timing args =
 -- | Split, classify, and typecheck one notebook cell in a single worker
 -- request. Rust authors the module template (scope/import/effect-row policy);
 -- GHC owns every Haskell decision and returns post-zonk statement binder pins.
+-- Parsing chooses execution ordinals before runtime reserves original owners.
+-- The emitted receipt contains no checked pins, prepared bodies or live values.
+runCellPlanMode :: WorkerRequest -> FilePath -> IO ExitCode
+runCellPlanMode args cellPath = do
+  result <- trySynchronous $ do
+    source <- readFile cellPath
+    templatePath <- requireArg "--cell-template" (requestCellTemplate args)
+    template <- readFile templatePath
+    templates <- forM (requestTurnTemplates args) $ \(kind,path) -> do
+      bytes <- BS.readFile path
+      pure (kind, shaHex bytes)
+    plan <- analyzeOrderedCell template source >>= either throwCellSplitError pure
+    let text = encodeString . T.pack
+        observation = encodeCellOut plan [] [] ""
+        receipt = encodeListLen 7 <> text "TPCELLPLAN1"
+          <> text (shaHex (TE.encodeUtf8 (T.pack source)))
+          <> text (shaHex (TE.encodeUtf8 (T.pack template)))
+          <> encodeListLen (fromIntegral (length templates))
+          <> foldMap (\(kind,digest) -> encodeListLen 2 <> text kind <> text digest) templates
+          <> encodeListLen (fromIntegral (length (requestIncludes args)))
+          <> foldMap text (requestIncludes args)
+          <> encodeListLen (fromIntegral (length (requestInjectVals args)))
+          <> foldMap text (requestInjectVals args)
+          <> encodeBytes observation
+    out <- requireArg "--cell-out" (requestCellOut args)
+    BS.writeFile out (toStrictByteString receipt)
+  reportDiags result
+
 runCellMode :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
 runCellMode compiler caches args cellPath = do
   timing <- readTimingEnabled

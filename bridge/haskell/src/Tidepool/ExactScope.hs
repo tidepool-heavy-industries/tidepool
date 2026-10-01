@@ -3,6 +3,7 @@
 module Tidepool.ExactScope
   ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..)
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..)
+  , PlannedCellAdmission(..), PlannedCellSlot(..)
   , readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation
   ) where
@@ -76,6 +77,19 @@ data CheckedCellAdmission = CheckedCellAdmission
   , checkedInjectedModules :: [String]
   , checkedReservedModules :: [String]
   , checkedValueInterfaces :: [ExactIfaceArtifact]
+  , checkedPlannedCell :: Maybe PlannedCellAdmission
+  } deriving (Eq, Show)
+
+data PlannedCellSlot = PlannedPrologue Word64 | PlannedDeclaration Word64
+  | PlannedBind Word64 | PlannedExpression Word64 Word64 String
+  deriving (Eq, Show)
+
+data PlannedCellAdmission = PlannedCellAdmission
+  { plannedParserDigest :: String
+  , plannedParserPath :: FilePath
+  , plannedParserSha256 :: String
+  , plannedReservationDigest :: String
+  , plannedSlots :: [PlannedCellSlot]
   } deriving (Eq, Show)
 
 data CheckedItemAdmission = CheckedItemAdmission
@@ -282,10 +296,28 @@ decodeScope = do
         unless (authCount == 9) (fail "invalid cell-check admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
           <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
-          <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces
+          <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces <*> pure Nothing
         validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         unique "checked injected modules" (checkedInjectedModules admission)
         unique "checked reserved modules" (checkedReservedModules admission)
+        paths <- includePaths
+        pure (Just admission,Nothing,Nothing,Just paths)
+      "cell-program1" -> do
+        unless (authCount == 14) (fail "invalid compiled cell admission")
+        admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
+          <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
+          <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces
+          <*> (Just <$> (PlannedCellAdmission <$> digestField <*> absolute <*> digestField <*> digestField
+            <*> bounded 10000 (do
+              count <- decodeListLen
+              kind <- nonempty
+              case (kind,count) of
+                ("prologue",2) -> PlannedPrologue <$> decodeWord64
+                ("decl",2) -> PlannedDeclaration <$> decodeWord64
+                ("bind",2) -> PlannedBind <$> decodeWord64
+                ("expr",4) -> PlannedExpression <$> decodeWord64 <*> decodeWord64 <*> nonempty
+                _ -> fail "invalid compiled cell reservation")))
+        validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         paths <- includePaths
         pure (Just admission,Nothing,Nothing,Just paths)
       "checked-item2" -> do

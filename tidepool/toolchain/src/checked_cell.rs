@@ -149,6 +149,185 @@ pub struct ExactCheckedCell {
     value_inputs: Arc<CheckedValueInputs>,
 }
 
+/// Read-only original identities from a final ordered compiler receipt.
+/// Constructing this projection cannot issue an ordered checked capability.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckedPlannedCellSlot {
+    Prologue {
+        declaration: u64,
+    },
+    Declaration {
+        declaration: u64,
+    },
+    Bind {
+        value: u64,
+    },
+    Expression {
+        capture: u64,
+        display: u64,
+        observation_name: String,
+    },
+}
+
+/// An untrusted ordered offer recipe. Only a final same-offer worker receipt
+/// can promote these reservations into an `ExactCheckedCell`.
+#[derive(Clone, Debug)]
+pub struct CheckedPlannedCellSpecification {
+    pub parsed_plan: Arc<crate::cell_plan::ParsedCellPlan>,
+    pub reservation_digest: [u8; 32],
+    pub slots: Vec<CheckedPlannedCellSlot>,
+}
+
+impl CheckedPlannedCellSpecification {
+    pub(crate) fn authorization(
+        &self,
+        specification: &CheckedCellSpecification,
+        producer: &[u8],
+        include: &[std::path::PathBuf],
+        scratch: &Path,
+    ) -> Result<Vec<Value>, CompileError> {
+        use crate::cell_plan::ParsedCellPlanKind;
+        if self.reservation_digest == [0; 32]
+            || self.reservation_digest != specification.admission_digest
+            || self.parsed_plan.specification_digest() != specification.specification_digest()
+            || !same_include_paths(self.parsed_plan.include_paths(), include)
+            || self.parsed_plan.injected_modules() != specification.injected_modules
+            || self.parsed_plan.producer_sha256() != <[u8; 32]>::from(Sha256::digest(producer))
+            || self.slots.len() != self.parsed_plan.items().len()
+        {
+            return Err(planned_input_rejection(
+                "ordered source, producer, or reservation differs",
+            ));
+        }
+        let mut libraries = Vec::new();
+        let mut values = BTreeSet::new();
+        let mut observations = BTreeSet::new();
+        let mut encoded = Vec::with_capacity(self.slots.len());
+        for (item, slot) in self.parsed_plan.items().iter().zip(&self.slots) {
+            let fields = match (item.kind(), slot) {
+                (
+                    ParsedCellPlanKind::Prologue,
+                    CheckedPlannedCellSlot::Prologue { declaration },
+                )
+                | (
+                    ParsedCellPlanKind::Declaration,
+                    CheckedPlannedCellSlot::Declaration { declaration },
+                ) if *declaration > 0 => {
+                    libraries.push(
+                        tidepool_repr::SessionModule::lib(tidepool_repr::Generation(*declaration))
+                            .module_name(),
+                    );
+                    vec![
+                        text(if item.kind() == ParsedCellPlanKind::Prologue {
+                            "prologue"
+                        } else {
+                            "decl"
+                        }),
+                        Value::Integer((*declaration).into()),
+                    ]
+                }
+                (ParsedCellPlanKind::Bind, CheckedPlannedCellSlot::Bind { value })
+                    if *value > 0 && values.insert(*value) =>
+                {
+                    vec![text("bind"), Value::Integer((*value).into())]
+                }
+                (
+                    ParsedCellPlanKind::Expression,
+                    CheckedPlannedCellSlot::Expression {
+                        capture,
+                        display,
+                        observation_name,
+                    },
+                ) if *capture > 0
+                    && *display > 0
+                    && values.insert(*capture)
+                    && values.insert(*display)
+                    && valid_observation_name(observation_name)
+                    && observations.insert(observation_name.as_str()) =>
+                {
+                    vec![
+                        text("expr"),
+                        Value::Integer((*capture).into()),
+                        Value::Integer((*display).into()),
+                        text(observation_name),
+                    ]
+                }
+                _ => {
+                    return Err(planned_input_rejection(
+                        "ordered item has another reserved slot",
+                    ))
+                }
+            };
+            encoded.push(Value::Array(fields));
+        }
+        if libraries != specification.reserved_declaration_modules
+            || libraries.iter().collect::<BTreeSet<_>>().len() != libraries.len()
+        {
+            return Err(planned_input_rejection(
+                "ordered original owner inventory differs",
+            ));
+        }
+        let path = scratch.join("parsed-cell-plan.cbor");
+        std::fs::write(&path, self.parsed_plan.receipt())?;
+        let path = path
+            .to_str()
+            .filter(|_| path.is_absolute())
+            .ok_or_else(|| planned_input_rejection("ordered parser receipt has no exact path"))?;
+        Ok(vec![
+            text(hex(&self.parsed_plan.digest())),
+            text(path),
+            text(hash(self.parsed_plan.receipt())),
+            text(hex(&self.reservation_digest)),
+            Value::Array(encoded),
+        ])
+    }
+}
+
+fn valid_observation_name(name: &str) -> bool {
+    name.starts_with("observation")
+        && name.len() <= 65536
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn planned_input_rejection(message: &str) -> CompileError {
+    CompileError::InputRejected(vec![crate::diag::ExtractDiag {
+        span: None,
+        severity: crate::diag::DiagnosticSeverity::Error,
+        message: message.to_owned(),
+    }])
+}
+
+/// Complete immutable output of one admitted compiler transaction. Preparing
+/// interfaces never asserts that the corresponding native binding is live.
+#[derive(Debug)]
+pub struct CellProgram {
+    checked: Arc<ExactCheckedCell>,
+    parsed: Arc<crate::cell_plan::ParsedCellPlan>,
+    slots: Vec<CheckedPlannedCellSlot>,
+    items: Vec<CellProgramItem>,
+}
+
+#[derive(Debug)]
+pub struct CellProgramItem {
+    checked: ExactCheckedItem,
+    native: Option<Arc<ExactCompiledItem>>,
+    display: Option<Arc<ExactCompiledDisplay>>,
+}
+
+impl CellProgram {
+    pub fn checked_cell(&self) -> &Arc<ExactCheckedCell> { &self.checked }
+    pub fn parsed_plan(&self) -> &Arc<crate::cell_plan::ParsedCellPlan> { &self.parsed }
+    pub fn admission_digest(&self) -> [u8; 32] { self.checked.admission_digest() }
+    pub fn slots(&self) -> &[CheckedPlannedCellSlot] { &self.slots }
+    pub fn items(&self) -> &[CellProgramItem] { &self.items }
+}
+
+impl CellProgramItem {
+    pub fn checked_item(&self) -> &ExactCheckedItem { &self.checked }
+    pub fn native(&self) -> Option<&Arc<ExactCompiledItem>> { self.native.as_ref() }
+    pub fn display(&self) -> Option<&Arc<ExactCompiledDisplay>> { self.display.as_ref() }
+}
+
 /// The existing checked-cell artifact owner retains one directory for exact
 /// input bytes. Directory membership is never authority: every request lists
 /// only the original inventory and its sealed completed deltas.
@@ -565,6 +744,7 @@ impl CheckedSettledValues {
 enum CheckedExecutionAdmission {
     InitialFold([u8; 32]),
     RuntimeItem([u8; 32]),
+    CellProgram([u8; 32]),
 }
 
 /// A checked recipe and its exact prepared target, issued together by the
@@ -799,6 +979,7 @@ impl ExactCompiledItem {
     ) -> Result<(), CompileError> {
         let valid = match self.admission {
             CheckedExecutionAdmission::RuntimeItem(digest) => digest == item_digest,
+            CheckedExecutionAdmission::CellProgram(digest) => digest == cell_digest,
             CheckedExecutionAdmission::InitialFold(digest) => {
                 digest == cell_digest
                     && self.item.index() == 0

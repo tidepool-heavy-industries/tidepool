@@ -527,6 +527,13 @@ impl ExtractCmd {
         self
     }
 
+    /// Parse an ordered cell plan without checking types or compiling products.
+    /// Its bounded receipt is written to the request's `cell_out` path.
+    pub fn cell_plan(&mut self) -> &mut Self {
+        self.request.cell_plan();
+        self
+    }
+
     /// Runtime-authored module template containing the two cell placeholders.
     pub fn cell_template(&mut self, path: &Path) -> &mut Self {
         self.request.cell_template(path);

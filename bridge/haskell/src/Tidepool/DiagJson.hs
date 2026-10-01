@@ -48,6 +48,7 @@ data InputRejection
   | InvalidCheckingWrapper String
   | InvalidDeclarationReservation
   | InvalidDeclarationWrapper String
+  | InvalidCellPlanRequest
   deriving Show
 instance Exception InputRejection
 

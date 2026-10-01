@@ -31,6 +31,15 @@ use crate::{
 // Typed yield sites (`asks.json` on disk)
 // ---------------------------------------------------------------------------
 
+/// Parse the source before reserving original module and value identities.
+/// This capability contains no checked types or native authority.
+pub fn parse_cell_plan(
+    specification: Arc<crate::checked_cell::CheckedCellSpecification>,
+    include_paths: &[PathBuf],
+) -> Result<Arc<crate::cell_plan::ParsedCellPlan>, CompileError> {
+    crate::cell_plan::parse(specification, include_paths)
+}
+
 /// One compiler sidecar entry: a typed suspension-site id, its rendered answer
 /// type, any live input types, and the defining modules needed to resolve each
 /// type by name —
@@ -263,6 +272,7 @@ pub struct ModuleCandidateOffer {
     include: Vec<PathBuf>,
     exact: Option<crate::declaration_context::ExactCompilationRequest>,
     checked_cell: Option<crate::checked_cell::CheckedCellSpecification>,
+    planned_cell: Option<crate::checked_cell::CheckedPlannedCellSpecification>,
     checked_values: Option<Arc<crate::checked_cell::CheckedValueInputs>>,
     checked_item: Option<crate::checked_cell::CheckedItemOffer>,
     checked_display: Option<crate::checked_cell::CheckedDisplayOffer>,
@@ -353,6 +363,7 @@ impl ModuleCandidateOffer {
             include: include.to_vec(),
             exact: None,
             checked_cell: None,
+            planned_cell: None,
             checked_values: None,
             checked_item: None,
             checked_display: None,
@@ -371,6 +382,7 @@ impl ModuleCandidateOffer {
             include: include.to_vec(),
             exact: Some(context.prepare_compilation(&scratch.join("exact-scope"), producer)?),
             checked_cell: None,
+            planned_cell: None,
             checked_values: None,
             checked_item: None,
             checked_display: None,
@@ -418,7 +430,40 @@ impl ModuleCandidateOffer {
                 Some(authorization),
             )?),
             checked_cell: Some(specification),
+            planned_cell: None,
             checked_values: Some(checked_values),
+            checked_item: None,
+            checked_display: None,
+        })
+    }
+
+    /// Reserve the complete original identity inventory before compilation.
+    pub fn select_cell_program(
+        producer: &[u8],
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        specification: crate::checked_cell::CheckedCellSpecification,
+        values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
+        planned: crate::checked_cell::CheckedPlannedCellSpecification,
+    ) -> Result<Self, CompileError> {
+        let extension = planned.authorization(&specification, producer, include, scratch)?;
+        let mut authorization = specification.manifest_value()?;
+        let inputs = crate::checked_cell::CheckedValueInputs::capture(values)?;
+        let Value::Array(fields) = &mut authorization else { unreachable!("closed authorization") };
+        fields[0] = Value::Text("cell-program1".into());
+        fields.push(inputs.baseline_authorization());
+        fields.extend(extension);
+        fields.push(Value::Array(include.iter().map(|path| Value::Text(path.to_string_lossy().into_owned())).collect()));
+        let context = checked_offer_context(context)?;
+        Ok(Self {
+            selected: immutable_candidates_in_context(&context, producer, include, scratch),
+            producer: producer.to_vec(),
+            include: include.to_vec(),
+            exact: Some(context.prepare_compilation_with_authorization(&scratch.join("exact-scope"), producer, Some(authorization))?),
+            checked_cell: Some(specification),
+            planned_cell: Some(planned),
+            checked_values: Some(inputs),
             checked_item: None,
             checked_display: None,
         })
@@ -470,6 +515,7 @@ impl ModuleCandidateOffer {
                 Some(authorization),
             )?),
             checked_cell: None,
+            planned_cell: None,
             checked_values: None,
             checked_item: Some(checked_item),
             checked_display: None,
@@ -525,6 +571,7 @@ impl ModuleCandidateOffer {
                 Some(authorization),
             )?),
             checked_cell: None,
+            planned_cell: None,
             checked_values: None,
             checked_item: None,
             checked_display: Some(display),
