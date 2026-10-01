@@ -6,8 +6,10 @@ record and reload example. Nest `Shell.ShellTools` to retain `bash`, `write_stdi
 
 `Shell.execute` implements structured `bash` with `Cmd.tryStart` and bounded
 `Cmd.observe`, so an observation expiry returns a retained job and the handler
-can continue. `Cmd.run` instead uses foreground handoff when observation expires.
-Choose between those execution semantics explicitly when authoring a new tool.
+can continue. Bounded observation does not detach the invocation-owned job;
+this presenter explicitly transfers unfinished work before returning it.
+`Cmd.run` preserves its continuation until terminal completion. Choose bounded
+presentation or an ordinary suspended computation explicitly when authoring a tool.
 
 Schemas and dispatch derive from the same Haskell record. The declared surface
 is fixed for an actor incarnation. The run owner can use `reloadSource` and

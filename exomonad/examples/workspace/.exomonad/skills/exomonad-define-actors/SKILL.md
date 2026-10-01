@@ -1,6 +1,6 @@
 ---
 name: exomonad-define-actors
-description: Define typed Haskell actors in a resident Exomonad session for custom joins, stateful routing and automatic continuations. Load when Project.Routing's existing collectors do not express the required coordination.
+description: Define typed Haskell actors in a resident Exomonad session for custom joins, stateful routing and automatic continuations. Load when Exomonad.Contrib.Routing's existing collectors do not express the required coordination.
 ---
 
 One record describes private state, public calls and fixed source handlers. The
@@ -17,12 +17,10 @@ Availability of the names below:
   `R.forwardResult`, `requestWithProgressInto`, `LocalEffects`, `ActorSpec`,
   `Handler`, `Actor.Selected`, `knownEffects`, `Replies`, `Actor`,
   `Notifications`.
-- **Example-only** — defined in `.exomonad/workspace/Project`, and
-  **not in scope in a fresh project**: `coordinationActor` and
-  `CoordinationEffects` (`Project.Actors`), `Outcome` and `Candidate`
-  (`Project.Types`). The examples here use them because this workspace ships
-  them; the last section writes the same actor without them, and a project
-  writes its own wrapper the same way in its own `.exomonad`.
+- **Shared contrib** — available through configured package imports: `coordinationActor` and
+  `CoordinationEffects` (`Exomonad.Contrib.Actors`), `Outcome` and `Candidate`
+  (`Exomonad.Contrib.Types`). The last section shows the lower-level shipped API when contrib imports
+  are absent.
 
 Confirm a name with `lookup` before depending on it. A skill's example is
 evidence of a pattern, not proof that the name is installed for you.
@@ -75,7 +73,9 @@ creator. It retains completion for a late collector. Route the result, including
 its cleanup evidence, rather than waking a model to poll command status.
 Sources compose with `fmap` and `(<>)`: tag independent sources with shared project
 constructors or names. Each handler receives one event. Publications accepted
-while it is busy remain ordered; no cursor rearming is required. Attachment starts
+while it is busy remain ordered; handlers remain serialized even during
+a suspended wait. Never await an event requiring another handler on that same
+mailbox to run; no cursor rearming is required. Attachment starts
 from retained current source state, not a replay of unavailable earlier history.
 
 Within a handler, `R.self @Join` supplies send-only endpoints for return messages.
@@ -104,7 +104,7 @@ to a route on `Self`; that route can create a collector using its receiving
 incarnation's endpoints. `checks/review-continuation.hs` is a low-level regression
 fixture for this retention boundary; its retained reviewer requires explicit
 checkout preparation. Routine review uses `startReviewFlow`, described in
-`plans/continuation.md`, which owns exact-source admission. Do not reconstruct
+`WORKBENCH.md`, which owns exact-source admission. Do not reconstruct
 response handles from labels or repeat submission after uncertain failure.
 
 Keep the integration actor alive through useful repairs. When done:
@@ -122,7 +122,7 @@ what the next engineering decision needs.
 
 ## Without the example workspace
 
-`coordinationActor` is one line this workspace wrote for itself:
+`Exomonad.Contrib.Actors.coordinationActor` composes these two definitions:
 
 ```
 coordinationActor name = R.definition name (Actor.Selected knownEffects)
@@ -174,5 +174,5 @@ re-exported by the workbench surface — a cell naming them needs
 checked against the launching actor's ceiling, so asking for more than the
 creator holds is refused at start, not silently granted. When the loop this
 record carries is implement → review → repair → merge, load `exomonad-review`
-for the owner-map and repair-policy shape and `Project.Merge` for the
+for the owner-map and repair-policy shape and `Exomonad.Contrib.Merge` for the
 integrator actor.

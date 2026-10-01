@@ -68,8 +68,8 @@ proposals distinct. Measure product progress and orchestration improvements
 separately, carry unresolved questions forward, and judge changes by subsequent
 behavior. Useful procedures become authored programs; missing capabilities can
 justify new primitives. [The RSI loop](docs/rsi-loop.md) describes the working
-pattern; [the current iteration](plans/rsi-iteration-1.md) records experiments
-and evidence.
+pattern; [the plan index](plans/README.md) separates current obligations from
+retained experimental evidence.
 
 ## System 1 is a program, not another chat
 
@@ -149,7 +149,7 @@ Long-running work has a handle that later cells can inspect:
 
 ```haskell
 let check = withMemory (GiB 4) [bash|cargo test -p my_crate --lib|]
-job <- Cmd.start check
+job <- Cmd.background check
 -- Later, inspect the same job:
 Cmd.status job
 Cmd.tailOutput Cmd.Stderr job
@@ -250,7 +250,7 @@ parents decide how to respond rather than relying on automatic restarts.
   output, and input/PTY support. A systemd slice bounds the whole run.
 
 The [actor guide](exomonad/examples/workspace/.exomonad/skills/exomonad-define-actors/SKILL.md)
-and [orchestration skill](exomonad/examples/workspace/.exomonad/skills/exomonad-orchestrate/SKILL.md)
+and [coordination skill](exomonad/examples/workspace/.exomonad/skills/exomonad-coordinate/SKILL.md)
 show how to compose these pieces. The same substrate supports one agent with
 powerful cells, semantic background actors, or a tree of coding workers.
 

@@ -33,10 +33,13 @@ next <- repair repairLabel current latest findings
 ```
 
 Left verdict means your requester repairs: respond (Produced verdict), then it
-uses `requestReview` for a changed candidate so the reviewer starts on its exact source. Right response means an available separate
-implementer has a repair request. Bind that response and watch it:
+uses `requestReview` for a changed candidate so the reviewer starts on its exact source. Right handoff retains the original response and its lifetime-transfer receipt.
+Inspect `handoffRetention` before promising work across turns; refusal leaves
+invocation ownership and normal cleanup. Given that returned `handoff`:
 
 ```haskell
+let response = handedRequest handoff
+Right () <- pure (handoffRetention handoff)
 let repairedLabel = "repair-ready" :: WatchLabel
 repaired <- watch repairedLabel (awaitSettled response)
 ```
@@ -80,8 +83,8 @@ given; keep the verdict and its evidence explicit.
 
 For recurring checks, begin with the project's compiled Haskell composition and
 specialize its inputs for this component. Retain one job and carry its terminal
-receipt, source and test counts into the candidate or review. Prefer completion
-routing to repeated observations. Pass the working helper name and its source to
+receipt, source and test counts into the candidate or review. Compose terminal waits and evidence reads in Haskell; use ongoing completion
+routing when independent observers need it. Pass the working helper name and its source to
 children; a menu seen by the parent does not establish discovery by a child.
 Before product review, name required sibling commits and check that the candidate
 contains them. A partial component review must say which integration gates remain.

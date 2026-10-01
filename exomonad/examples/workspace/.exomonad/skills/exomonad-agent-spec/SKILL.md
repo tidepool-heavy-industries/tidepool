@@ -12,10 +12,11 @@ compiled from the run's current source; saving a file does not install it.
 
 The conventional module is `AgentSpec`, exporting `agentSpec`. Workspace
 configuration may set `[haskell] spec` to another exported spec. The conventional
-module takes precedence; with neither, the host installs an empty spec. The spec
-comes from the run's current tooling graph, not a child's historical checkout.
-Use `status` with `view: "detailed"` to see the selected rule, source file, and
-installed revision. Run
+module takes precedence; with neither, the host installs an empty spec. The obsolete
+`[haskell] tools` key is rejected; wrap the typed tools record with `installSpec` and
+configure that spec. The spec comes from the run's current tooling graph, not a
+child's historical checkout. Use `status` with `view: "detailed"` to see the selected
+rule, source file, and installed revision. Run
 `exomonad check --workspace <path>` to typecheck a workspace before launch.
 
 ## Put behavior at the right boundary

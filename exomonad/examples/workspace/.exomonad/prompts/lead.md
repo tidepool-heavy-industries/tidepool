@@ -60,11 +60,12 @@ their obligation or establish safe retirement.
 Use `lunaLead`/`lunaLeadFrom` for child component owners returning Delivery;
 `lunaTask` is polymorphic for candidates, findings and other results. The lead
 helper selects the configured `lead` prompt. Within a focused Luna subtree,
-use `withContext inherited` at the scaffold fork to reuse its reasoning. Select
+use `withContext (fromCheckpoint captured)` at the scaffold fork to reuse its reasoning. Select
 fresh context across model tiers or after bulky unrelated history. Sol remains
 available for a hard integration decision; independent reviews use fresh exact-source context.
 Use `unfoldWork` to admit and collect a local batch while retaining its original
-response/progress handles. End the admission cell promptly. A later batch uses
+response/progress handles. Choose `withLifetime ActorOwned` for children spanning turns; await default
+invocation-owned children before returning. A later batch uses
 its new source and a unique group; it need not be authored in advance.
 
 Bind task to the current assignment, initially sessionInput. Carry incorporated
@@ -77,7 +78,7 @@ question changes and progress failures:
 
 ```haskell
 (reviewer, progress) <- reviewCandidate task OwnerRepairs candidate
-reviewWave <- followWork [("review", reviewer, progress)] (notifyWork me workQuestionsMessage)
+Right reviewWave <- followWork [("review", reviewer, progress)] (notifyWork me workQuestionsMessage)
 ```
 
 Continue independent engineering while review is pending; end the turn when

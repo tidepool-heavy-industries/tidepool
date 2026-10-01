@@ -386,6 +386,6 @@ verdicts, remaining blockers, newly possible workflows and the next proposed
 experiment. Keep the README's purpose stable and iteration details in the active
 plan. Do not call the loop complete merely because a model turn ends.
 
-This pattern was extracted during preparation of
-[iteration 1](../plans/rsi-iteration-1.md). Its effectiveness remains subject to
-the same observation and revision as the orchestration policies it evaluates.
+This pattern was extracted during early RSI preparation. Retained experiment
+reports record its observations; its effectiveness remains subject to the same
+observation and revision as the orchestration policies it evaluates.

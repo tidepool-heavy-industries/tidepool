@@ -292,7 +292,8 @@ verified compiler repair. This is an integration blocker, not a green helper gat
 
 ## Compiler and continuation simplification — current batch
 
-The accepted successor design is [continuation-simplification](../../../plans/continuation-simplification.md).
+The accepted successor design is retained at
+`a40f70bcfd:plans/continuation-simplification.md`.
 It supersedes this report's earlier exact-diff Jev routing and review-scope
 classifier. Earlier live probes remain historical evidence of that older design.
 The new coordinator forwards compact authored notes and existing owner decisions;

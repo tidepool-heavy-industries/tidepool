@@ -6,7 +6,7 @@ Luna implementation levels on average, with real overlap and useful integration
 at each owner. Reviewers and forwarding-only nodes do not count as depth.
 
 Use the compiled `RECURSIVE-WORK.md` procedure and `unfoldWork` to admit a local
-frontier with one collector. Shared reasoning belongs in the inherited prefix;
+frontier with one collector. Shared reasoning belongs in a captured checkpoint;
 implementation details stay with their owners. Cache reuse is observed, not
 guaranteed.
 

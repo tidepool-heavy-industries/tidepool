@@ -1,15 +1,24 @@
 ---
 name: exomonad-coordinate
-description: Split a shared Exomonad Task into children, then route and inspect progress and replies with Project.Routing actors.
+description: Split a shared Exomonad Task into children, then route and inspect progress and replies with Exomonad.Contrib.Routing actors.
 ---
 
-For a new batch, `unfoldWork group [workChild name branch, ...] sink` composes
-admission and this collector. It returns `WorkBatch` with the original typed
-handles in `batchMembers` and collector in `batchRouter`. All branches in one
-batch share their result type; use separate batches for different types.
-`finishWorkBatch` refuses while any result is pending. It drains the collector,
-not the children. The compiled `RECURSIVE-WORK.md` example shows recursive owners
-and a later batch without a preauthored graph.
+`unfoldWorkBatch group plan sink` admits an applicative `WorkBatchPlan` and returns
+`Either BatchFailure (RoutedBatch handles event)`. `routedMembers` preserves its
+original heterogeneous handle product; `routedCollector` collects the authored
+event sum. Map each child's result into that sum with `projectWorkChild`; use
+`projectWorkChildWith` when its progress needs a projection too.
+
+`unfoldWork group [workChild name branch, ...] sink` is the homogeneous-list
+convenience, returning `Either BatchFailure (WorkBatch value)`. Its `batchMembers`
+and `batchRouter` retain the original handles and collector. Typed preflight
+refuses invalid plans before allocation. Optional observer admission or delivery
+failure is retained separately and cannot break primary collection.
+
+`finishWorkBatch` refuses while original results remain pending. It drains the
+collector, not the children. Default branches are invocation-owned; explicitly
+use `withLifetime ActorOwned` for batches spanning model turns. The compiled
+`RECURSIVE-WORK.md` procedure shows local batches and subsequent integration.
 
 For a worker launched with `childWithProgress @WorkProgress`, its current request
 installs `reportProgress`. Given `candidate :: Candidate`, publish useful evidence
@@ -29,7 +38,8 @@ In the parent, retain `localBatch :: WorkBatch (Outcome Candidate)` from the
 fork skill and use its existing collector. The handler receives changes without
 rearming. `WorkSink` is a named value, so
 you can retain and compose `notifyWork` results across notebook cells. For a
-custom callback, construct `WorkSink (\event -> ...)`; its effects remain owned
+custom callback, construct `WorkSink (\policy event -> ...)` returning
+`WorkDelivery`; `noWorkDelivery` records no delivery. Its effects remain owned
 by the collector:
 
 ```haskell
@@ -51,9 +61,10 @@ for a correction that must fence that pending request. Inspect delivery when the
 next action depends on it. Neither admission nor presentation proves the requested
 change happened. Reply only with information needed for the next decision.
 
-Record handled candidates explicitly with
-`R.send (incorporatedWork (R.client router)) ("implementation", [candidate])`.
-The normal brief omits those exact entries; changed evidence at the same commit
+Acknowledge inspected candidate publications with
+`R.send (acknowledgeWork (R.client router)) ("implementation", [candidate])`.
+Acknowledgment proves neither incorporation nor checks. The normal brief omits
+those exact entries; changed evidence at the same commit
 remains outstanding. Candidate event indices select the original publications in
 `workHistory state` (for example `take 1 (drop index (workHistory state))`).
 
@@ -91,10 +102,9 @@ a new workspace workstream registry. This cell assumes `baseline :: GitOid` is b
 to the source being split. Both branches use `lunaTaskFrom` with fresh context
 selected from their Tasks and the `currentCheckout` seed of the local owner. Put the shared
 decisions and seam contracts they need in those Tasks. `lunaTaskFrom` selects
-the cheap `luna` alias with the effort you pass; `solTaskFrom` uses inherited
-context by default; crossing from Luna requires `withContext (selected taskContext)`.
-Routine subtree decisions and integration stay
-with the Luna owner; focused Luna descendants should inherit useful scaffold context.
+the cheap `luna` alias with the effort you pass; `solTaskFrom` selects Task
+context too. Use `fromCheckpoint` for captured scaffold reasoning.
+Routine subtree decisions and integration stay with the Luna owner.
 
 ```haskell
 data WorkSlice = InterfaceSlice | ConsumerSlice deriving (Show, Eq)
@@ -126,16 +136,17 @@ let sliceTask slice = shared
       , ownedPaths = slicePaths slice
       , acceptance = sliceAcceptance slice
       }
-let sliceBranch slice = lunaTaskFrom (sliceLabel slice) Medium currentCheckout (sliceTask slice)
-localBatch <- unfoldWork group
+let sliceBranch slice = withLifetime ActorOwned $ lunaTaskFrom (sliceLabel slice) Medium currentCheckout (sliceTask slice)
+Right localBatch <- unfoldWork group
   [ workChild "interface" (sliceBranch InterfaceSlice)
   , workChild "consumer" (sliceBranch ConsumerSlice)
   ] (notifyWork me (withCheckpoints (workMessage candidateOutcomeSummary)))
 let [(_, interface, interfaceProgress), (_, consumer, consumerProgress)] = batchMembers localBatch
 ```
 
-Admission creates two pending obligations and their persistent collector. End
-that cell promptly. On an actionable notice, read the same collector:
+Admission creates two pending obligations and their persistent collector. Its explicit `ActorOwned` branches survive this cell. Return
+when model decisions must participate; ordinary known continuations may await
+immediate children within their invocation instead. On an actionable notice, read the same collector:
 
 ```haskell
 let router = batchRouter localBatch
@@ -147,7 +158,7 @@ inspectFull (workSnapshotSummary candidateOutcomeSummary state)
 duplicate direct wake. Routine progress stays in `state`; a question, unavailable result,
 terminal result, or candidate checkpoint wakes the owner. On wake, inspect the
 relevant candidate and source receipt before incorporating it. Mark handled
-evidence with `incorporatedWork`, drain the router after the wave, and release
+evidence with `acknowledgeWork`, drain the router after the wave, and release
 finished children. A third repair at one boundary, or eight model rounds without
 a fork or candidate checkpoint, triggers a work-split reassessment. Commit a
 changed allocation or ask the parent for authority; continue locally if the

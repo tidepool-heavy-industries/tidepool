@@ -1005,6 +1005,14 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
                         other => Err(other),
                     },
                 ) => {
+                    if request.purpose
+                        == exomonad_actor::command_jobs::CommandBackendPurpose::SourceProbe
+                    {
+                        request.supply(Ok(super::command_jobs_tests::TestCommands::completed(
+                            "/work/tree\n0123456789abcdef0123456789abcdef01234567\nclean\n",
+                        )));
+                        continue;
+                    }
                     request.supply(Ok(super::command_jobs_tests::TestCommands::completed("README.md")));
                 }
             }
