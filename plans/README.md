@@ -11,6 +11,8 @@ unconsumed proposals are removed; Git retains their history.
   cell budget, remote Buck qualification and run timeline evidence.
 - [ModelCall integration handoff](model-call-integration-handoff.md): the
   admitted execution service hook and joined resident acceptance still owed.
+- [Workbench acceptance](workbench-acceptance.md): async workbench validation,
+  lifetime cleanup, pending-cell adapter gates and separate live evaluation.
 
 - [Final engine and harness delivery](engine-harness-final-delivery.md): accepted
   implementation wave through M1/M2, recovery, structural performance and native
@@ -30,44 +32,8 @@ unconsumed proposals are removed; Git retains their history.
   native code lifetime and external execution redesign after the wave22
   investigation; implementation ledger and acceptance evidence.
 
-- [Continuation simplification](continuation-simplification.md): compiler memo
-  repair, dynamic actor sources, Luna review, and message-based coordination.
-
-- [Bounded continuations](bounded-continuations.md): dependency routing, retained
-  failure investigation and checked repair, with next-wave adoption and evaluation.
-
 - [Dedicated swarm host](hetzner-swarm-host.md): 128 GB Hetzner host, declarative
   NixOS installation, resource budgets, recovery and staged wave migration.
-
-- [Recursive delegation](recursive-delegation.md): canonical live scaffold/unfold/
-  integration workflow, Luna implementation trees and reusable event routing.
-- [Wave19 coordination rethink](wave19-coordination-rethink.md): retained evidence
-  for the superseded WorkPlan design and prerequisite ownership failures.
-- [Jev pattern building blocks](jev-pattern-legos.md): opinionated composable
-  judgment patterns and decision trees; proposed interfaces and evaluation plan.
-- [Haskell authoring improvements](haskell-authoring-improvements.md): bounded
-  diagnostics/assertion work and the intermediate Jev layer.
-
-- [Post-wave17 improvements](post-wave17-improvements.md): planned worktree batch
-  for helper/mount integrity, recoverable checks, coordinator cleanup, executable
-  release evidence and measured coordination/launch costs.
-
-- [Post-wave15 improvements](post-wave15-improvements.md): completion-oriented
-  Bash with bounded contextual follow-ups, evidence access, source composition
-  and review friction; next RSI experiment and measurements.
-
-- [RSI iteration 3](rsi-iteration-3.md): wave-10 interview decisions, stale
-  reminders, incremental typed review tools and proposed offline restart wave.
-- [Request scoped typed tools](request-scoped-tools.md): design check for
-  current typed request access and a review acceptance tool.
-- [RSI iteration 2](rsi-iteration-2.md): wave-10 preparation and observations,
-  launch repairs, review-cell evidence and deferred indentation assistance.
-- [RSI iteration 1](rsi-iteration-1.md): wave-8 reconciliation, typed review
-  provenance, programmable coordination, and the next harness wave's evidence.
-
-- [Inherited-resource permissions](inherited-resource-permissions.md): active
-  implementation of shared observation with owner-controlled mutation, including
-  listener/release races and caller-relative checkout seeds.
 
 - [Structural performance ledger](structural-performance-a.md): matched
   measurements are complete; the remaining rows are questions, not scheduled

@@ -1,7 +1,6 @@
 use super::*;
 use crate::command_jobs::CommandControl;
 use crate::generated::commands::CommandsReq;
-use crate::resident_workbench::CommandObservationStop;
 use tidepool_bridge_effects::CommandError;
 
 /// The owner settles the command operation before evaluating its Haskell continuation.
@@ -39,6 +38,7 @@ where
         context: &ActorSessionContext,
         continuation: ResidentHole,
         request: CommandsReq,
+        invocation: Option<&super::invocation_work::InvocationWork>,
     ) -> CommandResolution {
         let permitted = self
             .descriptor
@@ -53,6 +53,7 @@ where
             request,
             permitted,
             None,
+            invocation,
         )
         .await
     }
@@ -66,6 +67,7 @@ pub(super) async fn resolve_command<H, O>(
     request: CommandsReq,
     permitted: bool,
     control: Option<&crate::WorkbenchExecutionControl>,
+    invocation: Option<&super::invocation_work::InvocationWork>,
 ) -> CommandResolution
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -114,34 +116,27 @@ where
                 .await
         }};
     }
+    let notify_owner = matches!(&request, CommandsReq::CommandBackgroundWith(..));
     let outcome = async {
         match request {
             // An inspection-only actor runs commands in its read-only
             // project view; the mount, not this handler, prevents writes.
-            CommandsReq::CommandStartWith(spec) => answer!({
-                match jobs.start(kernel, spec).await {
-                    Ok((id, request)) => {
-                        super::command_settlement::dispatch_backend(
-                            &environment.deployments,
-                            request,
-                        );
+            CommandsReq::CommandStartWith(spec) | CommandsReq::CommandBackgroundWith(spec) => {
+                answer!({
+                    let started = super::command_settlement::CommandSettlements::new(environment)
+                        .start(
+                            kernel,
+                            spec,
+                            notify_owner,
+                            if notify_owner { None } else { invocation },
+                        )
+                        .await;
+                    if let Ok(id) = &started {
                         started_job = Some(id.clone());
-                        Ok(id)
                     }
-                    Err(error) => Err(error),
-                }
-            }),
-            // Returns at once; the job's completion settles a request
-            // whose notice (or a watch on the job) wakes the owner.
-            CommandsReq::CommandBackgroundWith(spec) => answer!({
-                let started = super::command_settlement::CommandSettlements::new(&environment)
-                    .start(kernel, spec)
-                    .await;
-                if let Ok(id) = &started {
-                    started_job = Some(id.clone());
-                }
-                started
-            }),
+                    started
+                })
+            }
             CommandsReq::CommandStatusWith(id) => answer!(jobs.status(owner, &id).await),
             CommandsReq::CommandAwaitWith(id, milliseconds) => {
                 answer!(observe!(jobs.wait(owner, &id, milliseconds)))
@@ -163,69 +158,16 @@ where
                     Err(error) => Err(error),
                 }
             }),
-            CommandsReq::CommandForegroundWith(id) => {
-                let observed = if permitted {
-                    observe!(jobs.wait(owner, &id, 30_000))
-                } else {
-                    Err(CommandError::CommandUnauthorized)
-                };
-                match observed {
-                    Ok(tidepool_bridge_effects::CommandStatus::CommandFinished(result)) => {
-                        settled = WorkbenchOperationDisposition::Committed;
-                        match jobs.output(owner, &id, 1024 * 1024).await {
-                            Ok(output) => {
-                                environment
-                                    .runner
-                                    .resume_value(
-                                        context.clone(),
-                                        continuation,
-                                        Ok::<_, CommandError>(
-                                            tidepool_bridge_effects::CommandObservation {
-                                                result,
-                                                output,
-                                            },
-                                        ),
-                                    )
-                                    .await
-                            }
-                            Err(error) => {
-                                environment
-                                    .runner
-                                    .stop_command_observation(
-                                        context.clone(),
-                                        continuation,
-                                        id,
-                                        CommandObservationStop::OutputUnavailable(error),
-                                    )
-                                    .await
-                            }
-                        }
-                    }
-                    Ok(_) => {
-                        settled = WorkbenchOperationDisposition::Committed;
-                        environment
-                            .runner
-                            .stop_command_observation(
-                                context.clone(),
-                                continuation,
-                                id,
-                                CommandObservationStop::Deadline,
-                            )
-                            .await
-                    }
-                    Err(error) => {
-                        settled = disposition::<()>(&Err(error.clone()));
-                        environment
-                            .runner
-                            .resume_value(
-                                context.clone(),
-                                continuation,
-                                Err::<tidepool_bridge_effects::CommandObservation, _>(error),
-                            )
-                            .await
-                    }
+            CommandsReq::CommandWaitWith(id) => answer!({
+                let result = observe!(jobs.finished(owner, &id));
+                match result {
+                    Ok(result) => Ok(tidepool_bridge_effects::CommandObservation {
+                        result,
+                        output: jobs.output(owner, &id, 1024 * 1024).await,
+                    }),
+                    Err(error) => Err(error),
                 }
-            }
+            }),
             CommandsReq::CommandPresentWith(id, _) => {
                 if !permitted {
                     settled = WorkbenchOperationDisposition::Rejected;
@@ -267,6 +209,18 @@ where
             CommandsReq::CommandCloseInputWith(id) => {
                 answer!(jobs.control(owner, &id, CommandControl::CloseInput).await)
             }
+            CommandsReq::CommandDetachWith(id) => answer!({
+                match invocation {
+                    Some(invocation) => invocation.detach_command(&jobs, owner, &id),
+                    None => jobs.owner(&id).and_then(|actual| {
+                        if actual == owner {
+                            Ok(())
+                        } else {
+                            Err(CommandError::CommandUnauthorized)
+                        }
+                    }),
+                }
+            }),
             CommandsReq::CommandCancelWith(id) => {
                 answer!(jobs.control(owner, &id, CommandControl::Cancel).await)
             }
@@ -299,7 +253,7 @@ pub(super) fn waits_for_completion(request: &CommandsReq) -> bool {
         request,
         CommandsReq::CommandAwaitWith(..)
             | CommandsReq::CommandAwaitAndNotifyWith(..)
-            | CommandsReq::CommandForegroundWith(..)
+            | CommandsReq::CommandWaitWith(..)
     )
 }
 

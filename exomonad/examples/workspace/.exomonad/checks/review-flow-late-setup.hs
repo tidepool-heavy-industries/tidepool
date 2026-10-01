@@ -1,0 +1,9 @@
+{-# LANGUAGE QuasiQuotes #-}
+import Tidepool.Effects.Core (GitRef (..))
+let campaign = campaignName :: CampaignLabel
+let task = Task (batch campaign "component") "plans/component.md" sourceHead
+      "Implement one component" "Exercise fresh review and bounded repair"
+      ["review-flow.txt"] "Read exact committed source" []
+(worker, _updates) <- unfold (taskGroup task)
+  (childWithProgress @WorkProgress @(Outcome Candidate)
+    (withLifetime ActorOwned $ withContext (selected taskContext) $ coding (atRef (GitRef (renderGitOid sourceHead))) (assignment [label|implement|] task)))

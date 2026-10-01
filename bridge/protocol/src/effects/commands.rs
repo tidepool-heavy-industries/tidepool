@@ -111,6 +111,10 @@ pub fn commands() -> Effect {
                     ("TerminalInput", vec![]),
                 ],
             ),
+            sum(
+                "CommandSourceCapture",
+                vec![("NoCapture", vec![]), ("CaptureBeforeStart", vec![])],
+            ),
             record(
                 "CommandSpec",
                 vec![
@@ -123,6 +127,11 @@ pub fn commands() -> Effect {
                     ),
                     ("commandMemory", "memory", HsType::Int),
                     ("commandInput", "input", named("CommandInput")),
+                    (
+                        "commandSourceCapture",
+                        "source_capture",
+                        named("CommandSourceCapture"),
+                    ),
                 ],
             ),
             sum(
@@ -200,7 +209,11 @@ pub fn commands() -> Effect {
                 "CommandObservation",
                 vec![
                     ("observedCommandResult", "result", named("CommandResult")),
-                    ("observedCommandOutput", "output", named("CommandOutput")),
+                    (
+                        "observedCommandOutput",
+                        "output",
+                        HsType::either(named("CommandError"), named("CommandOutput")),
+                    ),
                 ],
             ),
             record(
@@ -292,8 +305,8 @@ pub fn commands() -> Effect {
                 HsType::either(named("CommandError"), named("CommandStatus")),
             ),
             verb(
-                "CommandForegroundWith",
-                "command_foreground_with",
+                "CommandWaitWith",
+                "command_wait_with",
                 vec![("job", HsType::Text, "String")],
                 HsType::either(named("CommandError"), named("CommandObservation")),
             ),
@@ -369,6 +382,12 @@ pub fn commands() -> Effect {
                     ("rows", HsType::Int, "i64"),
                     ("columns", HsType::Int, "i64"),
                 ],
+                HsType::either(named("CommandError"), HsType::Unit),
+            ),
+            verb(
+                "CommandDetachWith",
+                "command_detach_with",
+                vec![("job", HsType::Text, "String")],
                 HsType::either(named("CommandError"), HsType::Unit),
             ),
             verb(

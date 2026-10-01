@@ -33,7 +33,7 @@ import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (Actor, Jev)
 import Tidepool.Effects.Row (knownEffects)
 import Tidepool.Worktree (renderGitOid)
-import Project.Types (Incorporation (..))
+import Exomonad.Contrib.Types (Incorporation (..))
 
 -- | The policy receives domain values, not their rendered descriptions.
 data Change value = Change

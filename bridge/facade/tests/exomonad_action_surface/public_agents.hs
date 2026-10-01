@@ -46,10 +46,13 @@ rootTools :: Tools.Tools (AsServerT (Eff ActorEffects))
 rootTools = Tools.tools
 
 startCoding :: WorktreeHandle -> Eff ActorEffects AgentRef
-startCoding = startAgent . codingAgent
+startCoding = startAgent . withAgentLifetime ActorOwned . codingAgent
 
 startReview :: Text -> Eff ActorEffects AgentRef
-startReview = startAgent . readonlyAgent
+startReview = startAgent . withAgentLifetime ActorOwned . readonlyAgent
+
+startPersisted :: AgentLaunchSpec -> Eff ActorEffects AgentRef
+startPersisted = startAgent . withAgentLifetime ActorOwned
 
 submit
   :: AgentRef
@@ -57,6 +60,16 @@ submit
   -> input
   -> Eff ActorEffects (Response result)
 submit actor name value = request actor (assignment name value)
+
+submitPersisted
+  :: AgentRef
+  -> Label
+  -> input
+  -> Eff ActorEffects (Response result)
+submitPersisted actor name value = do
+  response <- request actor (assignment name value)
+  Right () <- detachRequest response
+  pure response
 
 submitProgress
   :: AgentRef
@@ -78,7 +91,7 @@ submitConfigured
   -> input
   -> Eff ActorEffects (Response result)
 submitConfigured actor name timeout value =
-  requestWith actor ((assignment name value)
+  request actor ((assignment name value)
     { guidance = Just "inspect the typed input before acting"
     , deadline = Just timeout
     })
@@ -195,27 +208,27 @@ heterogeneousUnfold
   -> Label
   -> Eff ActorEffects (Response Text, Response Int)
 heterogeneousUnfold group textLeaf intLeaf =
-  unfold group $
+  unfoldDeferred group $
     (,)
-      <$> child (withEffort High (researching @Text projectHead (assignment textLeaf ())))
-      <*> child (withEffort Low (coding @Int projectHead (assignment intLeaf ())))
+      <$> child (withLifetime ActorOwned (withEffort High (researching @Text projectHead (assignment textLeaf ()))))
+      <*> child (withLifetime ActorOwned (withEffort Low (coding @Int projectHead (assignment intLeaf ()))))
 
 progressiveUnfold
   :: ForkGroupPath
   -> Label
   -> Eff ActorEffects (Response Text, Progress Int)
 progressiveUnfold group leaf =
-  unfold group $
-    childWithProgress @Int (researching @Text projectHead (assignment leaf ()))
+  unfoldDeferred group $
+    childWithProgress @Int (withLifetime ActorOwned (researching @Text projectHead (assignment leaf ())))
 
 homogeneousUnfold
   :: ForkGroupPath
   -> [Label]
   -> Eff ActorEffects [Response Text]
 homogeneousUnfold group leaves =
-  unfold group $
+  unfoldDeferred group $
     traverse
-      (\leaf -> child (researching @Text projectHead (assignment leaf ())))
+      (\leaf -> child (withLifetime ActorOwned (researching @Text projectHead (assignment leaf ()))))
       leaves
 
 recoverableUnfold
@@ -223,8 +236,27 @@ recoverableUnfold
   -> Label
   -> Eff ActorEffects (Either UnfoldError (Response Text))
 recoverableUnfold group leaf =
+  attemptUnfoldDeferred group $
+    child (withLifetime ActorOwned (researching @Text projectHead (assignment leaf ())))
+
+checkpointUnfold
+  :: ContextCheckpoint
+  -> ForkGroupPath
+  -> Label
+  -> Eff ActorEffects (Response Text)
+checkpointUnfold checkpoint group leaf =
+  unfold group $
+    child (withLifetime ActorOwned (withContext (fromCheckpoint checkpoint)
+      (researching @Text projectHead (assignment leaf ()))))
+
+selectedUnfold
+  :: ForkGroupPath
+  -> Label
+  -> Eff ActorEffects (Either UnfoldError (Response Text))
+selectedUnfold group leaf =
   attemptUnfold group $
-    child (researching @Text projectHead (assignment leaf ()))
+    child (withLifetime ActorOwned (withContext (selected id)
+      (researching @Text projectHead (assignment leaf ("inspect only" :: Text)))))
 
 configuredBranch
   :: Duration
@@ -246,7 +278,7 @@ subSecondRequest
   -> Label
   -> Eff ActorEffects (Response Text)
 subSecondRequest actor label =
-  requestWith actor ((assignment label ()) { deadline = Just (milliseconds 25) })
+  request actor ((assignment label ()) { deadline = Just (milliseconds 25) })
 
 type TinyResearchEffects = '[Replies, ActorContext]
 
@@ -255,12 +287,13 @@ narrowResearch
   -> Label
   -> Eff ActorEffects (Response Text)
 narrowResearch group leaf =
-  unfold group $
+  unfoldDeferred group $
     child $
-      narrowed
-        (knownEffects @TinyResearchEffects)
-        (inspectionPolicy projectHead)
-        (assignment leaf ())
+      withLifetime ActorOwned $
+        narrowed
+          (knownEffects @TinyResearchEffects)
+          (inspectionPolicy projectHead)
+          (assignment leaf ())
 
 usageTotals :: ActorContextInfo -> Maybe (ProviderUsageScope, ProviderUsageCompleteness, Int, Int, Int)
 usageTotals context = fmap project (contextUsageSummary context)

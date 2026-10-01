@@ -8,12 +8,12 @@
 -- Branches and exact-source review for recursive local work. Importing the
 -- module admits nothing; the execution owner composes each ready frontier.
 module Project.Work
-  ( projectPrompt, taskContext, reviewContext, decisionContext
-  , withDecision, updateDecision, designQuestion, sameQuestion, raiseQuestion, resolveQuestion
+  ( task, labelCampaign, projectPrompt, taskContext, reviewContext, decisionContext
+  , withDecision, updateDecision, designQuestion, raiseQuestion, resolveQuestion
   , lunaTask, lunaTaskFrom, lunaTaskInputFrom, lunaLead, lunaLeadFrom
   , solTask, solTaskFrom, implement, reviewCandidate, reviewCommit, requestReview, repair
   , candidateAtSubmission, reviewCandidateAtSubmission, admitReviewedCheckpoint
-  , requestIncorporation, consultDesign
+  , RequestHandoff (..), requestIncorporation, consultDesign
   , settledValue
   , unownedPaths
   ) where
@@ -22,13 +22,30 @@ import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Actors.Exomonad
+import Tidepool.Agent.Assignment (labelText)
 import Tidepool.Effects.Core (AgentInspection, Commands, Forks, GitRef (..))
 import Tidepool.Inspection (WorkbenchDisplay)
 import Tidepool.Worktree (renderGitOid)
 import qualified Tidepool.Command as Cmd
-import Project.Types
+import Exomonad.Contrib.Types
 import Project.Evidence (numstatFiles)
 import Exomonad.Workspace (workspacePrompt)
+
+-- Project task defaults keep the shared data types free of workspace paths.
+labelCampaign :: Label -> CampaignLabel
+labelCampaign label = either (error . show) id (campaignLabel (labelText label))
+
+task :: Label -> Text -> [Text] -> Text -> GitOid -> Task
+task label objective owned accept source = Task
+  { taskGroup = batch (labelCampaign label) "work"
+  , planPath = ".exomonad/WORKBENCH.md"
+  , taskSource = source
+  , obligation = objective
+  , rationale = ""
+  , ownedPaths = owned
+  , acceptance = accept
+  , acceptedDecisions = []
+  }
 
 -- Keys are the workspace's authored resource names; selecting prose grants no
 -- permission and does not create a runtime role.
@@ -56,10 +73,6 @@ withDecision decision task = task
   , acceptedDecisions = filter (not . sameQuestion (decisionQuestion decision) . decisionQuestion)
       (acceptedDecisions task) ++ [decision]
   }
-
-sameQuestion :: Question -> Question -> Bool
-sameQuestion left right = questionKey left == questionKey right
-  && questionPlan (questionDetails left) == questionPlan (questionDetails right)
 
 raiseQuestion :: Question -> Attention -> Attention
 raiseQuestion question current = filter (not . sameQuestion question) current ++ [question]
@@ -89,8 +102,8 @@ updateDecision response = updateRequest response . decisionContext
 
 -- Model placement: the "luna" alias is the cheap, fast tier and the default
 -- for bounded implementation, recursive component ownership and review.
--- Selected Task context crosses model tiers; same-model descendants can use
--- inherited context. Sol is available for consequential design uncertainty.
+-- Selected Task context makes immediate admission explicit across model tiers.
+-- Sol is available for consequential design uncertainty.
 -- Effort remains an explicit choice at each branch.
 lunaTask :: Label -> ForkEffort -> Task -> Branch CodingEffects Task result
 lunaTask label effort = lunaTaskFrom label effort currentCheckout
@@ -111,7 +124,7 @@ solTask label effort = solTaskFrom label effort currentCheckout
 -- executing actor's checkout; an exact
 -- committed review seed uses atRef. Fresh context is an explicit withContext.
 --
--- An ordinary assignment reports settlement to its requester. Project.Routing's
+-- An ordinary assignment reports settlement to its requester. Exomonad.Contrib.Routing's
 -- workChild selects Silent when the batch collector owns that notification.
 -- Custom collectors should likewise select one notification owner explicitly.
 lunaTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result
@@ -130,9 +143,13 @@ lunaTaskInputFrom label effort source context input = withInstructions (projectP
 
 solTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result
 solTaskFrom label effort source task = withInstructions (projectPrompt "task") $
-  withContext inherited $ withModel "executor" $ withEffort effort $
+  withContext (selected taskContext) $ withModel "executor" $ withEffort effort $
   coding source (assignment label task)
 
+-- These response-returning project helpers hand unfinished work to later cells,
+-- so their branches explicitly use ActorOwned. Lower-level branch constructors
+-- leave lifetime selectable and scoped by default.
+--
 -- implement exposes no effort parameter of its own; Medium is chosen here
 -- because a caller with a bounded, ordinary implementation obligation has
 -- nowhere else to pass one through this entry point. A caller that needs a
@@ -142,7 +159,7 @@ implement
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
   => Task -> Eff effects (Response (Outcome Candidate), Progress WorkProgress)
 implement task = unfold (taskGroup task) $
-  childWithProgress @WorkProgress @(Outcome Candidate) (lunaTask [label|implement|] Medium task)
+  childWithProgress @WorkProgress @(Outcome Candidate) (withLifetime ActorOwned $ lunaTask [label|implement|] Medium task)
 
 -- Exact-scope reviews return findings to their requester because there is no
 -- owning Task with which to address a retained implementer.
@@ -156,7 +173,7 @@ reviewContext :: ReviewRequest -> Text
 reviewContext request = Text.unlines
   [ basisContext
   , "Candidate: " <> renderGitOid (candidateCommit (reviewInput request))
-  , "Claimed checks: " <> Text.intercalate "; " (checkedCommands (reviewInput request))
+  , "Claimed checks: " <> Text.intercalate "; " (reportedChecks (reviewInput request))
   , "Remaining product gates: " <> Text.intercalate "; " (remainingGates (reviewInput request))
   , ownerContext
   ]
@@ -188,11 +205,7 @@ reviewCandidate task owner candidate =
 -- as reviewCandidate (fixed Medium, same effect constraints). The exact
 -- scope stays distinct from a Task in the accepted result.
 --
--- Takes its own campaign label rather than nesting under the caller's path
--- (subgroup): the root itself has no allocated actor path to nest under
--- (Task's batch/"work" split has the same shape, one level up -- see
--- Project.Types's task constructor), and a caller-supplied label keeps
--- concurrent reviewCommit calls from the same actor in separate groups.
+-- The caller supplies an independent campaign label for each root review.
 reviewCommit
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
   => Label -> GitOid -> GitOid -> Text -> [Text] -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
@@ -205,21 +218,17 @@ reviewCommit reviewLabel base commit accept owned = requestReview reviewLabel $
 -- retains it with ordinary progress and decides whether to notify its owner.
 
 -- Ownership gate: which paths a candidate range actually touched outside its
--- declared ownership. Same numstat parsing as Project.Evidence's pure
--- ownershipCheck, but this runs the diff itself and returns the exact stray
--- paths, for a caller that wants to act on the list rather than read a
--- CheckResult's rendered detail string. A git failure here is a defect in
--- the evidence, the same stance Project.Review's own gitText takes -- never
--- read as an empty, passing diff.
+-- declared ownership. A command failure is unavailable evidence, never an
+-- empty passing diff.
 unownedPaths
   :: Member Commands effects
   => GitOid -> GitOid -> [Text] -> Eff effects [Text]
 unownedPaths base candidate owned = do
   let range = renderGitOid base <> ".." <> renderGitOid candidate
   result <- Cmd.run (Cmd.argv ["git", "diff", "--numstat", range])
-  case Cmd.stdout result of
-    Right stat -> pure [path | (_, _, path) <- numstatFiles stat, path `notElem` owned]
-    Left issue -> error ("unownedPaths: git diff --numstat " <> Text.unpack range <> " failed: " <> show issue)
+  case (Cmd.failure result, Cmd.stdout result, Cmd.commandCleanup (Cmd.commandResult result)) of
+    (Nothing, Right stat, Cmd.CommandClean) -> pure [path | (_, _, path) <- numstatFiles stat, path `notElem` owned]
+    unavailable -> error ("unownedPaths: git diff --numstat " <> Text.unpack range <> " failed: " <> show unavailable)
 
 -- A revised candidate gets its own exact checkout. A retained actor's previous
 -- checkout is never implicitly treated as the source named by a new request.
@@ -235,7 +244,7 @@ admitReview
   => ForkGroupPath -> ReviewRequest -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
 admitReview group request = unfold group $
   childWithProgress @WorkProgress @(Outcome ReviewDecision) $
-    withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
+    withLifetime ActorOwned $ withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
     withModel "luna" $ withEffort Medium $
     coding (atRef (GitRef (renderGitOid (candidateCommit (reviewInput request)))))
       (assignment [label|review|] request)
@@ -247,23 +256,38 @@ admitReview group request = unfold group $
 repair
   :: Member Replies effects
   => Label -> ReviewRequest -> Candidate -> [Text]
-  -> Eff effects (Either ReviewDecision (Response (Outcome Candidate)))
-repair label request candidate findings = case reviewBasis request of
+  -> Eff effects (Either ReviewDecision (RequestHandoff (Outcome Candidate)))
+repair label reviewRequest candidate findings = case reviewBasis reviewRequest of
   ExactScope _ _ _ -> pure (Left (Repair candidate findings))
-  AssignedTask task -> case repairOwner request of
+  AssignedTask task -> case repairOwner reviewRequest of
     OwnerRepairs -> pure (Left (Repair candidate findings))
-    RetainedImplementer actor -> Right <$> requestWith actor
-      ((assignment label (RepairTask task candidate findings))
-        { guidance = Just (projectPrompt "repair") })
+    RetainedImplementer actor -> do
+      response <- request actor
+        ((assignment label (RepairTask task candidate findings))
+          { guidance = Just (projectPrompt "repair") })
+      Right <$> retainRequest response
 
 -- Reporting is the Assignment default (NotifyOwner); see lunaTaskFrom's note
 -- above.
 requestIncorporation
   :: Member Replies effects
-  => AgentRef -> Label -> Task -> PlanAmendment -> Eff effects (Response Incorporation)
-requestIncorporation recipient label task amendment = requestWith recipient $
-  (assignment label (IncorporationTask task amendment))
-    { guidance = Just (projectPrompt "incorporate") }
+  => AgentRef -> Label -> Task -> PlanAmendment -> Eff effects (RequestHandoff Incorporation)
+requestIncorporation recipient label task amendment = do
+  response <- request recipient $
+    (assignment label (IncorporationTask task amendment))
+      { guidance = Just (projectPrompt "incorporate") }
+  retainRequest response
+
+-- A retention receipt proves only transfer of this request to actor ownership.
+-- A refusal leaves invocation ownership and its ordinary scope cleanup intact;
+-- the original response remains available to inspect or cancel.
+data RequestHandoff value = RequestHandoff
+  { handedRequest :: Response value
+  , handoffRetention :: Either ReplyError ()
+  } deriving (Show)
+
+retainRequest :: Member Replies effects => Response value -> Eff effects (RequestHandoff value)
+retainRequest response = RequestHandoff response <$> detachRequest response
 
 -- Build a complete packet from evidence already bound in the workbench. Record
 -- updates add alternatives or narrow the unblocked obligation when needed.
@@ -272,7 +296,7 @@ designQuestion task candidate finding = DesignQuestion
   { questionPlan = planPath task
   , questionSource = candidateCommit candidate
   , questionFinding = finding
-  , questionEvidence = checkedCommands candidate
+  , questionEvidence = reportedChecks candidate
   , questionAlternatives = []
   , questionUnblocks = [obligation task]
   }
@@ -282,7 +306,7 @@ consultDesign
   => DesignSlot -> DesignQuestion -> Eff effects (Response DesignAnswer, Watch (Settlement DesignAnswer))
 consultDesign slot question = do
   expert <- unfold (specialistGroup slot) $ child $
-    withInstructions (projectPrompt "specialist") $ withContext (selected (designContext slot)) $
+    withLifetime ActorOwned $ withInstructions (projectPrompt "specialist") $ withContext (selected (designContext slot)) $
     withModel (specialistModel slot) $ withEffort (specialistEffort slot) $
     coding (atRef (GitRef (renderGitOid (questionSource question))))
       (assignment (specialistLabel slot) question)

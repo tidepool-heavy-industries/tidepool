@@ -19,11 +19,15 @@ receives typed command observations and retained output; its
 typed lookup results and candidates. These are the examples for presenting or
 selecting tool results inside the tool itself.
 
-An after-tool hook serves a separate purpose: a parent can install a monitor on
-a child actor that runs after its tool calls, gives the child advice in its
-result, or escalates a call to the parent. The workspace's Watchdog module
-provides the Haskell monitor logic; it does not replace typed presentation
-inside tools.
+An after-tool hook observes a completed call; it does not rewrite that tool's
+result. Keep presentation in the typed tool seam and recurring coordination in
+ordinary Haskell compositions or persistent event actors.
+
+Commands and immediate child waits preserve the current Haskell continuation.
+Unfinished work is invocation-owned by default: await it before returning or
+explicitly transfer it to actor-owned lifetime. The shared
+[workbench guide](examples/workspace/.exomonad/WORKBENCH.md) explains commands,
+readiness, captured publication and contrib helpers.
 
 ## Workspaces and operation
 

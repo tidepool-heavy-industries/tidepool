@@ -4,5 +4,5 @@ let x = 99 :: Int
 let observerGroup = "observer" :: ForkGroupLabel
 let observerLabel = [label|observer|]
 observer <- unfold (batch campaign observerGroup)
-  (child (withContext (fromCheckpoint seed)
-    (researching @Text projectHead (assignment observerLabel ("inspect" :: Text)))))
+  (child (withLifetime ActorOwned (withContext (fromCheckpoint seed)
+    (researching @Text projectHead (assignment observerLabel ("inspect" :: Text))))))

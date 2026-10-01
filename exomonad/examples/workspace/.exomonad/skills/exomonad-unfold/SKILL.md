@@ -8,50 +8,47 @@ The execution workflow is recursive scaffold/delegate/integrate, using
 the underlying admission and join primitives for custom Haskell compositions.
 See `RECURSIVE-WORK.md` for the canonical procedure.
 
-`unfold` admits persistent child actor applications and returns their handles now. The
-children start after the entire enclosing cell finishes, and they inherit that
-cell's final committed bindings plus the conversation through the real tool
-result. Combine independent children applicatively in one `unfold`; keep the
-shared contract and the integration with their parent.
+`unfold` publishes a typed applicative group immediately from captured or selected
+context. `unfoldDeferred` publishes after the enclosing call's real result;
+its branches require explicit persistent lifetime. Keep shared contracts and
+integration with the parent.
 
-`batch campaign group` builds the `ForkGroupPath`; it has no exported
-constructor of its own, so `ForkGroupPath "..."` does not type-check. Use
-`subgroup group` to nest under the enclosing fork's own path instead of
-starting a new campaign.
+`batch campaign group` builds the `ForkGroupPath`; it has no exported constructor.
+Use `subgroup group` under your own existing path, passing only the new segment.
 
 ```haskell
-let group = batch "corpus" "fanout"
-let domainLabel = [label|domain|]
-let consumerLabel = [label|consumer-tests|]
+Right captured <- checkpoint "corpus-scaffold"
 let domainPlan = "Add the shared item type and its tests." :: Text
 let consumerPlan = "Update the readers of that type." :: Text
-workers <- unfold group $
-  (,) <$> child @(Outcome Candidate) (coding currentCheckout (assignment domainLabel domainPlan))
-      <*> child @(Outcome Candidate) (withEffort Medium (coding currentCheckout (assignment consumerLabel consumerPlan)))
-let sharedAfterUnfold = ("ready" :: Text)
+let fromScaffold = withContext (fromCheckpoint captured)
+workers <- unfold (batch "corpus" "fanout") $
+  (,) <$> child @(Outcome Candidate) (fromScaffold (coding currentCheckout (assignment [label|domain|] domainPlan)))
+      <*> child @(Outcome Candidate) (fromScaffold (withEffort Medium (coding currentCheckout (assignment [label|consumer-tests|] consumerPlan))))
+joined <- waitFor ((,) <$> awaitSettled (fst workers) <*> awaitSettled (snd workers))
 ```
 
-Both children see `sharedAfterUnfold` although it is bound after the `unfold`.
-Never await a child inside the cell that admits it: a queued child cannot start
-until the cell returns. End that cell promptly.
+`waitFor` suspends this continuation and returns `Either WatchFailure result`.
+Default `InvocationOwned` children settle within this invocation or are cancelled
+on exit with cleanup retained. For work spanning model turns, decorate each
+branch with `withLifetime ActorOwned`, retain the original handles, and register
+named watches or a persistent collector. Returning handles does not extend work.
 
-`spawnWatched` admits and watches exactly one child, so it cannot take the pair
-above. Admit with `unfold`, then join the settlements in one watch:
+Immediate admission requires `fromCheckpoint` or `selected`, refusing unresolved
+`inherited` context before allocation. A checkpoint retains the exact Haskell
+scope and provider prefix before the current call; dependencies from earlier
+pending calls remain real dependencies. `releaseCheckpoint` prevents future
+use while admitted children keep their independent leases.
 
-```haskell
-joined <- watch "both-ready" $
-  (,) <$> awaitSettled (fst workers) <*> awaitSettled (snd workers)
-joinedState <- pollWatch joined
-```
+Use explicit `ActorOwned` with `unfoldDeferred` for the enclosing call's final
+scope and real result. Return promptly from that invocation; never await a
+child whose publication needs its return. The deferred result is never fabricated.
 
-Bind `pollWatch`'s result; a bare `pollWatch joined` as a cell's last statement
-leaves its effect row unpinned (`Ambiguous type variable ... arising from a
-use of pollWatch`) with nothing else in the cell to settle it.
-
-Use `awaitSettled` when a failure belongs in the value, `awaitResponse` when an
-unavailable dependency should fail the watch, and `awaitAnySettled` to wake on
-the first. Register the watch, then end the model round; a wake is a reason to
-inspect retained handles, not proof of success.
+`spawnWatched` admits one child and registers its settlement watch. For several
+children compose their original typed `Await` values: `awaitSettled` keeps failure
+in the result; `awaitResponse` makes an unavailable dependency a watch failure.
+`awaitAnySettled` selects the first settlements while preserving input order.
+Borrowed responses support observation; updates, cancellation and release remain
+with the owner. Record-actor handlers remain serialized while suspended.
 
 ## Observe a child's submission
 

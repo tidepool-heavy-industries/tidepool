@@ -24,7 +24,7 @@ questionRouting = do
     , "import qualified Tidepool.Actor.Record as R"
     , "let source = " <> gitOidLiteral source
     , "Right reminders <- startRemindersWith (\\_ _ -> pure Suggest) me reviewRelayPolicy"
-    , "routed <- followWork [(\"producer\", producer, updates)] (withQuestionReminders reminders (notifyWork (responseActor consumer) (workMessage id)))"
+    , "Right routed <- followWork [(\"producer\", producer, updates)] (withQuestionReminders reminders (notifyWork (responseActor consumer) (workMessage id)))"
     ])
   void $ turn (checkActor producer) (Text.unlines
     [ "let first = Question \"relay\" (DesignQuestion \"plans/review.md\" " <> gitOidLiteral source <> " \"Manual within-contract review relay\" [\"review result for exact candidate\"] [] [\"repair\"] )"
@@ -81,7 +81,7 @@ snapshotTrial = do
     , "import Project.WorkflowReminders"
     , "import qualified Tidepool.Actor.Record as R"
     , "Right trial <- startReminderTrialWith (\\_ _ -> pure Suggest) me (notificationPolicy \"Integrate reviewed component slices\")"
-    , "routed <- followWork [(\"producer\", producer, updates)] (notifyWork me (workMessage id))"
+    , "Right routed <- followWork [(\"producer\", producer, updates)] (notifyWork me (workMessage id))"
     ])
   void $ turn (checkActor producer) (Text.unlines
     [ "let question = Question \"ownership\" (DesignQuestion \"plans/component.md\" " <> gitOidLiteral source <> " \"Old status repeated, but who owns the new file?\" [\"ownership not assigned\"] [] [\"parent\"])"

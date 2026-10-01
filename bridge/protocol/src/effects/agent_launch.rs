@@ -23,6 +23,7 @@ pub fn agent_launch() -> Effect {
         foreign_types: &[
             ("ActorLaunchRole", "crate::ActorLaunchRoleWire"),
             ("ActorEffectProfile", "crate::ActorEffectProfileWire"),
+            ("WorkerLifetime", "crate::WorkerLifetime"),
         ],
         errors: None,
         verbs: vec![Verb {
@@ -99,6 +100,13 @@ pub(crate) fn launch_args(forked: bool) -> Vec<Arg> {
             rust: RustBinding::Derived,
         },
     ]);
+    if !forked {
+        args.push(Arg {
+            name: "lifetime",
+            ty: HsType::Named("WorkerLifetime"),
+            rust: RustBinding::Path("crate::WorkerLifetime"),
+        });
+    }
     args
 }
 

@@ -33,13 +33,13 @@ episode = do
     , "let decision = AcceptedDecision question after \"Adopt the accepted baseline\" [\"plan check\"]"
     , "let change = BaselineChange before after amendment decision"
     , "let workerBranch label ownerLabel collector = lunaBaselineTaskFrom label Medium (atRef (GitRef (renderGitOid before))) (BaselineAssignment ownerTask ownerLabel collector)"
-    , "worker <- unfold (taskGroup ownerTask) (child @(Outcome Candidate) (workerBranch [label|incorporate|] \"worker\" opened))"
+    , "worker <- unfold (taskGroup ownerTask) (child @(Outcome Candidate) (withLifetime ActorOwned (workerBranch [label|incorporate|] \"worker\" opened)))"
     ])
   worker <- activation
   check "selected Luna receives the task without changing its role prompt"
     (checkModel worker == Just "gpt-6-luna" && "Plan:" `Text.isInfixOf` checkContext worker
       && "baselineCollector sessionInput" `Text.isInfixOf` checkContext worker)
-  void $ turn owner "lateWorker <- unfold (batch (labelCampaign [label|late-baseline|]) \"work\") (child @(Outcome Candidate) (workerBranch [label|late|] \"late\" lateOpened))"
+  void $ turn owner "lateWorker <- unfold (batch (labelCampaign [label|late-baseline|]) \"work\") (child @(Outcome Candidate) (withLifetime ActorOwned (workerBranch [label|late|] \"late\" lateOpened)))"
   lateWorker <- activation
   void $ turn (checkActor lateWorker) "respond (Blocked \"already settled\" [] :: Outcome Candidate)"
 

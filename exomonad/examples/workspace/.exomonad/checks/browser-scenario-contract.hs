@@ -35,9 +35,10 @@ main = do
       && Text.count "git status --porcelain" (preparation !! 6) == 2)
     (error "browser preparation lost its source or required web steps")
   let readiness = Cmd.commandArgv (Cmd.describe (browserReadinessCommand workspace))
-  unless (length readiness == 4
+  unless (length readiness == 5
       && take 2 readiness == ["bash", "-lc"]
-      && readiness !! 3 == source
+      && readiness !! 3 == "browser-ready"
+      && readiness !! 4 == source
       && all (`Text.isInfixOf` (readiness !! 2))
         ["git rev-parse HEAD", "git status --porcelain", "test -f web/dist/index.html"])
     (error "browser readiness must inspect the prepared asset")

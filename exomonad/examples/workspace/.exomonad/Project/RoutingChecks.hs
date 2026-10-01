@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.RoutingChecks (routing, handlerCall, messageDeltas, independentSources, twoLaneHandoff, notificationRetention, automaticReview, requestRecovery, candidateHistory, reviewReadiness, reviewedCheckpoints, declaredRepair, forwardingFailure) where
+module Project.RoutingChecks (mixedBatch, refusedBatch, observerIsolation, routing, handlerCall, messageDeltas, independentSources, twoLaneHandoff, notificationRetention, candidateHistory, reviewReadiness, reviewedCheckpoints, forwardingFailure) where
 
 import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
@@ -12,6 +12,12 @@ import Project.Checks (script, checkSource)
 
 routing :: Member RecipeCheck effects => Eff effects ()
 routing = do
+  mixedBatch
+  void restart
+  refusedBatch
+  void restart
+  observerIsolation
+  void restart
   messageDeltas
   void restart
   forwardCandidate Forward
@@ -44,13 +50,65 @@ routing = do
   pending <- turn (checkActor producer) "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply"
   check "publishing progress preserves the original reply" ("ReplyOpen" `Text.isSuffixOf` output pending)
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
-  closed <- turn owner "(== ([WorkClosed])) . map Project.Routing.sourceStatus . collectedWork <$> readWork forwarding"
+  closed <- turn owner "(== ([WorkClosed])) . map Exomonad.Contrib.Routing.sourceStatus . collectedWork <$> readWork forwarding"
   check "source closure leaves the actor's retained state queryable" (output closed == "True")
   void $ turn owner "finishWork forwarding"
   void restart
   independentSources
   void restart
   twoLaneHandoff
+
+-- The shared collector receives projected values while the product retains
+-- independently typed response/progress handles and exact original receipts.
+mixedBatch :: Member RecipeCheck effects => Eff effects ()
+mixedBatch = do
+  owner <- root
+  script owner "mixed-batch"
+  textWorker <- activation
+  numberWorker <- activation
+  void $ turn (checkActor textWorker) "reportProgress True"
+  void $ turn (checkActor numberWorker) "reportProgress (\"numbers ready\" :: Text)"
+  void $ turn (checkActor textWorker) "respond (\"text ready\" :: Text)"
+  void $ turn (checkActor numberWorker) "respond (42 :: Int)"
+  projected <- turn owner $ Text.unlines
+    [ "view <- readWork (routedCollector mixed)"
+    , "ResponseReady textReceipt <- pollResponse textResponse"
+    , "ResponseReady numberReceipt <- pollResponse numberResponse"
+    , "let sameReceipt original projected = responseExecution original == responseExecution projected && responseWorktree original == responseWorktree projected"
+    , "let textMatches = [sameReceipt textReceipt receipt && responseValue receipt == TextResult (responseValue textReceipt) | WorkFinished \"text\" (Right receipt) <- workHistory view]"
+    , "let numberMatches = [sameReceipt numberReceipt receipt && responseValue receipt == NumberResult (responseValue numberReceipt) | WorkFinished \"number\" (Right receipt) <- workHistory view]"
+    , "inspectFull (textMatches == [True] && numberMatches == [True] && length [() | source <- collectedWork view, Just _ <- [sourceCursor source]] == 2)"
+    ]
+  check "mixed batch keeps original handles and exact receipts across projections" (lastOutput projected == "True")
+  void $ turn owner "finishRoutedBatch mixed"
+
+refusedBatch :: Member RecipeCheck effects => Eff effects ()
+refusedBatch = do
+  owner <- root
+  result <- readFile owner (checkSource "refused-batch") >>= turn owner
+  check "invalid batches return typed refusals before allocating any actor" (lastOutput result == "True")
+
+observerIsolation :: Member RecipeCheck effects => Eff effects ()
+observerIsolation = do
+  owner <- root
+  script owner "progress-route-producer"
+  producer <- activation
+  refused <- turn owner "refusedExisting <- followWork [(\"same\", producer, updates), (\"same\", producer, updates)] keepWork\noriginalState <- pollResponse producer\ninspectFull ((case refusedExisting of { Left (DuplicateWorkName \"same\") -> True; _ -> False }) && (case originalState of { ResponsePending _ -> True; _ -> False }))"
+  check "collector refusal leaves original supplied response active" (lastOutput refused == "True")
+  script owner "observer-isolation"
+  script (checkActor producer) "progress-route-questions"
+  void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first])"
+  _ <- awaitOutput owner "Actor.pollExit (R.actorRef optional)" (Text.isInfixOf "Failed")
+  void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first,second])"
+  void $ turn (checkActor producer) "respond (\"still collected\" :: Text)"
+  retained <- turn owner $ Text.unlines
+    [ "view <- readWork collection"
+    , "let refusals = [() | ObserverAdmission _ _ (Left _) <- workObserverAdmissions view]"
+    , "let admissions = [() | ObserverAdmission _ _ (Right ()) <- workObserverAdmissions view]"
+    , "inspectFull (length refusals >= 3 && length admissions == 1 && not (null (workNotices view)) && (case collectedWork view of { [source] -> case sourceResult source of { Just (Right receipt) -> responseValue receipt == \"still collected\"; _ -> False }; _ -> False }))"
+    ]
+  check "refused and failed optional observers preserve primary terminal collection" (lastOutput retained == "True")
+  void $ turn owner "finishWork collection"
 
 -- Real Delivery values cross a typed parent mailbox; partial source remains in
 -- the local collector and both later final heads are integrated by the owner.
@@ -61,7 +119,7 @@ twoLaneHandoff = do
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline)
   script owner "handoff-setup"
   left <- activation
-  void $ turn owner "(right, rightProgress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @Delivery (coding projectHead (assignment rightLabel task)))"
+  void $ turn owner "(right, rightProgress) <- unfoldDeferred (taskGroup task) (childWithProgress @WorkProgress @Delivery (withLifetime ActorOwned $ coding projectHead (assignment rightLabel task)))"
   right <- activation
   script owner "handoff-router"
   partial <- checkpoint (checkActor left) "left.txt" "partial\n" "left partial checkpoint"
@@ -97,108 +155,6 @@ twoLaneHandoff = do
   retired <- turn owner "retired <- finishWork handoff\ninspectFull (case retired of { Actor.Completed state -> collectedWork state; _ -> [] })"
   check "drain retains both incorporated final heads" (all (`Text.isInfixOf` output retired) [leftFinal, rightFinal])
   void $ turn owner "R.finish parent"
-
-automaticReview :: Member RecipeCheck effects => Eff effects ()
-automaticReview = reviewCycle False False
-
-requestRecovery :: Member RecipeCheck effects => Eff effects ()
-requestRecovery = reviewCycle True False
-
-declaredRepair :: Member RecipeCheck effects => Eff effects ()
-declaredRepair = reviewCycle False True
-
-reviewCycle :: Member RecipeCheck effects => Bool -> Bool -> Eff effects ()
-reviewCycle failAfterAdmission automaticRepair = do
-  owner <- root
-  baseline <- git owner ["rev-parse", "HEAD"]
-  void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline)
-  script owner "review-flow-setup"
-  reviewer <- activation
-  void $ turn (checkActor reviewer) "respond (Produced (Repair (reviewInput sessionInput) []))"
-  void $ turn owner "(worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) (solTaskFrom workerLabel Medium projectHead task))"
-  worker <- activation
-  void $ turn owner "let onReview = keepWork :: WorkSink (Outcome ReviewDecision)\nlet onStopped = const Nothing :: Settlement (Outcome Candidate) -> Maybe Text\nlet owner = me\nlet repairPolicy = OwnerRepairs\nlet repairLabel = [label|repair-produced-candidate|] :: Label"
-  if automaticRepair then void $ turn owner "let repairPolicy = RetainedImplementer (responseActor worker)" else pure ()
-  if failAfterAdmission then do
-    source <- readFile owner (checkSource "review-continuation")
-    let withoutStart = fst (Text.breakOn "reviewBox <-" source)
-        definition = "let reviewBoxDefinition" <> snd (Text.breakOn " = coordinationActor" withoutStart)
-        faulty = Text.replace "let reviewBoxDefinition" "let failingDefinition"
-          (Text.replace "          startReview own result" "          startReview own result\n          error \"injected after admission\"" definition)
-    void $ turn owner (withoutStart <> "\n" <> faulty <> "\nreviewBox <- R.start failingDefinition")
-  else script owner "review-continuation"
-  candidate <- checkpoint (checkActor worker) "feature.txt" "candidate feature\n" "candidate for automatic review"
-  void $ turn (checkActor worker) ("respond (Produced (Candidate " <> gitOidLiteral candidate <> " [\"read feature\"] [\"integration pending\"]))")
-  if failAfterAdmission then pure () else do
-    routed <- awaitOutput owner "flow <- R.call (retainedReviewView (R.client reviewBox)) ()\ninspectFull (retainedReviewCollectors flow, retainedCandidateReceipts flow, retainedSourceProblems flow)" (Text.isInfixOf candidate)
-    check ("candidate settlement retained by the review router: " <> routed) (candidate `Text.isInfixOf` routed)
-    routerExit <- turn owner "inspectFull <$> Actor.pollExit (R.actorRef reviewBox)"
-    check ("retained review router is live before activation: " <> lastOutput routerExit) (lastOutput routerExit == "Nothing")
-  reviewing <- activation
-  check "settlement submits to the available retained reviewer without a model relay" (checkActor reviewing == checkActor reviewer)
-  if failAfterAdmission then do
-    void $ turn owner "reviewBox <- R.replace reviewBox reviewBoxDefinition"
-    retained <- turn owner "flow <- R.call (retainedReviewView (R.client reviewBox)) ()\ninspectFull (length (retainedReviewCollectors flow))"
-    check ("replacement receives the exact request handle queued before admission: " <> lastOutput retained) (lastOutput retained == "1")
-  else pure ()
-  input <- turn (checkActor reviewing) "inspectFull (reviewInput sessionInput)"
-  check "the automatic request carries the exact candidate and gates" (candidate `Text.isInfixOf` output input && "integration pending" `Text.isInfixOf` output input)
-  void $ git (checkActor reviewing) ["merge", "--ff-only", candidate]
-  feature <- readFile (checkActor reviewing) "feature.txt"
-  check "the reviewer incorporates the actual settled source" (feature == "candidate feature\n")
-  (accepting, finalCandidate) <- if automaticRepair then do
-    void $ turn (checkActor reviewing) "respond (Produced (Repair (reviewInput sessionInput) [\"repair the feature\"]))"
-    repairing <- activation
-    check "the declared repair edge reuses the settled implementer" (checkActor repairing == checkActor worker)
-    repairInput <- turn (checkActor repairing) "inspectFull (repairInput sessionInput, repairFindings sessionInput)"
-    check "the repair carries the exact candidate and finding" (candidate `Text.isInfixOf` output repairInput && "repair the feature" `Text.isInfixOf` output repairInput)
-    repaired <- checkpoint (checkActor repairing) "feature.txt" "repaired feature\n" "repair reviewed candidate"
-    void $ turn (checkActor repairing) ("respond (Produced (Candidate " <> gitOidLiteral repaired <> " [\"read repaired feature\"] [\"integration pending\"]))")
-    repeated <- activation
-    check "the repaired candidate returns to the same reviewer automatically" (checkActor repeated == checkActor reviewer)
-    void $ git (checkActor repeated) ["merge", "--ff-only", repaired]
-    checkedFeature <- readFile (checkActor repeated) "feature.txt"
-    check "the repeated reviewer checks repaired source" (checkedFeature == "repaired feature\n")
-    pure (repeated, repaired)
-  else pure (reviewing, candidate)
-  void $ turn (checkActor accepting) "reportProgress (WorkProgress [reviewInput sessionInput] [])"
-  void $ turn (checkActor accepting) "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) (reviewInput sessionInput) [\"read exact feature\"] \"ready for owner integration\")))"
-  received <- awaitOutput owner "flow <- R.call (retainedReviewView (R.client reviewBox)) ()\ninspectFull (retainedReviewEvents flow)" (Text.isInfixOf "Accepted")
-  let arrived = finalCandidate `Text.isInfixOf` received && "WorkChanged" `Text.isInfixOf` received && "Accepted" `Text.isInfixOf` received
-  check (if arrived then "typed review progress and acceptance return through the mailbox"
-         else "missing typed review evidence: " <> received) arrived
-  finished <- turn owner (("let expectedReviews = " <> (if automaticRepair then "2" else "1") <> "\n") <> "finished <- R.finish reviewBox\n(== (0,expectedReviews)) (case finished of { Actor.Completed state -> (length (retainedReviewCollectors state), length (retainedCompletedReviews state)); _ -> (-1,-1) })")
-  check "each admitted review completes and its collector drains" (lastOutput finished == "True")
-  if automaticRepair then do
-    forwarding <- turn owner "case finished of { Actor.Completed state -> mapM (R.forwardingExit . snd) (retainedRepairAttempts state); _ -> pure [] }"
-    check "the result-only repair forwarder exits without a model retirement turn" ("Completed" `Text.isInfixOf` output forwarding)
-    void $ git owner ["merge", "--ff-only", finalCandidate]
-    integrated <- readFile owner "feature.txt"
-    check "the owner integrates and checks the actual accepted repair" (integrated == "repaired feature\n")
-  else pure ()
-  void $ turn owner "let blockedLabel = [label|blocked-implementation|]\n(worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) (solTaskFrom blockedLabel Medium projectHead task))"
-  blocked <- activation
-  script owner "review-continuation"
-  void $ turn (checkActor blocked) "respond (Blocked \"needs owner decision\" [\"contract conflict\"] :: Outcome Candidate)"
-  stopped <- awaitOutput owner "flow <- R.call (retainedReviewView (R.client reviewBox)) ()\ninspectFull (length (retainedReviewCollectors flow), retainedStoppedCandidates flow, length (retainedStoppedNotices flow))" (Text.isInfixOf "contract conflict")
-  check "a blocked candidate retains its receipt without starting review" ("(0," `Text.isInfixOf` stopped && "contract conflict" `Text.isInfixOf` stopped)
-  void $ turn owner "R.finish reviewBox"
-  if automaticRepair then do
-    void $ turn owner "let mismatchLabel = [label|mismatched-source|]\n(worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) (solTaskFrom mismatchLabel Medium projectHead task))"
-    mismatched <- activation
-    script owner "review-continuation"
-    actual <- checkpoint (checkActor mismatched) "different.txt" "actual submitted source\n" "source evidence differs from claim"
-    void $ turn (checkActor mismatched) ("respond (Produced (Candidate " <> gitOidLiteral baseline <> " [] []))")
-    _ <- awaitOutput owner "flow <- R.call (retainedReviewView (R.client reviewBox)) ()\nnot (null (retainedSourceProblems flow))" (Text.isSuffixOf "True")
-    let expectedProblem = "candidate " <> baseline <> "; submitted " <> actual
-    rejected <- turn owner
-      ("null (retainedReviewCollectors flow) && map snd (retainedSourceProblems flow) == [" <> literal expectedProblem
-        <> "] && (case retainedCandidateReceipts flow of { [Right receipt] -> case responseValue receipt of { Produced candidate -> candidateCommit candidate == "
-        <> literal baseline <> "; _ -> False }; _ -> False })")
-    check "source mismatch retains the original receipt and stops automatic review"
-      (lastOutput rejected == "True")
-    void $ turn owner "R.finish reviewBox"
-  else pure ()
 
 -- A record-actor handler that calls another record actor and waits for the
 -- reply must be serviced while it waits: the integrator pattern in a project
@@ -249,16 +205,16 @@ candidateHistory = do
   script owner "progress-route-producer"
   producer <- activation
   baseline <- git owner ["rev-parse", "HEAD"]
-  void $ turn owner "collection <- followWork [(\"producer\", producer, updates)] keepWork"
-  let candidates = "let firstCandidate = Candidate " <> gitOidLiteral baseline <> " [\"first check\"] []\nlet secondCandidate = firstCandidate { checkedCommands = [\"different check\"] }"
+  void $ turn owner "Right collection <- followWork [(\"producer\", producer, updates)] keepWork"
+  let candidates = "let firstCandidate = Candidate " <> gitOidLiteral baseline <> " [\"first check\"] []\nlet secondCandidate = firstCandidate { reportedChecks = [\"different check\"] }"
   void $ turn (checkActor producer) (candidates <> "\nreportProgress (WorkProgress [firstCandidate] [])\nreportProgress (WorkProgress [secondCandidate] [])")
   before <- turn owner "view <- readWork collection\n(== ((2,2))) (length (workEvidence (sourceProgress (head (collectedWork view)))), length (workHistory view))"
   check "same-commit changed evidence remains distinct and ordered" (lastOutput before == "True")
-  void $ turn owner (candidates <> "\nR.send (incorporatedWork (R.client collection)) (\"producer\", [firstCandidate])\nview <- readWork collection\nlet briefBefore = workSnapshotSummary id view")
-  frontier <- turn owner "(== ([[\"different check\"]])) (map checkedCommands (outstandingEvidence view (head (collectedWork view))))"
+  void $ turn owner (candidates <> "\nR.send (acknowledgeWork (R.client collection)) (\"producer\", [firstCandidate])\nview <- readWork collection\nlet briefBefore = workSnapshotSummary id view")
+  frontier <- turn owner "(== ([[\"different check\"]])) (map reportedChecks (outstandingEvidence view (head (collectedWork view))))"
   check "incorporation removes only the exact handled evidence" (output frontier == "True")
   void $ turn (checkActor producer) "mapM_ reportProgress (replicate 100 (WorkProgress [firstCandidate,secondCandidate] []))"
-  after <- turn owner "view <- readWork collection\n(== ((True,102,[[\"first check\"],[\"different check\"]]))) (workSnapshotSummary id view == briefBefore, length (workHistory view), map checkedCommands (workEvidence (sourceProgress (head (collectedWork view)))))"
+  after <- turn owner "view <- readWork collection\n(== ((True,102,[[\"first check\"],[\"different check\"]]))) (workSnapshotSummary id view == briefBefore, length (workHistory view), map reportedChecks (workEvidence (sourceProgress (head (collectedWork view)))))"
   check "100 retained publications do not expand the normal brief or erase evidence"
     (lastOutput after == "True")
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
@@ -328,32 +284,40 @@ reviewedCheckpoints = do
     "admitReviewedCheckpoint (reviewRequest { reviewInput = Candidate (GitOid \"different\") [] [] }) reviewer"
   check "a requested candidate without the review checkout HEAD is refused"
     ("CheckpointSourceRejected" `Text.isInfixOf` output mismatchedSource)
-  void $ turn owner
-    "(alteredReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|altered-review|] reviewRequest)"
+  alteredReviewCreated <- turn owner
+    "(alteredReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|altered-review|] reviewRequest)\nalteredReviewRetention <- detachRequest alteredReview\ninspectFull (show alteredReviewRetention)"
+  check ("alteredReview retention: " <> lastOutput alteredReviewCreated)
+    ("Right ()" `Text.isInfixOf` lastOutput alteredReviewCreated)
   void activation
   void $ turn (checkActor reviewerActor)
-    "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) ((reviewInput sessionInput) { checkedCommands = [\"different\"] }) [] \"accepted\")))"
+    "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) ((reviewInput sessionInput) { reportedChecks = [\"different\"] }) [] \"accepted\")))"
   mismatchedCandidate <- turn owner "admitReviewedCheckpoint reviewRequest alteredReview"
   check "a reviewer verdict for another full candidate is refused"
     ("CheckpointCandidateMismatch" `Text.isInfixOf` output mismatchedCandidate)
-  void $ turn owner
-    "(blockedReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|blocked-review|] reviewRequest)"
+  blockedReviewCreated <- turn owner
+    "(blockedReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|blocked-review|] reviewRequest)\nblockedReviewRetention <- detachRequest blockedReview\ninspectFull (show blockedReviewRetention)"
+  check ("blockedReview retention: " <> lastOutput blockedReviewCreated)
+    ("Right ()" `Text.isInfixOf` lastOutput blockedReviewCreated)
   void activation
   void $ turn (checkActor reviewerActor)
     "respond (Blocked \"review blocked\" [\"missing source proof\"] :: Outcome ReviewDecision)"
   blocked <- turn owner "admitReviewedCheckpoint reviewRequest blockedReview"
   check "a blocked review cannot become a reviewed checkpoint"
     ("CheckpointBlocked" `Text.isInfixOf` output blocked)
-  void $ turn owner
-    "(repairReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|repair-review|] reviewRequest)"
+  repairReviewCreated <- turn owner
+    "(repairReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|repair-review|] reviewRequest)\nrepairReviewRetention <- detachRequest repairReview\ninspectFull (show repairReviewRetention)"
+  check ("repairReview retention: " <> lastOutput repairReviewCreated)
+    ("Right ()" `Text.isInfixOf` lastOutput repairReviewCreated)
   void activation
   void $ turn (checkActor reviewerActor)
     "respond (Produced (Repair (reviewInput sessionInput) [\"repair requested\"]))"
   needsRepair <- turn owner "admitReviewedCheckpoint reviewRequest repairReview"
   check "a review requesting repair cannot become a reviewed checkpoint"
     ("CheckpointNeedsRepair" `Text.isInfixOf` output needsRepair)
-  void $ turn owner
-    "(dirtyReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|dirty-review|] reviewRequest)"
+  dirtyReviewCreated <- turn owner
+    "(dirtyReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|dirty-review|] reviewRequest)\ndirtyReviewRetention <- detachRequest dirtyReview\ninspectFull (show dirtyReviewRetention)"
+  check ("dirtyReview retention: " <> lastOutput dirtyReviewCreated)
+    ("Right ()" `Text.isInfixOf` lastOutput dirtyReviewCreated)
   void activation
   writeFile (checkActor reviewerActor) "README.md" "dirty review checkout\n"
   void $ turn (checkActor reviewerActor)
@@ -373,7 +337,7 @@ reviewedCheckpoints = do
   check "the checkpoint retains the original review response reference"
     (output receipt == "True")
   void $ turn owner
-    "(producer, updates) <- unfold (batch campaign \"produce\") (childWithProgress @WorkProgress @Text (coding projectHead (assignment [label|producer|] reviewed)))\ncollection <- followWork [(\"producer\", producer, updates)] (notifyWork me (workMessage id))"
+    "(producer, updates) <- unfoldDeferred (batch campaign \"produce\") (childWithProgress @WorkProgress @Text (withLifetime ActorOwned $ coding projectHead (assignment [label|producer|] reviewed)))\nRight collection <- followWork [(\"producer\", producer, updates)] (notifyWork me (workMessage id))"
   producerActor <- activation
   void $ turn (checkActor producerActor)
     "reportProgress (WorkProgress [checkpointCandidate sessionInput] [])"
@@ -406,13 +370,13 @@ reviewedCheckpoints = do
   check "a later policy change has a distinct cursor"
     ("Just 4" `Text.isInfixOf` output changed)
   void $ turn (checkActor producerActor)
-    "reportProgress (WorkProgress [(checkpointCandidate sessionInput) { checkedCommands = [\"new raw evidence\"] }] [newQuestion])"
+    "reportProgress (WorkProgress [(checkpointCandidate sessionInput) { reportedChecks = [\"new raw evidence\"] }] [newQuestion])"
   future <- turn owner
     "view <- readWork collection\n(length [() | Notice _ (Left NotificationUnavailable) <- workNotices view], length (workHistory view), sourceCursor (head (collectedWork view)), length (outstandingReviewed view)) == (2,6,Just (ProgressCursor 4),1)"
   check "future-only policy keeps one history and source cursor"
     (lastOutput future == "True")
   void $ turn owner
-    "R.send (incorporatedWork (R.client collection)) (\"producer\", [checkpointCandidate reviewed])"
+    "R.send (acknowledgeWork (R.client collection)) (\"producer\", [checkpointCandidate reviewed])"
   handled <- turn owner "length . outstandingReviewed <$> readWork collection"
   check "explicit incorporation clears the reviewed snapshot"
     (output handled == "0")
@@ -427,7 +391,7 @@ notificationRetention = do
   script owner "progress-route-consumer"
   _ <- activation
   void $ turn owner "stopAgent (responseActor consumer)"
-  void $ turn owner "import qualified Tidepool.Actor as Actor\ncollection <- followWork [(\"producer\", producer, updates)] (notifyWork (responseActor consumer) (workMessage id))"
+  void $ turn owner "import qualified Tidepool.Actor as Actor\nRight collection <- followWork [(\"producer\", producer, updates)] (notifyWork (responseActor consumer) (workMessage id))"
   script (checkActor producer) "progress-route-questions"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first])"
   retained <- turn owner "view <- readWork collection\ninspectFull (collectedWork view, [failure | Notice _ (Left failure) <- workNotices view])"
@@ -439,14 +403,14 @@ notificationRetention = do
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first,first])"
   once <- turn owner "inspectFull . length . workNotices <$> readWork collection"
   check "repeated questions do not retry failed notification" (output once == "1")
-  void $ turn owner "collection <- R.replace collection (workDefinition [(\"producer\", producer, updates)] (notifyWork (responseActor consumer) (workMessage id)))"
+  void $ turn owner "Right replacementSpec <- pure (workDefinition [(\"producer\", producer, updates)] (notifyWork (responseActor consumer) (workMessage id)))\ncollection <- R.replace collection replacementSpec"
   preserved <- turn owner "(\\view -> (== ((1,[[\"question-a\"]]))) (length (workNotices view), map (map questionKey . workQuestions . sourceProgress) (collectedWork view))) <$> readWork collection"
   check "replacement preserves failed notification evidence without replay" (output preserved == "True")
   -- Exercise uncertainty as typed sink data. No external send is claimed here.
   script owner "uncertain-route"
   uncertain <- turn owner "view <- readWork uncertain\ninspectFull (collectedWork view, [failure | Notice _ (Left failure) <- workNotices view])"
   check "uncertain admission preserves the observed question" ("question-a" `Text.isInfixOf` output uncertain && "NotificationAdmissionUnconfirmed" `Text.isInfixOf` output uncertain)
-  void $ turn owner "uncertain <- R.replace uncertain (workDefinition [(\"producer\", producer, updates)] keepWork)"
+  void $ turn owner "Right replacementSpec <- pure (workDefinition [(\"producer\", producer, updates)] keepWork)\nuncertain <- R.replace uncertain replacementSpec"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [])"
   resolved <- turn owner "(\\view -> (== (([[]],2))) (map (workQuestions . sourceProgress) (collectedWork view), length (workNotices view))) <$> readWork collection"
   check "resolving the final question produces its own delta" (output resolved == "True")
@@ -464,15 +428,15 @@ independentSources = do
   owner <- root
   script owner "attention-sources-setup"
   left <- activation
-  void $ turn owner "(right, rightProgress) <- unfold (batch campaign wave) (childWithProgress @WorkProgress @Text (coding projectHead (assignment rightLabel (\"right\" :: Text))))"
+  void $ turn owner "(right, rightProgress) <- unfoldDeferred (batch campaign wave) (childWithProgress @WorkProgress @Text (withLifetime ActorOwned $ coding projectHead (assignment rightLabel (\"right\" :: Text))))"
   right <- activation
   script owner "attention-sources-route"
   script (checkActor left) "attention-sources-question"
   script (checkActor right) "attention-sources-question"
   void $ turn (checkActor left) "reportProgress (WorkProgress [] [first,second])"
-  first <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkOpen),(\"right\",[],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), Project.Routing.sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
+  first <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkOpen),(\"right\",[],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), Exomonad.Contrib.Routing.sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
   check "left progresses while right is silent" (output first == "True")
-  void $ turn owner "collection <- R.replace collection (workDefinition [(\"left\", left, leftProgress), (\"right\", right, rightProgress)] countChanges)"
+  void $ turn owner "Right replacementSpec <- pure (workDefinition [(\"left\", left, leftProgress), (\"right\", right, rightProgress)] countChanges)\ncollection <- R.replace collection replacementSpec"
   void $ turn (checkActor left) "reportProgress (WorkProgress [] [second,first,first])"
   void $ turn owner "readWork collection"
   count <- turn owner "Actor.call wakes (RoutingCount 0 id)"
@@ -481,13 +445,13 @@ independentSources = do
   both <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"]),(\"right\",[\"same-key\"])])) [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
   check "same-key questions retain both source identities" (output both == "True")
   void $ turn (checkActor left) "respond (\"finished\" :: Text)"
-  closed <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkClosed),(\"right\",[\"same-key\"],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), Project.Routing.sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
+  closed <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkClosed),(\"right\",[\"same-key\"],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), Exomonad.Contrib.Routing.sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
   check "closure retains unanswered questions" (output closed == "True")
   void $ turn (checkActor right) "reportProgress (WorkProgress [] [])"
   resolved <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"]),(\"right\",[])])) [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
   check "one resolution cannot erase another source's questions" (output resolved == "True")
   void $ turn (checkActor right) "respond (\"finished\" :: Text)"
-  final <- turn owner "(== ([WorkClosed,WorkClosed])) . map Project.Routing.sourceStatus . collectedWork <$> readWork collection"
+  final <- turn owner "(== ([WorkClosed,WorkClosed])) . map Exomonad.Contrib.Routing.sourceStatus . collectedWork <$> readWork collection"
   check "both sources close without rearming" (output final == "True")
   void $ turn owner "finishWork collection"
 

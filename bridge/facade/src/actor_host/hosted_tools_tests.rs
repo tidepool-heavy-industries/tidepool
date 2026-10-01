@@ -10,12 +10,16 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
             let directory = config.workspace.join(".exomonad");
             std::fs::create_dir_all(directory.join("Project")).unwrap();
             std::fs::write(directory.join("Project/Tools.hs"), include_str!("hosted_tools_fixture.hs")).unwrap();
+            std::fs::write(directory.join("ToolDispatchFixture.hs"), include_str!("fixtures/tool_dispatch_fixture.hs")).unwrap();
             std::fs::write(directory.join("config.toml"),
-                "[defaults]\nmodel='gpt-6-sol'\n[haskell]\nsource_roots=['.']\nmodules=['Project.Tools']\ntools='Project.Tools.tools'\n").unwrap();
+                "[defaults]\nmodel='gpt-6-sol'\n[haskell]\nsource_roots=['.']\nmodules=['Project.Tools','ToolDispatchFixture']\nspec='Project.Tools.agentSpec'\n").unwrap();
             config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root).unwrap());
         },
     ).await;
     let policy = campaign.root_installation.policy.clone();
+    let typed =
+        dispatch_haskell_script(policy.as_ref(), "ToolDispatchFixture.dispatchChecks").await;
+    assert_eq!(typed["items"][0]["output"], "True", "{typed}");
     // The running dispatcher uses captured source, even if authored files change.
     std::fs::write(
         campaign
@@ -68,6 +72,43 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
     assert!(call("unknown", ToolArguments::Raw("x".into()))
         .await
         .is_err());
+    for arguments in [
+        serde_json::json!({"text": "x", "copies": "three"}),
+        serde_json::json!({"text": "x"}),
+    ] {
+        let error = call("repeat_text", ToolArguments::Structured(arguments))
+            .await
+            .expect_err("malformed declared input is a tool refusal");
+        assert!(
+            matches!(
+                error,
+                exomonad_actor::ResidentToolError::Invocation(
+                    exomonad_actor::KernelInvocationFailure::Rejected { .. }
+                )
+            ),
+            "{error}"
+        );
+    }
+    let scalar = call(
+        "repeat_text",
+        ToolArguments::Structured(serde_json::json!(17)),
+    )
+    .await
+    .expect_err("structured transport requires an object before Haskell dispatch");
+    assert!(
+        matches!(
+            scalar,
+            exomonad_actor::ResidentToolError::InvalidInvocation(_)
+        ),
+        "{scalar}"
+    );
+    let repaired = call(
+        "repeat_text",
+        ToolArguments::Structured(serde_json::json!({"text": "fixed", "copies": 1})),
+    )
+    .await
+    .expect("valid call remains usable after malformed input");
+    assert_eq!(repaired["items"][0]["output"], "fixed");
     let failed = call("raw_echo", ToolArguments::Raw("fail".into()))
         .await
         .unwrap();

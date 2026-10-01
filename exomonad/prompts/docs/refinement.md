@@ -8,9 +8,12 @@ With `interfaceWorker`, `revisionLabel`, and a task-specific `revisionPlan`
 already bound, and `RevisionReport` defined as your desired result type:
 
 ```haskell
-revision <- requestWith @RevisionReport (responseActor interfaceWorker) $
-  (assignment revisionLabel revisionPlan)
-    { guidance = Just "Address only the accepted review findings." }
+revision <- do
+  response <- request @RevisionReport (responseActor interfaceWorker) $
+    (assignment revisionLabel revisionPlan)
+      { guidance = Just "Address only the accepted review findings." }
+  Right () <- detachRequest response
+  pure response
 let revisionActor = responseActor revision
 revisionActor
 ```

@@ -1,13 +1,15 @@
+mod invocation;
 pub(crate) mod routes;
 pub(crate) mod sources;
 mod updates;
+pub(crate) use invocation::RequestCleanupState;
 pub use updates::{
     LateUpdateEvidence, RequestUpdateCorrelation, RequestUpdateDelivery, RequestUpdateId,
     RequestUpdatePresentation, RequestUpdateReconciler, RequestUpdateState,
     UpdateReconciliationError,
 };
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -319,13 +321,18 @@ struct RequestRecord {
     updates: Vec<updates::UpdateRecord>,
     owner: ActorRef,
     reservation_owner: Option<RequestReservationOwner>,
+    /// Detachment changes lifetime, never the original reservation rollback fence.
+    invocation_detached: bool,
     target: ActorRef,
     label: String,
     target_state: TargetState,
     owner_state: OwnerState,
     deadline: Option<ActiveRequestDeadline>,
     progress: Option<ProgressSnapshot>,
+    /// Authored reporting intent; subscriptions temporarily own its wake.
     notify_owner: bool,
+    /// The owner notice was emitted, a named subscription owns it, or a direct
+    /// wait passed its cancellation gate and captured it.
     settlement_notified: bool,
     registered_at_unix_ms: u64,
     /// A bounded, best-effort text rendering of the reply value, attached by
@@ -424,6 +431,7 @@ enum WatchState {
 }
 
 struct WatchRecord {
+    transient: bool,
     route: Option<routes::WatchRoute>,
     owner: ActorRef,
     label: String,
@@ -474,7 +482,7 @@ struct RequestStateTable {
     cleaning: std::collections::HashSet<ActorRef>,
     requests: HashMap<RequestId, RequestRecord>,
     watches: HashMap<WatchId, WatchRecord>,
-    settlement_notifications: Vec<SettlementNotification>,
+    settlement_notifications: VecDeque<SettlementNotification>,
 }
 
 /// One process-local owner for request identity, terminal state, and watch
@@ -483,6 +491,7 @@ struct RequestStateTable {
 #[derive(Default)]
 pub(crate) struct RequestRegistry {
     state: Mutex<RequestStateTable>,
+    settlement_publication: tokio::sync::Mutex<()>,
 }
 
 /// A cancellable subscription to one retained watch's readiness transition.
@@ -1235,6 +1244,7 @@ impl RequestRegistry {
                 updates: Vec::new(),
                 owner,
                 reservation_owner,
+                invocation_detached: false,
                 target,
                 label,
                 target_state: TargetState::Reserved,
@@ -1283,6 +1293,7 @@ impl RequestRegistry {
                 updates: Vec::new(),
                 owner,
                 reservation_owner: None,
+                invocation_detached: false,
                 target: owner,
                 label: format!("job {job}"),
                 target_state: TargetState::Presented,
@@ -1330,8 +1341,29 @@ impl RequestRegistry {
         notifications
     }
 
+    /// Serialize publishers across channel reservation without holding the
+    /// request-state lock. Cancellation leaves unclaimed notices in the queue.
+    pub(crate) async fn lock_settlement_publication(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.settlement_publication.lock().await
+    }
+
+    pub(crate) fn has_settlement_notifications(&self) -> bool {
+        !self.state.lock().settlement_notifications.is_empty()
+    }
+
+    /// Called by the serialized publisher only after reserving channel capacity.
+    /// Claim and permit delivery must have no intervening suspension point.
+    pub(crate) fn take_next_settlement_notification(&self) -> Option<SettlementNotification> {
+        self.state.lock().settlement_notifications.pop_front()
+    }
+
+    #[cfg(test)]
     pub(crate) fn take_settlement_notifications(&self) -> Vec<SettlementNotification> {
-        std::mem::take(&mut self.state.lock().settlement_notifications)
+        self.state
+            .lock()
+            .settlement_notifications
+            .drain(..)
+            .collect()
     }
 
     /// Remove request identities which never crossed the admission commit.
@@ -1598,7 +1630,10 @@ impl RequestRegistry {
         let mut state = self.state.lock();
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
         authorize_owner(record, owner)?;
-        if is_owner_terminal(&record.owner_state) || record.target_state == TargetState::Closed {
+        // Releasing the requester's wait does not settle the target. An
+        // abandoned response still needs cancellation and a deadline may
+        // already have requested it without receiving acknowledgment.
+        if record.target_state == TargetState::Closed {
             return Ok((CancelRequestOutcome::AlreadyTerminal, None));
         }
         if matches!(
@@ -1875,6 +1910,28 @@ impl RequestRegistry {
         groups: Vec<Vec<(RequestId, WatchRequirement)>>,
         route: Option<routes::WatchRoute>,
     ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
+        self.register_watch_groups(owner, label, groups, route, false)
+    }
+
+    /// A direct suspended wait uses the same readiness owner, without a
+    /// model notification or a retained named subscription.
+    pub(crate) fn register_transient_watch(
+        &self,
+        owner: ActorRef,
+        groups: Vec<Vec<(RequestId, WatchRequirement)>>,
+    ) -> Result<WatchId, ReplyError> {
+        self.register_watch_groups(owner, "wait-for".into(), groups, None, true)
+            .map(|(watch, _)| watch)
+    }
+
+    fn register_watch_groups(
+        &self,
+        owner: ActorRef,
+        label: String,
+        groups: Vec<Vec<(RequestId, WatchRequirement)>>,
+        route: Option<routes::WatchRoute>,
+        transient: bool,
+    ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
         let group_count = groups.len();
         let dependencies = groups
             .iter()
@@ -1905,20 +1962,6 @@ impl RequestRegistry {
             }
             touched.insert(record.target);
         }
-        // An owner's response watch or route owns that owner's settlement
-        // wake. A foreign listener and a progress-only watch do not.
-        // A notice already emitted before registration cannot be retracted.
-        for dependency in &dependencies {
-            if owner == state.requests[&dependency.request].owner
-                && matches!(dependency.requirement, WatchRequirement::Response { .. })
-            {
-                state
-                    .requests
-                    .get_mut(&dependency.request)
-                    .ok_or(ReplyError::Stale)?
-                    .notify_owner = false;
-            }
-        }
         for actor in touched {
             *state.cleanup_revision.entry(actor).or_default() += 1;
         }
@@ -1939,6 +1982,7 @@ impl RequestRegistry {
         state.watches.insert(
             id,
             WatchRecord {
+                transient,
                 route,
                 owner,
                 label,
@@ -2041,6 +2085,72 @@ impl RequestRegistry {
         Ok(ForgetWatchOutcome::Forgotten)
     }
 
+    pub(crate) fn is_transient_watch(&self, owner: ActorRef, watch: WatchId) -> bool {
+        self.state
+            .lock()
+            .watches
+            .get(&watch)
+            .is_some_and(|record| record.owner == owner && record.transient)
+    }
+
+    /// Claim the owner's readiness wake only after cancellation and retirement
+    /// chose this direct wait's successful resume. A cancelled waiter must leave
+    /// the original reporting policy available to the producer.
+    pub(crate) fn claim_transient_watch_wake(
+        &self,
+        owner: ActorRef,
+        watch: WatchId,
+    ) -> Result<(), ReplyError> {
+        let mut state = self.state.lock();
+        let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
+        if record.owner != owner {
+            return Err(identity_error(record.owner, owner));
+        }
+        if !record.transient || record.state == WatchState::Pending {
+            return Err(ReplyError::Stale);
+        }
+        let requests = record
+            .dependencies
+            .iter()
+            .filter_map(|dependency| {
+                matches!(dependency.requirement, WatchRequirement::Response { .. })
+                    .then_some(dependency.request)
+            })
+            .collect::<Vec<_>>();
+        for request in requests {
+            if let Some(record) = state
+                .requests
+                .get_mut(&request)
+                .filter(|record| record.owner == owner)
+            {
+                record.settlement_notified = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop only the invocation's subscription, including a pending one.
+    /// The producing request and its cancellation/cleanup state are untouched.
+    pub(crate) fn release_transient_watch(
+        &self,
+        owner: ActorRef,
+        watch: WatchId,
+    ) -> Result<(), ReplyError> {
+        let mut state = self.state.lock();
+        let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
+        if record.owner != owner {
+            return Err(identity_error(record.owner, owner));
+        }
+        if !record.transient {
+            return Err(ReplyError::Unauthorized);
+        }
+        wake_watch_waiters(state.watches.get_mut(&watch).expect("watch checked"));
+        state.watches.remove(&watch);
+        queue_settlement_notifications(&mut state);
+        release_settled_commands(&mut state);
+        Ok(())
+    }
+
     /// Hold an existing command record for a watch about to register, so
     /// it is not released in between. False when the record was already
     /// released: its job then re-arms a fresh, already settled record.
@@ -2067,18 +2177,8 @@ impl RequestRegistry {
         if record.command_job.is_none() {
             return None;
         }
-        let owner = record.owner;
-        let owner_watches = state.watches.values().any(|watch| {
-            watch.owner == owner
-                && watch.dependencies.iter().any(|dependency| {
-                    dependency.request == request
-                        && matches!(dependency.requirement, WatchRequirement::Response { .. })
-                })
-        });
-        if !owner_watches {
-            if let Some(record) = state.requests.get_mut(&request) {
-                record.notify_owner = true;
-            }
+        if let Some(record) = state.requests.get_mut(&request) {
+            record.notify_owner = true;
         }
         let notifications = reevaluate_watches(&mut state);
         release_settled_commands(&mut state);
@@ -2376,6 +2476,10 @@ fn invalidate_response_watches(
             failure: ResponseFailure::Released,
         };
         watch.progress.clear();
+        wake_watch_waiters(watch);
+        if watch.transient {
+            continue;
+        }
         if let Some(route) = &mut watch.route {
             route.schedule(*watch_id);
             continue;
@@ -2467,8 +2571,9 @@ fn wake_watch_waiters(watch: &mut WatchRecord) {
     }
 }
 
-fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
+fn queue_settlement_notifications(state: &mut RequestStateTable) {
     let mut settlements = Vec::new();
+    let watches = &state.watches;
     for (request, record) in &mut state.requests {
         record.publish_source_closure();
         if record.owner_state != OwnerState::Observing || record.target_state == TargetState::Closed
@@ -2484,6 +2589,29 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
                 OwnerState::Observing | OwnerState::Abandoned => None,
             };
             if let Some(transition) = transition {
+                let (subscribed, named) = watches
+                    .values()
+                    .filter(|watch| {
+                        watch.owner == record.owner
+                            && watch.dependencies.iter().any(|dependency| {
+                                dependency.request == *request
+                                    && matches!(
+                                        dependency.requirement,
+                                        WatchRequirement::Response { .. }
+                                    )
+                            })
+                    })
+                    .fold((false, false), |(_, named), watch| {
+                        (true, named || !watch.transient)
+                    });
+                if subscribed {
+                    // A named watch emits its retained wake below. A direct
+                    // wait claims only after its cancellation gate chooses resume.
+                    if named {
+                        record.settlement_notified = true;
+                    }
+                    continue;
+                }
                 record.settlement_notified = true;
                 // The preview describes a successful reply specifically; an
                 // `Unavailable` settlement keeps today's guidance-only text.
@@ -2516,20 +2644,26 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
     ) in settlements
     {
         let sequence = next_event_sequence(state, owner);
-        state.settlement_notifications.push(SettlementNotification {
-            owner,
-            request,
-            label,
-            transition,
-            reply_preview,
-            target_path,
-            target_revision,
-            command_job,
-            occurred_at_unix_ms: unix_time_ms(),
-            sequence,
-            watermark: sequence,
-        });
+        state
+            .settlement_notifications
+            .push_back(SettlementNotification {
+                owner,
+                request,
+                label,
+                transition,
+                reply_preview,
+                target_path,
+                target_revision,
+                command_job,
+                occurred_at_unix_ms: unix_time_ms(),
+                sequence,
+                watermark: sequence,
+            });
     }
+}
+
+fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
+    queue_settlement_notifications(state);
     let mut notifications = Vec::new();
     for (watch_id, watch) in &mut state.watches {
         if watch.state != WatchState::Pending {
@@ -2639,6 +2773,9 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
         wake_watch_waiters(watch);
         let occurred_at_unix_ms = unix_time_ms();
         watch.transitioned_at_unix_ms = Some(occurred_at_unix_ms);
+        if watch.transient {
+            continue;
+        }
         if let Some(route) = &mut watch.route {
             route.schedule(*watch_id);
             continue;

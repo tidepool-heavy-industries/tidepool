@@ -207,7 +207,7 @@ impl WorkbenchPublicOwner {
             _ => {
                 return Err(refuse(
                     "publication plane differs from requested persistence",
-                ))
+                ));
             }
         }
         Ok(Arc::new(Self {
@@ -242,6 +242,14 @@ struct OwnedExecution<H, O> {
     resources: Arc<ExecutionResourceOwners>,
     observation: crate::ActorRuntimeObservationHandle,
     retirement: crate::RetainedActorExit,
+}
+
+impl<H, O> Drop for OwnedExecution<H, O> {
+    fn drop(&mut self) {
+        // Lost actor tasks cannot admit further work. The original journal and
+        // resource owners retain any cleanup that could not be observed.
+        self.state.effects.invocation_work.close();
+    }
 }
 
 pub(super) struct WorkbenchUnitStart {
@@ -302,10 +310,6 @@ pub(super) enum WorkbenchFragmentRequest {
         fragment: ResidentWorkbenchFragment,
         outcome: ResidentOutcome,
     },
-    BackgroundJob {
-        job: String,
-        reason: crate::resident_workbench::CommandObservationStop,
-    },
     ReplyRejection {
         continuation: ResidentHole,
         error: crate::ReplyError,
@@ -339,11 +343,6 @@ where
                 .settle_item(context.clone(), fragment, outcome)
                 .await?
         }
-        WorkbenchFragmentRequest::BackgroundJob { job, reason } => {
-            workbench
-                .bind_background_job(context.clone(), job, reason)
-                .await?
-        }
         WorkbenchFragmentRequest::ReplyRejection {
             continuation,
             error,
@@ -351,7 +350,7 @@ where
             return runner
                 .resume_reply_rejection(context, continuation, error)
                 .await
-                .map(WorkbenchFragmentAdvance::Resumed)
+                .map(WorkbenchFragmentAdvance::Resumed);
         }
     };
     match step {
@@ -556,7 +555,7 @@ where
         let admitted = match self.preflight_workbench(kernel.identity(), invocation, control) {
             Ok(WorkbenchPreflight::Admitted(admitted)) => admitted,
             Ok(WorkbenchPreflight::Retained(reply)) => {
-                return terminal_task(reply.map(KernelStep::Continue))
+                return terminal_task(reply.map(KernelStep::Continue));
             }
             Err(error) => return terminal_task(Err(error)),
         };
@@ -611,6 +610,12 @@ where
             }),
             attempt: crate::request::WorkbenchReservationAttempt::fresh(),
         };
+        let invocation_work = InvocationWork::new(context.actor, reservation_owner.clone());
+        self.workbench_executions.lock().retain_invocation_work(
+            invocation_work.clone(),
+            request.execution_id(),
+            invocation.as_ref(),
+        );
         let kind = request
             .tool_call()
             .map(|call| call.name.clone())
@@ -639,6 +644,7 @@ where
                     installed_tools,
                     admitted_source,
                     reservation_owner,
+                    invocation_work,
                     publication: ForkPublication::Workbench {
                         boundary: request.fork_boundary().cloned(),
                         capture,
@@ -728,7 +734,7 @@ where
                         return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
                             owned,
                             Err(workbench_failure(&[], 0, 1, error)),
-                        )))
+                        )));
                     }
                 };
                 if let Some(cell) = cell {
@@ -741,13 +747,13 @@ where
                             return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
                                 owned,
                                 Ok(step),
-                            )))
+                            )));
                         }
                         Err(error) => {
                             return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
                                 owned,
                                 Err(error),
-                            )))
+                            )));
                         }
                         Ok(None) => {}
                     }
@@ -917,9 +923,6 @@ where
                         Ok(WorkbenchRunAdvance::ParkAfterToolFinish) => {
                             behavior.finish_owned_after_tool_task(owned, kernel.clone())
                         }
-                        Ok(WorkbenchRunAdvance::ParkBackground(presentation)) => {
-                            behavior.owned_background_command_task(owned, presentation)
-                        }
                         result => {
                             let result = result.map(|advance| match advance {
                                 WorkbenchRunAdvance::Complete(step) => step,
@@ -958,62 +961,6 @@ where
                 );
                 owned.state.cursor.started = Some(started);
                 Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
-            },
-        )
-    }
-
-    fn owned_background_command_task(
-        &self,
-        owned: OwnedExecution<H, O>,
-        request: background_command_wait::BackgroundCommandRequest,
-    ) -> OwnedWorkbenchTask<Self> {
-        let jobs = self.environment.commands.clone();
-        let binding = request.binding.clone();
-        Self::owned_step_task(
-            owned,
-            move |owned| {
-                let actor = owned.state.effects.context.actor;
-                Box::pin(
-                    async move { background_command_wait::prepare(&jobs, actor, request).await },
-                )
-            },
-            move |behavior, kernel, mut owned, prepared| {
-                let output = prepared.apply(
-                    &behavior.environment.commands,
-                    owned.state.effects.context.actor,
-                );
-                owned.state.cursor.receipts.push(WorkbenchItemReceipt {
-                    diagnostics: Vec::new(),
-                    index: owned.state.cursor.index,
-                    kind: None,
-                    span: None,
-                    source_items: Vec::new(),
-                    status: WorkbenchItemStatus::Stopped,
-                    output,
-                    warnings: Vec::new(),
-                    installed_bindings: vec![binding],
-                    operations: std::mem::take(&mut owned.state.cursor.unit.operations),
-                    terminal_transfer: Some(WorkbenchTerminalTransfer::CommandBackgrounded),
-                    failure_layer: None,
-                });
-                let response = workbench_response(
-                    WorkbenchRunStatus::Backgrounded,
-                    std::mem::take(&mut owned.state.cursor.receipts),
-                    owned.state.cursor.index,
-                    owned.state.request.items.len(),
-                    owned
-                        .state
-                        .cursor
-                        .cell_check
-                        .as_ref()
-                        .map(|checked| checked.items.as_slice()),
-                );
-                Self::begin_owned_finalization(
-                    behavior,
-                    kernel,
-                    owned,
-                    Ok(KernelStep::Continue(response)),
-                )
             },
         )
     }
@@ -1591,6 +1538,7 @@ where
             .control
             .clone()
             .unwrap_or_else(crate::WorkbenchExecutionControl::untracked);
+        let invocation = owned.state.effects.invocation_work.clone();
         let observed_child = pending.wait.observe_after_resume();
         Self::owned_step_task(
             owned,
@@ -1602,6 +1550,7 @@ where
                     control,
                     pending.wait,
                     commands_permitted,
+                    invocation,
                 ))
             },
             move |behavior, _kernel, mut owned, result| {
@@ -1670,6 +1619,7 @@ where
         owned: OwnedExecution<H, O>,
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> Result<WorkbenchAdvance<Self>, KernelInvocationFailure> {
+        owned.state.effects.invocation_work.close();
         if owned.private.is_some() && private_publication_required(&result) {
             return Ok(WorkbenchAdvance::Park(Self::publish_owned_execution_task(
                 owned,
@@ -1686,18 +1636,20 @@ where
             .expect("owned execution retains its original control")
             .publication_decision()
             .terminate();
-        Self::settle_owned_execution(behavior, owned, result)
+        Self::settle_owned_execution(behavior, kernel, owned, result)
     }
 
     fn settle_owned_execution(
         behavior: &mut Self,
+        kernel: &KernelContext,
         owned: OwnedExecution<H, O>,
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> Result<WorkbenchAdvance<Self>, KernelInvocationFailure> {
         let (timing, cleanup) = owned.scopes();
         timing.sync_scope(|| {
             cleanup.sync_scope(|| {
-                let finalization = behavior.begin_workbench_finalization(&owned.state, result);
+                let finalization =
+                    behavior.begin_workbench_finalization(&owned.state, kernel, result);
                 Ok(WorkbenchAdvance::Park(
                     Self::settle_owned_finalization_task(
                         owned,
@@ -1739,7 +1691,7 @@ where
                 match published {
                     Ok(PrivateExecutionPublication::Manifest(
                         PublicManifestCommit::Durable | PublicManifestCommit::Ephemeral,
-                    )) => Self::settle_owned_execution(behavior, owned, result),
+                    )) => Self::settle_owned_execution(behavior, &kernel, owned, result),
                     Ok(PrivateExecutionPublication::Manifest(
                         PublicManifestCommit::PublishedDurabilityUnconfirmed { detail },
                     )) => Ok(WorkbenchAdvance::Park(
@@ -1775,6 +1727,7 @@ where
                             .terminate();
                         Self::settle_owned_execution(
                             behavior,
+                            &kernel,
                             owned,
                             Err(private_publication_failure(result, error)),
                         )
@@ -1809,7 +1762,7 @@ where
                     }
                 })
             },
-            move |behavior, _kernel, owned, confirmed| {
+            move |behavior, kernel, owned, confirmed| {
                 let result = match confirmed {
                     Ok(()) => result,
                     Err(error) => Err(private_publication_failure(
@@ -1819,7 +1772,7 @@ where
                         )),
                     )),
                 };
-                Self::settle_owned_execution(behavior, owned, result)
+                Self::settle_owned_execution(behavior, kernel, owned, result)
             },
         )
     }
@@ -1948,6 +1901,7 @@ async fn await_effect<H, O>(
     control: Arc<crate::WorkbenchExecutionControl>,
     wait: OwnedWorkbenchWait,
     commands_permitted: bool,
+    invocation: Arc<InvocationWork>,
 ) -> commands::CommandResolution
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -2055,6 +2009,7 @@ where
                 request,
                 commands_permitted,
                 wait_control,
+                Some(invocation.as_ref()),
             )
             .await;
             crate::call_timing::add_exec_ms(exec_started.elapsed().as_millis());

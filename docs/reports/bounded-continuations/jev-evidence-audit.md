@@ -2,8 +2,8 @@
 
 ## Current design
 
-The [approved simplification](../../../plans/continuation-simplification.md)
-supersedes the diff-relevance and repair-scope classifiers below. Jev compares
+The approved simplification retained at
+`a40f70bcfd:plans/continuation-simplification.md` supersedes the diff-relevance and repair-scope classifiers below. Jev compares
 exact-candidate authored publication notes with admitted consumer interests and
 open questions, or selects an existing accepted owner decision. It does not judge
 code correctness or review findings. Independent reviewers own code review;

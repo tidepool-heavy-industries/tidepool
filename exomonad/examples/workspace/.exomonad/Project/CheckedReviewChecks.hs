@@ -1,7 +1,8 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Project.CheckedReviewChecks
-  ( continuation, green, published, zeroSelection, missingEvidence, infrastructure, sourceMismatch, escalation ) where
+  ( continuation, green, published, zeroSelection, selectionMismatch, duplicateSelection
+  , missingEvidence, infrastructure, sourceMismatch, escalation ) where
 
 import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
@@ -38,12 +39,12 @@ continuation = do
     (checkActor repairing == checkActor implementer)
   void $ turn (checkActor repairing) "let question = Question \"repair-scope\" (DesignQuestion \"plans/component.md\" (taskSource (repairAssignment sessionInput)) \"confirm repair scope\" [] [] [])\nreportProgress (WorkProgress [] [question])"
   repairQuestion <- awaitOutput owner
-    "do { state <- R.call (reviewSnapshot (R.client flow)) (); case flowRepairCollectors state of { [collector] -> do { seen <- readWork collector; pure (length (workNotices seen) == 1 && any (not . null . workQuestions . sourceProgress) (collectedWork seen)) }; _ -> pure False } }"
+    "do { state <- R.call (reviewSnapshot (R.client flow)) (); case flowRepairRequests state of { [response] -> pure (length (flowNotices state) == 1 && any (\\(request, questions) -> request == requestId response && any ((== \"repair-scope\") . questionKey) questions) (flowQuestions state)); _ -> pure False } }"
     (== "True")
   check "a pending repair question retains its owner notification receipt" (repairQuestion == "True")
   pending <- turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (flowRepairCount state == 1 && null (flowReviewerRequests state) && length (flowCheckReports state) == 1)"
   check "check repair consumes the shared budget and retains evidence" (lastOutput pending == "True")
-  original <- turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\nlet [(checked, report)] = flowCheckReports state\nlet Just observed = planState report\nlet [entry] = checkEntries observed\nlet Just outcome = checkOutcome entry\ninspectFull (focusedSource (runSpec (checkRun entry)) == renderGitOid (candidateCommit checked) && runJob (checkRun entry) == Cmd.completedJob (focusedCommand (checkFocused outcome)) && checkSourceAssurance entry outcome == SourceVerified && checkVerdict entry outcome == CheckFailed && Cmd.commandCleanup (checkCompletion outcome) == Cmd.CommandClean)"
+  original <- turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\nlet [(checked, report)] = flowCheckReports state\nlet Just observed = planState report\nlet [entry] = checkEntries observed\nlet Just outcome = checkOutcome entry\ninspectFull (focusedSource (runSpec (checkRun entry)) == renderGitOid (candidateCommit checked) && checkEvidenceComplete entry outcome && checkVerdict entry outcome == CheckFailed)"
   check "failed check retains original job, exact source, and clean terminal receipt"
     (lastOutput original == "True")
   repaired <- checkpoint (checkActor repairing) "review-flow.txt" "pass\n" "repair recovery fixture"
@@ -55,15 +56,15 @@ continuation = do
     ("Flow check evidence:" `Text.isInfixOf` checkContext reviewer && "recovery" `Text.isInfixOf` checkContext reviewer)
   void $ turn (checkActor reviewer) "let question = Question \"review-scope\" (DesignQuestion \"plans/component.md\" (reviewBase (reviewBasis sessionInput)) \"confirm review scope\" [] [] [])\nreportProgress (WorkProgress [] [question])"
   reviewQuestion <- awaitOutput owner
-    "do { state <- R.call (reviewSnapshot (R.client flow)) (); case flowReviewerCollectors state of { [collector] -> do { seen <- readWork collector; pure (length (workNotices seen) == 1 && any (not . null . workQuestions . sourceProgress) (collectedWork seen)) }; _ -> pure False } }"
+    "do { state <- R.call (reviewSnapshot (R.client flow)) (); case flowReviewerRequests state of { [response] -> pure (length (flowNotices state) == 2 && any (\\(request, questions) -> request == requestId response && any ((== \"review-scope\") . questionKey) questions) (flowQuestions state)); _ -> pure False } }"
     (== "True")
   check "a pending reviewer question retains its owner notification receipt" (reviewQuestion == "True")
   void $ turn (checkActor reviewer) "respond (Produced (Repair (reviewInput sessionInput) [\"another repair\"]))"
   void $ awaitOutput owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (flowStage state)" (Text.isInfixOf "RepairBudgetSpent")
   stopped <- turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (case flowStage state of { ReviewStopped (RepairBudgetSpent 1 _ _) -> True; _ -> False } && length (flowCheckReports state) == 2 && length (flowCheckCleanup state) == 2)"
   check "review cannot get a second repair budget after a check repair" (lastOutput stopped == "True")
-  drained <- turn owner "import qualified Tidepool.Actor as Actor\nstate <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (null (flowReviewerCollectors state) && null (flowRepairCollectors state) && case (flowReviewerCollected state, flowRepairCollected state) of { ([Actor.Completed _], [Actor.Completed _]) -> True; _ -> False })"
-  check "settlement drains both progress collectors and retains their exits" (lastOutput drained == "True")
+  retained <- turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\nlet hasQuestionHistory request = any (\\(seen, progress) -> seen == request && not (null (workQuestions progress))) (flowProgress state)\ninspectFull (length (flowReviewerReceipts state) == 1 && length (flowCandidateReceipts state) == 2 && length (flowReviewerUpdates state) == 1 && length (flowRepairUpdates state) == 1 && case (flowReviewerRequests state, flowRepairRequests state) of { ([reviewer], [repair]) -> hasQuestionHistory (requestId reviewer) && hasQuestionHistory (requestId repair); _ -> False })"
+  check "settlement retains original terminal receipts, progress handles and question history" (lastOutput retained == "True")
   void $ turn owner "R.finish flow"
 
 green :: Member RecipeCheck effects => Eff effects ()
@@ -99,9 +100,11 @@ greenScenario scenario expected = do
     else pure ()
   void $ turn owner "R.finish flow"
 
-zeroSelection, missingEvidence, infrastructure, sourceMismatch, escalation
+zeroSelection, selectionMismatch, duplicateSelection, missingEvidence, infrastructure, sourceMismatch, escalation
   :: Member RecipeCheck effects => Eff effects ()
 zeroSelection = refused "zero" "CandidateChecksUnknown"
+selectionMismatch = refused "selection" "CandidateChecksUnknown"
+duplicateSelection = refused "duplicates" "CandidateChecksUnknown"
 missingEvidence = refused "unknown" "CandidateChecksUnknown"
 infrastructure = refused "infrastructure" "CandidateChecksUnknown"
 sourceMismatch = refused "mismatch" "CandidateChecksUnknown"

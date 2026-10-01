@@ -4,8 +4,11 @@ time, not bare integers. Given an existing `worker`, declared `Report`, and
 input `task`:
 
 ```haskell
-response <- request @Report worker $
-  (assignment [label|bounded-review|] task) { deadline = Just (minutes 10) }
+response <- do
+  pending <- request @Report worker $
+    (assignment [label|bounded-review|] task) { deadline = Just (minutes 10) }
+  Right () <- detachRequest pending
+  pure pending
 ```
 
 `milliseconds`, `seconds`, and `minutes` construct `Duration`. Status preserves the authored unit and shows

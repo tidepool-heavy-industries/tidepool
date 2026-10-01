@@ -19,6 +19,7 @@ module Tidepool.Command
     argv,
     describe,
     withMemory,
+    withSource,
     inDirectory,
     withEnvironment,
     withArguments,
@@ -26,6 +27,8 @@ module Tidepool.Command
     withTerminal,
     start,
     tryStart,
+    detach,
+    tryDetach,
     background,
     tryBackground,
     awaitFinished,
@@ -38,7 +41,6 @@ module Tidepool.Command
     observe,
     observeCompletion,
     observeWith,
-    observeWithCompletion,
     quiet,
     job,
     status,
@@ -119,7 +121,7 @@ import Tidepool.Inspection
 import Tidepool.QQ.Bash (bash)
 
 data RunResult
-  = Finished {completedJob :: Job, commandResult :: CommandResult, capturedOutput :: CommandOutput}
+  = Finished {completedJob :: Job, commandResult :: CommandResult, capturedOutput :: Either CommandError CommandOutput}
   deriving (Eq, Show)
 
 -- | Bounded observation, independent of the lifetime of the process.
@@ -189,22 +191,17 @@ data Capture = Capture
   }
   deriving (Eq, Show)
 
--- | The convenience form of a command operation: a refusal ends the cell.
---
--- Every one of these has a @try@ sibling that returns the refusal as a value,
--- which is what to reach for when a refusal is an ordinary outcome. When the
--- cell does end here, it ends saying what was refused and what to do, rather
--- than showing a bare constructor: @CommandUnauthorized@ alone told a reader
--- nothing about which authority was missing.
-checked :: Either CommandError a -> a
-checked = either (error . T.unpack . renderCommandError) id
+-- | Convenience refusals stop the continuation, even when its result is
+-- discarded. Existing @try@ variants retain the refusal as a typed value.
+checked :: Either CommandError a -> Eff effects a
+checked = either (error . T.unpack . renderCommandError) pure
 
 -- | What a refused command says, in words rather than a constructor.
 renderCommandError :: CommandError -> Text
 renderCommandError failure = case failure of
   CommandUnauthorized ->
     "this command operation is not authorized: starting requires command authority; \
-    \input, resize and cancellation require the job's owner. Shared handles allow \
+    \input, resize, detachment and cancellation require the job's owner. Shared handles allow \
     \status and output reads, not control; ask the owner to perform the operation"
   CommandUnavailable detail ->
     "command resource or service unavailable: " <> detail
@@ -215,68 +212,69 @@ renderCommandError failure = case failure of
   CommandInputAcceptedCloseUnconfirmed detail ->
     "input was sent but closing the stream is unconfirmed: " <> detail
 
+-- | Start work owned by this invocation. Await it or explicitly detach before
+-- returning; scope exit cancels unfinished owned work and retains cleanup.
 start :: (Member Commands effects) => Command -> Eff effects Job
-start = fmap checked . tryStart
+start command = tryStart command >>= checked
 
 -- | Start a command, returning the refusal instead of failing the cell.
 tryStart :: (Member Commands effects) => Command -> Eff effects (Either CommandError Job)
 tryStart (Command spec) = fmap Job <$> send (CommandStartWith spec)
 
--- | Start a command and return at once. When it finishes, a settlement
+-- | Transfer an owned job to this actor's lifetime. Borrowed handles cannot
+-- detach or cancel another owner's work.
+detach :: (Member Commands effects) => Job -> Eff effects ()
+detach job = tryDetach job >>= checked
+
+tryDetach :: (Member Commands effects) => Job -> Eff effects (Either CommandError ())
+tryDetach (Job key) = send (CommandDetachWith key)
+
+-- | Start actor-owned work and return at once. This explicitly detaches its
+-- lifetime from the invocation. When it finishes, a settlement
 -- notice wakes this actor, unless a watch on 'awaitFinished' takes that wake
 -- over. The notice and the report carry the commit the command started at;
 -- the checkout is not guarded while it runs. A job running when the host
 -- restarts is not recovered and sends no notice.
 background :: (Member Commands effects) => Command -> Eff effects Job
-background = fmap checked . tryBackground
+background command = tryBackground command >>= checked
 
 -- | Start in the background, returning the refusal instead of failing the cell.
 tryBackground :: (Member Commands effects) => Command -> Eff effects (Either CommandError Job)
 tryBackground (Command spec) = fmap Job <$> send (CommandBackgroundWith spec)
 
 -- | Ready when the job has finished, with its outcome, cleanup, output
--- completeness, a diagnostic tail, and the source it started at ('Nothing'
--- for a job started in the foreground). Compose it with 'awaitSettled' and use
--- it with 'watch' or 'route'. A report is evidence about the commit the command
+-- completeness, a diagnostic tail, and the source it started at. Compose it
+-- with 'awaitSettled' and use it with 'waitFor', 'watch' or 'route'. A report is evidence about the commit the command
 -- started at; it says nothing about a later revision.
 awaitFinished :: Job -> Await CommandReport
 awaitFinished (Job key) =
   Await [[AwaitCommand key]] (\_ _ -> send (ObserveCommandWith key))
 
--- | Run and observe for up to 30 seconds, returning a completed result.
--- If still running, the interactive workbench stops the enclosing computation
--- and installs a retained Job binding. A Haskell handler instead fails through
--- its normal supervision boundary. Neither observation deadline cancels the job.
+-- | Run once and suspend until terminal completion, preserving the continuation.
 run :: (Member Commands effects) => Command -> Eff effects RunResult
 run command = start command >>= await
 
--- | Observe the same job for up to 30 seconds. A foreground handoff never resumes
--- an earlier block; subsequent calls observe only the retained command.
+-- | Suspend until the retained job is terminal. The process outcome and cleanup
+-- survive an unavailable output transport; explicit observation owns presentation.
 await :: (Member Commands effects) => Job -> Eff effects RunResult
 await retained@(Job key) = do
-  observation <- checked <$> send (CommandForegroundWith key)
-  let result = Finished retained (observedCommandResult observation) (observedCommandOutput observation)
-  -- The status/next block belongs to the returned 'RunResult's own Display
-  -- instance, which renders it once when the result is the cell's value (or
-  -- the shortened "output retained" form when this job was already shown).
-  -- Presenting it again here would print the same block twice.
-  send (CommandPresentWith key (CommandVisible ("session_id: " <> key) 65536))
-  pure result
+  observation <- send (CommandWaitWith key) >>= checked
+  pure (Finished retained (observedCommandResult observation) (observedCommandOutput observation))
 
 -- | Wait briefly and display newly available output, retaining the same job.
--- Unlike foreground 'await', an observation deadline returns the live status
--- normally, so authored handlers can continue composing effects.
+-- An observation deadline returns the live status normally.
 observe :: (Member Commands effects) => Observation -> Job -> Eff effects CommandStatus
 observe Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job key) = do
-  current <- checked <$> send (CommandAwaitWith key milliseconds)
+  current <- send (CommandAwaitWith key milliseconds) >>= checked
   presentStatus key bytes False current
 
--- | Observe an owned job with a bounded foreground wait and a completion
--- notice if it is still running. Foreign observers can use 'observe' or
--- 'awaitFinished' with a watch. Handoff never relaunches or cancels the job.
+-- | Observe an owned job for a bounded interval and request a completion
+-- notice if it is still running. The notice does not detach the job: await it
+-- or explicitly 'detach' before leaving its invocation. Foreign observers can
+-- use 'observe' or 'awaitFinished' with a watch.
 observeCompletion :: (Member Commands effects) => Observation -> Job -> Eff effects CommandStatus
 observeCompletion Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job key) = do
-  current <- checked <$> send (CommandAwaitAndNotifyWith key milliseconds)
+  current <- send (CommandAwaitAndNotifyWith key milliseconds) >>= checked
   presentStatus key bytes True current
 
 presentStatus :: (Member Commands effects) => Text -> Int -> Bool -> CommandStatus -> Eff effects CommandStatus
@@ -311,20 +309,7 @@ observeWith ::
   (PresentedObservation -> Eff effects Text) ->
   Eff effects (CommandStatus, Text)
 observeWith options@Observation {waitMilliseconds = milliseconds} retained@(Job key) prepare = do
-  current <- checked <$> send (CommandAwaitWith key milliseconds)
-  presentObserved options retained prepare current
-
--- | Wait on an owned job for a useful foreground interval. If still live, the
--- command owner arms its single completion settlement before this returns.
--- A finish racing that handoff is reported by the notice for the same job.
-observeWithCompletion ::
-  (Member Commands effects) =>
-  Observation ->
-  Job ->
-  (PresentedObservation -> Eff effects Text) ->
-  Eff effects (CommandStatus, Text)
-observeWithCompletion options@Observation {waitMilliseconds = milliseconds} retained@(Job key) prepare = do
-  current <- checked <$> send (CommandAwaitAndNotifyWith key milliseconds)
+  current <- send (CommandAwaitWith key milliseconds) >>= checked
   presentObserved options retained prepare current
 
 presentObserved ::
@@ -355,43 +340,36 @@ job Finished {completedJob = retained} = retained
 
 -- | Pure successful, complete stdout extraction. Cleanup is a separate obligation.
 stdout :: RunResult -> Either OutputIssue Text
-stdout result@Finished {commandResult = outcome, capturedOutput = captured} =
+stdout result@Finished {commandResult = outcome, capturedOutput = observed} =
   case commandOutcome outcome of
-    CommandExited 0 ->
+    CommandExited 0 -> do
+      captured <- either (Left . OutputUnavailable (job result)) Right observed
       let text = commandStdout captured
-       in if outputLossy text
-            then Left (InvalidOutputEncoding (job result))
-            else
-              if outputStart text /= 0 || outputEnd text /= outputAvailableEnd text || outputLostBytes text /= 0 || not (outputFinished text)
-                then Left (IncompleteStdout (job result))
-                else Right (outputText text)
+      if outputLossy text
+        then Left (InvalidOutputEncoding (job result))
+        else
+          if outputStart text /= 0 || outputEnd text /= outputAvailableEnd text || outputLostBytes text /= 0 || not (outputFinished text)
+            then Left (IncompleteStdout (job result))
+            else Right (outputText text)
     other -> Left (Unsuccessful other)
 
--- | Everything the command wrote to standard error, whatever its exit status.
---
--- 'stdout' deliberately refuses a non-zero exit, because a caller asking for a
--- command's output usually wants the output of a command that worked. Asking
--- why one failed is the opposite case and just as common, and most programs
--- say why on standard error — so this does not gate on the outcome. Reading a
--- failure through 'capturedOutput' and 'commandStderr' by hand is what dogfood
--- run 7's merge actor did not do, and it reported a confident wrong cause as a
--- result.
-stderr :: RunResult -> Text
-stderr Finished {capturedOutput = captured} = outputText (commandStderr captured)
+-- | Retained stderr, whatever the exit status. Output availability is independent
+-- of the process outcome; 'readStderr' can recover a complete paged capture.
+stderr :: RunResult -> Either OutputIssue Text
+stderr result@Finished {capturedOutput = observed} =
+  outputText . commandStderr <$> either (Left . OutputUnavailable (job result)) Right observed
 
--- | A short account of a command that did not exit 0: how it ended, and the
--- tail of whatever it said about that. 'Nothing' when it succeeded.
---
--- > Just detail -> block ("git update-ref failed: " <> detail)
+-- | A short account of failure, preserving the outcome when output is unavailable.
 failure :: RunResult -> Maybe Text
-failure result@Finished {commandResult = outcome} = case commandOutcome outcome of
+failure Finished {commandResult = outcome, capturedOutput = observed} = case commandOutcome outcome of
   CommandExited 0 -> Nothing
   other -> Just (outcomeText other <> said)
   where
-    said = case filter (not . T.null) (map T.strip [stderr result, spoken]) of
-      [] -> ""
-      (text : _) -> ": " <> T.takeEnd 400 text
-    spoken = outputText (commandStdout (capturedOutput result))
+    said = case observed of
+      Left issue -> ": output unavailable: " <> renderCommandError issue
+      Right captured -> case filter (not . T.null) (map T.strip [outputText (commandStderr captured), outputText (commandStdout captured)]) of
+        [] -> ""
+        (text : _) -> ": " <> T.takeEnd 400 text
 
 -- | Read complete retained stdout without starting or waiting for execution.
 readStdout :: (Member Commands effects) => Job -> Eff effects (Either OutputIssue Text)
@@ -481,7 +459,7 @@ asJSON :: (FromJSON a) => Text -> Either Text a
 asJSON = eitherDecode
 
 status :: (Member Commands effects) => Job -> Eff effects CommandStatus
-status (Job key) = checked <$> send (CommandStatusWith key)
+status (Job key) = send (CommandStatusWith key) >>= checked
 
 -- | Navigate retained stdout from its beginning; reading never executes again.
 output :: (Member Commands effects) => Job -> Eff effects OutputPage
@@ -501,7 +479,7 @@ nextPage OutputPage {pageJob = retained, pageStream = stream, pageDetails = deta
   readPage retained stream (OutputOffset (outputEnd details))
 
 readPage :: (Member Commands effects) => Job -> CommandStream -> CommandPosition -> Eff effects OutputPage
-readPage retained stream position = checked <$> tryPage retained stream position
+readPage retained stream position = tryPage retained stream position >>= checked
 
 -- | Read one page, returning the refusal instead of ending the cell. What
 -- 'readPage', 'readOutput' and 'next' are built from, and what a capture that
@@ -514,16 +492,16 @@ pageText :: OutputPage -> Text
 pageText = outputText . pageDetails
 
 sendInput :: (Member Commands effects) => Job -> Text -> Eff effects ()
-sendInput (Job key) text = checked <$> send (CommandInputWith key text)
+sendInput (Job key) text = send (CommandInputWith key text) >>= checked
 
 closeInput :: (Member Commands effects) => Job -> Eff effects ()
-closeInput (Job key) = checked <$> send (CommandCloseInputWith key)
+closeInput (Job key) = send (CommandCloseInputWith key) >>= checked
 
 resize :: (Member Commands effects) => Job -> Int -> Int -> Eff effects ()
-resize (Job key) rows columns = checked <$> send (CommandResizeWith key rows columns)
+resize (Job key) rows columns = send (CommandResizeWith key rows columns) >>= checked
 
 cancel :: (Member Commands effects) => Job -> Eff effects ()
-cancel (Job key) = checked <$> send (CommandCancelWith key)
+cancel (Job key) = send (CommandCancelWith key) >>= checked
 
 completion :: Job -> R.EventSource CommandResult
 completion = R.command
@@ -575,14 +553,14 @@ captureDisplay stream budget capture =
 
 instance Display RunResult where
   displayTree Finished {commandResult = outcome, capturedOutput = captured} =
-    Concat [TextLeaf (resultHeading outcome <> "\n"), displayTree captured]
+    Concat [TextLeaf (resultHeading outcome <> "\n"), either (TextLeaf . ("output unavailable: " <>) . renderCommandError) displayTree captured]
   displayWithout keys budget result@Finished {completedJob = Job key, commandResult = outcome}
     | key `elem` keys = rawText budget (resultHeading outcome <> " · output retained")
     | otherwise = displayWith budget result
   displayWith budget result = case result of
     Finished {commandResult = outcome, capturedOutput = captured} ->
       let heading = resultHeading outcome <> "\n"
-          (body, omitted) = displayOutput (max 0 (budget - T.length heading)) captured
+          (body, omitted) = either (rawText (max 0 (budget - T.length heading)) . ("output unavailable: " <>) . renderCommandError) (displayOutput (max 0 (budget - T.length heading))) captured
           (text, clipped) = rawText budget (heading <> body)
        in (text, omitted || clipped)
 
@@ -690,7 +668,7 @@ outputDisplayPage budget page following =
 
 instance (Member Commands effects) => PageDisplay effects RunResult where
   displayPage budget result@Finished {completedJob = retained, capturedOutput = captured} =
-    pageWithContinuation budget (displayTree result) (remainingOutput retained captured)
+    pageWithContinuation budget (displayTree result) (either (const Nothing) (remainingOutput retained) captured)
   displayPageWithout keys budget result@Finished {completedJob = retained@(Job key), commandResult = outcome}
     | key `elem` keys =
         let stderr = Just (do page <- readOutput Stderr retained; pure (outputDisplayPage 8192 page Nothing))

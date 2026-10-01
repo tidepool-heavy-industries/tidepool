@@ -93,15 +93,15 @@ where
                 loop {
                     match *phase.borrow() {
                         crate::ForkGroupPhase::Ready => {
-                            return descriptors(&environment, frame.context.actor, frame.group)
+                            return descriptors(&environment, frame.context.actor, frame.group);
                         }
                         crate::ForkGroupPhase::Committed => {
-                            return Err("direct fork group was already published".into())
+                            return Err("direct fork group was already published".into());
                         }
                         crate::ForkGroupPhase::Aborted => {
                             return Err(
                                 "direct fork group was aborted while awaiting readiness".into()
-                            )
+                            );
                         }
                         crate::ForkGroupPhase::Staging => {}
                     }

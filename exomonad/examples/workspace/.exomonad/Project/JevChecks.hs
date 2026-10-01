@@ -4,7 +4,7 @@
 -- Deterministic checks for the shipped programs' pure decision mechanics.
 -- These do not exercise a Jev request: recipe sessions currently install no
 -- Jev backend, so model-settled outcomes need a separate scripted seam.
-module Project.JevChecks (investigation, review, reflex) where
+module Project.JevChecks (investigation, reflex) where
 
 import Control.Monad.Freer (Eff, Member)
 import Data.Maybe (isNothing)
@@ -13,7 +13,6 @@ import Tidepool.Check
 
 import Project.Investigate
 import Project.Reflex
-import Project.Review (riskCountAt)
 
 investigation :: Member RecipeCheck effects => Eff effects ()
 investigation = do
@@ -67,13 +66,6 @@ investigation = do
   check "the ambiguity fixture stays inside the policy's undecided band"
     (mustChangeUnclear defaultInvestigationPolicy < 0.51
       && 0.51 < mustChangeFloor defaultInvestigationPolicy)
-
-review :: Member RecipeCheck effects => Eff effects ()
-review = do
-  check "review risk count excludes scores at or below its Noul floor"
-    (riskCountAt 0.5 [("high", 0.8), ("at-floor", 0.5), ("below", 0.2)] == 1)
-  check "review risk count handles an empty judgment set"
-    (riskCountAt 0.5 [] == 0)
 
 reflex :: Member RecipeCheck effects => Eff effects ()
 reflex = do

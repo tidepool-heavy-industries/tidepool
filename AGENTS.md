@@ -185,9 +185,10 @@ Keep detailed design references out of always-loaded instructions.
 
 - Use the smallest check that proves the changed behavior and compile every
   changed build or test target. Include important failure and cleanup paths.
-- In parallel worktree batches, do not run broad batteries. Follow
-  `scripts/codex-worktree-guidance.md` and report exactly what ran, what only
-  compiled, and what remains unverified.
+- Independent builds and focused tests may run concurrently in separate worktrees
+  with isolated outputs and bounded resources. Do not run broad batteries as routine
+  spot checks. Follow `scripts/codex-worktree-guidance.md` and report exactly what
+  ran, what only compiled, and what remains unverified.
 - The `justfile` enters the Nix environment. Prefer `just quick`,
   `just test-lib <crate> 'test(<name>)'` or
   `just test-target <crate> <target> 'test(<name>)'`, and the owning crate's

@@ -610,7 +610,7 @@ use exomonad_tool::{ToolArguments, ToolInvocation};
 #[tokio::test]
 #[ignore = "requires delegated cgroups and bubblewrap"]
 async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_shell().await;
 
     let policy = campaign.root_installation.policy.clone();
     let invocation = ToolInvocation {

@@ -4,7 +4,10 @@ not spend another model turn. Inspect an inherited response or register your
 own watch. The owner still controls updates, cancellation, and release.
 
 ```haskell
-response <- request @Report worker (assignment [label|review-change|] task)
+response <- do
+  response <- request @Report worker (assignment [label|review-change|] task)
+  Right () <- detachRequest response
+  pure response
 pollResponse response
 ```
 
@@ -12,8 +15,11 @@ Here `worker` is an existing `AgentRef`, `task` is your typed input, and `Report
 is your declared result type. The explicit result type keeps submission
 unambiguous before any consumer is defined. Set `guidance` or a dimensional
 `deadline` through an `Assignment` record update.
-Replying settles this request, not the actor, so the same `AgentRef` can accept
-later refinements. Terminal settlement wakes the requester by default. A watch
+Requests are invocation-owned even when their target actor is persistent.
+Await a response before returning or explicitly `detachRequest response`, as
+above, for a request spanning turns. Detachment returns a typed refusal and does
+not transfer another actor's request. Replying settles this request, not the
+actor, so the same `AgentRef` can accept later refinements. Terminal settlement wakes the requester by default. A watch
 or route takes over that wake when registered for the response; use
 `report = Silent` for a record actor settlement source.
 

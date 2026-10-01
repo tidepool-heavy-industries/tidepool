@@ -1,3 +1,4 @@
 do
-  _ <- Cmd.await job
+  result <- Cmd.await job
+  print result
   if error "failure-after-command" then pure () else pure ()

@@ -590,12 +590,12 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
     let root = campaign.root_installation.policy.clone();
     committed(
         root.as_ref(),
-        "worker <- startAgent (readonlyAgent \"notebook-reply-worker\")\n",
+        "worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"notebook-reply-worker\"))\n",
     )
     .await;
     committed(
         root.as_ref(),
-        "response <- request @Text worker (assignment [label|notebook-reply|] (\"ready\" :: Text))\n",
+        "response <- do { issued <- request @Text worker (assignment [label|notebook-reply|] (\"ready\" :: Text)); Right () <- detachRequest issued; pure issued }\n",
     )
     .await;
     let child = campaign
@@ -830,9 +830,9 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
     let invalid_unfold = dispatch_haskell_script(
         root.as_ref(),
         concat!(
-            "badWorkers <- unfold (batch \"literal-errors\" \"branches\") $ ",
-            "(,) <$> child (researching @Text projectHead (assignment [label|valid|] ())) ",
-            "<*> child (researching @Text projectHead (assignment [label|Bad Label|] ()))",
+            "badWorkers <- unfoldDeferred (batch \"literal-errors\" \"branches\") $ ",
+            "(,) <$> child (withLifetime ActorOwned (researching @Text projectHead (assignment [label|valid|] ()))) ",
+            "<*> child (withLifetime ActorOwned (researching @Text projectHead (assignment [label|Bad Label|] ())))",
         ),
     )
     .await;
@@ -851,8 +851,8 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
     committed(
         root.as_ref(),
         concat!(
-            "worker <- unfold (batch \"literal-errors\" \"request\") ",
-            "(child (researching @Text projectHead (assignment [label|target|] ())))",
+            "worker <- unfoldDeferred (batch \"literal-errors\" \"request\") ",
+            "(child (withLifetime ActorOwned (researching @Text projectHead (assignment [label|target|] ()))))",
         ),
     )
     .await;
@@ -1005,6 +1005,14 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
                         other => Err(other),
                     },
                 ) => {
+                    if request.purpose
+                        == exomonad_actor::command_jobs::CommandBackendPurpose::SourceProbe
+                    {
+                        request.supply(Ok(super::command_jobs_tests::TestCommands::completed(
+                            "/work/tree\n0123456789abcdef0123456789abcdef01234567\nclean\n",
+                        )));
+                        continue;
+                    }
                     request.supply(Ok(super::command_jobs_tests::TestCommands::completed("README.md")));
                 }
             }
@@ -1069,7 +1077,7 @@ async fn watch_documentation_request_options_reports_progress_then_settles() {
     let root = campaign.root_installation.policy.clone();
     committed(
         root.as_ref(),
-        "lead <- startAgent (readonlyAgent \"documented-progress-lead\")",
+        "lead <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"documented-progress-lead\"))",
     )
     .await;
     let snippets: Vec<_> = examples(include_str!("../../../../exomonad/prompts/docs/watch.md"))
@@ -1132,7 +1140,7 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
     let mut child = None;
-    committed(root.as_ref(), "data Report = Report Int deriving Show\nworker <- startAgent (readonlyAgent \"activation-preview-worker\")").await;
+    committed(root.as_ref(), "data Report = Report Int deriving Show\nworker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"activation-preview-worker\"))").await;
     committed(
         root.as_ref(),
         include_str!("../actor_host_fixtures/generic_actor/activation_preview_setup.hs"),
@@ -1182,7 +1190,7 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
             "case sessionInput of BrokenPreview n -> respond (Report n)",
         ),
     ] {
-        committed(root.as_ref(), &format!("let previewLabel = [label|{label}|]\npreviewResponse <- request @Report worker (assignment previewLabel {input})")).await;
+        committed(root.as_ref(), &format!("let previewLabel = [label|{label}|]\npreviewResponse <- do {{ issued <- request @Report worker (assignment previewLabel {input}); Right () <- detachRequest issued; pure issued }}")).await;
         let activation = campaign
             .next_deployment(
                 "preview activation",
@@ -1326,7 +1334,11 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
         .inspect_graph(campaign.actor.identity())
         .unwrap()
         .len();
-    let spawned = committed(root.as_ref(), "startAgent (readonlyAgent \"observe-once\")").await;
+    let spawned = committed(
+        root.as_ref(),
+        "startAgent (withAgentLifetime ActorOwned (readonlyAgent \"observe-once\"))",
+    )
+    .await;
     let spawned_name = spawned["items"][0]["installedBindings"][0]
         .as_str()
         .unwrap();
@@ -1378,7 +1390,8 @@ async fn reattachment_preserves_completed_unacknowledged_forks() {
             )),
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(
-                example(include_str!("../../../../exomonad/prompts/docs/unfold.md")).into(),
+                include_str!("../actor_host_fixtures/generic_actor/deferred_unfold_example.hs")
+                    .into(),
             ),
         })
         .await
@@ -1468,7 +1481,7 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(format!(
                 "{}\n{}\n{}\n{}",
-                example(include_str!("../../../../exomonad/prompts/docs/unfold.md")),
+                include_str!("../actor_host_fixtures/generic_actor/deferred_unfold_example.hs"),
                 example(include_str!("../../../../exomonad/prompts/docs/watch.md")),
                 extra_group,
                 suffix.unwrap_or("")
@@ -1476,7 +1489,7 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         }),
     )
     .await
-    .expect("unfold must return without provider startup")
+    .expect("deferred unfold must return without provider startup")
     .unwrap();
     assert_eq!(
         result["status"],
@@ -1910,7 +1923,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     let reply = dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
     committed(root.as_ref(), "stopAgent (responseActor producer)").await;
-    committed(root.as_ref(), "unavailable <- requestWith @Text (responseActor producer) (assignment forwardedLabel (\"lost target\" :: Text))\nhandled <- route (awaitSettled unavailable) (\\settled -> case settled of { ReplyUnavailable _ -> pure (); ReplyAvailable _ -> error \"unexpected success\" })").await;
+    committed(root.as_ref(), "unavailable <- request @Text (responseActor producer) (assignment forwardedLabel (\"lost target\" :: Text))\nhandled <- route (awaitSettled unavailable) (\\settled -> case settled of { ReplyUnavailable _ -> pure (); ReplyAvailable _ -> error \"unexpected success\" })").await;
     let handled = committed(
         root.as_ref(),
         "pollRoute handled\nforgetRoute forwarding\nforgetRoute broken",
@@ -1999,7 +2012,7 @@ async fn work_actor_consumes_later_progress_without_rearming() {
     let replied =
         dispatch_haskell_script(producer.policy.as_ref(), "respond (\"finished\" :: Text)").await;
     assert_eq!(replied["status"], "replied", "{replied}");
-    let closed = committed(root.as_ref(), "view <- readWork forwarding\ninspectFull (map Project.Routing.sourceStatus (collectedWork view))\nfinishWork forwarding").await;
+    let closed = committed(root.as_ref(), "view <- readWork forwarding\ninspectFull (map Exomonad.Contrib.Routing.sourceStatus (collectedWork view))\nfinishWork forwarding").await;
     assert_eq!(closed["items"][1]["output"], "[WorkClosed]", "{closed}");
     assert!(
         closed["items"][2]["output"]
@@ -2192,10 +2205,10 @@ async fn independent_admission_rejects_inheritance_and_supervised_escape() {
     )
     .await;
     assert!(
-        result.to_string().contains("requires a selected context"),
+        result.to_string().contains("UnfoldUncapturedContext"),
         "{result}"
     );
-    committed(root.as_ref(), &fixture.replace("SwarmOwned", "ParentOwned")).await;
+    committed(root.as_ref(), &fixture.replace("SwarmOwned", "ActorOwned")).await;
     let (worker, _binding) = next_project_worker(&mut campaign).await;
     assert_eq!(
         worker.supervisor_parent,
@@ -2322,7 +2335,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         .unwrap();
     assert!(worker.actor.terminal().get().is_none());
     assert!(observer.actor.terminal().get().is_none());
-    committed(observer.policy.as_ref(), "let followupLabel = [label|peer-followup|]\nfollowup <- request @Text retainedPeer (assignment followupLabel (\"after planner retirement\" :: Text))").await;
+    committed(observer.policy.as_ref(), "let followupLabel = [label|peer-followup|]\nfollowup <- do { issued <- request @Text retainedPeer (assignment followupLabel (\"after planner retirement\" :: Text)); Right () <- detachRequest issued; pure issued }").await;
     let worker_actor = worker.actor.identity();
     campaign
         .next_deployment(
@@ -2447,6 +2460,21 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     )
     .await;
     let (reviewer, _reviewer_binding) = next_project_worker(&mut campaign).await;
+    let review_source = campaign
+        .worktrees
+        .lookup(&exomonad_worktree::WorktreeId::from_raw(
+            &reviewer.launch_worktrees[0],
+        ))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        exomonad_worktree::git::GitCli::new()
+            .run(review_source.cwd(), &["rev-parse", "HEAD"])
+            .unwrap()
+            .trimmed(),
+        candidate.as_str(),
+        "independent review must inspect the originally submitted commit"
+    );
     let review_instructions =
         include_str!("../../../../exomonad/examples/workspace/.exomonad/prompts/review.md");
     assert_eq!(reviewer.instructions.as_deref(), Some(review_instructions));
@@ -2465,6 +2493,13 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             .unwrap()
             .contains("focused candidate check"),
         "{evidence}"
+    );
+    assert!(
+        evidence["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("reportedChecks"),
+        "authored check summaries remain claims: {evidence}"
     );
     assert!(
         evidence["items"][0]["output"]

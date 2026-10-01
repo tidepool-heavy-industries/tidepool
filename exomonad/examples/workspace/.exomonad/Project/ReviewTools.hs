@@ -24,7 +24,7 @@ import Tidepool.Effects.Core
   , SubmissionObservation (..)
   )
 import Tidepool.Worktree (worktreeId)
-import Project.Types
+import Exomonad.Contrib.Types
 
 data ReviewSubmitInput = ReviewSubmitInput
   { expectedRequestId :: Int

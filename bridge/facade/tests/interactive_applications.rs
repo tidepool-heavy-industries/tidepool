@@ -34,7 +34,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tidepool_bridge_effects::{CommandInput, CommandSpec};
+use tidepool_bridge_effects::{CommandInput, CommandSourceCapture, CommandSpec};
 use tokio::net::{TcpListener, UnixListener};
 
 #[derive(Clone, Default)]
@@ -519,6 +519,7 @@ trust_level = "trusted"
                 environment: vec![],
                 memory: 256,
                 input: CommandInput::ClosedInput,
+                source_capture: CommandSourceCapture::NoCapture,
             }),
         )
         .await

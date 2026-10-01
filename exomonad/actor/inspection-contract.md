@@ -13,8 +13,11 @@ seen the transition so a queued duplicate notice can be suppressed. Foreign
 actors may read a shared watch, but that read cannot acknowledge the owner's
 notice. Status and overview reads never change this acknowledgment.
 
-Command jobs retain their live status and completion report, while stream
-output is paged from the bytes still retained by the job. Pages identify gaps,
+Command jobs retain their identity, starting source, live status, terminal outcome
+and cleanup independently of presentation or waiter lifetime. Stream output is
+paged from the bytes still retained by the job. `observe` and its completion-notifying
+variants do not detach; invocation cleanup is an ownership operation, not a transfer
+or revocation of borrowed observation authority. Pages identify gaps,
 evicted bytes, lossy decoding, and partial boundaries; readers must preserve
 those omissions when describing output. There is no separate history store,
 and a released request or forgotten watch is stale rather than an implicit

@@ -1,14 +1,14 @@
 ---
 name: exomonad-fork
-description: Compose Exomonad implementation children in resident Haskell, choosing inherited or fresh context and collecting typed progress/results. Use when decomposing work with the Project coordination package.
+description: Compose Exomonad implementation children in resident Haskell, choosing captured or fresh context and collecting typed progress/results. Use when decomposing work with the Project coordination package.
 ---
 
 Use the resident Haskell tool for scaffold/delegate/integrate; briefly
 justify terminal leaves. Give Luna component owners `lunaLead` (Delivery) and
 other children `lunaTask` with their real result type. Admit each ready frontier
 with `unfoldWork` and retain its original handles. See `RECURSIVE-WORK.md`
-for a compiled two-batch example and ready-frontier task construction. The selected package imports Project.Types, Work,
-Routing and Observe. An inherited fork carries conversation, not skill
+for a compiled two-batch example and ready-frontier task construction. The shared package supplies Exomonad.Contrib.Types and Routing;
+Project.Work and Project.Observe supply project policy. A captured context carries conversation, not skill
 contents. A child using `withContext (selected taskContext)` reads relevant skills
 itself or receives the needed facts in its assignment. Its request-local bindings
 come from its own assignment, not the parent's history.
@@ -28,8 +28,9 @@ is chosen at every fork. It selects fresh context from the Task, so the assignme
 needs, including the contract at each seam it shares with a sibling.
 Use the assignment's actual result type for findings or no-change work;
 do not manufacture a code Candidate to fit the example below.
-`solTaskFrom` has the same shape on the `executor` (Sol) alias with inherited
-context; when crossing from Luna, override it with `withContext (selected taskContext)`.
+`solTaskFrom` has the same shape on the `executor` (Sol) alias with selected Task
+context. To reuse a focused scaffold, capture it with `checkpoint` and decorate
+the branch with `withContext (fromCheckpoint captured)`.
 Use Sol for consequential design judgment. Routine local integration belongs
 with the recursive Luna owner. The batch collector routes settlement and question
 notices; no watch is needed per child.
@@ -42,8 +43,8 @@ Include every independent ready obligation in the same list. Use `lunaLeadFrom`
 and `deliverySummary` when admitting component owners returning `Delivery`.
 
 ```haskell
-let implementationBranch = lunaTaskFrom [label|implementation|] Medium source work :: Branch CodingEffects Task (Outcome Candidate)
-localBatch <- unfoldWork (taskGroup work) [workChild "implementation" implementationBranch] (notifyWork me (workMessage candidateOutcomeSummary))
+let implementationBranch = withLifetime ActorOwned $ lunaTaskFrom [label|implementation|] Medium source work :: Branch CodingEffects Task (Outcome Candidate)
+Right localBatch <- unfoldWork (taskGroup work) [workChild "implementation" implementationBranch] (notifyWork me (workMessage candidateOutcomeSummary))
 let [(_, worker, progress)] = batchMembers localBatch
 ```
 
@@ -65,14 +66,17 @@ independent review or test child, admitted in one `unfold`:
 let parserTask = task [label|parser|] "Parse the wire format into Item values" ["src/parse.rs"] "Round-trip tests for every item kind pass" base
 let storeTask = task [label|store|] "Persist Items with atomic append" ["src/store.rs"] "Append and replay tests pass" base
 let testTask = task [label|contract-tests|] "Write failing tests for the parse/store seam" ["tests/seam.rs"] "Tests compile and name the seam contract" base
+let persistent = withLifetime ActorOwned
 ((parser, parserProgress), (store, storeProgress), (tests, testsProgress)) <- unfold (batch "feature" "wave-1") $ (,,)
-  <$> childWithProgress @WorkProgress @(Outcome Candidate) (lunaTaskFrom [label|parser|] Medium currentCheckout parserTask)
-  <*> childWithProgress @WorkProgress @(Outcome Candidate) (lunaTaskFrom [label|store|] Medium currentCheckout storeTask)
-  <*> childWithProgress @WorkProgress @(Outcome Candidate) (lunaTaskFrom [label|contract-tests|] Low currentCheckout testTask)
-primitiveQuestions <- followWork [("parser", parser, parserProgress), ("store", store, storeProgress), ("tests", tests, testsProgress)] (notifyWork me workQuestionsMessage)
+  <$> childWithProgress @WorkProgress @(Outcome Candidate) (persistent (lunaTaskFrom [label|parser|] Medium currentCheckout parserTask))
+  <*> childWithProgress @WorkProgress @(Outcome Candidate) (persistent (lunaTaskFrom [label|store|] Medium currentCheckout storeTask))
+  <*> childWithProgress @WorkProgress @(Outcome Candidate) (persistent (lunaTaskFrom [label|contract-tests|] Low currentCheckout testTask))
+Right primitiveQuestions <- followWork [("parser", parser, parserProgress), ("store", store, storeProgress), ("tests", tests, testsProgress)] (notifyWork me workQuestionsMessage)
 ```
 
-End the admission cell promptly; continue independent work or end the turn when
+These branches explicitly use `ActorOwned` because their work spans cells.
+For an ordinary dependent computation, keep the default invocation lifetime
+and await immediate children before returning. End persistent admission promptly; continue independent work or end the turn when
 waiting is all that remains. The requests own settlement notices; the collector
 surfaces pending questions without duplicate final notices. Read it for question
 details and drain `finishWork primitiveQuestions` after all results settle. Before merging a
@@ -84,11 +88,10 @@ strays <- unownedPaths base (candidateCommit candidate) ["src/parse.rs"]
 
 Choose `source = currentCheckout` for the executing actor's checkout (root
 project checkout or child's bound checkout), `projectHead` for the project source
-explicitly, or `atRef (GitRef (renderGitOid commit))` for a committed seed. Use
-`solTaskFrom` when a related Sol child should inherit your completed reasoning. Fresh context is useful after bulky reconciliation or for
-independent review; descendants within a focused subtree can inherit.
+explicitly, or `atRef (GitRef (renderGitOid commit))` for a committed seed. Use a retained checkpoint when a related child needs your scaffold reasoning.
+Selected context is useful across model tiers and for independent review.
 
-Admission costs one cell per `unfold`, not per child. Batch the ready, disjoint
+Admission composes one applicative group, not one call per child. Batch the ready, disjoint
 obligations; do not admit dependents before their shared contract is available. Keep shared-contract and integration work with the parent. Use
 `child` when only a final reply is needed; it does not install `reportProgress`.
 Retain returned handles. A record-actor router (`followWork`, see

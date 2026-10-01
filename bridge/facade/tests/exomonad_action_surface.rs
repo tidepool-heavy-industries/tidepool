@@ -125,7 +125,16 @@ fn exomonad_exports_persistent_agents_and_hides_turn_lifecycle_operations() {
     assert_eq!(failure.class, tidepool_runtime::FailureClass::UserHaskell);
     assert!(failure.message.contains("requestDeadline"));
 
-    for hidden in ["reply", "pollReply", "actorContext"] {
+    for hidden in [
+        "reply",
+        "pollReply",
+        "actorContext",
+        "requestWith",
+        "requestWithSited",
+        "assignmentSiblings",
+        "unfoldCaptured",
+        "attemptUnfoldCaptured",
+    ] {
         let source = format!(
             "module ExomonadHidden where\nimport qualified Tidepool.Actors.Exomonad as Exomonad\nresult = Exomonad.{hidden}\n"
         );
@@ -155,9 +164,7 @@ fn exomonad_exports_persistent_agents_and_hides_turn_lifecycle_operations() {
         "result",
         &include_refs,
     )
-    .expect(
-        "two children in one unfold compile with the sibling roster plumbed through requestBranch",
-    );
+    .expect("two deferred children compile with private sibling activation metadata");
 
     compile_haskell(
         include_str!("exomonad_action_surface/research_can_unfold.hs"),
@@ -235,7 +242,7 @@ fn unresolved_request_result_is_a_source_diagnostic_with_annotation_guidance() {
     assert!(
         diagnostics.iter().any(|diag| {
             diag.message.contains("result type is unresolved")
-                && diag.message.contains("requestWith @Finding")
+                && diag.message.contains("request @Finding")
         }),
         "{diagnostics:?}"
     );

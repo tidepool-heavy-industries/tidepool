@@ -15,7 +15,7 @@
 module Project.DecisionAnswers
   ( DecisionAnswers (answerQuestion, answerRead, disableAnswers)
   , AnswerTarget (..), AnswerState (..), AnswerEntry (..), AnswerChoice (..)
-  , DecisionChoice, startDecisionAnswers, startDecisionAnswersWith
+  , AnswerFailure (..), DecisionChoice, startDecisionAnswers, startDecisionAnswersWith
   , semanticDecisionAnswer, withDecisionAnswers
   , prepareDecisionAnswer, interpretDecisionAnswer, DecisionAnswerPacket
   , unfoldAnsweredWork
@@ -35,9 +35,9 @@ import Tidepool.Aeson.Value (Value, encodeValue, object, (.=))
 import Tidepool.Effects.Core (Jev)
 import Tidepool.Effects.Row (knownEffects)
 import Tidepool.Worktree (renderGitOid)
-import Project.Routing
-import Project.Types
-import Project.Work (sameQuestion, decisionContext)
+import Exomonad.Contrib.Routing
+import Exomonad.Contrib.Types
+import Project.Work (decisionContext)
 
 data AnswerTarget = AnswerTarget
   { answerName :: Text, answerRecipient :: AgentRef, answerTask :: Task }
@@ -138,20 +138,27 @@ interpretDecisionAnswer response = case J.takenUnder J.strict response.answer of
   Left doubt -> AskOwner doubt.why
   Right (J.Settled chosen) -> chosen
 
+data AnswerFailure = InvalidAnswerCount | InvalidAnswerNames | AnswerAdmissionFailed BatchFailure
+  deriving (Show, Eq)
+
 startDecisionAnswers :: Member Actor effects
-  => AgentRef -> [AnswerTarget] -> Eff effects (Either Text (ActorHandle DecisionAnswers))
+  => AgentRef -> [AnswerTarget] -> Eff effects (Either AnswerFailure (ActorHandle DecisionAnswers))
 startDecisionAnswers = startDecisionAnswersWith semanticDecisionAnswer
 
 startDecisionAnswersWith :: Member Actor effects
   => DecisionChoice -> AgentRef -> [AnswerTarget]
-  -> Eff effects (Either Text (ActorHandle DecisionAnswers))
+  -> Eff effects (Either AnswerFailure (ActorHandle DecisionAnswers))
 startDecisionAnswersWith choose owner targets
-  | null targets || length targets > 16 = pure (Left "supply one to sixteen answer targets")
+  | null targets || length targets > 16 = pure (Left InvalidAnswerCount)
   | length names /= length (nub names) || any (Text.null . Text.strip) names =
-      pure (Left "answer target names must be unique and nonempty")
-  | otherwise = Right <$> R.start specification
+      pure (Left InvalidAnswerNames)
+  | otherwise = Right <$> startValidDecisionAnswersWith choose owner targets
+  where names = map answerName targets
+
+startValidDecisionAnswersWith :: Member Actor effects
+  => DecisionChoice -> AgentRef -> [AnswerTarget] -> Eff effects (ActorHandle DecisionAnswers)
+startValidDecisionAnswersWith choose owner targets = R.start specification
   where
-    names = map answerName targets
     specification :: ActorSpec DecisionAnswers AnswerEffects
     specification = R.definition "decision-answers" (Actor.Selected knownEffects) DecisionAnswers
       { answerState = AnswerState True []
@@ -201,13 +208,13 @@ admitted entry = case answerDelivery entry of
 -- uncertainty, exhausted budgets and failed sends preserve owner escalation.
 -- The record actor waits for the bounded judgment; the model's cell returns.
 withDecisionAnswers :: ActorHandle DecisionAnswers -> WorkSink value -> WorkSink value
-withDecisionAnswers actor (WorkSink sink) = WorkSink $ \event -> case event of
+withDecisionAnswers actor (WorkSink sink) = WorkSink $ \policy event -> case event of
   WorkChanged name delta | not (null (openedQuestions delta)) -> do
     results <- mapM (\q -> do
       answered <- R.call (answerQuestion (R.client actor)) (name, q)
       pure (q, answered)) (openedQuestions delta)
-    sink (WorkChanged name delta { openedQuestions = [q | (q, False) <- results] })
-  _ -> sink event
+    sink policy (WorkChanged name delta { openedQuestions = [q | (q, False) <- results] })
+  _ -> sink policy event
 
 -- Task/branch pairs describe one ready frontier, not a future workflow. The
 -- response recipients are bound from the actual admission, never guessed IDs.
@@ -218,18 +225,18 @@ unfoldAnsweredWork
       Member Actor effects, Subset CodingEffects effects)
   => AgentRef -> ForkGroupPath
   -> [(Text, Task, Task -> Branch CodingEffects Task value)] -> WorkSink value
-  -> Eff effects (Either Text (WorkBatch value, ActorHandle DecisionAnswers))
+  -> Eff effects (Either AnswerFailure (WorkBatch value, ActorHandle DecisionAnswers))
 unfoldAnsweredWork owner group branches sink
-  | null branches || length branches > 16 = pure (Left "supply one to sixteen branches")
+  | null branches || length branches > 16 = pure (Left InvalidAnswerCount)
   | length names /= length (nub names) || any (Text.null . Text.strip) names =
-      pure (Left "branch names must be unique and nonempty")
-  | otherwise = Right <$> unfoldWorkWith group
-      [workChild name (branch task) | (name, task, branch) <- branches]
-      (\members -> do
-        let targets = [AnswerTarget name (responseActor response) task
-              | ((name, task, _), (_, response, _)) <- zip branches members]
-        created <- startDecisionAnswers owner targets
-        case created of
-          Left issue -> error (Text.unpack issue)
-          Right actor -> pure (withDecisionAnswers actor sink, actor))
+      pure (Left InvalidAnswerNames)
+  | otherwise = do
+      admitted <- unfoldWorkWith group
+        [workChild name (branch task) | (name, task, branch) <- branches]
+        (\members -> do
+          let targets = [AnswerTarget name (responseActor response) task
+                | ((name, task, _), (_, response, _)) <- zip branches members]
+          actor <- startValidDecisionAnswersWith semanticDecisionAnswer owner targets
+          pure (withDecisionAnswers actor sink, actor))
+      pure (either (Left . AnswerAdmissionFailed) Right admitted)
   where names = [name | (name, _, _) <- branches]

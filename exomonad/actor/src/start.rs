@@ -66,7 +66,8 @@ impl std::ops::Deref for Model {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]
 pub enum WorkerLifetime {
-    ParentOwned,
+    InvocationOwned,
+    ActorOwned,
     SwarmOwned,
 }
 
@@ -96,11 +97,8 @@ pub(crate) struct ActorStartRequest {
 }
 
 impl ActorStartRequest {
-    /// A launch that opens no fork group — `startActor` and `startAgent`,
-    /// including the read-only errand — belongs to the actor that asked for
-    /// it. `ParentOwned` records a supervisor parent (below) and spawns the
-    /// child linked (`local_actor.rs`), so nothing has to retire it by hand.
-    pub(crate) const FRESH_LAUNCH_LIFETIME: WorkerLifetime = WorkerLifetime::ParentOwned;
+    /// Explicit record services remain owned by their creating actor.
+    pub(crate) const RECORD_SERVICE_LIFETIME: WorkerLifetime = WorkerLifetime::ActorOwned;
 }
 
 #[derive(tidepool_bridge_derive::FromHaskell)]
@@ -207,6 +205,7 @@ pub struct ActorReplacementDefinition {
 }
 
 pub(crate) struct CapturedChildLaunch {
+    pub lifetime: WorkerLifetime,
     pub descriptor: ActorDescriptor,
     /// Still resident on the LAUNCHING session's machine, whether or not
     /// the descriptor's own placement names a different, freshly minted
@@ -346,7 +345,7 @@ impl ResidentActorStart {
                 instructions: None,
                 context: ForkContext::SelectedContext,
                 checkpoint: None,
-                lifetime: ActorStartRequest::FRESH_LAUNCH_LIFETIME,
+                lifetime: ActorStartRequest::RECORD_SERVICE_LIFETIME,
                 fork_budget: None,
                 session_id,
                 parent_actor,
@@ -497,7 +496,7 @@ impl ResidentActorStart {
         .with_creator(parent_actor)
         .with_checkpoint_token(checkpoint)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades([&facade]));
-        if lifetime == WorkerLifetime::ParentOwned {
+        if lifetime != WorkerLifetime::SwarmOwned {
             descriptor = descriptor.with_supervisor_parent(parent_actor);
         }
         if context_fork {
@@ -509,6 +508,7 @@ impl ResidentActorStart {
         Ok(Self {
             parent_hole,
             child: CapturedChildLaunch {
+                lifetime,
                 descriptor,
                 entry,
                 launch_worktrees,
@@ -847,17 +847,6 @@ mod tests {
         // what the errand declines to allocate.
         let with_tree = super::ActorLaunchRoleWire::ActorInheritedRole.effective_role(true);
         assert_eq!(with_tree.workspace(), crate::WorkspaceAccess::WritableBound);
-    }
-
-    /// Nothing has to retire an errand: `AgentLaunchWith` is captured as
-    /// `ParentOwned`, which records a supervisor parent and makes the child a
-    /// linked worker that goes with its owner.
-    #[test]
-    fn a_fresh_launch_is_parent_owned_so_no_retirement_is_authored() {
-        assert_eq!(
-            super::ActorStartRequest::FRESH_LAUNCH_LIFETIME,
-            crate::WorkerLifetime::ParentOwned
-        );
     }
 }
 

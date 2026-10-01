@@ -14,7 +14,7 @@ async fn hosted_lookup_uses_actual_actor_row_for_constraint_availability() {
             "pollResponse",
             "sleep",
             "LookupEffects.readFile",
-            "installTools",
+            "installSpec",
         ],
     )
     .await;
@@ -24,7 +24,7 @@ async fn hosted_lookup_uses_actual_actor_row_for_constraint_availability() {
         ("pollResponse", "available"),
         ("sleep", "available"),
         ("LookupEffects.readFile", "unavailable"),
-        ("installTools", "unknown"),
+        ("installSpec", "unknown"),
     ] {
         let block = output
             .split("\n\n")

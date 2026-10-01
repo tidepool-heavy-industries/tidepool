@@ -6,6 +6,8 @@ use ractor::{Actor, ActorProcessingErr, ActorRef as RactorRef};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(test)]
+use tidepool_bridge_effects::CommandSourceCapture;
 use tidepool_bridge_effects::{
     CommandCleanup, CommandError, CommandInput, CommandOutcome, CommandOutput, CommandPage,
     CommandPosition, CommandReport, CommandResult, CommandSpec, CommandStatus, CommandStream,
@@ -139,12 +141,27 @@ pub enum CommandControl {
 
 type BackendResult = Result<Arc<dyn CommandBackend>, CommandError>;
 
+/// Why the existing command owner requested a backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandBackendPurpose {
+    Command,
+    SourceProbe,
+}
+
 /// The deployment owner supplies a backend for this exact actor, never an ambient executor.
 pub struct CommandBackendRequest {
     pub owner: ActorRef,
+    pub purpose: CommandBackendPurpose,
     reply: Mutex<Option<oneshot::Sender<BackendResult>>>,
 }
 impl CommandBackendRequest {
+    pub(crate) fn pending(&self) -> bool {
+        self.reply
+            .lock()
+            .as_ref()
+            .is_some_and(|reply| !reply.is_closed())
+    }
+
     pub fn supply(&self, backend: BackendResult) {
         if let Some(reply) = self.reply.lock().take() {
             // best-effort: the caller awaiting the backend may have dropped
@@ -165,6 +182,8 @@ struct Shared {
     displayed: Mutex<HashMap<ActorRef, [i64; 2]>>,
     /// The argv as authored, before the discard hold wraps it.
     command: Vec<String>,
+    /// Internal source capture shares this job's invocation lifetime.
+    source_probe: Mutex<Option<String>>,
     /// The request that settles when this job finishes, once one is armed.
     settlement: Mutex<Option<crate::RequestId>>,
     /// Once true, this job has already arranged its owner's completion wake.
@@ -395,6 +414,28 @@ impl CommandJobs {
         &self,
         parent: &KernelContext,
         spec: CommandSpec,
+        invocation: Option<&crate::resident_actor::invocation_work::InvocationWork>,
+    ) -> Result<(String, Arc<CommandBackendRequest>), CommandError> {
+        self.start_with_purpose(parent, spec, CommandBackendPurpose::Command, invocation)
+            .await
+    }
+
+    pub(crate) async fn start_source_probe(
+        &self,
+        parent: &KernelContext,
+        spec: CommandSpec,
+        invocation: Option<&crate::resident_actor::invocation_work::InvocationWork>,
+    ) -> Result<(String, Arc<CommandBackendRequest>), CommandError> {
+        self.start_with_purpose(parent, spec, CommandBackendPurpose::SourceProbe, invocation)
+            .await
+    }
+
+    async fn start_with_purpose(
+        &self,
+        parent: &KernelContext,
+        spec: CommandSpec,
+        purpose: CommandBackendPurpose,
+        invocation: Option<&crate::resident_actor::invocation_work::InvocationWork>,
     ) -> Result<(String, Arc<CommandBackendRequest>), CommandError> {
         validate_spec(&spec).map_err(|error| match error {
             CommandError::CommandInvalid(detail) => CommandError::CommandInvalid(format!(
@@ -408,6 +449,7 @@ impl CommandJobs {
         let (reply, receive) = oneshot::channel();
         let request = Arc::new(CommandBackendRequest {
             owner: parent.identity(),
+            purpose,
             reply: Mutex::new(Some(reply)),
         });
         let shared = Arc::new(Shared {
@@ -419,6 +461,7 @@ impl CommandJobs {
             observers: Mutex::new(Default::default()),
             displayed: Mutex::new(Default::default()),
             command,
+            source_probe: Mutex::new(None),
             settlement: Mutex::new(None),
             owner_notice_armed: std::sync::atomic::AtomicBool::new(false),
             report: Mutex::new(None),
@@ -469,6 +512,18 @@ impl CommandJobs {
         self.entries
             .lock()
             .insert(id.clone(), Entry { actor, shared });
+        if let Some(invocation) = invocation {
+            if let Err(error) = invocation.register_command(id.clone()) {
+                // No backend has been dispatched. Close its supply channel before
+                // cancelling the queued owner; the resource retains cleanup evidence.
+                drop(request);
+                drop(
+                    self.control(parent.identity(), &id, CommandControl::Cancel)
+                        .await,
+                );
+                return Err(error);
+            }
+        }
         Ok((id, request))
     }
 
@@ -504,6 +559,15 @@ impl CommandJobs {
             .get(id)
             .ok_or_else(|| CommandError::CommandUnavailable("unknown command job".into()))?;
         Ok(entry.shared.clone())
+    }
+
+    pub(crate) fn set_source_probe(&self, id: &str, probe: String) -> Result<(), CommandError> {
+        *self.shared(id)?.source_probe.lock() = Some(probe);
+        Ok(())
+    }
+
+    pub(crate) fn source_probe(&self, id: &str) -> Result<Option<String>, CommandError> {
+        Ok(self.shared(id)?.source_probe.lock().clone())
     }
 
     /// The request that settles when this job finishes. The first caller
@@ -570,11 +634,17 @@ impl CommandJobs {
     /// Wait for the job to finish and return its result, confirming cleanup
     /// with the backend as the job's owner would. A job whose execution ended
     /// without a terminal status reports an unconfirmed outcome.
-    pub(crate) async fn finished(&self, id: &str) -> Result<CommandResult, CommandError> {
+    pub(crate) async fn finished(
+        &self,
+        caller: ActorRef,
+        id: &str,
+    ) -> Result<CommandResult, CommandError> {
         let shared = self.shared(id)?;
-        let owner = shared.owner();
-        self.wait(owner, id, -1).await?;
-        match shared.status(owner, id).await {
+        if shared.owner() != caller {
+            return Err(CommandError::CommandUnauthorized);
+        }
+        self.wait(caller, id, -1).await?;
+        match shared.status(caller, id).await {
             CommandStatus::CommandFinished(result) => Ok(result),
             other => Ok(unconfirmed(format!(
                 "job ended without a terminal status: {other:?}"
@@ -1165,6 +1235,7 @@ mod validation_tests {
             environment: vec![("EMPTY".into(), "".into())],
             memory: 256 * 1024 * 1024,
             input: CommandInput::ClosedInput,
+            source_capture: CommandSourceCapture::NoCapture,
         };
         assert!(validate_spec(&valid).is_ok());
         let cases = [
@@ -1313,6 +1384,7 @@ mod bounded_backend_tests {
             observers: Mutex::new(Default::default()),
             displayed: Mutex::new(Default::default()),
             command: vec!["true".into()],
+            source_probe: Mutex::new(None),
             settlement: Mutex::new(None),
             owner_notice_armed: std::sync::atomic::AtomicBool::new(false),
             report: Mutex::new(None),

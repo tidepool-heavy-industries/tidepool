@@ -11,6 +11,7 @@ pub(super) struct ChildLaunchContinuation {
     pub context: ActorSessionContext,
     pub parent_descriptor: ActorDescriptor,
     pub control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    pub invocation_work: Option<Arc<InvocationWork>>,
     pub parent_hole: ResidentHole,
     pub fork_group: Option<crate::ForkGroupId>,
     pub original_placement: crate::ActorPlacement,
@@ -20,7 +21,8 @@ pub(super) struct ChildLaunchAdmission {
     pub child: crate::start::CapturedChildLaunch,
     pub checkpoint_admission: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
     pub retained_checkpoint_scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
-    pub lifetime: crate::WorkerLifetime,
+    pub child_session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
+    pub invocation_work: Option<Arc<InvocationWork>>,
 }
 
 pub(super) struct CompletedChildLaunch {
@@ -43,6 +45,7 @@ pub(super) struct ChildLaunchResume {
     context: ActorSessionContext,
     parent_hole: ResidentHole,
     fork_group: Option<crate::ForkGroupId>,
+    invocation_work: Option<Arc<InvocationWork>>,
     original_placement: crate::ActorPlacement,
     failed_child: Option<LocalActorRef>,
     result: Result<
@@ -70,22 +73,28 @@ where
     } = prepared;
     let context = &continuation.context;
     let result = async {
-        let ChildLaunchAdmission { child, checkpoint_admission, retained_checkpoint_scope, lifetime } = admission?;
-        let crate::start::CapturedChildLaunch { mut descriptor, entry, mut launch_worktrees, fork_workspace, seed } = child;
+        let ChildLaunchAdmission {
+            child,
+            checkpoint_admission,
+            retained_checkpoint_scope,
+            child_session_startup,
+            invocation_work,
+        } = admission?;
+        let crate::start::CapturedChildLaunch { lifetime, mut descriptor, entry, mut launch_worktrees, fork_workspace, seed } = child;
         let fork_group = descriptor.fork_group();
         let checkpoint_lease = checkpoint_admission.as_ref().map(|(lease, _)| lease.clone());
-            let root_admission = environment.root_admission_closed.clone();
-            let _root_admission = if descriptor.supervisor_parent().is_none() {
-                let admission = root_admission.read().await;
-                if *admission {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "swarm root admission is closed".into(),
-                    ));
-                }
-                Some(admission)
-            } else {
-                None
-            };
+        let root_admission = environment.root_admission_closed.clone();
+        let _root_admission = if descriptor.supervisor_parent().is_none() {
+            let admission = root_admission.read().await;
+            if *admission {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "swarm root admission is closed".into(),
+                ));
+            }
+            Some(admission)
+        } else {
+            None
+        };
             let prepared_workspace = if let Some(seed) = fork_workspace {
                 let admission = environment.fork_workspaces.clone().ok_or_else(|| {
                     ResidentActorWorkbenchError::ActorProtocol(
@@ -238,7 +247,27 @@ where
             );
             behavior.admitted_checkpoint = checkpoint_admission.clone();
             behavior.prepared_workspace = prepared_workspace;
-            let child = match kernel.spawn_worker(None, behavior, lifetime).await {
+            behavior.child_session_startup = child_session_startup;
+            let startup_admission = match lifetime {
+                crate::WorkerLifetime::InvocationOwned => Some(
+                    invocation_work.clone().ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "invocation-owned worker has no request owner".into(),
+                        )
+                    })?,
+                ),
+                crate::WorkerLifetime::ActorOwned | crate::WorkerLifetime::SwarmOwned => None,
+            };
+            let child_result = match startup_admission {
+                Some(admission) => {
+                    let admission: Arc<dyn crate::local_actor::WorkerStartupAdmission> = admission;
+                    kernel
+                        .spawn_worker_scoped(None, behavior, lifetime, admission)
+                        .await
+                }
+                None => kernel.spawn_worker(None, behavior, lifetime).await,
+            };
+            let child = match child_result {
                 Ok(child) => child,
                 Err(error) => {
                     if checkpoint_lease.is_some() {
@@ -386,6 +415,7 @@ where
         context: continuation.context,
         parent_hole: continuation.parent_hole,
         fork_group: continuation.fork_group,
+        invocation_work: continuation.invocation_work,
         original_placement: continuation.original_placement,
         failed_child: result.as_ref().err().and(failed_child),
         result,
@@ -405,11 +435,15 @@ where
         context,
         parent_hole,
         fork_group,
+        invocation_work,
         original_placement,
         failed_child,
         result,
     } = resume;
     if let Some(child) = failed_child {
+        if let Some(invocation) = &invocation_work {
+            invocation.retain_aborted_children(&kernel, &[child.identity()]);
+        }
         if let Err(error) = child
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
@@ -438,6 +472,9 @@ where
         Err(error) if fork_group.is_some() => {
             if let Some(group) = fork_group {
                 if let Ok(children) = environment.fork_groups.abort(group, context.actor) {
+                    if let Some(invocation) = &invocation_work {
+                        invocation.retain_aborted_children(&kernel, &children);
+                    }
                     for child in children {
                         if let Some(child) = kernel.resolve(child) {
                             // A child already gone from a failed fork-group admission is

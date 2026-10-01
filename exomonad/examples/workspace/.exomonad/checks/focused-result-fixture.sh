@@ -2,9 +2,16 @@
 set -euo pipefail
 
 case "$1" in
-  pass|fail|preparedfail|unknown|dirty|missingfile|zero|setup|short|expired) ;;
+  pass|argv|fail|preparedfail|unknown|dirty|missingfile|zero|setup|short|expired) ;;
   *) exit 2 ;;
 esac
+if [[ "$1" == argv ]]; then
+  [[ $# == 10 && "$2" == 'literal runner ; $(false) "quotes"'
+    && "$3" == --package && "$4" == fixture-package
+    && "$5" == --target && "$6" == lib
+    && "$7" == --filter && "$8" == fixture::one
+    && "$9" == --expect && "${10}" == 1 ]] || exit 2
+fi
 
 if [[ "$1" == unknown ]]; then
   echo 'the runner produced no evidence path' >&2
@@ -24,7 +31,7 @@ if [[ "${2:-}" == managed ]]; then
 else
   evidence_dir=$(mktemp -d)
 fi
-if [[ "$1" == pass || "$1" == dirty || "$1" == zero || "$1" == expired ]]; then
+if [[ "$1" == pass || "$1" == argv || "$1" == dirty || "$1" == zero || "$1" == expired ]]; then
   exit_code=0
   passed=1
   failed=0

@@ -26,7 +26,7 @@ pub enum CommandsReq {
     CommandStatusWith(String),
     CommandAwaitWith(String, i64),
     CommandAwaitAndNotifyWith(String, i64),
-    CommandForegroundWith(String),
+    CommandWaitWith(String),
     CommandPresentWith(String, tidepool_bridge_effects::CommandPresentation),
     CommandOutputWith(String, i64),
     CommandReadWith(
@@ -38,5 +38,6 @@ pub enum CommandsReq {
     CommandFinishInputWith(String, String),
     CommandCloseInputWith(String),
     CommandResizeWith(String, i64, i64),
+    CommandDetachWith(String),
     CommandCancelWith(String),
 }

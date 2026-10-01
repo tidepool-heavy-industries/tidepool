@@ -39,9 +39,9 @@ followed by a passing one reads as a pass. Give expensive commands
 explicit, realistic memory limits. For large or failing output pass `focus`
 with what you are looking for: the result keeps the relevant sections and
 names the retained job; `read_output` pages the rest without rerunning, and
-ordinary Bash waits for completion or hands the same job to a completion notice.
-Omit `yield_time_ms` for ordinary batch work; an explicit short yield requests
-a snapshot and can create an avoidable polling loop. Use `write_stdin` for input
+ordinary Bash preserves its invocation until completion, then presents once.
+`background: true` returns with completion delivery; explicit `yield_time_ms`
+returns bounded status and detaches live work without a notice. Use `write_stdin` for input
 or a deliberate snapshot, not repeated empty waits. In Haskell, compose command
 completion with evidence collection and the next bounded action; a routine wait
 or reread need not consume a model round.
@@ -70,7 +70,7 @@ The run owner can use `reloadSource` to typecheck and publish edited run
 workspace modules, then `reload_agent_spec` to rebuild its own typed tool
 record (a changed tool surface requires a new actor incarnation). Workers use
 the run's tooling; editing a child checkout does not reload it. `Project.Shell`,
-`Project.Lookup` and `Project.Routing` are the worked examples of presenters,
+`Project.Lookup` and `Exomonad.Contrib.Routing` are the worked examples of presenters,
 selectors and event routing.
 
 # Notebook contract
@@ -115,8 +115,11 @@ output extraction with empty text and reason as if the read succeeded.
 
 A command handle identifies existing work: observe it; never rerun for output.
 Terminal outcome, output completeness, and cleanup are independent facts.
-Observation expiry may leave execution alive. Register a completion route before
-leaving unattended work; starting a command alone does not arrange a model wake.
+`Cmd.run` and `Cmd.await` suspend until terminal completion. Bounded observation
+returns live status normally and never detaches. Invocation-owned unfinished work
+is cancelled on scope exit; await it or explicitly transfer its lifetime.
+`Cmd.background` starts actor-owned work with a completion notice; `Cmd.detach`
+transfers an existing owned job. Returning a handle does not extend its lifetime.
 
 Execution owners scaffold and delegate. Before substantial direct
 implementation, state briefly why this is a terminal leaf: one bounded change
@@ -138,8 +141,11 @@ results, and `unfoldWork` for admission plus event collection. Use selected cont
 across model tiers; focused Luna descendants inherit useful scaffold context. Child acceptance names
 its local gate; the parent retains the stronger combined acceptance. A child that
 needs a contract decision asks its parent and continues independent work.
-Never await children inside their admission cell. Context inheritance is a snapshot; later
-definitions and decisions require explicit delivery. Inherited handles keep
+Immediate `unfold` uses `fromCheckpoint` or `selected` context and permits an
+ordinary suspended wait in the same invocation. Use explicit `ActorOwned` branches
+for work spanning turns. `unfoldDeferred` needs persistent lifetime and must return
+before its children start; never await those children in the admission invocation.
+Context captures are snapshots; later definitions and decisions require explicit delivery. Inherited handles keep
 their values; register your own watch for a pending response, and never drain
 another actor's listener.
 
@@ -168,14 +174,13 @@ a notice. Retrieving a settled watch with your own `pollWatch` acknowledges that
 transition for you; another actor's read cannot suppress your notice. A read is
 not always mutation-free. `status` (view `watches`) shows pending work without a cell.
 
-Admitting a child and registering its watch does not make a synchronously
-waiting cell receptive to input. A cell that waits for a child question blocks
-the same actor from handling the answer. Admit children and register the watch
-in a cell that returns; answer questions and inspect results in later turns.
-When awaiting Exomonad events, end the turn normally. Do not park in native
-`sleep`: it keeps the turn active and can prevent queued steering from being
-presented.
-Ending a caller's wait does not cancel work already admitted. `R.finish` drains
+Choose an ordinary suspended program when all inputs for the next action are
+known; `waitFor` composes typed `Await` values without a named subscription.
+Use watches and persistent routing when model decisions or independent observers
+must participate. Record-actor handlers remain serialized: a handler must not
+await an event requiring another handler on its own mailbox to run.
+Invocation cancellation stops unfinished owned work and retains cleanup; a borrowed
+waiter cannot cancel another actor's resource. Do not park in native `sleep`. `R.finish` drains
 an actor: it closes admission, finishes accepted calls, then returns an
 `ActorExit`; later calls are refused. `Cmd.cancel`, child cancellation, and
 actor retirement have their own typed outcomes. Inspect the retained receipt

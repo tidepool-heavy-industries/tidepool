@@ -110,11 +110,11 @@ exampleCases =
         [ SourceFact "review/abc123#finding-3" "A later test reportedly failed" "" ] []
     , Unresolved "incoming fact lacks source, claim, or evidence" )
   , ( "consumer-changed", consumerCheckpointCriteria
-    , consumerCheckpointInput "def456" "Project.Routing.followWork" "checkpoint:4"
+    , consumerCheckpointInput "def456" "Exomonad.Contrib.Routing.followWork" "checkpoint:4"
         [ SourceFact "src/Project/Routing.hs@def456" "Production consumer now invokes the new update path; its focused check fails on missing source identity" "compiler output and routing check 4" ] []
     , Attention )
   , ( "consumer-silence", consumerCheckpointCriteria
-    , consumerCheckpointInput "def456" "Project.Routing.followWork" "checkpoint:5"
+    , consumerCheckpointInput "def456" "Exomonad.Contrib.Routing.followWork" "checkpoint:5"
         [ SourceFact "status/worker-2" "No worker update has arrived for ten minutes; consumer effect is unknown" "elapsed-time observation only" ] []
     , Unresolved "evidence insufficient to compare update" )
   ]

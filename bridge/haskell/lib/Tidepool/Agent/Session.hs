@@ -8,14 +8,25 @@
 -- authoritative input remains a live Haskell value mounted in the persistent
 -- workbench. Request settlement uses the separate 'Replies' effect.
 module Tidepool.Agent.Session
-  ( attachAgent
+  ( ActivationMetadata (..)
+  , emptyActivationMetadata
+  , attachAgent
   , requestSessionSited
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
 
-import Tidepool.Effects.Core (AgentSession (..))
+import Tidepool.Effects.Core (AgentSession (..), WorkerLifetime (..))
+
+-- | Runtime activation data, separate from the caller's authored assignment.
+data ActivationMetadata = ActivationMetadata
+  { activationSiblings :: [(Text, Text, Text)]
+  , activationRequestLifetime :: WorkerLifetime
+  }
+
+emptyActivationMetadata :: ActivationMetadata
+emptyActivationMetadata = ActivationMetadata [] InvocationOwned
 
 -- | Request this actor's Codex application without manufacturing a model turn.
 attachAgent :: Member AgentSession effs => Maybe Text -> Eff effs ()
@@ -30,8 +41,8 @@ requestSessionSited
   => Int
   -> Int
   -> Maybe Text
-  -> [(Text, Text, Text)]
+  -> ActivationMetadata
   -> input
   -> Eff effs output
-requestSessionSited site requestId initialUser siblings input =
-  send (AgentSessionWith site input requestId initialUser siblings)
+requestSessionSited site requestId initialUser metadata input =
+  send (AgentSessionWith site input requestId initialUser (activationSiblings metadata))

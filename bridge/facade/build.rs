@@ -117,6 +117,7 @@ fn emit_scaffold_package(repository: PathBuf) {
     collect_all(&template, &template, &mut entries);
     entries.retain(|(relative, _)| {
         relative == "AgentSpec.hs"
+            || relative == "WORKBENCH.md"
             || relative.starts_with("prompts/")
             || relative.starts_with("plans/")
     });

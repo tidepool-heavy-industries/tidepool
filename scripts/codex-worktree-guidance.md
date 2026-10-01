@@ -62,9 +62,14 @@ Before committing:
 6. Run formatting or the narrow crate check needed for warnings, plus
    `git diff --check`.
 
-Never run a prohibited workspace battery, broad suite, background test, or
-parallel test command. If a necessary focused command unexpectedly fans out or
-the host is saturated, stop it and report the exact unverified target.
+Do not run a prohibited workspace battery or broad suite. Independent builds and
+focused tests may run concurrently, including alongside other development jobs,
+using separate worktrees, isolated outputs and bounded resource limits. Reuse
+compatible outputs within each worker's validation rather than sharing mutable
+build directories between independent workers. Keep existing daemon ownership;
+do not restart shared daemons or clear shared caches to obtain capacity.
+If a necessary focused command unexpectedly fans out or exhausts its admitted
+resources, stop it and report the exact unverified target.
 
 Use precise result words:
 

@@ -3,57 +3,52 @@ cycle in `RECURSIVE-WORK.md`, normally through `lunaLead`/`lunaTask` and
 `unfoldWork`. This page describes the underlying admission primitive used by
 that procedure and by custom typed joins.
 
-`unfold` admits persistent child actor applications and returns their handles now. Children
-start after the entire enclosing cell finishes, including statements after
-`unfold`. All forks queued in that block inherit its final committed Haskell
-bindings and the conversation through the actual tool result.
+`unfold` publishes children immediately. Every branch chooses
+`withContext (fromCheckpoint captured)` or `withContext (selected render)`;
+unresolved inherited context is refused before allocation. Capture a useful
+scaffold before admitting dependent children:
 
 ```haskell
-let campaign = "my-project" :: CampaignLabel
-let wave = "first-wave" :: ForkGroupLabel
+Right captured <- checkpoint "shared-scaffold"
 let domainLabel = [label|domain|]
 let consumerLabel = [label|consumer-tests|]
-workers <- unfold (batch campaign wave) $
-  (,) <$> child (coding @Report projectHead (assignment domainLabel domainPlan))
-      <*> child (withEffort Medium (coding @Report projectHead (assignment consumerLabel consumerPlan)))
-let sharedAfterUnfold = ("ready" :: Text)
+let fromScaffold = withContext (fromCheckpoint captured)
+workers <- unfold (batch "my-project" "first-wave") $
+  (,) <$> child (fromScaffold (coding projectHead (assignment domainLabel domainPlan)))
+      <*> child (fromScaffold (withEffort Medium (coding projectHead (assignment consumerLabel consumerPlan))))
+joined <- waitFor ((,) <$> awaitSettled (fst workers) <*> awaitSettled (snd workers))
 ```
 
-Each `Response a` contains its target actor and, on the launch request, its
-immutable launch/worktree receipt. The handles name admitted children; they do not mean
-that child inference has started. Do not describe an admitted child as running
-until `pollResponse` or status shows it started; a child that is admitted but
-not yet started reports `ResponseStarting`. In this example both children can inspect
-`sharedAfterUnfold`, although it was defined after `unfold`. Multiple unfolds
-in one block share its final scope; later parent tool calls cannot change it.
-The branch role narrows effects and native authority independently.
+Define your result types and task values first. This ordinary Haskell program
+preserves its continuation while awaiting both children. `waitFor` returns
+`Either WatchFailure result`; `awaitSettled` keeps a child's unavailable result
+inside its `Settlement`. Named `watch` subscriptions are useful when later
+model decisions or independently inspectable observations participate.
 
-`spawnWatched` admits and watches exactly one child; it cannot take the
-applicative pair above (`Unfold parent (Response a, Response b)` does not
-match its single-`Response` type). Admit several children with `unfold`
-directly, then join their settlements in one watch:
+Provider workers are `InvocationOwned` by default. Scope exit cancels unfinished owned work
+and retains cleanup. Returning handles or installing a watch does not extend
+its lifetime. Use `withLifetime ActorOwned` on branches that span model turns;
+`SwarmOwned` is an explicit top-level, selected-context choice. Borrowed handles
+permit inspection while available, never owner cancellation. Releasing a
+checkpoint ends future use; admitted children retain their own capture leases.
 
-```haskell
-joined <- watch "both-ready" $
-  (,) <$> awaitSettled (fst workers) <*> awaitSettled (snd workers)
-joinedState <- pollWatch joined
-```
+`unfoldDeferred` and `attemptUnfoldDeferred` publish after the enclosing call's
+real result and final committed binding tip. Every deferred branch requires an
+explicit persistent lifetime; invocation-owned deferred work is refused before
+allocation. Deferred branches may use `inherited` context. Return from admission
+before waiting for those children; awaiting them in that invocation prevents
+publication. No pending marker is a fabricated completed tool result.
 
-Bind `pollWatch`'s result rather than leaving it as the cell's bare last
-statement: with nothing else pinning it, its effect row is ambiguous.
+`attemptUnfold` and `attemptUnfoldDeferred` return typed admission refusal. All
+branches are checked before any allocation. Assignment values, captured closures
+and explicit worktree seeds keep ordinary Haskell value semantics. Context,
+checkout, lifetime and authority are separate choices.
 
-Assignment values, captured closures, and explicit worktree seeds keep their
-ordinary Haskell value semantics; they are not reevaluated at child startup.
-A later executable failure stops the block's suffix but preserves successful
-earlier unfolds. Children inherit the last committed bindings and the real tool
-result describing the failure. Failed admission cancels only its own group.
-
-You may enqueue requests, poll, and register watches after `unfold` in the same
-cell. Do not synchronously call or wait for a queued child: it cannot start
-until this cell returns. Register the watch in this cell, then end the model
-turn while waiting for its wake.
-If the host reconnects before completion is acknowledged, queued children are
-cancelled with an explicit failure; already started children are unaffected.
+Each launch `Response` retains the exact actor and immutable worktree receipt.
+Admission is distinct from provider startup; inspect `ResponseStarting` rather
+than claiming every admitted child is running. A later failure stops the cell's
+suffix; prior completed effects and their receipts remain. Invocation cleanup
+still applies to unfinished owned work.
 
 `withEffort Low`, `Medium`, or `High` requests the child's initial reasoning
 effort. Omission uses the launch selector's inherited default. Inspect provider
@@ -95,12 +90,8 @@ no concurrency ceiling. Set `maximum_active_children` only for an explicit finit
 research limit. The first researcher defaults to one generation;
 research descendants inherit remaining depth. Every child consumes a generation.
 
-For a deeper coordinator, select and inspect a proposal before admission:
-
-```haskell
-let proposal = withForkBudget (ForkBudget 3 6) (researching @Text researchLabel currentCheckout assignment)
-previewBranch proposal
-```
+Use `withForkBudget (ForkBudget depth width)` to request a deeper research
+coordinator and inspect `previewBranch` before admission.
 
 Requested depth/width are capped by config and parent allowance. Effective
 `ForkAllowance` has `allowanceDepth` and `allowanceWidth :: Maybe Int`; Nothing
@@ -119,18 +110,12 @@ validate the worktree seed. A leaf-sized assignment and zero fork authority are
 different things. `researchingLeaf` explicitly omits delegation; a researcher
 with an exhausted budget retains `Forks` in its row but cannot admit children.
 
-For a question rather than a contract, `errand` is the whole call:
-`w <- errand "repo-layout" "which crate owns the compile cache?"` starts an
-inspection-only child, gives it the task, and returns the watch that wakes you
-with its reply — `pollWatch w`, then `settledValue` on the settlement. Nothing
-else is yours to write: no record, no client, no state query, no retirement.
-It is not `unfold` and deliberately pays none of `unfold`'s admission: no fork
-group, no source checkpoint, no worktree, and no wait for this cell to return
-before the child may start. The child holds no checkout, so it resolves to the
-research role and can neither write nor fork, and it is parent-owned, so it
-goes when you do. The reply is prose. When the answer has structure worth
-typing, use `child` or `request` with a result annotation instead; when you
-would have read the answer yourself, use `errand`.
+For a small inspection question, `errand name question` starts an invocation-owned
+inspection-only leaf and returns its named watch. Await it in the same invocation
+with `awaitWatch`; it is cancelled if the invocation returns unfinished. For a
+persistent direct worker use `startAgent` with `withAgentLifetime ActorOwned` on
+its `AgentLaunchSpec`, then submit a typed request. A launch spec selects worker
+intent; the tools installation contract is the separate `AgentSpec`.
 
 Width counts active or reserved descendants across the subtree; all ancestor
 ceilings also apply. Setting `maximum_depth = 0` disables research recursion.
