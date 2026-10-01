@@ -13,7 +13,7 @@
 
 -- One worktree-holding actor serializes merge and check for a parent. A green
 -- check advances an optional named publication branch; red evidence remains in
--- the integration checkout. Review and ReviewFlow call the same owner. Local
+-- the integration checkout. ReviewFlow calls this owner. Local
 -- component integration uses this mechanism at every implementation depth.
 module Project.Merge
   ( -- The merge target: supplied by whoever starts a review
@@ -25,8 +25,10 @@ module Project.Merge
   , PublishRequest (..)
   , MergeResult (..)
   , mergeInto
-    -- Shared with Project.Review, which runs its own `git` commands
-  , exitCode
+  , IntegrationCheck (..)
+  , integrationPassed
+  , MergeHistory (..)
+  , MergeEvent (..)
   ) where
 
 import Data.Text (Text)
@@ -39,12 +41,9 @@ import qualified Tidepool.Command as Cmd
 import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (BranchName (..), Commands, WorktreeHandle (..), WorktreeReceipt (..))
 
-import Project.Evidence (CheckResult (..), CheckSource (..), HistoryEntry (..))
-import Project.Reflex (reflexFor)
-
--- The merge target, supplied by whoever starts the review: the merge actor
--- that holds the integration worktree. Every review under one parent shares
--- it.
+-- One serialized actor owns the integration checkout and optional publication
+-- branch. The project supplies the command; successful execution alone does
+-- not prove that a test was selected or executed.
 newtype MergeTarget = MergeTarget
   { mergeActor :: R.ActorHandle Merge
   } deriving (Show)
@@ -56,75 +55,81 @@ data PublishRequest = PublishRequest
   , publishMessage :: Text
   } deriving (Show, Eq)
 
--- Every outcome names the revisions it checked or refused: a merge that
--- landed and then failed its check is a different fact from a merge that
--- failed, and the parent reads which from the constructor.
+-- The original command receipt remains inspectable independently of its short
+-- diagnostic display. The head is captured before execution and checked again
+-- before publication, since a project command may change the checkout.
+data IntegrationCheck = IntegrationCheck
+  { integrationHead :: GitOid
+  , integrationArgv :: [Text]
+  , integrationReceipt :: Cmd.RunResult
+  , integrationDetail :: Text
+  } deriving (Eq)
+
+instance Show IntegrationCheck where
+  show checked = "IntegrationCheck " ++ show (integrationHead checked)
+    ++ " argv=" ++ show (integrationArgv checked)
+    ++ " " ++ show (Cmd.commandResult (integrationReceipt checked))
+    ++ ": " ++ Text.unpack (integrationDetail checked)
+
+integrationPassed :: IntegrationCheck -> Bool
+integrationPassed = cleanSuccess . integrationReceipt
+
 data MergeResult
-  = Published GitOid GitOid CheckResult
-    -- ^ checked head, previous head, the green check; the branch advanced
-  | RedPreserved GitOid GitOid CheckResult
-    -- ^ previous integration head, checked head left in the worktree, red check
+  = Published GitOid GitOid IntegrationCheck
+    -- ^ checked head, previous head, original successful command receipt
+  | RedPreserved GitOid GitOid IntegrationCheck
+    -- ^ previous head, checked head left in the checkout, original red receipt
   | Conflict Text [Text]
   | MergeBlocked Text
-    -- ^ the merge actor refuses every request until `reconcile` clears the
-    -- reason: publication drift, an advance that was refused, or the branch checked out
-    -- somewhere `update-ref` would desynchronise
+    -- ^ requests remain refused until the parent reconciles the checkout
   | MergeFailed Text
   deriving (Show, Eq)
 
--- ---------------------------------------------------------------------------
--- The merge actor: one per merge target. It holds the integration worktree
--- (custody is exclusive, publish authority follows custody), merges one
--- candidate per Call, checks the merged head, and only then publishes.
--- ---------------------------------------------------------------------------
+data MergeEvent
+  = PublishRefused Text
+  | PublishFailed Text
+  | MergeConflict Text [Text]
+  | PublicationBlocked Text
+  | IntegrationPublished GitOid IntegrationCheck
+  | IntegrationRed GitOid IntegrationCheck
+  | IntegrationBlocked IntegrationCheck Text
+  | Reconciled Text
+  deriving (Show, Eq)
+
+data MergeHistory = MergeHistory
+  { historyTask :: Text
+  , historyCandidate :: Maybe GitOid
+  , historyEvent :: MergeEvent
+  } deriving (Show, Eq)
 
 data Merge mode = Merge
   { mergeState :: mode :- State MergeState
   , publish :: mode :- Call PublishRequest (R.Reply MergeResult)
   , reconcile :: mode :- Call Text NoReply
-    -- ^ the parent, after fixing the worktree and branch by hand, clears the
-    -- blocked state with a note that lands in the history
   , mergeView :: mode :- Call () (R.Reply MergeState)
   } deriving Generic
 
 data MergeState = MergeState
   { mergeAdvanceBranch :: Maybe BranchName
   , mergeCheckCommand :: [Text]
-    -- ^ what this actor runs to decide a merged head is green. Supplied at
-    -- start, never guessed, and shown in the state so a receipt always says
-    -- which command produced its verdict.
   , mergeTree :: Maybe WorktreeHandle
   , mergeBlocked :: Maybe Text
-  , mergeHistory :: [HistoryEntry]
+  , mergeHistory :: [MergeHistory]
   }
 
 instance Show MergeState where
   show state = unlines $
     ( "merge tree=" ++ maybe "unbound" (Text.unpack . cwd . handleReceipt) (mergeTree state)
       ++ " advance=" ++ maybe "-" (\(BranchName branch) -> Text.unpack branch) (mergeAdvanceBranch state)
-      ++ " check=" ++ Text.unpack (Text.unwords (mergeCheckCommand state))
+      ++ " check=" ++ show (mergeCheckCommand state)
       ++ " blocked=" ++ maybe "no" Text.unpack (mergeBlocked state)
     ) : map show (mergeHistory state)
 
 type MergeEffects = R.LocalEffects Merge
   '[Replies, BoundWorktree, WorktreeIntegration, Commands, Actor]
 
--- | Start with the id of a worktree the parent created and did not bind, and
--- the command that decides a merged head is green:
---
--- > Right tree <- createWorktree (fromRef "exomonad/integration" "integration")
--- > merge <- R.start (mergeInto (worktreeId tree) (Just "exomonad/integration")
--- >                     ["just", "test-lib", "exomonad-actor", "test(request::updates)"])
---
--- The check is an argument because only the caller knows what green means for
--- the change in hand. Name the narrowest command that would actually catch a
--- regression in it — a crate and a test filter, not a whole workspace.
---
--- This actor came from a project whose entire check was a one-second script, so
--- running it after every merge cost nothing. That is not true here: a
--- workspace-wide run in a fresh worktree compiles the world first. Do not pass
--- `just verify`; it is the pre-review gate, budgeted at up to two hours, and an
--- actor must not start it unattended.
+-- | Bind the integration checkout and run the supplied argv after each merge.
+-- Only a clean exit 0 can advance the optional publication branch.
 mergeInto :: WorktreeId -> Maybe BranchName -> [Text] -> ActorSpec Merge MergeEffects
 mergeInto tree advance check =
   R.withWorktree tree $ R.definition "integrator" (Actor.Selected knownEffects) Merge
@@ -133,99 +138,111 @@ mergeInto tree advance check =
     , publish = runPublish
     , reconcile = \note -> R.modify' (\state -> state
         { mergeBlocked = Nothing
-        , mergeHistory = mergeHistory state
-            ++ [ HistoryEntry (length (mergeHistory state)) "integrate" Nothing RanHere
-                   "reconciled" note "accepting requests again" ] })
+        , mergeHistory = mergeHistory state ++ [MergeHistory "integrate" Nothing (Reconciled note)] })
     }
 
 runPublish :: PublishRequest -> Handler MergeState MergeEffects MergeResult
 runPublish request = do
   blocked <- R.gets mergeBlocked
-  bound <- ownTree
-  case (blocked, bound) of
-    (Just reason, _) -> do
-      history "refused_while_blocked" reason
+  case blocked of
+    Just reason -> do
+      history (PublishRefused reason)
       pure (MergeBlocked reason)
-    (Nothing, Left failure) -> do
-      history "unbound" (Text.pack (show failure))
-      pure (MergeFailed ("the merge actor holds no worktree: " <> Text.pack (show failure)))
-    (Nothing, Right handle) -> do
-      let path = cwd (handleReceipt handle)
-      advance <- R.gets mergeAdvanceBranch
-      before <- gitIn path ["rev-parse", "HEAD"]
-      -- Publication drift is established before the merge, not discovered
-      -- by a failed final command: the branch must be where the worktree is,
-      -- and it must not be checked out anywhere `update-ref` would leave a
-      -- stale index behind.
-      drift <- case advance of
-        Nothing -> pure Nothing
-        Just (BranchName branch) -> do
-          published <- gitIn path ["rev-parse", "refs/heads/" <> branch]
-          checkouts <- gitIn path ["worktree", "list", "--porcelain"]
-          let elsewhere = [ line | line <- Text.lines checkouts, line == "branch refs/heads/" <> branch ]
-          pure $ if published /= before
-            then Just ("publication branch " <> branch <> " is at " <> Text.take 7 published
-                       <> " but the integration worktree is at " <> Text.take 7 before)
-            else if not (null elsewhere)
-            then Just ("publication branch " <> branch <> " is checked out in another worktree; update-ref would desynchronise it")
-            else Nothing
-      case drift of
-        Just reason -> block "drift" reason
-        Nothing -> do
-          outcome <- tryMerge MergeRequest
-            { mergeSourceHead = publishCandidate request
-            , mergeSourceWorktree = publishSource request
-            , mergeSourceBranch = Nothing
-            , mergeTargetWorktree = worktreeId handle
-            , mergeMessage = publishMessage request
-            , mergeAdvance = Nothing
-            }
-          case outcome of
-            Left failure -> do
-              history "merge_error" (Text.pack (show failure))
-              pure (MergeFailed (Text.pack (show failure)))
-            Right (ManualGitRequired _ _ reason paths) -> do
-              history "conflict" (reason <> ": " <> Text.intercalate ", " paths)
-              pure (Conflict reason paths)
-            Right merged -> do
-              checked <- gitIn path ["rev-parse", "HEAD"]
-              check <- checkedOutput path
-              if checkPassed check
-                then do
-                  published <- case advance of
-                    Nothing -> pure Nothing
-                    Just (BranchName branch) -> do
-                      result <- Cmd.run (Cmd.inDirectory path
-                        (Cmd.argv ["git", "update-ref", "refs/heads/" <> branch, checked, before]))
-                      -- `update-ref` says why it refused on stderr; reading
-                      -- stdout here reported an empty reason for a real
-                      -- failure, and the caller inferred a cause that was
-                      -- false (dogfood: the ref file was unwritable, not moved).
-                      pure (Cmd.failure result)
-                  case published of
-                    Nothing -> do
-                      history "merged_green" (Text.pack (show merged) <> "; " <> checked <> "; " <> checkDetail check)
-                      pure (Published (GitOid checked) (GitOid before) check)
-                    Just detail ->
-                      block "advance_refused"
-                        ("the checked head was not published to " <> branchText advance
-                          <> ": " <> detail)
-                else do
-                  history "merged_red_preserved"
-                    ("previous " <> before <> "; checked " <> checked <> "; " <> checkDetail check)
-                  pure (RedPreserved (GitOid before) (GitOid checked) check)
+    Nothing -> do
+      bound <- ownTree
+      case bound of
+        Left failure -> failed ("the merge actor holds no worktree: " <> Text.pack (show failure))
+        Right handle -> do
+          let path = cwd (handleReceipt handle)
+          advance <- R.gets mergeAdvanceBranch
+          beforeResult <- gitIn path ["rev-parse", "HEAD"]
+          case beforeResult of
+            Left failure -> failed failure
+            Right before -> do
+              drift <- publicationDrift path advance before
+              case drift of
+                Left failure -> failed failure
+                Right (Just reason) -> block (PublicationBlocked reason) reason
+                Right Nothing -> do
+                  outcome <- tryMerge MergeRequest
+                    { mergeSourceHead = publishCandidate request
+                    , mergeSourceWorktree = publishSource request
+                    , mergeSourceBranch = Nothing
+                    , mergeTargetWorktree = worktreeId handle
+                    , mergeMessage = publishMessage request
+                    , mergeAdvance = Nothing
+                    }
+                  case outcome of
+                    Left failure -> failed (Text.pack (show failure))
+                    Right (ManualGitRequired _ _ reason paths) -> do
+                      history (MergeConflict reason paths)
+                      pure (Conflict reason paths)
+                    Right _ -> do
+                      checkedResult <- gitIn path ["rev-parse", "HEAD"]
+                      case checkedResult of
+                        Left failure -> block (PublicationBlocked failure) failure
+                        Right checked -> do
+                          evidence <- checkedOutput path (GitOid checked)
+                          case evidence of
+                            Left failure -> block (PublicationBlocked failure) failure
+                            Right check -> do
+                              after <- gitIn path ["rev-parse", "HEAD"]
+                              case after of
+                                Left failure -> block (IntegrationBlocked check failure) failure
+                                Right headAfter
+                                  | headAfter /= checked ->
+                                      let reason = "integration command changed HEAD from " <> checked <> " to " <> headAfter
+                                      in block (IntegrationBlocked check reason) reason
+                                  | not (integrationPassed check) -> do
+                                      history (IntegrationRed (GitOid before) check)
+                                      pure (RedPreserved (GitOid before) (GitOid checked) check)
+                                  | otherwise -> do
+                                      published <- case advance of
+                                        Nothing -> pure (Right ())
+                                        Just (BranchName branch) -> do
+                                          result <- runIn path ["git", "update-ref", "refs/heads/" <> branch, checked, before]
+                                          pure $ case result of
+                                            Left failure -> Left failure
+                                            Right receipt -> maybe (Right ()) Left (commandProblem receipt)
+                                      case published of
+                                        Left detail ->
+                                          let reason = "the checked head was not published to " <> branchText advance <> ": " <> detail
+                                          in block (IntegrationBlocked check reason) reason
+                                        Right () -> do
+                                          history (IntegrationPublished (GitOid before) check)
+                                          pure (Published (GitOid checked) (GitOid before) check)
   where
-    history :: Text -> Text -> Handler MergeState MergeEffects ()
-    history key detail = R.modify' (\state -> state
+    history :: MergeEvent -> Handler MergeState MergeEffects ()
+    history event = R.modify' (\state -> state
       { mergeHistory = mergeHistory state
-          ++ [ HistoryEntry (length (mergeHistory state)) "integrate"
-                 (Just (publishCandidate request)) RanHere key
-                 (publishTask request <> ": " <> detail) "replied to the review" ] })
-    block :: Text -> Text -> Handler MergeState MergeEffects MergeResult
-    block key reason = do
+          ++ [MergeHistory (publishTask request) (Just (publishCandidate request)) event] })
+    failed :: Text -> Handler MergeState MergeEffects MergeResult
+    failed reason = do
+      history (PublishFailed reason)
+      pure (MergeFailed reason)
+    block :: MergeEvent -> Text -> Handler MergeState MergeEffects MergeResult
+    block event reason = do
       R.modify' (\state -> state { mergeBlocked = Just reason })
-      history key reason
+      history event
       pure (MergeBlocked reason)
+
+publicationDrift :: Text -> Maybe BranchName -> Text -> Handler MergeState MergeEffects (Either Text (Maybe Text))
+publicationDrift _ Nothing _ = pure (Right Nothing)
+publicationDrift path (Just (BranchName branch)) before = do
+  published <- gitIn path ["rev-parse", "refs/heads/" <> branch]
+  case published of
+    Left failure -> pure (Left failure)
+    Right headPublished -> do
+      checkouts <- gitIn path ["worktree", "list", "--porcelain"]
+      pure $ do
+        listing <- checkouts
+        let checkedOut = "branch refs/heads/" <> branch `elem` Text.lines listing
+        pure $ if headPublished /= before
+          then Just ("publication branch " <> branch <> " is at " <> headPublished
+                     <> " but the integration worktree is at " <> before)
+          else if checkedOut
+          then Just ("publication branch " <> branch <> " is checked out in another worktree; update-ref would desynchronise it")
+          else Nothing
 
 ownTree :: Handler MergeState MergeEffects (Either WorktreeError WorktreeHandle)
 ownTree = do
@@ -240,30 +257,46 @@ ownTree = do
           pure bound
         Left _ -> pure bound
 
--- The publication branch as the reader named it, for a message about it.
 branchText :: Maybe BranchName -> Text
 branchText = maybe "no publication branch" (\(BranchName name) -> name)
 
-gitIn :: Text -> [Text] -> Handler MergeState MergeEffects Text
+runIn :: Text -> [Text] -> Handler MergeState MergeEffects (Either Text Cmd.RunResult)
+runIn path arguments = do
+  started <- Cmd.tryStart (Cmd.inDirectory path (Cmd.argv arguments))
+  case started of
+    Left failure -> pure (Left (Text.unwords arguments <> ": " <> Cmd.renderCommandError failure))
+    Right job -> Right <$> Cmd.await job
+
+gitIn :: Text -> [Text] -> Handler MergeState MergeEffects (Either Text Text)
 gitIn path arguments = do
-  result <- Cmd.run (Cmd.inDirectory path (Cmd.argv ("git" : arguments)))
-  pure (Text.strip (either (const "") id (Cmd.stdout result)))
+  result <- runIn path ("git" : arguments)
+  pure $ do
+    receipt <- result
+    case commandProblem receipt of
+      Just failure -> Left ("git " <> Text.unwords arguments <> ": " <> failure)
+      Nothing -> case Cmd.stdout receipt of
+        Left issue -> Left ("git " <> Text.unwords arguments <> ": " <> Text.pack (show issue))
+        Right output -> Right (Text.strip output)
 
-exitCode :: Cmd.RunResult -> Int
-exitCode result = case Cmd.commandOutcome (Cmd.commandResult result) of
-  Cmd.CommandExited status -> status
-  _ -> 1
+cleanSuccess :: Cmd.RunResult -> Bool
+cleanSuccess result =
+  Cmd.commandOutcome (Cmd.commandResult result) == Cmd.CommandExited 0
+    && Cmd.commandCleanup (Cmd.commandResult result) == Cmd.CommandClean
 
-outputOf :: Cmd.RunResult -> Text
-outputOf result = Cmd.outputText (Cmd.commandStdout (Cmd.capturedOutput result))
+commandProblem :: Cmd.RunResult -> Maybe Text
+commandProblem result
+  | cleanSuccess result = Nothing
+  | otherwise = Just (maybe (Text.pack (show (Cmd.commandResult result))) id (Cmd.failure result)
+      <> "; cleanup=" <> Text.pack (show (Cmd.commandCleanup (Cmd.commandResult result))))
 
-checkedOutput :: Text -> Handler MergeState MergeEffects CheckResult
-checkedOutput path = do
+checkedOutput :: Text -> GitOid -> Handler MergeState MergeEffects (Either Text IntegrationCheck)
+checkedOutput path headChecked = do
   check <- R.gets mergeCheckCommand
-  result <- Cmd.run (Cmd.inDirectory path (Cmd.argv check))
-  -- A check that fails usually says why on stderr; classify over both streams
-  -- so the reflex table sees the compiler's own words.
-  let spoken = Text.strip (outputOf result <> "\n" <> Cmd.stderr result)
-      code = exitCode result
-  pure (CheckResult (Text.unwords check) RanHere (code == 0)
-    (maybe (Text.takeEnd 400 spoken) (Text.pack . show) (reflexFor code spoken)))
+  result <- runIn path check
+  pure $ fmap (\receipt -> IntegrationCheck headChecked check receipt (detail receipt)) result
+  where
+    detail receipt = case Cmd.capturedOutput receipt of
+      Left failure -> "output unavailable: " <> Cmd.renderCommandError failure
+      Right output -> "display tail: " <> Text.takeEnd 400 (Text.strip
+        (Cmd.outputText (Cmd.commandStdout output) <> "\n"
+          <> Cmd.outputText (Cmd.commandStderr output)))
