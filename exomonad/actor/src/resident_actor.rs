@@ -277,6 +277,12 @@ struct ResidentActorRecord {
 }
 
 #[derive(Clone)]
+enum RootPublicOwnerPosture {
+    Pending,
+    PublishedUnconfirmed,
+    Ready,
+}
+
 enum ActorPublicOwnerPlane {
     Ephemeral(Arc<WorkbenchPublicOwner>),
     DurablePending(tidepool_runtime::session::RecoveryPublicOwner),
@@ -11248,54 +11254,141 @@ where
         ))
     }
 
-    /// Persist the admitted root's initial empty surface. Readiness requires
-    /// `Durable`; a post-rename uncertainty permits only durability confirmation.
+    fn root_public_owner_posture(
+        &self,
+        placement: &crate::RootRecoveryPlacement,
+    ) -> Result<RootPublicOwnerPosture, ResidentActorWorkbenchError> {
+        let records = self.environment.actors.lock();
+        let record = records.get(&placement.actor()).ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "root public owner allocation is absent".into(),
+            )
+        })?;
+        match &record.public_owner {
+            ActorPublicOwnerPlane::DurablePending(owner) if owner == placement.owner() => {
+                Ok(RootPublicOwnerPosture::Pending)
+            }
+            ActorPublicOwnerPlane::DurablePublishedUnconfirmed { owner, .. }
+                if owner == placement.owner() =>
+            {
+                Ok(RootPublicOwnerPosture::PublishedUnconfirmed)
+            }
+            ActorPublicOwnerPlane::DurableReady(owner)
+                if owner.durable() == Some(placement.owner()) =>
+            {
+                Ok(RootPublicOwnerPosture::Ready)
+            }
+            _ => Err(ResidentActorWorkbenchError::ActorProtocol(
+                "root public plane differs from its original requested owner".into(),
+            )),
+        }
+    }
+
+    fn settle_root_public_owner(
+        &self,
+        placement: &crate::RootRecoveryPlacement,
+        outcome: &tidepool_runtime::session::PublicManifestCommit,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        let context = self.root_recovery_context(placement)?;
+        let mut records = self.environment.actors.lock();
+        let record = records.get_mut(&placement.actor()).ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "root public allocation retired before confirmation".into(),
+            )
+        })?;
+        if record.terminal.is_some()
+            || record.descriptor.placement() != placement.placement()
+            || !matches!(&record.public_owner,
+                ActorPublicOwnerPlane::DurablePending(owner)
+                | ActorPublicOwnerPlane::DurablePublishedUnconfirmed { owner, .. }
+                if owner == placement.owner())
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "root public settlement requires its original pending owner".into(),
+            ));
+        }
+        match outcome {
+            tidepool_runtime::session::PublicManifestCommit::Durable => {
+                record.public_owner = ActorPublicOwnerPlane::DurableReady(
+                    WorkbenchPublicOwner::issue(
+                        &context,
+                        &record.descriptor,
+                        Some(placement.owner().clone()),
+                    )
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                    })?,
+                );
+            }
+            tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed {
+                detail,
+            } => {
+                record.public_owner = ActorPublicOwnerPlane::DurablePublishedUnconfirmed {
+                    owner: placement.owner().clone(),
+                    detail: detail.clone(),
+                };
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Confirm only directory durability of the original visible root owner.
+    /// This never stages another manifest or consumes the retained startup boot.
+    pub async fn confirm_durable_root_public_owner(
+        &self,
+        actor: ActorRef,
+    ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
+        let placement = self.root_recovery_placement(actor)?;
+        match self.root_public_owner_posture(&placement)? {
+            RootPublicOwnerPosture::Ready => {
+                return Ok(tidepool_runtime::session::PublicManifestCommit::Durable)
+            }
+            RootPublicOwnerPosture::Pending => {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "root has no visible original manifest to confirm".into(),
+                ))
+            }
+            RootPublicOwnerPosture::PublishedUnconfirmed => {}
+        }
+        let context = self.root_recovery_context(&placement)?;
+        self.environment
+            .runner
+            .confirm_durable_public_owner(context, placement.owner().clone())
+            .await?;
+        let outcome = tidepool_runtime::session::PublicManifestCommit::Durable;
+        self.settle_root_public_owner(&placement, &outcome)?;
+        Ok(outcome)
+    }
+
+    /// Persist the admitted root's initial empty surface. Visible uncertainty
+    /// routes repeated calls through confirmation, never through initialization.
     pub async fn bind_durable_root_public_owner(
         &self,
         actor: ActorRef,
     ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
         let placement = self.root_recovery_placement(actor)?;
+        match self.root_public_owner_posture(&placement)? {
+            RootPublicOwnerPosture::Ready => {
+                return Ok(tidepool_runtime::session::PublicManifestCommit::Durable)
+            }
+            RootPublicOwnerPosture::PublishedUnconfirmed => {
+                return self.confirm_durable_root_public_owner(actor).await
+            }
+            RootPublicOwnerPosture::Pending => {}
+        }
         let context = self.root_recovery_context(&placement)?;
         let outcome = self
             .environment
             .runner
             .bind_durable_root_public_owner(context, placement.owner().clone())
             .await?;
-        let context = self.root_recovery_context(&placement)?;
-        if outcome == tidepool_runtime::session::PublicManifestCommit::Durable {
-            let mut records = self.environment.actors.lock();
-            let record = records.get_mut(&actor).ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "durable root was retired before readiness".into(),
-                )
-            })?;
-            if record.terminal.is_some() || record.descriptor.placement() != placement.placement() {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "durable root placement changed before readiness".into(),
-                ));
-            }
-            match &record.public_owner {
-                ActorPublicOwnerPlane::DurablePending(owner) if owner == placement.owner() => {}
-                _ => {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "root did not request this durable publication owner".into(),
-                    ))
-                }
-            }
-            record.public_owner = ActorPublicOwnerPlane::DurableReady(
-                WorkbenchPublicOwner::issue(
-                    &context,
-                    &record.descriptor,
-                    Some(placement.owner().clone()),
-                )
-                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?,
-            );
-        }
+        self.settle_root_public_owner(&placement, &outcome)?;
         Ok(outcome)
     }
 
-    /// The runtime checks the configured run lease and opaque journal proof;
-    /// the successor owner always comes from this actually admitted root.
+    /// Transfer under the exact journal proof. After a visible publication,
+    /// repeated calls confirm the original owner without restaging the transfer.
     pub async fn transfer_recovered_root_public_owner(
         &self,
         actor: ActorRef,
@@ -11303,6 +11396,15 @@ where
         authority: Arc<dyn tidepool_runtime::session::RecoverySuccessorAuthority>,
     ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
         let placement = self.root_recovery_placement(actor)?;
+        match self.root_public_owner_posture(&placement)? {
+            RootPublicOwnerPosture::Ready => {
+                return Ok(tidepool_runtime::session::PublicManifestCommit::Durable)
+            }
+            RootPublicOwnerPosture::PublishedUnconfirmed => {
+                return self.confirm_durable_root_public_owner(actor).await
+            }
+            RootPublicOwnerPosture::Pending => {}
+        }
         let context = self.root_recovery_context(&placement)?;
         let outcome = self
             .environment
@@ -11314,36 +11416,7 @@ where
                 authority,
             )
             .await?;
-        let context = self.root_recovery_context(&placement)?;
-        if outcome == tidepool_runtime::session::PublicManifestCommit::Durable {
-            let mut records = self.environment.actors.lock();
-            let record = records.get_mut(&actor).ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "durable root was retired before readiness".into(),
-                )
-            })?;
-            if record.terminal.is_some() || record.descriptor.placement() != placement.placement() {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "durable root placement changed before readiness".into(),
-                ));
-            }
-            match &record.public_owner {
-                ActorPublicOwnerPlane::DurablePending(owner) if owner == placement.owner() => {}
-                _ => {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "root did not request this durable publication owner".into(),
-                    ))
-                }
-            }
-            record.public_owner = ActorPublicOwnerPlane::DurableReady(
-                WorkbenchPublicOwner::issue(
-                    &context,
-                    &record.descriptor,
-                    Some(placement.owner().clone()),
-                )
-                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?,
-            );
-        }
+        self.settle_root_public_owner(&placement, &outcome)?;
         Ok(outcome)
     }
 
