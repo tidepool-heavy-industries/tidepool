@@ -9,6 +9,7 @@ No live provider credentials are used.
 |---|---|---|
 | M1 browser | `actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root` | Playwright input and real raw Haskell output, request-pinned reload/retry, interruption of the active operation, continue and root retirement. |
 | Complete-cell preflight | `actor_host::embedded_captured_unfold_tests::admitted_cell_late_type_error_has_no_effect_or_publication_on_retry` | An installed AgentSpec and admitted root reject a final type error before the first notification effect or binding publication; exact operation retry retains rejection without compiler work. |
+| Warm production cells | `actor_host::m1_host_tests::warm_cell_performance::production_engine_store_warm_display_cells_50` | Fifty source-backed displays across ten workloads through the production HTTP/Engine/Store host, exact original operations and exclusive daemon request attribution. |
 | M2 captured replies | `actor_host::embedded_captured_unfold_tests::embedded_captured_unfold_awaits_two_child_replies_before_parent_call_returns` | Two independent captured children reply while the parent call is unfinished; release refuses new use while admitted children retain their scope. |
 | M2 failure and reuse | `actor_host::embedded_captured_unfold_tests::embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell` | Both children reply, the same parent cell fails, both children still read its completed private prefix, and a third child uses the retained checkpoint independently. |
 
@@ -88,3 +89,44 @@ still require execution on the joined compiler/actor candidate; this guide is
 not an acceptance report. The retained browser native failure on `32bd98b7b`
 preceded Sleep and supplies no passing cancellation evidence. Its older compiler
 pair cannot validate the current whole-cell protocol or deployment authority.
+
+## Warm production measurement
+
+The ignored warm fixture reuses the M1 real host launcher and cleanup. It submits
+one authenticated HTTP command; the request-aware deterministic provider emits
+ten distinct real warm-up cells followed by fifty unique authored cells across
+ten workload kinds. Every returned display must match its source fixture, and
+its exact original operation, authored source and settled output must exist in
+Store. No provider response supplies a tool result.
+
+Set `TIDEPOOL_PERFORMANCE_COMPILER_TRACE` to the absolute retained JSONL path of
+the exclusively assigned owned daemon, alongside its bound
+`TIDEPOOL_EXTRACT_DAEMON_SOCKET` and the frozen compiler deployment inputs above.
+The trace must contain one actual matching boot. A test-only observer reads the
+existing client `compile_request` spans; an incremental byte cursor joins those
+exact digests to actual daemon completions. Foreign requests, missing or repeated
+completions, cold/rotated measured workers, or workers without repeated measured
+use invalidate the campaign. Trace waits and Store checks occur after the latency
+boundary, before admitting the next cell.
+
+Timing runs from actual raw tool submission to its display in the Engine's
+successor request. It includes production checking, compilation, execution,
+publication and result return; it does not measure DOM painting. Warm-up lines
+use `resident-performance-warmup`; fifty measured lines use the existing
+`resident-performance` schema with `composition: engine-store`, actual source,
+source SHA-256, original operation and every consumed compiler correlation.
+Retain both streams and the complete trace for the owning reporter. The fixture
+has only been compile checked until a matching real-worker execution is retained.
+
+```sh
+python3 build/rust/isolated-libtest.py "$FACADE_TEST_BINARY" \
+  --exact actor_host::m1_host_tests::warm_cell_performance::production_engine_store_warm_display_cells_50 \
+  --expected-count 1 --ignored --jobs 1 --timeout 1800
+```
+
+Execute after the actual cell correctness gate passes. The warm fixture starts
+no compiler daemon and never stops a shared daemon. The assigned runner retains
+and stops its owned daemon using the existing lifecycle recipe, then runs
+`scripts/resident-performance-report.py`. Cold-start and active cancellation
+measurements remain separate fixtures; this warm run alone does not establish
+all performance targets.

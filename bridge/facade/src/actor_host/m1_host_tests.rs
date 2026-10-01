@@ -23,6 +23,9 @@ mod browser_process;
 #[path = "m1_browser_runner.rs"]
 mod browser_runner;
 
+#[path = "m1_warm_cell_performance.rs"]
+mod warm_cell_performance;
+
 #[path = "m1_real_host_late_output_tests.rs"]
 mod real_host_late_output_tests;
 

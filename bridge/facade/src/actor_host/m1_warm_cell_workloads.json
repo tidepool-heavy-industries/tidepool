@@ -1,0 +1,362 @@
+[
+  {
+    "workload": "integer-addition",
+    "source": "40 + 6 :: Int",
+    "expected": "46",
+    "source_digest": "e7cd04947845a34a0459b08acbc663d8eb1dd6403502685f2d0ed2248a06ece9"
+  },
+  {
+    "workload": "integer-subtraction",
+    "source": "100 - 6 :: Int",
+    "expected": "94",
+    "source_digest": "80533d55fa1d6b50cf6fdc17ecc041a8e838ddf7232db67871af60fe468beab5"
+  },
+  {
+    "workload": "integer-multiplication",
+    "source": "6 * 3 :: Int",
+    "expected": "18",
+    "source_digest": "a2eca64d0fb4d622c12ccc797175219d9b189acf79d73aaa3db631e62724b265"
+  },
+  {
+    "workload": "integer-quotient",
+    "source": "div (100 + 6) 3 :: Int",
+    "expected": "35",
+    "source_digest": "b5c7bcbff1a72ff2766e02bc65d498593be1445cac56c9eaeeabbb58d3351f1b"
+  },
+  {
+    "workload": "integer-remainder",
+    "source": "mod (10 + 6) 4 :: Int",
+    "expected": "0",
+    "source_digest": "820ed0f426e2f1c50cd324111351818e3bfbe0552fc0b2a2ed82d9eeb99f6089"
+  },
+  {
+    "workload": "integer-comparison",
+    "source": "(6 :: Int) > 3",
+    "expected": "True",
+    "source_digest": "f710e148aa37cee108881e64a1952e6521863da24ec7eecf27de04a03c201389"
+  },
+  {
+    "workload": "conditional-branch",
+    "source": "if (6 :: Int) > 3 then (100 :: Int) else 200",
+    "expected": "100",
+    "source_digest": "435460889cc6f86e4e7efe8516328844bd2025f6d8bae8e4986d99cc2f25c5df"
+  },
+  {
+    "workload": "tuple-projection",
+    "source": "fst (6 :: Int, True)",
+    "expected": "6",
+    "source_digest": "2d259d91c853c80bd7bb8259b51048bc56ae25c3562dd992d16a5314ea7e5859"
+  },
+  {
+    "workload": "list-sum",
+    "source": "sum [6, 2, 3] :: Int",
+    "expected": "11",
+    "source_digest": "b20aff127b14b45c02ba9971fefc94508f034dc7972bf7c5370f920758c675a3"
+  },
+  {
+    "workload": "list-length",
+    "source": "length (replicate 6 True) :: Int",
+    "expected": "6",
+    "source_digest": "2e78bfd35e1ad6ce8e701760ef3d6c685b39f1815a62f903181892afe9383ce0"
+  },
+  {
+    "workload": "integer-addition",
+    "source": "40 + 1 :: Int",
+    "expected": "41",
+    "source_digest": "d657bef4b2acfd78402b10140fbffe5f5f0737ce78799ecdb3f54ae8d8dd7daa"
+  },
+  {
+    "workload": "integer-subtraction",
+    "source": "100 - 1 :: Int",
+    "expected": "99",
+    "source_digest": "f62d6595eb29d6572d957fb4e3dccf4cc7988d495c5f78248e7d6a58f52e2d55"
+  },
+  {
+    "workload": "integer-multiplication",
+    "source": "1 * 3 :: Int",
+    "expected": "3",
+    "source_digest": "de57cf5879ea3061727ed5a1e3c31a5db9831e6e747d50900655aa785732855d"
+  },
+  {
+    "workload": "integer-quotient",
+    "source": "div (100 + 1) 3 :: Int",
+    "expected": "33",
+    "source_digest": "f9f0906f06ce8274e4a23397e736dfd99401a301499bcbec1927513886b8ddcf"
+  },
+  {
+    "workload": "integer-remainder",
+    "source": "mod (10 + 1) 4 :: Int",
+    "expected": "3",
+    "source_digest": "f39c0961334d068b4dce530a5679764fa58d2a879b1e312f8839540c31e9285a"
+  },
+  {
+    "workload": "integer-comparison",
+    "source": "(1 :: Int) > 3",
+    "expected": "False",
+    "source_digest": "c9a877b598679a12df111a3542fbf2a9d36940b2d6c406ad3836bb13a7bf0ed0"
+  },
+  {
+    "workload": "conditional-branch",
+    "source": "if (1 :: Int) > 3 then (100 :: Int) else 200",
+    "expected": "200",
+    "source_digest": "bccf202cdc0fb8ee8fa792a44a7f5f68aeb7433fb2c31faf26fc205a2b43cd68"
+  },
+  {
+    "workload": "tuple-projection",
+    "source": "fst (1 :: Int, True)",
+    "expected": "1",
+    "source_digest": "4ab300e1108c0444e2fe2ca141e2d74353ab09ed1fa0f0c1c017e02095bcd643"
+  },
+  {
+    "workload": "list-sum",
+    "source": "sum [1, 2, 3] :: Int",
+    "expected": "6",
+    "source_digest": "3752b8a64d29ea4163765444df1ae19396fd9cd57fe8fadf5dc0430dffea4261"
+  },
+  {
+    "workload": "list-length",
+    "source": "length (replicate 1 True) :: Int",
+    "expected": "1",
+    "source_digest": "3da322abae88bed9923cae5c4be64f8eedf51a99f0ea93de1cecd91edcd51a70"
+  },
+  {
+    "workload": "integer-addition",
+    "source": "40 + 2 :: Int",
+    "expected": "42",
+    "source_digest": "21b855fb143fef3c43097d19c06af0e483aa43886b9d0af586892a91e55c3706"
+  },
+  {
+    "workload": "integer-subtraction",
+    "source": "100 - 2 :: Int",
+    "expected": "98",
+    "source_digest": "fc8d5ae0e56a6ec3313f9c78328ba860e88019ab1e0a480645f3b7d7ba6de07b"
+  },
+  {
+    "workload": "integer-multiplication",
+    "source": "2 * 3 :: Int",
+    "expected": "6",
+    "source_digest": "45c290aa4d683d96732dcf8374fec25cb167f5c63ee5c6af6a27fe38aa6ea078"
+  },
+  {
+    "workload": "integer-quotient",
+    "source": "div (100 + 2) 3 :: Int",
+    "expected": "34",
+    "source_digest": "8c3fd08b8f007fee47ce981d7e85e3eadce40a549b5bafa50e90d4344b0a10d5"
+  },
+  {
+    "workload": "integer-remainder",
+    "source": "mod (10 + 2) 4 :: Int",
+    "expected": "0",
+    "source_digest": "05c85b4445b6aa4e453d0a4a0fb7ca34b23202995739106be0a6d05712323ca7"
+  },
+  {
+    "workload": "integer-comparison",
+    "source": "(2 :: Int) > 3",
+    "expected": "False",
+    "source_digest": "f1f334bbeceabc5db496e1481976da3249c8e16b4a0985527f5c43a6a169a883"
+  },
+  {
+    "workload": "conditional-branch",
+    "source": "if (2 :: Int) > 3 then (100 :: Int) else 200",
+    "expected": "200",
+    "source_digest": "c36dafcaf01adfc142eb7ad3d4a3402a231928cdc1a14c5991743a469333920d"
+  },
+  {
+    "workload": "tuple-projection",
+    "source": "fst (2 :: Int, True)",
+    "expected": "2",
+    "source_digest": "31ad6e55615a5246a438d435d697981c87a0adfc7ab926bf888beedd117e2e07"
+  },
+  {
+    "workload": "list-sum",
+    "source": "sum [2, 2, 3] :: Int",
+    "expected": "7",
+    "source_digest": "945640ec8c647fbd30c1427e7d832dcf236ef3e42da1ae0a6f95f0cf333ef61f"
+  },
+  {
+    "workload": "list-length",
+    "source": "length (replicate 2 True) :: Int",
+    "expected": "2",
+    "source_digest": "b44dada592b9b4818503186184056551b3147625542468148366a2aada0dc266"
+  },
+  {
+    "workload": "integer-addition",
+    "source": "40 + 3 :: Int",
+    "expected": "43",
+    "source_digest": "f495bfe12c8aae0dedaf9441e49758e424b3681e3393aa0619f52645b1be3960"
+  },
+  {
+    "workload": "integer-subtraction",
+    "source": "100 - 3 :: Int",
+    "expected": "97",
+    "source_digest": "099b967231823dd8ac981587b5f05c4b25b82bd3f89582cf7d5c2ba0a4010048"
+  },
+  {
+    "workload": "integer-multiplication",
+    "source": "3 * 3 :: Int",
+    "expected": "9",
+    "source_digest": "a2a8a20d19e50578d529b23830cb1f6ad9206f9b10f61445d2b23aa2aa288eac"
+  },
+  {
+    "workload": "integer-quotient",
+    "source": "div (100 + 3) 3 :: Int",
+    "expected": "34",
+    "source_digest": "66dea558a1cb266d1b23adcf4656dc1a705c72ed02c5c493497b10dcc4770ec9"
+  },
+  {
+    "workload": "integer-remainder",
+    "source": "mod (10 + 3) 4 :: Int",
+    "expected": "1",
+    "source_digest": "1ff97de51d2089d2f2846ff17efa7a4cd91dde22f4485262759da851d1a33cfc"
+  },
+  {
+    "workload": "integer-comparison",
+    "source": "(3 :: Int) > 3",
+    "expected": "False",
+    "source_digest": "babe7d03e49a9963de8c34aba71eca64160309283b4788a997436835e88f0e24"
+  },
+  {
+    "workload": "conditional-branch",
+    "source": "if (3 :: Int) > 3 then (100 :: Int) else 200",
+    "expected": "200",
+    "source_digest": "e1ad44807aae528500b2edd9f602f22ee1e4da4ce8be187177d50515f7612fdc"
+  },
+  {
+    "workload": "tuple-projection",
+    "source": "fst (3 :: Int, True)",
+    "expected": "3",
+    "source_digest": "0ed50ef98846e550473f65bf4e90aac8e46b38e71ad46416dd3587b192cae3c8"
+  },
+  {
+    "workload": "list-sum",
+    "source": "sum [3, 2, 3] :: Int",
+    "expected": "8",
+    "source_digest": "affaf628b1b455176266651579e5065c7c464376d286fca8e99f6878a6f01f19"
+  },
+  {
+    "workload": "list-length",
+    "source": "length (replicate 3 True) :: Int",
+    "expected": "3",
+    "source_digest": "84d76bef16ae8a3975f526b7480bfa1483bd2931dc344188273b01af4a544553"
+  },
+  {
+    "workload": "integer-addition",
+    "source": "40 + 4 :: Int",
+    "expected": "44",
+    "source_digest": "1509c9d34f8366acaaa47176152dcf8ca91790a43207b02ad780e584344138de"
+  },
+  {
+    "workload": "integer-subtraction",
+    "source": "100 - 4 :: Int",
+    "expected": "96",
+    "source_digest": "89ed996c9eaf5a5cbd2eb976c985f2663b793406137971f94187589ec24724a1"
+  },
+  {
+    "workload": "integer-multiplication",
+    "source": "4 * 3 :: Int",
+    "expected": "12",
+    "source_digest": "0e041eddf54da2946d85aa4ab260719c900416c2600275c38156fcc4974d0797"
+  },
+  {
+    "workload": "integer-quotient",
+    "source": "div (100 + 4) 3 :: Int",
+    "expected": "34",
+    "source_digest": "1388844b2c56ac38b4d0c07f1647cd068510fc5f01eb1fb71ee0ffa659e2b302"
+  },
+  {
+    "workload": "integer-remainder",
+    "source": "mod (10 + 4) 4 :: Int",
+    "expected": "2",
+    "source_digest": "4a2608a510d644a0863dd923e14aa4ada9c457d4c53a4b8ab405c21ec71e8394"
+  },
+  {
+    "workload": "integer-comparison",
+    "source": "(4 :: Int) > 3",
+    "expected": "True",
+    "source_digest": "542aee01f5df7adb3d1007da799ca4f65bde00a8c7d7eedcd011041c7e4ed649"
+  },
+  {
+    "workload": "conditional-branch",
+    "source": "if (4 :: Int) > 3 then (100 :: Int) else 200",
+    "expected": "100",
+    "source_digest": "ec66a349678cae67ff7e675d1bfd6420402a93ae0f12cda53a936e9deba1259e"
+  },
+  {
+    "workload": "tuple-projection",
+    "source": "fst (4 :: Int, True)",
+    "expected": "4",
+    "source_digest": "46179fb05600485da40856d77fb209b46ff8efef42fabadc238adc9b362eb0d6"
+  },
+  {
+    "workload": "list-sum",
+    "source": "sum [4, 2, 3] :: Int",
+    "expected": "9",
+    "source_digest": "2c8b89be049678cc0f7aeb2d995f3985acf4e50414af476417bed9c68b60fc65"
+  },
+  {
+    "workload": "list-length",
+    "source": "length (replicate 4 True) :: Int",
+    "expected": "4",
+    "source_digest": "bb7a742e1b01f903466cf74d0175c2331438934c9b399eb9da8ec18955d8b739"
+  },
+  {
+    "workload": "integer-addition",
+    "source": "40 + 5 :: Int",
+    "expected": "45",
+    "source_digest": "14105212657436efe6cf5bf2a4c4b9f2811b61443a9ab4f1a20aee34e1abe6d7"
+  },
+  {
+    "workload": "integer-subtraction",
+    "source": "100 - 5 :: Int",
+    "expected": "95",
+    "source_digest": "a6f7b6ec4ecc5fbf74311fb59325432883921b440787212604a373ba1973d377"
+  },
+  {
+    "workload": "integer-multiplication",
+    "source": "5 * 3 :: Int",
+    "expected": "15",
+    "source_digest": "6db0123a3ee6e1ee1383c2baaf8ef33fb621dff31be5a40a79c36cd650ba029e"
+  },
+  {
+    "workload": "integer-quotient",
+    "source": "div (100 + 5) 3 :: Int",
+    "expected": "35",
+    "source_digest": "7cf2e94792128cec54e290308cc5ba51ab2464aa46e0d78ffc2ab4eedbb02a3d"
+  },
+  {
+    "workload": "integer-remainder",
+    "source": "mod (10 + 5) 4 :: Int",
+    "expected": "3",
+    "source_digest": "d1b276138e4b025c57e0d92e3899123f7828b7a5e3d9bd1ada5fa353fd04b21d"
+  },
+  {
+    "workload": "integer-comparison",
+    "source": "(5 :: Int) > 3",
+    "expected": "True",
+    "source_digest": "aa99f838726c1feb20c0eacd1f1303b4e25c99bc1ed25666853cf4d97b6563c0"
+  },
+  {
+    "workload": "conditional-branch",
+    "source": "if (5 :: Int) > 3 then (100 :: Int) else 200",
+    "expected": "100",
+    "source_digest": "0d8967b7ec56a51e882817a825e8279c10d79cb23faa6dbf418c9aa4c1652258"
+  },
+  {
+    "workload": "tuple-projection",
+    "source": "fst (5 :: Int, True)",
+    "expected": "5",
+    "source_digest": "6b434ce633c5f2331d7e611644a8486714c5082547c46769d9773682c334084e"
+  },
+  {
+    "workload": "list-sum",
+    "source": "sum [5, 2, 3] :: Int",
+    "expected": "10",
+    "source_digest": "6999b8a3e6d00cf0792d2a85a831a517169ebcf733825b8c6e943115b12272ca"
+  },
+  {
+    "workload": "list-length",
+    "source": "length (replicate 5 True) :: Int",
+    "expected": "5",
+    "source_digest": "2dd5ea30978185b2124eef56f33b106a9cac0842790fb349f43b5b4ff59343e2"
+  }
+]
