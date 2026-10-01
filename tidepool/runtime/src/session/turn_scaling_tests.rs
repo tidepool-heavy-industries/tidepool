@@ -4,9 +4,9 @@
 use super::*;
 use crate::session::{
     resident_cell_check_template, resident_workbench_templates, CertifiedDeclarationPublication,
-    ExecutionPublication, ModuleEnv, OutputSink, PersistentSession, PublicManifestCommit,
-    PublicationDecision, RecoveryPublicOwner, RecoveryRunAuthority, ResidentSession, SessionLib,
-    SessionRunContext, SourceImports,
+    ExecutionPublication, ModuleEnv, OutputSink, PersistentSession, PreparedRuntimeError,
+    PublicManifestCommit, PublicationDecision, RecoveryPublicOwner, RecoveryRunAuthority,
+    ResidentError, ResidentSession, SessionLib, SessionRunContext, SourceImports,
 };
 use std::time::{Duration, Instant};
 use tidepool_codegen::{prepared_program::ImageRegistry, scope::ScopeId};
@@ -187,6 +187,35 @@ fn execute_cell_with_authority_checks(
     publication_target: &ScalePublication,
     authority_checks: AuthorityChecks,
 ) -> Duration {
+    try_execute_cell_with_authority_checks(
+        resident,
+        public,
+        effects,
+        images,
+        scenario,
+        label,
+        source,
+        declarations,
+        expected_display,
+        publication_target,
+        authority_checks,
+    )
+    .unwrap()
+}
+
+fn try_execute_cell_with_authority_checks(
+    resident: &mut ScaleSession,
+    public: ScopeId,
+    effects: &TestEffectSurface,
+    images: &ImageRegistry,
+    scenario: (usize, usize),
+    label: &str,
+    source: &str,
+    declarations: usize,
+    expected_display: Option<&str>,
+    publication_target: &ScalePublication,
+    authority_checks: AuthorityChecks,
+) -> Result<Duration, ResidentError> {
     let cell_started = Instant::now();
     let execution = Arc::new(resident.begin_private_execution(public).unwrap());
     let view = execution.view();
@@ -395,23 +424,26 @@ fn execute_cell_with_authority_checks(
                     },
                 );
             } else {
-                measured(
+                let observed = measured(
                     resident,
                     images,
                     scenario,
                     &format!("{label}.native_observe"),
                     Some(index),
                     |resident| {
-                        resident
-                            .run_observation_with_sites(
-                                compiled.code(),
-                                &bound[0],
-                                reservation.generation(),
-                                false,
-                            )
-                            .unwrap();
+                        resident.run_observation_with_sites(
+                            compiled.code(),
+                            &bound[0],
+                            reservation.generation(),
+                            false,
+                        )
                     },
                 );
+                assert_eq!(
+                    tidepool_extract_cmd::extract_spawn_count(),
+                    submissions_before_effects
+                );
+                observed?;
                 let display = resident
                     .admit_checked_display(
                         prefix.clone(),
@@ -602,7 +634,7 @@ fn execute_cell_with_authority_checks(
             "phase": format!("{label}.artifact_inventory"), "inventory": inventory,
         })
     );
-    elapsed
+    Ok(elapsed)
 }
 
 fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool) {
@@ -1122,8 +1154,8 @@ fn durable_mixed_originals_recover_independent_native_entry() {
             .iter()
             .any(|name| name == "x"));
         eprintln!("durable-recovery fresh_process_pid={}", std::process::id());
-        // Both y and z interfaces survived. Only y's independent native entry
-        // is demanded; z's old process-local x lease cannot be reconstructed.
+        // One original owns both entries. Hydration must retain its complete
+        // typed interface while native demand enforces the exact old x lease.
         execute_cell(
             &mut resident,
             public,
@@ -1131,10 +1163,46 @@ fn durable_mixed_originals_recover_independent_native_entry() {
             &images,
             (0, 0),
             "recovered_independent",
-            "y",
+            "independent",
             0,
             Some("42"),
             &publication,
+        );
+        let missing_before = demand_missing_retained(
+            &mut resident,
+            public,
+            &effects,
+            &images,
+            "lost_dependent_before_rebind",
+            &publication,
+        );
+        execute_cell(
+            &mut resident,
+            public,
+            &effects,
+            &images,
+            (0, 0),
+            "rebind_x",
+            "let x = (2 :: Int)",
+            0,
+            None,
+            &publication,
+        );
+        assert!(resident
+            .binding_names_in(public)
+            .iter()
+            .any(|name| name == "x"));
+        let missing_after = demand_missing_retained(
+            &mut resident,
+            public,
+            &effects,
+            &images,
+            "lost_dependent_after_rebind",
+            &publication,
+        );
+        assert_eq!(
+            missing_after, missing_before,
+            "same-spelled x must not satisfy the original's exact old Val import"
         );
         return;
     }
@@ -1178,8 +1246,8 @@ fn durable_mixed_originals_recover_independent_native_entry() {
         &effects,
         &images,
         (0, 0),
-        "dependent_original",
-        include_str!("fixtures/compiled-cell-dependent-original.hs"),
+        "mixed_original",
+        include_str!("fixtures/compiled-cell-mixed-original.hs"),
         1,
         None,
         &publication,
@@ -1198,11 +1266,46 @@ fn durable_mixed_originals_recover_independent_native_entry() {
     println!("{}", String::from_utf8_lossy(&output.stdout));
     assert!(
         output.status.success(),
-        "fresh process must execute independent y despite lost x and dependent z"
+        "fresh process must execute the mixed original independent entry and refuse its exact lost dependency"
     );
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("1 passed;"),
         "fresh process must select exactly its one test"
     );
     drop(root_guard);
+}
+
+/// Any compile, authority, source, or unrelated runtime failure fails this test.
+/// Only the native resolver's exact missing retained owner counts as refusal.
+fn demand_missing_retained(
+    resident: &mut ScaleSession,
+    public: ScopeId,
+    effects: &TestEffectSurface,
+    images: &ImageRegistry,
+    label: &str,
+    publication: &ScalePublication,
+) -> (tidepool_repr::execution_schema::SymbolIdentity, u64) {
+    let error = try_execute_cell_with_authority_checks(
+        resident,
+        public,
+        effects,
+        images,
+        (0, 0),
+        label,
+        "dependent",
+        0,
+        Some("1"),
+        publication,
+        AuthorityChecks::Configured,
+    )
+    .expect_err("demanding the old retained x must refuse native installation");
+    let ResidentError::Prepared(PreparedRuntimeError::MissingRetainedCertifiedOwner {
+        identity,
+        generation,
+    }) = error
+    else {
+        panic!("expected exact retained native refusal, got {error:?}");
+    };
+    eprintln!("durable-recovery exact_missing_retained={identity:?} generation={generation}");
+    (identity, generation)
 }

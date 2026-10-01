@@ -166,11 +166,14 @@ record selector replaces a prior heap binding and displays 2.
 `complete_cell_preserves_exact_local_fixity` is ignored while the local fixity
 production guard remains; after its reviewed removal it must display 8.
 `durable_mixed_originals_recover_independent_native_entry` is an opt-in durable
-fixture: it publishes live x, independent y=42, then dependent z=x; asserts the
-persisted root dependency classifications; and launches the already-built
-native test binary for one exact fresh-process test. That process opens the
-owned retained graph, verifies x has no live heap binding, and demands only y,
-which must display 42 despite z's unavailable native dependency. The battery
-continues to own the one compiler daemon. This fixture does not establish the
-packaged host cold-start target, same-name rebinding refusal, or instance
-fallback behavior; those need their own owning assertions.
+fixture: it publishes live x, independent y=42, then one original containing
+independent=42 and dependent=x; asserts the persisted root dependency
+classifications; and launches the already-built native test binary for one
+exact fresh-process test. That process opens the owned retained graph, verifies
+x has no live heap binding, and demands the mixed original's independent entry,
+which must display 42. Demanding dependent must return the typed missing exact
+retained owner. Rebinding the same-spelled x then demanding dependent again
+must refuse the same identity and generation. Unexpected compiler or native
+errors fail the test. The battery continues to own the one compiler daemon.
+This fixture does not establish packaged host cold-start timing or instance
+fallback behavior.
