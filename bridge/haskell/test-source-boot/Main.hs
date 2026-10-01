@@ -154,6 +154,35 @@ verifyRetainedPackageWitness producer evidence = do
   encode [global (package { symbolModule = "Missing.Package.Owner" }) 0] >>= \case
     Left _ -> pure ()
     Right _ -> fail "retained package owner without loaded interface evidence was accepted"
+  let constructor = SymbolIdentity "ghc-internal" "GHC.Internal.Stack.Types" "value" "EmptyCallStack" Nothing
+      synthetic = constructor { symbolOccurrence = "$internalSyntheticPackageSibling" }
+      localProgram identities = (program [])
+        { programConstructors = [ConstructorDecl
+            (constructor { symbolNamespace = "constructor" })
+            (constructor { symbolNamespace = "type", symbolOccurrence = "CallStack" })
+            LiftedRefRep [] [] (CheckedLayout [] 8 0 []) 0 2 0]
+        , programBindings = [NonRecursive (TopBinding identity
+            (HeapBinding (ValueId (fromIntegral index)) (Constructor (ConstructorId 0) [])))
+            | (index, identity) <- zip [0 :: Int ..] identities] }
+      encodeProgram target = encodeCertifiedProducts producer [] Nothing []
+        [("target", target)] evidence "" ""
+      decode bytes' = either (fail . show) (pure . snd)
+        (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes'))
+  local <- encodeProgram (localProgram [constructor, synthetic]) >>= either fail decode
+  case local of
+    TList [TString "TPCERT", TInt 4, _, _, TList [TList
+      [TString "ghc-internal", TString "GHC.Internal.Stack.Types", TString _, TString sha]], TList []]
+      | T.length sha == 64 -> pure ()
+    _ -> fail "local package constructor without incoming globals lacks exact interface evidence"
+  internal <- encodeProgram (localProgram [synthetic]) >>= either fail decode
+  case internal of
+    TList [TString "TPCERT", TInt 4, _, _, TList [], TList []] -> pure ()
+    _ -> fail "noncanonical internal package helper supplied external interface authority"
+  encodeProgram ((localProgram [constructor, synthetic])
+    { programGlobals = [global synthetic 0] }) >>= \case
+      Left _ -> pure ()
+      Right _ -> fail "witnessed package module authorized a noncanonical retained sibling"
+  putStrLn "local package exports: canonical constructor without globals, internal helper and synthetic demand refusal passed"
   putStrLn "retained package witnesses: authenticated map/gen0, home/gen7 and missing package refusal passed"
 
 -- The fixed two-module SOURCE SCC is surrounded by ordinary candidate

@@ -41,7 +41,8 @@ import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencySource(..)
   , ProductAvailability(..) )
 import Tidepool.ExecutionSchema
-  ( GlobalDecl(..), ProjectedGroup(..), ProjectedGroupBody(..)
+  ( ConstructorDecl(..), ConstructorId(..), GlobalDecl(..), Group(..)
+  , HeapBinding(..), HeapRhs(..), TopBinding(..), ProjectedGroup(..), ProjectedGroupBody(..)
   , ResultContract(..), RuntimeRep(..), Signature(..), SignatureId(..)
   , SymbolIdentity(..), WireProgram(..) )
 import Tidepool.ExactScope
@@ -146,6 +147,7 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
               at (programSignatures program) (fromIntegral index))
             (globalRequiredEvaluated global) (globalRequiredGeneration global)
         pure (target, sequence globals)
+      certifyLocalPackageExports env packageRef (map snd targets)
       packageWitnesses <- readIORef packageRef
       let packages = Map.fromListWith Set.union
             [ ((unit, name), Set.singleton (path, sha))
@@ -189,6 +191,39 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
             [encodeString "TPCERT", encodeWord 4
             , list id encodedModules, list id encodedTargets
             , list id encodedPackages, list encodePreEncoded globalBytes])))
+
+-- A locally emitted package value may have no incoming global edge. Its exact
+-- defining interface must still be retained before it is offered to later
+-- turns. One canonical binder proves each module's selected interface; later
+-- retained-package demands independently prove their own canonical binder.
+-- Noncanonical compiler helpers remain internal and do not supply evidence.
+certifyLocalPackageExports :: HscEnv -> IORef [PackageWitness] -> [WireProgram] -> IO ()
+certifyLocalPackageExports env packageRef programs = do
+  observed <- readIORef packageRef
+  let witnessed = Set.fromList [(unit, name) | (unit, name, _, _) <- observed]
+      candidates = Map.fromListWith (++)
+        [ ((symbolUnit identity, symbolModule identity), [identity])
+        | program <- programs, group <- programBindings program
+        , TopBinding identity binding <- case group of
+            NonRecursive top -> [top]
+            Recursive tops -> tops
+        , not (isHomeUnit (hsc_home_unit env) (moduleUnit (symbolOwner identity)))
+        , symbolNamespace identity == "value"
+        , eligible program (heapBindingRhs binding) ]
+  mapM_ (select . Set.toAscList . Set.fromList . snd)
+    (Map.toAscList (Map.withoutKeys candidates witnessed))
+  where
+    eligible _ (Bytes _) = False
+    eligible program (Constructor (ConstructorId index) _) =
+      maybe False ((== LiftedRefRep) . constructorResultRep)
+        (at (programConstructors program) (fromIntegral index))
+    eligible _ _ = True
+    select [] = pure ()
+    select (identity : rest) = resolvePackageGlobal env identity >>= \case
+      Left _ -> select rest
+      Right (_, witness) -> modifyIORef' packageRef
+        ((symbolUnit identity, symbolModule identity, packagePath witness,
+          T.pack (packageSha256 witness)) :)
 
 freshGroup :: ProjectedGroup -> Maybe CandidateGroup
 freshGroup group = do
