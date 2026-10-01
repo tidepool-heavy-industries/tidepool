@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 pub(super) struct EmbeddedPolicyInstallation {
     actor: ActorRef,
     policy: Arc<dyn ResidentToolEndpoint>,
+    manifest: Result<Arc<harness::embedding::EmbeddedToolManifest>, String>,
 }
 
 impl EmbeddedPolicyInstallation {
@@ -20,7 +21,14 @@ impl EmbeddedPolicyInstallation {
     }
 
     fn new(actor: ActorRef, policy: Arc<dyn ResidentToolEndpoint>) -> Self {
-        Self { actor, policy }
+        let manifest = harness::embedding::EmbeddedToolManifest::new(project_tools(policy.tools()))
+            .map(Arc::new)
+            .map_err(|error| error.to_string());
+        Self {
+            actor,
+            policy,
+            manifest,
+        }
     }
 
     pub(super) fn actor(&self) -> ActorRef {
@@ -36,12 +44,23 @@ impl EmbeddedPolicyInstallation {
 
     pub(super) fn request_snapshot(&self) -> Result<EmbeddedPolicySnapshot, ResidentToolError> {
         let policy = self.policy.snapshot_for_request()?;
-        let tools = project_tools(policy.tools());
+        let declared = self.policy.tools();
+        let issued = policy.tools();
+        if !std::ptr::eq(declared, issued) && declared != issued {
+            return Err(ResidentToolError::Unavailable(
+                "request endpoint changed its installed tool declarations".into(),
+            ));
+        }
+        let manifest = self
+            .manifest
+            .as_ref()
+            .map_err(|error| ResidentToolError::Unavailable(error.clone()))?
+            .clone();
         Ok(EmbeddedPolicySnapshot {
             #[cfg(test)]
             actor: self.actor,
             policy,
-            tools,
+            manifest,
         })
     }
 }
@@ -52,7 +71,7 @@ pub(super) struct EmbeddedPolicySnapshot {
     #[cfg(test)]
     actor: ActorRef,
     policy: Arc<dyn ResidentToolEndpoint>,
-    tools: Vec<Value>,
+    manifest: Arc<harness::embedding::EmbeddedToolManifest>,
 }
 
 impl EmbeddedPolicySnapshot {
@@ -62,7 +81,11 @@ impl EmbeddedPolicySnapshot {
     }
 
     pub(super) fn tools(&self) -> &[Value] {
-        &self.tools
+        self.manifest.tools()
+    }
+
+    pub(super) fn manifest(&self) -> Arc<harness::embedding::EmbeddedToolManifest> {
+        self.manifest.clone()
     }
 
     pub(super) fn dispatch(
@@ -184,13 +207,7 @@ mod tests {
     }
 
     fn reloading_policy() -> Arc<dyn ResidentToolEndpoint> {
-        let pinned = policy_with_tools(
-            "issued-handler",
-            vec![HostedTool::Custom(CustomToolDeclaration {
-                name: "haskell_v2".into(),
-                description: "Reloaded notebook cell".into(),
-            })],
-        );
+        let pinned = policy("issued-handler");
         Arc::new(ProbePolicy {
             tools: declared_tools(),
             marker: "stale-handler",
@@ -241,6 +258,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn requests_share_the_installed_manifest_and_refuse_changed_declarations() {
+        let actor = exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7));
+        let installation = EmbeddedPolicyInstallation::new(actor, policy("first"));
+        let first = installation.request_snapshot().unwrap();
+        let second = installation.request_snapshot().unwrap();
+        assert!(Arc::ptr_eq(&first.manifest, &second.manifest));
+        let incompatible = Arc::new(ProbePolicy {
+            tools: declared_tools(),
+            marker: "original",
+            request_policy: Some(policy_with_tools("changed", vec![])),
+        });
+        assert!(matches!(
+            EmbeddedPolicyInstallation::new(actor, incompatible).request_snapshot(),
+            Err(ResidentToolError::Unavailable(_))
+        ));
+    }
+
     #[tokio::test]
     async fn request_manifest_and_handler_come_from_the_same_reloaded_endpoint() {
         let snapshot = EmbeddedPolicyInstallation::new(
@@ -250,11 +285,11 @@ mod tests {
         .request_snapshot()
         .unwrap();
 
-        assert_eq!(snapshot.tools().len(), 1);
-        assert_eq!(snapshot.tools()[0]["name"], "haskell_v2");
+        assert_eq!(snapshot.tools().len(), 2);
+        assert_eq!(snapshot.tools()[0]["name"], "haskell");
         let result = snapshot
             .dispatch(
-                "haskell_v2".into(),
+                "haskell".into(),
                 ToolArguments::Raw("1".into()),
                 context(),
                 None,
@@ -262,7 +297,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["marker"], "issued-handler");
-        assert_eq!(result["name"], "haskell_v2");
+        assert_eq!(result["name"], "haskell");
     }
 
     #[tokio::test]

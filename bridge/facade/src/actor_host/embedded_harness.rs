@@ -493,14 +493,16 @@ impl HostActor for EmbeddedHostActor {
             "{}:{}:{}:{sequence}",
             self.identity.run, self.identity.actor.0, self.identity.incarnation
         );
-        let tools = snapshot.tools().to_vec();
+        let manifest = snapshot.manifest();
         let dispatcher: Arc<dyn Provider> = Arc::new(EmbeddedDispatcher {
             identity: self.identity.clone(),
             issuer: self.actor.identity(),
             snapshot,
             store: self.store.clone(),
         });
-        Ok(Arc::new(ToolSurface::new(version, tools, dispatcher)?))
+        Ok(Arc::new(ToolSurface::from_manifest(
+            version, manifest, dispatcher,
+        )?))
     }
 
     async fn wake(&self, envelope_id: i64) -> Result<(), String> {
