@@ -3,10 +3,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Project.InterviewChecks (collectAnswers) where
 
-import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
 import Control.Monad.Freer (Eff, Member)
-import qualified Data.Text as Text
 import Tidepool.Check
 import Project.Checks (script)
 
@@ -16,24 +14,14 @@ collectAnswers = do
   source <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral source)
   script owner "interview-collect"
-  empty <- turn owner "inspectFull (interviewSummary (InterviewReport []))"
-  check "an empty interview cannot claim completion"
-    ("Interview incomplete: no questions supplied" `Text.isInfixOf` output empty)
-  pending <- turn owner
-    "pending <- collectInterview interviewItems\ninspectFull (interviewSummary pending)"
-  check "supplied live answer is explicitly incomplete"
-    ("Interview incomplete" `Text.isInfixOf` output pending
-      && "waiting:" `Text.isInfixOf` output pending)
+  assertCell owner "an empty interview cannot claim completion" "not (interviewComplete (InterviewReport []))"
+  void $ turn owner "pending <- collectInterview interviewItems"
+  assertCell owner "supplied live answer is explicitly incomplete" "not (interviewComplete pending) && case interviewFindings pending of { [Waiting _ AnswerWorking] -> True; _ -> False }"
   expert <- activation
   void $ turn (checkActor expert)
     "respond (Decision \"choose one source\" [\"inspected exact input\"] :: DesignAnswer)"
-  answered <- turn owner
-    "answered <- collectInterview interviewItems\ninspectFull (interviewSummary answered)"
-  check "terminal typed answer appears in one summary"
-    ("Interview complete" `Text.isInfixOf` output answered
-      && "choose one source" `Text.isInfixOf` output answered)
-  reused <- turn owner
-    "let prior = case interviewFindings answered of { [Answered q receipt] -> [KnownAnswer q receipt]; _ -> [] }\nreused <- collectInterview prior\ninspectFull (interviewSummary reused)"
-  check "earlier answer is reused with its receipt"
-    ("Interview complete" `Text.isInfixOf` output reused
-      && "choose one source" `Text.isInfixOf` output reused)
+  void $ turn owner "answered <- collectInterview interviewItems"
+  assertCell owner "terminal typed answer appears in one summary" "interviewComplete answered && case interviewFindings answered of { [Answered _ receipt] -> responseValue receipt == Decision \"choose one source\" [\"inspected exact input\"]; _ -> False }"
+  assertCell owner "text: interview summary includes the terminal answer" "\"choose one source\" `Text.isInfixOf` interviewSummary answered"
+  void $ turn owner "let prior = case interviewFindings answered of { [Answered q receipt] -> [KnownAnswer q receipt]; _ -> [] }\nreused <- collectInterview prior"
+  assertCell owner "earlier answer is reused with its receipt" "interviewComplete reused && case (interviewFindings answered, interviewFindings reused) of { ([Answered originalQuestion originalReceipt], [Answered question receipt]) -> question == originalQuestion && receipt == originalReceipt; _ -> False }"

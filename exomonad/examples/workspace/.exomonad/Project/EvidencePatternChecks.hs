@@ -15,7 +15,8 @@ import qualified Jev.Operators as J
 import Jev.Operators (Packet ((:=)))
 import Project.EvidencePattern
 import Project.EvidencePatternExamples
-import Tidepool.Aeson.Value (object, (.=))
+import Tidepool.Aeson.Value (Value (..), object, (.=))
+import qualified Tidepool.Aeson.KeyMap as KeyMap
 import Tidepool.Check (RecipeCheck, check)
 
 construction :: Member RecipeCheck effects => Eff effects ()
@@ -40,14 +41,14 @@ construction = do
       && usefulWhen commandCriteria /= usefulWhen reviewCriteria)
   let commandRequest = J.request J.jevLatest
         commandState commandPacket
-  check "shared useful criterion appears once in the packet, not once per candidate"
+  check "text: shared useful criterion appears once in the packet, not once per candidate"
     (case commandRequest of
       Left _ -> False
       Right request ->
-        Text.count (usefulWhen commandCriteria) (Text.pack (show request)) == 1
+        sum (map (Text.count (usefulWhen commandCriteria)) (textFields request)) == 1
           && all (not . Text.isInfixOf (usefulWhen commandCriteria)) wording
-          && Text.count (Text.takeWhile (/= '\n') (evidenceExcerpt (head commandEvidence)))
-               (Text.pack (show request)) == 1)
+          && sum (map (Text.count (Text.takeWhile (/= '\n') (evidenceExcerpt (head commandEvidence))))
+               (textFields request)) == 1)
   check "both authored packets prepare as a single request"
     (isRight commandRequest
       && isRight (J.request J.jevLatest reviewState reviewPacket))
@@ -85,3 +86,10 @@ decodeSelection selected = do
   case settleEvidence J.lenient response.best of
     Left doubt -> Left doubt.why
     Right (J.Settled selection) -> Right selection
+
+-- Inspect the actual protocol Text fields, preserving their boundaries.
+textFields :: Value -> [Text.Text]
+textFields (String value) = [value]
+textFields (Array values) = concatMap textFields values
+textFields (Object fields) = concatMap textFields (KeyMap.elems fields)
+textFields _ = []
