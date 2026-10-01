@@ -42,6 +42,8 @@ mod embedded_recovery;
 #[cfg(test)]
 mod embedded_recovery_tests;
 mod embedded_service;
+#[cfg(test)]
+mod embedded_shutdown_tests;
 mod host_incarnation;
 #[cfg(feature = "codex-compat")]
 mod hosted_retirement;
@@ -3417,11 +3419,24 @@ async fn run_owned(
         NativeRetirement::Preserve
     }));
     operator.shutdown().await;
-    forest.shutdown().await;
+    let forest_shutdown = forest.shutdown().await;
     let cleanup = if !applications_finished {
         await_applications(&mut applications_task, APPLICATION_SHUTDOWN_TIMEOUT).await
     } else {
         Ok(())
+    };
+    let unconfirmed = forest_shutdown
+        .into_iter()
+        .filter(|outcome| !outcome.is_confirmed())
+        .collect::<Vec<_>>();
+    let cleanup = match (cleanup, unconfirmed.is_empty()) {
+        (cleanup, true) => cleanup,
+        (Ok(()), false) => Err(runtime_error(format!(
+            "resident forest cleanup unconfirmed: {unconfirmed:?}"
+        ))),
+        (Err(error), false) => Err(runtime_error(format!(
+            "{error}; resident forest cleanup unconfirmed: {unconfirmed:?}"
+        ))),
     };
     handoff_application_owners(application_owners, applications_task, cleanup, result)
 }
@@ -4650,7 +4665,13 @@ async fn run_interactive_applications(
     let mut launches = JoinSet::new();
     #[cfg(not(feature = "codex-compat"))]
     let mut launches: JoinSet<()> = JoinSet::new();
-    let mut embedded_tasks: JoinSet<(ActorRef, LocalActorRef, Result<(), String>)> = JoinSet::new();
+    let mut embedded_tasks: JoinSet<(
+        ActorRef,
+        LocalActorRef,
+        Result<(), embedded_service::EmbeddedDriverError>,
+    )> = JoinSet::new();
+    let mut embedded_cleanup_failures: Vec<(ActorRef, embedded_service::EmbeddedDriverError)> =
+        Vec::new();
     let mut embedded_cancellations: HashMap<ActorRef, watch::Sender<bool>> = HashMap::new();
     let mut embedded_live = BTreeSet::new();
     let mut embedded_conversations: HashMap<ActorRef, embedded_harness::EmbeddedActorBinding> =
@@ -4956,8 +4977,9 @@ async fn run_interactive_applications(
                     schedule_embedded_notification_drain(actor, binding, &mut notifications);
                 }
                 if let Some(waiters) = release_waiters.remove(&actor) {
+                    let release = embedded_resource_release(outcome.as_ref().err());
                     for waiter in waiters {
-                        waiter.answer(exomonad_actor::ResourceRelease::Released);
+                        waiter.answer(release.clone());
                     }
                 }
                 match outcome {
@@ -4973,7 +4995,11 @@ async fn run_interactive_applications(
                         }
                     }
                     Ok(()) => {}
-                    Err(detail) => {
+                    Err(error) => {
+                        let detail = error.to_string();
+                        if error.cleanup_failed() {
+                            embedded_cleanup_failures.push((actor, error));
+                        }
                         tracing::error!(?actor, %detail, "embedded Engine failed");
                         if local_actor.terminal().get().is_none() {
                             if let Err(error) = apply_application_failure(
@@ -5232,7 +5258,7 @@ async fn run_interactive_applications(
                                         }
                                         if let Err(error) = provider_attachment.validate() {
                                             embedded.cancellation.send_replace(true);
-                                            return Err(error.to_string());
+                                            return Err(error.to_string().into());
                                         }
                                         embedded.cancellation = cancel;
                                         embedded.cancellation_rx = cancellation_rx;
@@ -5675,6 +5701,8 @@ async fn run_interactive_applications(
                         let actor = request.actor;
                         let settled = if embedded_live.contains(&actor) {
                             None
+                        } else if let Some((_, error)) = embedded_cleanup_failures.iter().find(|(failed, _)| *failed == actor) {
+                            Some(embedded_resource_release(Some(error)))
                         } else {
                             match application_owners.lock().get(&actor) {
                                 None => Some(exomonad_actor::ResourceRelease::Released),
@@ -6361,29 +6389,8 @@ async fn run_interactive_applications(
     for cancellation in embedded_cancellations.values() {
         cancellation.send_replace(true);
     }
-    let embedded_cleanup = match tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
-        let mut failure = None;
-        while let Some(result) = embedded_tasks.join_next().await {
-            match result {
-                Ok((_actor, _local_actor, Ok(()))) => {}
-                Ok((actor, _local_actor, Err(error))) => {
-                    tracing::warn!(?actor, %error, "embedded Engine stopped with an error during host shutdown");
-                }
-                Err(error) => {
-                    failure.get_or_insert_with(|| format!("embedded Engine task: {error}"));
-                }
-            }
-        }
-        failure
-    })
-    .await
-    {
-        Ok(failure) => failure,
-        Err(_) => {
-            embedded_tasks.shutdown().await;
-            Some("embedded Engine cleanup timed out after cancellation".into())
-        }
-    };
+    let embedded_cleanup =
+        drain_embedded_shutdown(&mut embedded_tasks, APPLICATION_SHUTDOWN_TIMEOUT).await;
     let embedded_service_cleanup = match embedded_service.as_mut() {
         Some(service) => service
             .shutdown()
@@ -6499,7 +6506,15 @@ async fn run_interactive_applications(
     .unwrap_or_else(|_| Some("interactive application cleanup timed out".into()));
     #[cfg(not(feature = "codex-compat"))]
     let cleanup_failure: Option<String> = None;
+    let earlier_embedded_cleanup = (!embedded_cleanup_failures.is_empty()).then(|| {
+        embedded_cleanup_failures
+            .into_iter()
+            .map(|(actor, error)| format!("embedded Engine {actor:?}: {error}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    });
     let cleanup_failures = [
+        earlier_embedded_cleanup,
         launch_failure,
         embedded_cleanup,
         embedded_service_cleanup,
@@ -6519,6 +6534,48 @@ async fn run_interactive_applications(
         (Some(error), Some(cleanup)) => Err(format!("{error}; cleanup: {cleanup}")),
         (Some(error), None) | (None, Some(error)) => Err(error),
         (None, None) => Ok(()),
+    }
+}
+
+fn embedded_resource_release(
+    error: Option<&embedded_service::EmbeddedDriverError>,
+) -> exomonad_actor::ResourceRelease {
+    match error.filter(|error| error.cleanup_failed()) {
+        Some(error) => exomonad_actor::ResourceRelease::Retained(format!(
+            "embedded Engine cleanup unconfirmed: {error}"
+        )),
+        None => exomonad_actor::ResourceRelease::Released,
+    }
+}
+
+async fn drain_embedded_shutdown<A: fmt::Debug + Send + 'static, L: Send + 'static>(
+    tasks: &mut JoinSet<(A, L, Result<(), embedded_service::EmbeddedDriverError>)>,
+    grace: Duration,
+) -> Option<String> {
+    let mut failure = None;
+    match tokio::time::timeout(grace, async {
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok((_actor, _local_actor, Ok(()))) => {}
+                Ok((actor, _local_actor, Err(error))) => {
+                    tracing::warn!(?actor, %error, "embedded Engine stopped with an error during host shutdown");
+                    failure.get_or_insert_with(|| format!("embedded Engine {actor:?}: {error}"));
+                }
+                Err(error) => {
+                    failure.get_or_insert_with(|| format!("embedded Engine task: {error}"));
+                }
+            }
+        }
+    }).await {
+        Ok(()) => failure,
+        Err(_) => {
+            tasks.abort_all();
+            let timeout = "embedded Engine cleanup timed out; abort requested, cleanup unconfirmed";
+            Some(match failure {
+                Some(failure) => format!("{failure}; {timeout}"),
+                None => timeout.into(),
+            })
+        }
     }
 }
 

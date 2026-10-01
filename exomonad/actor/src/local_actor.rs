@@ -6652,6 +6652,59 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn forest_shutdown_preserves_confirmed_and_unconfirmed_component_evidence() {
+        use crate::{CleanupComponentOutcome as Component, ForestRootShutdown};
+        for realm in [
+            Component::Confirmed,
+            Component::Unconfirmed("busy resident machine".into()),
+            Component::Unsupported,
+        ] {
+            let mut fixture = behavior(false);
+            fixture.behavior.shutdown_override =
+                Some(ShutdownOverride::Fixed(Component::Confirmed, realm.clone()));
+            let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+            let outcome =
+                crate::resident_actor::shutdown_forest_root(&actor, Duration::from_secs(1)).await;
+            task.await.unwrap();
+            assert_eq!(
+                outcome.is_confirmed(),
+                matches!(realm, Component::Confirmed)
+            );
+            let ForestRootShutdown::Settled(shutdown) = outcome else {
+                panic!("actor did not settle");
+            };
+            assert_eq!(shutdown.cleanup.actor(), actor.identity());
+            assert_eq!(shutdown.cleanup.realm(), &realm);
+            assert_eq!(shutdown.terminal.kind, ActorExitKind::Cancelled);
+            let repeated =
+                crate::resident_actor::shutdown_forest_root(&actor, Duration::from_secs(1)).await;
+            assert_eq!(repeated, ForestRootShutdown::Settled(shutdown));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn forest_shutdown_timeout_remains_unconfirmed_after_forced_actor_exit() {
+        let mut fixture = behavior(false);
+        fixture.behavior.shutdown_override =
+            Some(ShutdownOverride::HangRealmForever(Arc::new(Notify::new())));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        let outcome =
+            crate::resident_actor::shutdown_forest_root(&actor, Duration::from_secs(1)).await;
+        assert_eq!(
+            outcome,
+            crate::ForestRootShutdown::TimedOut {
+                actor: actor.identity()
+            }
+        );
+        assert!(!outcome.is_confirmed());
+        task.await.unwrap();
+        assert!(
+            !outcome.is_confirmed(),
+            "scheduler exit must not confirm resource cleanup"
+        );
+    }
+
     /// Q2-B: unconfirmed hook/resource-scope cleanup no longer rewrites the exit kind
     /// to `Failed`. The requested kind is preserved and cleanup uncertainty
     /// stays a separate, already-retained fact.

@@ -61,7 +61,8 @@ mod start;
 pub(crate) mod status_tool;
 mod termination;
 pub use hosted_lifecycle::{
-    CleanupComponentOutcome, HostedWorkSeal, ResidentCleanupOutcome, ResidentShutdown,
+    CleanupComponentOutcome, ForestRootShutdown, HostedWorkSeal, ResidentCleanupOutcome,
+    ResidentShutdown,
 };
 mod typed_request;
 mod usage_pointer;

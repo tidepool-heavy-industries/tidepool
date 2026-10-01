@@ -575,7 +575,6 @@ async fn host_cancellation_stops_a_real_running_haskell_cell() {
         .unwrap();
     match result {
         Ok(()) => {}
-        Err(error) if error == "engine cancelled" => {}
         Err(error) => {
             panic!("embedded Engine failed while cancelling its real Haskell call: {error}")
         }

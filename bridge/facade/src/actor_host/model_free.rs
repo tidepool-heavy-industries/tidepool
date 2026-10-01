@@ -227,13 +227,15 @@ async fn failed_root_start_cleanup(
     cause: String,
 ) -> Box<dyn std::error::Error> {
     let mut details = vec![cause];
-    if tokio::time::timeout(FAILED_START_FOREST_SHUTDOWN_TIMEOUT, forest.shutdown())
-        .await
-        .is_err()
-    {
-        details.push(format!(
+    match tokio::time::timeout(FAILED_START_FOREST_SHUTDOWN_TIMEOUT, forest.shutdown()).await {
+        Ok(outcomes) => {
+            for outcome in outcomes.into_iter().filter(|outcome| !outcome.is_confirmed()) {
+                details.push(format!("forest cleanup unconfirmed: {outcome:?}"));
+            }
+        }
+        Err(_) => details.push(format!(
             "forest shutdown exceeded {FAILED_START_FOREST_SHUTDOWN_TIMEOUT:?}; completion is unconfirmed"
-        ));
+        )),
     }
 
     hosted.abort();

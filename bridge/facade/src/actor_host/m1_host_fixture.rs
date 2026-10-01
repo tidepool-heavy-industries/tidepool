@@ -396,13 +396,15 @@ impl RunningBrowserHost {
 }
 
 async fn finish_campaign(campaign: &mut test_campaign::TestCampaign, errors: &mut Vec<String>) {
-    if tokio::time::timeout(FOREST_SHUTDOWN_TIMEOUT, campaign.forest.shutdown())
-        .await
-        .is_err()
-    {
-        errors.push(format!(
+    match tokio::time::timeout(FOREST_SHUTDOWN_TIMEOUT, campaign.forest.shutdown()).await {
+        Ok(outcomes) => {
+            for outcome in outcomes.into_iter().filter(|outcome| !outcome.is_confirmed()) {
+                errors.push(format!("resident forest cleanup unconfirmed: {outcome:?}"));
+            }
+        }
+        Err(_) => errors.push(format!(
             "resident forest shutdown exceeded {FOREST_SHUTDOWN_TIMEOUT:?}; completion is unconfirmed"
-        ));
+        )),
     }
 
     match tokio::time::timeout(HOSTED_SHUTDOWN_TIMEOUT, &mut campaign.hosted).await {

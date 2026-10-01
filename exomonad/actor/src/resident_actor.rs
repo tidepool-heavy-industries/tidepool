@@ -11898,7 +11898,9 @@ where
         }
     }
 
-    pub async fn shutdown(&self) {
+    /// Close root admission and retain each root's actor-owned cleanup evidence.
+    /// A forced actor stop remains unconfirmed even after its scheduler task exits.
+    pub async fn shutdown(&self) -> Vec<crate::ForestRootShutdown> {
         *self.environment.root_admission_closed.write().await = true;
         let roots = self
             .environment
@@ -11908,19 +11910,11 @@ where
             .filter(|(_, record)| record.scheduler_root)
             .filter_map(|(actor, _)| self.directory.resolve(*actor))
             .collect::<Vec<_>>();
+        let mut outcomes = Vec::with_capacity(roots.len());
         for root in roots {
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                root.shutdown(ActorTerminal {
-                    kind: ActorExitKind::Cancelled,
-                    summary: "forest host shutdown".into(),
-                }),
-            )
-            .await;
-            if !matches!(result, Ok(Ok(_))) {
-                root.address().kill();
-            }
+            outcomes.push(shutdown_forest_root(&root, std::time::Duration::from_secs(30)).await);
         }
+        outcomes
     }
 
     /// Provision a host-authorized workbench without a provider attachment.
@@ -12650,6 +12644,36 @@ pub(crate) async fn publish_request_notifications(
             outcome = "sent",
             "publishing settlement notice"
         );
+    }
+}
+
+pub(crate) async fn shutdown_forest_root(
+    root: &LocalActorRef,
+    grace: std::time::Duration,
+) -> crate::ForestRootShutdown {
+    let result = tokio::time::timeout(
+        grace,
+        root.shutdown_with_cleanup(ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "forest host shutdown".into(),
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(shutdown)) => crate::ForestRootShutdown::Settled(shutdown),
+        result => {
+            root.address().kill();
+            match result {
+                Ok(Err(cause)) => crate::ForestRootShutdown::Failed {
+                    actor: root.identity(),
+                    cause,
+                },
+                Err(_) => crate::ForestRootShutdown::TimedOut {
+                    actor: root.identity(),
+                },
+                Ok(Ok(_)) => unreachable!(),
+            }
+        }
     }
 }
 

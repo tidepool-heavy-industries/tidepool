@@ -1162,7 +1162,6 @@ mod tests {
             .unwrap();
         match engine_result {
             Ok(()) => {}
-            Err(error) if error == "engine cancelled" => {}
             Err(error) => panic!("embedded Engine failed: {error}"),
         }
         let requests = transport.requests.lock().unwrap();
