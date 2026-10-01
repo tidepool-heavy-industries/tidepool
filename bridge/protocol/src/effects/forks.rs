@@ -72,7 +72,7 @@ pub fn forks() -> Effect {
                 json: JsonInstance::None,
                 derives: WireDerives(&[]),
                 domain: None,
-                doc: &["Whether the creating actor or the enclosing swarm owns worker lifetime."],
+                doc: &["InvocationOwned is the hosted invocation default; ActorOwned and SwarmOwned retain work beyond it. Structured actor turns without a hosted invocation use actor ownership."],
             },
             TypeDef {
                 name: "ForkContext",
