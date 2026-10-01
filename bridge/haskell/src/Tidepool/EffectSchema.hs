@@ -124,9 +124,6 @@ sitedVerbs =
   , verb "request" "Tidepool.Actors.Internal.Agent"
       "requestSited" "Tidepool.Actors.Internal.Agent" False [1]
       DeliverExitCellFill ResponseResultEvidence
-  , verb "requestWith" "Tidepool.Actors.Internal.Agent"
-      "requestWithSited" "Tidepool.Actors.Internal.Agent" False [1]
-      DeliverExitCellFill ResponseResultEvidence
   , (verb "requestWithProgress" "Tidepool.Actors.Internal.Agent"
       "requestWithProgressSited" "Tidepool.Actors.Internal.Agent" False [2, 0]
       DeliverExitCellFill ResponseResultEvidence)

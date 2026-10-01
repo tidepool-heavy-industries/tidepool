@@ -33,8 +33,7 @@ module Tidepool.Actors.Internal.Agent
   , minutes
   , assignment
   , labelFromText
-  , requestWith
-  , requestWithSited
+  , requestActivatedSited
   , requestWithProgress
   , requestWithProgressSited
   , requestWithProgressInto
@@ -101,7 +100,9 @@ import Tidepool.Agent.Watch.Internal (WatchId (..))
 import Tidepool.Inspection
   ( Display (..), DisplayTree (..), PageDisplay (..), opaqueHandle, pageWithContinuation )
 import Tidepool.Agent.Session
-  ( attachAgent
+  ( ActivationMetadata
+  , emptyActivationMetadata
+  , attachAgent
   , requestSessionSited
   )
 import Tidepool.Effects.Core
@@ -349,17 +350,8 @@ requestSited
   -> AgentRef
   -> Assignment input
   -> Eff effs (Response result)
-requestSited site (AgentRef target targetWorktree) options = do
-  requestConfiguredSited site target targetWorktree options (const (pure ()))
-
-{-# OPAQUE requestWith #-}
-requestWith
-  :: forall result input effs
-   . Member Replies effs
-  => AgentRef
-  -> Assignment input
-  -> Eff effs (Response result)
-requestWith = requestWithSited (error "requestWith: extractor must assign a typed site")
+requestSited site (AgentRef target targetWorktree) options =
+  requestConfiguredSited site target targetWorktree options emptyActivationMetadata (const (pure ()))
 
 {-# OPAQUE requestWithProgress #-}
 requestWithProgress
@@ -380,7 +372,7 @@ requestWithProgressSited
   -> Assignment input
   -> Eff effs (Response result, Progress progress)
 requestWithProgressSited site actor options = do
-  response <- requestWithSited @result @input site actor options
+  response <- requestSited @result @input site actor options
   pure (response, Progress (responseRequestId response))
 
 -- | Retain the exact typed handles before admitting work. The callback should
@@ -408,23 +400,25 @@ requestWithProgressIntoSited
 requestWithProgressIntoSited site (AgentRef target targetWorktree) options retain = do
   let handles response = (response, Progress (responseRequestId response))
   response <- requestConfiguredSited site target targetWorktree
-    options (retain . handles)
+    options emptyActivationMetadata (retain . handles)
   pure (handles response)
 
-{-# OPAQUE requestWithSited #-}
-requestWithSited
+{-# OPAQUE requestActivatedSited #-}
+requestActivatedSited
   :: forall result input effs
    . Member Replies effs
   => Int
   -> AgentRef
   -> Assignment input
+  -> ActivationMetadata
   -> Eff effs (Response result)
-requestWithSited site (AgentRef target targetWorktree) options =
+requestActivatedSited site (AgentRef target targetWorktree) options metadata =
   requestConfiguredSited
     site
     target
     targetWorktree
     options
+    metadata
     (const (pure ()))
 
 requestConfiguredSited
@@ -434,13 +428,12 @@ requestConfiguredSited
   -> Actor.ActorRef AgentProtocol ()
   -> Maybe WorktreeHandle
   -> Assignment input
+  -> ActivationMetadata
   -> (Response result -> Eff effs ())
   -> Eff effs (Response result)
-requestConfiguredSited site target targetWorktree options retain = do
+requestConfiguredSited site target targetWorktree options metadata retain = do
   requestId <- reserveRequest (assignmentLabel options) (actorAddress target) (report options)
-  let renderedLabel = labelText (assignmentLabel options)
-      requestInput = input options
-      responseGuidance = guidance options
+  let requestInput = input options
       requestDeadline = deadline options
       (response, reply) = newRequestHandles requestInput requestId (AgentRef target targetWorktree)
   retain response
@@ -460,7 +453,7 @@ requestConfiguredSited site target targetWorktree options retain = do
       result <-
         requestSessionSited @result @input
           site requestId (Just (activationGuidance (labelText (assignmentLabel options)) (guidance options)))
-          (assignmentSiblings options) (input options)
+          metadata (input options)
       evidence <- case (targetTree, start) of
         (Nothing, _) -> pure NoBoundWorktree
         (Just tree, Just startHead) -> do

@@ -145,7 +145,9 @@ module Tidepool.Actors.Exomonad
   , UnfoldError (..)
   , renderUnfoldError
   , attemptUnfold
+  , attemptUnfoldDeferred
   , unfold
+  , unfoldDeferred
   , spawnWatched
   , errand
   , AgentSpec
@@ -194,7 +196,6 @@ module Tidepool.Actors.Exomonad
   , milliseconds
   , seconds
   , minutes
-  , requestWith
   , requestWithProgress
   , requestWithProgressInto
   , Progress
@@ -336,7 +337,6 @@ import Tidepool.Actors.Internal.Agent
   , milliseconds
   , seconds
   , minutes
-  , requestWith
   , requestWithProgress
   , requestWithProgressInto
   , StopOutcome (..)
