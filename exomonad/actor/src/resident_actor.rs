@@ -10975,6 +10975,47 @@ where
         ))
     }
 
+    fn validate_root_startup_public_operation(
+        &self,
+        placement: &crate::RootRecoveryPlacement,
+        predecessor: Option<&tidepool_runtime::session::RecoveryPublicOwner>,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        let records = self.environment.actors.lock();
+        let pending_startup = records
+            .get(&placement.actor())
+            .is_some_and(|record| record.root_startup.is_some());
+        drop(records);
+        if !pending_startup {
+            return Ok(());
+        }
+        let journal = self.environment.recovery.as_ref().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol("root startup journal is absent".into())
+        })?;
+        let records = journal
+            .validated_records()
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let intent = records
+            .iter()
+            .find(|record| record.admission.actor == placement.actor())
+            .and_then(|record| record.startup.as_ref())
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "root original startup intent is absent".into(),
+                )
+            })?;
+        if intent
+            .manifest
+            .as_ref()
+            .map(|manifest| &manifest.public_owner)
+            != predecessor
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "root public operation differs from its original startup manifest owner".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn root_public_owner_posture(
         &self,
         placement: &crate::RootRecoveryPlacement,
@@ -11089,6 +11130,7 @@ where
         actor: ActorRef,
     ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
         let placement = self.root_recovery_placement(actor)?;
+        self.validate_root_startup_public_operation(&placement, None)?;
         match self.root_public_owner_posture(&placement)? {
             RootPublicOwnerPosture::Ready => {
                 return Ok(tidepool_runtime::session::PublicManifestCommit::Durable)
@@ -11117,6 +11159,7 @@ where
         authority: Arc<dyn tidepool_runtime::session::RecoverySuccessorAuthority>,
     ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
         let placement = self.root_recovery_placement(actor)?;
+        self.validate_root_startup_public_operation(&placement, Some(predecessor))?;
         match self.root_public_owner_posture(&placement)? {
             RootPublicOwnerPosture::Ready => {
                 return Ok(tidepool_runtime::session::PublicManifestCommit::Durable)
