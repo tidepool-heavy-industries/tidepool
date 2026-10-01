@@ -8,6 +8,7 @@ No live provider credentials are used.
 | Gate | Exact libtest name | What it proves |
 |---|---|---|
 | M1 browser | `actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root` | Playwright input and real raw Haskell output, request-pinned reload/retry, interruption of the active operation, continue and root retirement. |
+| Complete-cell preflight | `actor_host::embedded_captured_unfold_tests::admitted_cell_late_type_error_has_no_effect_or_publication_on_retry` | An installed AgentSpec and admitted root reject a final type error before the first notification effect or binding publication; exact operation retry retains rejection without compiler work. |
 | M2 captured replies | `actor_host::embedded_captured_unfold_tests::embedded_captured_unfold_awaits_two_child_replies_before_parent_call_returns` | Two independent captured children reply while the parent call is unfinished; release refuses new use while admitted children retain their scope. |
 | M2 failure and reuse | `actor_host::embedded_captured_unfold_tests::embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell` | Both children reply, the same parent cell fails, both children still read its completed private prefix, and a third child uses the retained checkpoint independently. |
 
@@ -30,6 +31,18 @@ checkpoint retained in the seed-store actor admits a third reader after the
 failed original operation has durably settled. Releasing that checkpoint twice
 must succeed. Issuer actor retirement and final native reader reclamation have
 separate native-owner gates; these tests do not substitute for those proofs.
+
+The preflight gate installs a real `AgentSpec`, then dispatches an authored cell
+through its admitted root policy. The first bind would send an observable
+notification and return `41`; its final statement is the real type error
+`pure (True :: Int)`. Rejection must retain receipts with no committed item,
+installed binding or completed operation. The notification inbox stays empty,
+and a fresh Haskell lookup reports that `neverPublished` is not in scope.
+Retrying the identical original operation returns the same retained rejection
+without another compiler submission. A valid control changes only the final
+statement, executes exactly one notification through the production durable
+inbox/Store owner, and publishes the binding. This is admitted-actor evidence;
+it does not claim a scripted provider drove that call.
 
 ## Matched inputs and execution
 
@@ -58,6 +71,10 @@ Run the frozen libtest with the existing bounded runner, in an admitted scope:
 python3 build/rust/isolated-libtest.py "$FACADE_TEST_BINARY" \
   --exact actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root \
   --expected-count 1 --ignored --jobs 1 --timeout 900
+
+python3 build/rust/isolated-libtest.py "$FACADE_TEST_BINARY" \
+  --exact actor_host::embedded_captured_unfold_tests::admitted_cell_late_type_error_has_no_effect_or_publication_on_retry \
+  --expected-count 1 --jobs 1 --timeout 600
 
 python3 build/rust/isolated-libtest.py "$FACADE_TEST_BINARY" \
   --exact actor_host::embedded_captured_unfold_tests::embedded_captured_unfold_awaits_two_child_replies_before_parent_call_returns \

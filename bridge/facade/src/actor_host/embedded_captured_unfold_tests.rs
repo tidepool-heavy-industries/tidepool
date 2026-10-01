@@ -593,3 +593,239 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         assert!(error.is_cancelled());
     }
 }
+
+fn preflight_invocation(
+    request_id: &str,
+    call_id: &str,
+    source: String,
+) -> exomonad_tool::ToolInvocation {
+    exomonad_tool::ToolInvocation {
+        context: Some(exomonad_tool::ToolInvocationContext::external(
+            "whole-cell-preflight".into(),
+            request_id.into(),
+            call_id.into(),
+            Some(call_id.into()),
+            Some("haskell".into()),
+        )),
+        name: exomonad_actor::HASKELL_TOOL.into(),
+        arguments: exomonad_tool::ToolArguments::Raw(source),
+    }
+}
+
+async fn preflight_dispatch_without_effect(
+    campaign: &mut test_campaign::TestCampaign,
+    invocation: exomonad_tool::ToolInvocation,
+) -> Value {
+    let policy = campaign.root_installation.policy.clone();
+    tokio::select! {
+        result = policy.dispatch_boxed(invocation) => result.expect("actual admitted Haskell invocation settles"),
+        effect = campaign.next_deployment("forbidden preflight notification", Duration::from_secs(120), |event| match event {
+            LocalResidentDeployment::NotificationSend(command) => Ok(command),
+            other => Err(other),
+        }) => panic!("effect ran before complete-cell rejection: {}", effect.message()),
+    }
+}
+
+fn assert_preflight_rejection(response: &Value) {
+    use tidepool_runtime::session::{WorkbenchItemStatus, WorkbenchRunStatus};
+    assert_eq!(
+        response["status"],
+        serde_json::to_value(WorkbenchRunStatus::Rejected).unwrap(),
+        "{response}"
+    );
+    let items = response["items"].as_array().expect("rejection receipts");
+    assert!(!items.is_empty(), "type error must retain its receipt");
+    for item in items {
+        assert_ne!(
+            item["status"],
+            serde_json::to_value(WorkbenchItemStatus::Committed).unwrap(),
+            "{response}"
+        );
+        assert!(
+            item["installedBindings"]
+                .as_array()
+                .is_none_or(Vec::is_empty),
+            "{response}"
+        );
+        assert!(
+            item["operations"].as_array().is_none_or(Vec::is_empty),
+            "{response}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
+    let mut campaign = test_campaign::TestCampaign::start_with_config(
+        exomonad_actor::ResearchPolicy::default(), |admission| admission,
+        |config| {
+            config.backend = crate::exomonad::HostBackendOptions::Embedded;
+            let authored = config.workspace.join(".exomonad");
+            std::fs::create_dir_all(&authored).unwrap();
+            std::fs::write(authored.join("AgentSpec.hs"), include_str!("embedded_bad_final_agent_spec.hs")).unwrap();
+            std::fs::write(authored.join("config.toml"), "[haskell]\nsource_roots = ['.']\nmodules = ['AgentSpec']\nspec = 'AgentSpec.agentSpec'\n").unwrap();
+            test_campaign::commit_workspace(&config.workspace);
+            config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root).unwrap());
+        },
+    ).await;
+    let actor = campaign.actor.identity();
+    let policy = campaign.root_installation.policy.clone();
+    let status = policy
+        .dispatch_boxed(exomonad_tool::ToolInvocation {
+            context: None,
+            name: "status".into(),
+            arguments: exomonad_tool::ToolArguments::Structured(json!({"view":"detailed"})),
+        })
+        .await
+        .unwrap();
+    assert!(
+        status.to_string().contains("AgentSpec.agentSpec"),
+        "actual AgentSpec must be installed: {status}"
+    );
+
+    let runtime =
+        embedded_harness::EmbeddedHarnessRuntime::open(campaign.session_root.path(), 1).unwrap();
+    let embedded = runtime
+        .attach(
+            harness::embedding::HostIdentity {
+                run: runtime_namespace(campaign.session_root.path()),
+                actor: AgentPath("/root".into()),
+                incarnation: actor.incarnation.0.to_string(),
+            },
+            campaign.actor.clone(),
+            Arc::new(
+                embedded_policy::EmbeddedPolicyInstallation::from_installation(
+                    &campaign.root_installation,
+                ),
+            ),
+            None,
+        )
+        .unwrap();
+    let binding = open_embedded_actor_binding(
+        campaign.session_root.path(),
+        actor,
+        AgentPath("/root".into()),
+        Some(embedded.conversation.clone()),
+    )
+    .unwrap();
+    assert_eq!(binding.inbox.watermark(), 0);
+    let source = include_str!("embedded_bad_final_cell.hs")
+        .replace("TARGET_ID", &actor.id.0.to_string())
+        .replace("TARGET_INCARNATION", &actor.incarnation.0.to_string());
+    let invocation = preflight_invocation("bad-final-request", "bad-final-call", source.clone());
+    let rejected = preflight_dispatch_without_effect(&mut campaign, invocation.clone()).await;
+    assert_preflight_rejection(&rejected);
+    let diagnostics = rejected.to_string();
+    assert!(
+        diagnostics.contains("Bool") && diagnostics.contains("Int"),
+        "must reject the real final Bool::Int type error: {rejected}"
+    );
+    assert_eq!(binding.inbox.watermark(), 0);
+    campaign.assert_no_deployment("preflight rejected all effects", |event| {
+        matches!(event, LocalResidentDeployment::NotificationSend(_))
+    });
+    policy
+        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "whole-cell-preflight".into(),
+            "bad-final-request".into(),
+            "bad-final-call".into(),
+        ))
+        .await
+        .unwrap();
+    let requests = tidepool_extract_cmd::extract_spawn_count();
+    let retry = preflight_dispatch_without_effect(&mut campaign, invocation).await;
+    assert_eq!(
+        retry, rejected,
+        "same exact operation must retain its rejection"
+    );
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        requests,
+        "retained rejection must not resubmit compiler work"
+    );
+    assert_eq!(binding.inbox.watermark(), 0);
+    let absent = preflight_dispatch_without_effect(
+        &mut campaign,
+        preflight_invocation(
+            "binding-probe-request",
+            "binding-probe-call",
+            "neverPublished".into(),
+        ),
+    )
+    .await;
+    assert_preflight_rejection(&absent);
+    let absent_diagnostic = absent.to_string();
+    assert!(
+        absent_diagnostic.contains("neverPublished") && absent_diagnostic.contains("not in scope"),
+        "rejected bind must remain absent from the public lexical environment: {absent}"
+    );
+    assert!(
+        campaign.actor.terminal().get().is_none(),
+        "type rejection keeps the admitted actor live"
+    );
+
+    let valid = source.replace("pure (True :: Int)", "pure (42 :: Int)");
+    let mut control = tokio::spawn(async move {
+        policy
+            .dispatch_boxed(preflight_invocation(
+                "valid-control-request",
+                "valid-control-call",
+                valid,
+            ))
+            .await
+    });
+    let notification = tokio::select! {
+        result = &mut control => panic!("valid first statement returned before emitting its effect: {result:?}"),
+        effect = campaign.next_deployment("valid first-statement control", Duration::from_secs(120), |event| match event {
+            LocalResidentDeployment::NotificationSend(command) => Ok(command), other => Err(other),
+        }) => effect,
+    };
+    assert_eq!(notification.owner(), actor);
+    assert_eq!(notification.target(), actor);
+    assert_eq!(notification.message(), "whole-cell-preflight-sentinel");
+    let mut notifications = JoinSet::new();
+    schedule_embedded_notification_send(notification, &binding, &mut notifications);
+    let (_, admitted) = tokio::time::timeout(Duration::from_secs(30), notifications.join_next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    admitted.unwrap();
+    let committed = tokio::time::timeout(Duration::from_secs(120), control)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_committed_haskell_value(&committed, "42");
+    assert!(
+        committed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["installedBindings"]
+                .as_array()
+                .is_some_and(|names| names.iter().any(|name| name == "neverPublished"))),
+        "valid control publishes its binding: {committed}"
+    );
+    assert_eq!(
+        binding.inbox.watermark(),
+        1,
+        "only valid control can publish the actual effect"
+    );
+    let unread = runtime.store().unread("/root").unwrap();
+    assert_eq!(unread.len(), 1);
+    assert_eq!(
+        runtime
+            .store()
+            .get_item(&unread[0].item_hash)
+            .unwrap()
+            .unwrap()
+            .0["content"],
+        "whole-cell-preflight-sentinel"
+    );
+    campaign.assert_no_deployment("valid control executes once", |event| {
+        matches!(event, LocalResidentDeployment::NotificationSend(_))
+    });
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}

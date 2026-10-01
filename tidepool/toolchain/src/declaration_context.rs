@@ -134,6 +134,9 @@ impl ExactCompilationRequest {
             .into_iter()
             .filter(|entry| !baseline_ids.contains(&entry.descriptor.id))
             .collect::<Vec<_>>();
+        if !new_entries.is_empty() {
+            std::fs::create_dir_all(root)?;
+        }
         let mut validation = PackageInterfaceValidation::default();
         let (mut materialized, references) =
             context.materialize_entries_with_validation(root, &new_entries, &mut validation)?;
@@ -1326,6 +1329,84 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
     use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
+
+    #[test]
+    fn first_program_context_growth_materializes_and_checks_new_original() {
+        let interface = b"interface".to_vec();
+        let value = Value::Array(vec![
+            text("TPMOD"),
+            Value::Integer(1.into()),
+            Value::Array(vec![Value::Array(vec![
+                text("fixture"),
+                text("Support"),
+                Value::Bytes(interface.clone()),
+                Value::Array(vec![]),
+            ])]),
+        ]);
+        let mut product_bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut product_bytes).unwrap();
+        let owner = CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "Support".into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: Sha256::digest(&interface).into(),
+            product_sha256: Sha256::digest(&product_bytes).into(),
+        };
+        let certification =
+            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
+                .unwrap();
+        let package_value = Value::Array(vec![
+            text("TPPKGROOTS"),
+            text("1"),
+            Value::Array(vec![
+                text(&owner.unit),
+                text(&owner.module),
+                text(sha256(&interface)),
+            ]),
+            Value::Array(vec![]),
+        ]);
+        let mut package_bytes = Vec::new();
+        ciborium::ser::into_writer(&package_value, &mut package_bytes).unwrap();
+        let product = CertifiedRecoveryProduct::from_certification(
+            owner,
+            interface,
+            product_bytes,
+            package_bytes,
+            certification,
+        );
+        let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let context = Arc::new(
+            baseline
+                .as_ref()
+                .clone()
+                .extend_checked_original_products([2; 32], &[product], &BTreeMap::new())
+                .unwrap(),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let request = ExactCompilationRequest {
+            context: baseline,
+            manifest: directory.path().join("scope"),
+            request_sha256: String::new(),
+            semantic_sha256: [1; 32],
+            producer_sha256: [2; 32],
+            artifacts: vec![],
+            groups: Arc::from([]),
+        };
+        let root = directory.path().join("program-inputs");
+        assert!(!root.exists());
+        let effective = request.in_program_context(&root, context).unwrap();
+        assert_eq!(effective.artifacts.len(), 1);
+        assert!(effective.artifacts[0].interface.path.is_file());
+        effective
+            .context
+            .validate_artifacts(&effective.artifacts)
+            .unwrap();
+        std::fs::write(&effective.artifacts[0].interface.path, b"tampered").unwrap();
+        assert!(effective
+            .context
+            .validate_artifacts(&effective.artifacts)
+            .is_err());
+    }
     #[test]
     fn unchanged_program_context_reuses_materialization_but_admission_checks_tampering() {
         let owner = CachedHomeOwner {
