@@ -5544,11 +5544,10 @@ where
                             registered.and_then(|watch| {
                                 if let Some(invocation) = effect_owner.invocation_work() {
                                     if let Err(error) = invocation.register_transient_watch(watch) {
-                                        drop(
-                                            self.environment
-                                                .requests
-                                                .release_transient_watch(context.actor, watch),
-                                        );
+                                        let _ = self
+                                            .environment
+                                            .requests
+                                            .release_transient_watch(context.actor, watch);
                                         return Err(error);
                                     }
                                 }
