@@ -78,6 +78,10 @@ impl<B: 'static, T: 'static> OwnedActorTask<B, T> {
             }
         }
     }
+
+    pub(super) fn is_serial(&self) -> bool {
+        matches!(&self.run, ActorTaskExecution::Serial(_))
+    }
 }
 
 /// One execution's cleanup claim. Create it as soon as a private scope or
@@ -125,6 +129,15 @@ type ActorResume<B, T> = Box<
 enum CompletionFinalizer<B, T> {
     Immediate(Box<dyn FnOnce(&mut B) -> Result<KernelStep<T>, KernelInvocationFailure> + Send>),
     Resume(ActorResume<B, T>),
+    AsyncResume(
+        Box<
+            dyn for<'a> FnOnce(
+                    &'a mut B,
+                    &'a KernelContext,
+                ) -> BoxFuture<'a, Result<ActorAdvance<B, T>, KernelInvocationFailure>>
+                + Send,
+        >,
+    ),
 }
 
 /// The task result rejoins its owning behavior only after its step is fenced.
@@ -162,6 +175,21 @@ impl<B, T> OwnedActorCompletion<B, T> {
         }
     }
 
+    /// Resume actor-owned decisions that require a bounded asynchronous turn.
+    pub(crate) fn advance_async(
+        finish: impl for<'a> FnOnce(
+                &'a mut B,
+                &'a KernelContext,
+            ) -> BoxFuture<'a, Result<ActorAdvance<B, T>, KernelInvocationFailure>>
+            + Send
+            + 'static,
+    ) -> Self {
+        Self {
+            finish: Some(CompletionFinalizer::AsyncResume(Box::new(finish))),
+            abandon_guard: None,
+        }
+    }
+
     /// Transfer the task's exact cleanup claim to its actor completion.
     pub fn with_abandon_guard(mut self, guard: ActorAbandonGuard) -> Self {
         assert!(self.abandon_guard.is_none(), "one actor task cleanup owner");
@@ -169,7 +197,7 @@ impl<B, T> OwnedActorCompletion<B, T> {
         self
     }
 
-    pub(super) fn finish(
+    pub(super) async fn finish(
         mut self,
         behavior: &mut B,
         context: &KernelContext,
@@ -177,6 +205,7 @@ impl<B, T> OwnedActorCompletion<B, T> {
         let mut result = match self.finish.take().expect("one completion finalizer") {
             CompletionFinalizer::Immediate(finish) => finish(behavior).map(ActorAdvance::Complete),
             CompletionFinalizer::Resume(finish) => finish(behavior, context),
+            CompletionFinalizer::AsyncResume(finish) => finish(behavior, context).await,
         };
         match &mut result {
             Ok(ActorAdvance::Complete(_)) => {
