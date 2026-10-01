@@ -33,16 +33,16 @@ data GateStart
 -- job's terminal output. The watcher never opens a second actor's files.
 startGate
   :: (Member Actor effects, Member Commands effects)
-  => AgentRef -> Text -> Cmd.Memory -> FocusedSpec -> Eff effects GateStart
-startGate owner name memory spec = do
-  startFocused memory spec >>= attachGate owner name
+  => [Text] -> AgentRef -> Text -> Cmd.Memory -> FocusedSpec -> Eff effects GateStart
+startGate runner owner name memory spec = do
+  startFocusedWith runner memory spec >>= attachGate owner name
 
 -- One original job retains prerequisite and test evidence in the owner checkout.
 startPreparedGate
   :: (Member Actor effects, Member Commands effects)
-  => AgentRef -> Text -> Cmd.Memory -> FocusedSpec -> [Text] -> Eff effects GateStart
-startPreparedGate owner name memory spec preparation =
-  startFocusedAfter memory spec preparation >>= attachGate owner name
+  => [Text] -> AgentRef -> Text -> Cmd.Memory -> FocusedSpec -> [Text] -> Eff effects GateStart
+startPreparedGate runner owner name memory spec preparation =
+  startFocusedAfterWith runner memory spec preparation >>= attachGate owner name
 
 -- | Reattach to the original job after a watcher binding was lost. A retained
 -- 'FocusedRun' (or its spec, job and constructor) is required. An old watcher
@@ -90,12 +90,13 @@ foldGate onFailed onUnknown state
       pure (Just (checksSummary state))
   where entries = checkEntries state
 
--- | Each check builds its spec and optional preparation from the invocation's
--- candidate. The job and resource reservation remain owned by Commands.
+-- | Each check supplies literal runner argv, then builds its spec and optional
+-- preparation from the invocation's candidate. Commands owns the job.
 data CheckPreparation = WithoutPreparation | PrepareWith (GitOid -> [Text])
 
 data PlanCheck = PlanCheck
   { planName :: Text
+  , planRunner :: [Text]
   , planSpec :: GitOid -> FocusedSpec
   , planMemory :: Cmd.Memory
   , planPreparation :: CheckPreparation
@@ -138,8 +139,8 @@ startCheckPlanWith watch candidate checks = case checks of
     launched <- forM checks $ \item -> do
       let spec = planSpec item candidate
       result <- case planPreparation item of
-        WithoutPreparation -> startFocused (planMemory item) spec
-        PrepareWith commandFor -> startFocusedAfter (planMemory item) spec (commandFor candidate)
+        WithoutPreparation -> startFocusedWith (planRunner item) (planMemory item) spec
+        PrepareWith commandFor -> startFocusedAfterWith (planRunner item) (planMemory item) spec (commandFor candidate)
       pure (planName item, result)
     let admitted = [(name, run) | (name, Right run) <- launched]
         refused = [(name, issue) | (name, Left issue) <- launched]
