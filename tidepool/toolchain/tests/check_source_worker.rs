@@ -80,13 +80,14 @@ fn complete_source_check_uses_current_transitive_graph_without_native_products()
     command.output_dir(root.join("forbidden-output"));
     let endpoint = AdmittedCompilerEndpoint::from_bound(command.bind().unwrap()).unwrap();
     let run = endpoint.execute(&command).unwrap();
-    let rejection = diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
-        .expect_err("checking cannot carry output authority");
+    let rejection =
+        diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
+            .expect_err("checking cannot carry output authority");
     let CompileError::WorkerFailure(diagnostics) = rejection else {
         panic!("expected invalid-mode diagnostics, got {rejection:?}");
     };
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains(
-        "source checking cannot carry product or notebook authority"
-    )));
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("source checking cannot carry product or notebook authority")));
     assert!(!root.join("forbidden-output").exists());
 }

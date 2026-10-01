@@ -300,6 +300,7 @@ checkingSourceRequestRoundTrip :: IO ()
 checkingSourceRequestRoundTrip = do
   let fields = [Input "Complete.hs", CheckSource, Include "source-graph"
                , ModuleCandidates "candidates.cbor", BuildProductsDir "interfaces"]
+  [flag, payload] <- pure (workerArgv fields)
   case workerRequestFromArgv (workerArgv fields) of
     Right (Just request) -> do
       assertEqual "checking mode retained" True (requestCheckSource request)
@@ -308,12 +309,11 @@ checkingSourceRequestRoundTrip = do
       assertEqual "no product output" Nothing (requestOutDir request)
       assertEqual "no cell rewriting" False (requestCell request)
     other -> fail ("checking source request round trip failed: " ++ show other)
-  case workerRequestFromArgv ["--worker-request-v16", last (workerArgv fields)] of
+  case workerRequestFromArgv ["--worker-request-v16", payload] of
     Left _ -> pure ()
     other -> fail ("retired request protocol accepted: " ++ show other)
-  let payload = last (workerArgv fields)
-      retiredPayload = take 14 payload ++ "36" ++ drop 16 payload
-  case workerRequestFromArgv [head (workerArgv fields), retiredPayload] of
+  let retiredPayload = take 14 payload ++ "36" ++ drop 16 payload
+  case workerRequestFromArgv [flag, retiredPayload] of
     Left _ -> pure ()
     other -> fail ("retired request bytes accepted: " ++ show other)
 
