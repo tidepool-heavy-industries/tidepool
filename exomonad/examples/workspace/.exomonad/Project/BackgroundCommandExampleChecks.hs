@@ -25,7 +25,7 @@ completion = do
   void $ turn owner (stage "await")
   success <- turn owner "completionProjection job commandEvidence"
   check "late command completion keeps a compact typed projection"
-    (all (`Text.isInfixOf` success) ["CommandExited 0", "CompleteCapture"])
+    (all (`Text.isInfixOf` lastOutput success) ["CommandExited 0", "CompleteCapture"])
   evidence <- turn owner "commandEvidence"
   check "full command evidence remains available after the projection"
     (all (`Text.isInfixOf` lastOutput evidence) ["CaptureComplete", "passed"])
@@ -36,7 +36,7 @@ completion = do
     ]
   failed <- turn owner "completionProjection failedJob failedEvidence"
   check "a failed command retains its outcome and both streams"
-    (all (`Text.isInfixOf` failed) ["CommandExited 7", "CompleteCapture"])
+    (all (`Text.isInfixOf` lastOutput failed) ["CommandExited 7", "CompleteCapture"])
   fullFailure <- turn owner "failedEvidence"
   check "failed execution evidence stays accessible without rerunning"
     (all (`Text.isInfixOf` lastOutput fullFailure) ["CaptureComplete", "failed"])

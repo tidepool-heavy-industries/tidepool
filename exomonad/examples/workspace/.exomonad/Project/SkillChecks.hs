@@ -203,7 +203,9 @@ reviewProvenance = do
     (lastOutput accepted == "True")
   -- Exact review retries retain the real scope, including when the caller offers
   -- a retained implementer: there is no implementation Task to assign to it.
-  void $ turn owner "let exact = ReviewRequest (ExactScope base [\"review-provenance.txt\"] \"exact acceptance\") (Candidate commit [] [\"remaining gate\"]) (RetainedImplementer (responseActor reviewer))\n(retry, retryProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|exact-retry|] exact)"
+  retryCreated <- turn owner "let exact = ReviewRequest (ExactScope base [\"review-provenance.txt\"] \"exact acceptance\") (Candidate commit [] [\"remaining gate\"]) (RetainedImplementer (responseActor reviewer))\n(retry, retryProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|exact-retry|] exact)\nretryRetention <- detachRequest retry\ninspectFull (show retryRetention)"
+  check ("exact review retry retention: " <> lastOutput retryCreated)
+    ("Right ()" `Text.isInfixOf` lastOutput retryCreated)
   retried <- turn (checkActor reviewer) "let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current\nverdict <- repair [label|exact-findings|] current latest [\"repair at the owner\"]\ninspectFull (case verdict of { Left (Repair found issues) -> found == latest && issues == [\"repair at the owner\"]; _ -> False })"
   check "exact-scope repair returns findings without inventing an implementation assignment"
     (lastOutput retried == "True")
@@ -211,7 +213,9 @@ reviewProvenance = do
   revised <- checkpoint owner "review-provenance.txt" "revised review candidate\n" "review repair fixture"
   void $ git (checkActor reviewer) ["merge", "--ff-only", revised]
   void $ turn owner ("let revisedCommit = " <> gitOidLiteral revised)
-  void $ turn owner "let question = Question \"contract\" (DesignQuestion \"plan.md\" base \"boundary\" [\"evidence\"] [] [])\nlet decision = AcceptedDecision question base \"preserve the boundary\" [\"checked\"]\nlet assigned = (task [label|assigned-review|] \"review implementation\" [\"review-provenance.txt\"] \"assigned acceptance\" base) { planPath = \"plan.md\", rationale = \"retained reason\", acceptedDecisions = [decision] }\nlet assignedRequest = ReviewRequest (AssignedTask assigned) (Candidate revisedCommit [\"candidate check\"] [\"open gate\"]) OwnerRepairs\n(assignedReview, assignedProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|assigned-retry|] assignedRequest)"
+  assignedReviewCreated <- turn owner "let question = Question \"contract\" (DesignQuestion \"plan.md\" base \"boundary\" [\"evidence\"] [] [])\nlet decision = AcceptedDecision question base \"preserve the boundary\" [\"checked\"]\nlet assigned = (task [label|assigned-review|] \"review implementation\" [\"review-provenance.txt\"] \"assigned acceptance\" base) { planPath = \"plan.md\", rationale = \"retained reason\", acceptedDecisions = [decision] }\nlet assignedRequest = ReviewRequest (AssignedTask assigned) (Candidate revisedCommit [\"candidate check\"] [\"open gate\"]) OwnerRepairs\n(assignedReview, assignedProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|assigned-retry|] assignedRequest)\nassignedReviewRetention <- detachRequest assignedReview\ninspectFull (show assignedReviewRetention)"
+  check ("assigned review retry retention: " <> lastOutput assignedReviewCreated)
+    ("Right ()" `Text.isInfixOf` lastOutput assignedReviewCreated)
   void $ turn (checkActor reviewer) "let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current"
   revisedScope <- turn (checkActor reviewer)
     ("newScope <- (ReviewReply.currentRequest :: Eff CodingEffects (ReviewReply.RequestScope ReviewRequest (Outcome ReviewDecision)))\n"

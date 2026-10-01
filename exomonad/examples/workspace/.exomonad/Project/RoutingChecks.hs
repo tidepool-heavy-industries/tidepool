@@ -284,32 +284,40 @@ reviewedCheckpoints = do
     "admitReviewedCheckpoint (reviewRequest { reviewInput = Candidate (GitOid \"different\") [] [] }) reviewer"
   check "a requested candidate without the review checkout HEAD is refused"
     ("CheckpointSourceRejected" `Text.isInfixOf` output mismatchedSource)
-  void $ turn owner
-    "(alteredReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|altered-review|] reviewRequest)"
+  alteredReviewCreated <- turn owner
+    "(alteredReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|altered-review|] reviewRequest)\nalteredReviewRetention <- detachRequest alteredReview\ninspectFull (show alteredReviewRetention)"
+  check ("alteredReview retention: " <> lastOutput alteredReviewCreated)
+    ("Right ()" `Text.isInfixOf` lastOutput alteredReviewCreated)
   void activation
   void $ turn (checkActor reviewerActor)
     "respond (Produced (Accepted (ReviewedCandidate (reviewBasis sessionInput) ((reviewInput sessionInput) { reportedChecks = [\"different\"] }) [] \"accepted\")))"
   mismatchedCandidate <- turn owner "admitReviewedCheckpoint reviewRequest alteredReview"
   check "a reviewer verdict for another full candidate is refused"
     ("CheckpointCandidateMismatch" `Text.isInfixOf` output mismatchedCandidate)
-  void $ turn owner
-    "(blockedReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|blocked-review|] reviewRequest)"
+  blockedReviewCreated <- turn owner
+    "(blockedReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|blocked-review|] reviewRequest)\nblockedReviewRetention <- detachRequest blockedReview\ninspectFull (show blockedReviewRetention)"
+  check ("blockedReview retention: " <> lastOutput blockedReviewCreated)
+    ("Right ()" `Text.isInfixOf` lastOutput blockedReviewCreated)
   void activation
   void $ turn (checkActor reviewerActor)
     "respond (Blocked \"review blocked\" [\"missing source proof\"] :: Outcome ReviewDecision)"
   blocked <- turn owner "admitReviewedCheckpoint reviewRequest blockedReview"
   check "a blocked review cannot become a reviewed checkpoint"
     ("CheckpointBlocked" `Text.isInfixOf` output blocked)
-  void $ turn owner
-    "(repairReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|repair-review|] reviewRequest)"
+  repairReviewCreated <- turn owner
+    "(repairReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|repair-review|] reviewRequest)\nrepairReviewRetention <- detachRequest repairReview\ninspectFull (show repairReviewRetention)"
+  check ("repairReview retention: " <> lastOutput repairReviewCreated)
+    ("Right ()" `Text.isInfixOf` lastOutput repairReviewCreated)
   void activation
   void $ turn (checkActor reviewerActor)
     "respond (Produced (Repair (reviewInput sessionInput) [\"repair requested\"]))"
   needsRepair <- turn owner "admitReviewedCheckpoint reviewRequest repairReview"
   check "a review requesting repair cannot become a reviewed checkpoint"
     ("CheckpointNeedsRepair" `Text.isInfixOf` output needsRepair)
-  void $ turn owner
-    "(dirtyReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|dirty-review|] reviewRequest)"
+  dirtyReviewCreated <- turn owner
+    "(dirtyReview, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) (assignment [label|dirty-review|] reviewRequest)\ndirtyReviewRetention <- detachRequest dirtyReview\ninspectFull (show dirtyReviewRetention)"
+  check ("dirtyReview retention: " <> lastOutput dirtyReviewCreated)
+    ("Right ()" `Text.isInfixOf` lastOutput dirtyReviewCreated)
   void activation
   writeFile (checkActor reviewerActor) "README.md" "dirty review checkout\n"
   void $ turn (checkActor reviewerActor)
