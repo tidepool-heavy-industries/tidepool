@@ -127,6 +127,8 @@ main = do
   cellResult "false actor cell fails" CellFailed (checked "false cell" "scopedValue == 0")
   cellResult "non-Bool actor cell is rejected" CellRejected (checked "wrong type" "scopedValue")
   cellResult "typed await executes in actor scope" CellAccepted (awaited "typed await" "pure (scopedValue == 42)")
+  cellResult "do-action await preserves layout" CellAccepted
+    (awaited "do predicate" "do\n  let value = scopedValue\n  pure (value == 42)")
   cellResult "non-Bool action is rejected" CellRejected (awaited "wrong action type" "pure scopedValue")
   require "cell boundary never counts success before accepting turn status" . null =<< readIORef successes
   failedCounts <- newIORef []
@@ -136,5 +138,5 @@ main = do
       Check.assertCell actor "failed turn" "True"
       pure (42 :: Int)
   require "failed turn records zero successes" . null =<< readIORef failedCounts
-  putStrLn "executed: 16 native helper contract checks"
+  putStrLn "executed: 17 native helper contract checks"
   putStrLn "not executed: successful host counting requires the prepared-runtime JSON intrinsic"
