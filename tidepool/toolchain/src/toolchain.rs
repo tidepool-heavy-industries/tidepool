@@ -61,7 +61,7 @@
 //! the materialized bundle at a completely different path. Identical content
 //! must compare equal.
 //!
-//! Cost: one endpoint preflight plus one walk of ~40 small `.hs` files. Never
+//! Cost: one endpoint preflight plus one complete shipped-source walk. Never
 //! per-eval.
 
 use std::path::{Path, PathBuf};
@@ -256,6 +256,10 @@ pub enum ToolchainError {
     #[error("{0}")]
     Skew(Box<SkewReport>),
 
+    /// The stdlib tree could not be completely inspected.
+    #[error("stdlib fingerprint: {0}")]
+    StdlibManifest(#[from] crate::cache::SourceManifestError),
+
     /// Reading or writing the deploy stamp failed.
     #[error("toolchain stamp {}: {source}", .path.display())]
     Stamp {
@@ -294,6 +298,7 @@ impl std::fmt::Debug for ToolchainError {
             Self::StdlibNotFound { .. } => "StdlibNotFound",
             Self::Skew(_) => "Skew",
             Self::Stamp { .. } => "Stamp",
+            Self::StdlibManifest(_) => "StdlibManifest",
             Self::DeploymentAuthority(_) => "DeploymentAuthority",
             Self::DeploymentManifest { .. } => "DeploymentManifest",
         };
@@ -753,72 +758,30 @@ fn extract_sibling_lib() -> Option<PathBuf> {
     }
 }
 
-/// Content fingerprint of a stdlib tree rooted at `dir`.
+/// Content fingerprint of the complete shipped stdlib source tree.
 ///
-/// Hashes `(path relative to `dir`, blake3(contents))` for every `.hs` file,
-/// in sorted order, so the same content at two different absolute paths — the
-/// repo `bridge/haskell/lib` the stamp is written from and the materialized bundle a
-/// deployed server resolves — fingerprints identically.
+/// The canonical source traversal includes every namespace and production
+/// Internal module, selects `.hs` files, and excludes generated Prelude_cbor
+/// directories. Paths are relative to `dir`, so deployed bundles and authored
+/// trees with the same shipped bytes compare identically.
 ///
-/// **The filter mirrors `tidepool/build.rs`'s embed filter exactly**: `.hs`
-/// only, skipping the `Internal/` probe and the `Prelude_cbor/` build
-/// artifacts. If that filter changes, this must change with it, or a deployed
-/// server will report skew against its own bundle.
-#[must_use]
-pub fn stdlib_fingerprint(dir: &Path) -> String {
-    // Root the walk at `Tidepool/`, not at `dir`, because that is exactly what
-    // `tidepool/build.rs` embeds. Walking `dir` itself would count a stray
-    // `bridge/haskell/lib/Scratch.hs` that never ships, and every deployed server
-    // would then report skew against its own bundle.
-    let root = dir.join("Tidepool");
-    let mut files: Vec<(String, PathBuf)> = Vec::new();
-    collect_stdlib_files(&root, &root, &mut files);
-    files.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&(files.len() as u64).to_le_bytes());
-    for (rel, abs) in &files {
-        hasher.update(&(rel.len() as u64).to_le_bytes());
-        hasher.update(rel.as_bytes());
-        match std::fs::read(abs) {
-            Ok(bytes) => hasher.update(blake3::hash(&bytes).as_bytes()),
-            Err(_) => hasher.update(b"<unreadable>"),
-        };
-    }
-    hasher.finalize().to_hex().to_string()
-}
-
-/// Excluded directory names — kept in lockstep with `tidepool/build.rs`.
-const STDLIB_SKIP_DIRS: [&str; 2] = ["Internal", "Prelude_cbor"];
-
-fn collect_stdlib_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if STDLIB_SKIP_DIRS.contains(&name.as_ref()) {
-                continue;
-            }
-            collect_stdlib_files(root, &path, out);
-        } else if path.extension().is_some_and(|e| e == "hs") {
-            if let Ok(rel) = path.strip_prefix(root) {
-                out.push((rel.to_string_lossy().replace('\\', "/"), path.clone()));
-            }
-        }
-    }
+/// # Errors
+/// Refuses an identity if any selected source or directory cannot be read.
+pub fn stdlib_fingerprint(dir: &Path) -> Result<String, crate::cache::SourceManifestError> {
+    let manifest = crate::cache::shipped_haskell_source_manifest(dir)?;
+    Ok(crate::cache::source_manifests_identity(
+        b"tidepool-shipped-stdlib-v3",
+        &[manifest],
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // The deploy stamp + handshake
 // ---------------------------------------------------------------------------
 
-/// Wire-format version of the stamp. Bump when the compared fields change; a
-/// stamp with a different schema is treated as absent (warn, don't fail — an
-/// old stamp must not brick a newer server).
-pub const STAMP_SCHEMA: u32 = 2;
+/// Stamp schema including the complete shipped-source fingerprint. A stamp
+/// from another schema must be explicitly regenerated through deployment.
+pub const STAMP_SCHEMA: u32 = 3;
 
 /// The (extract, stdlib) pair that was last deployed together.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -851,29 +814,34 @@ pub fn stamp_path() -> PathBuf {
     crate::paths::cache_dir().join("toolchain-stamp.json")
 }
 
-/// Read the stamp. `Ok(None)` when the file is absent (or unreadable at the
-/// filesystem level, e.g. a permission error — nothing to compare against,
-/// same as absent), or when it parses cleanly but was written by a different
-/// [`STAMP_SCHEMA`] (an old/future stamp must never brick a server).
-///
-/// A stamp file that EXISTS, was read, and fails to parse as valid JSON in
-/// the current schema's shape is CORRUPT, not absent, and is no longer
-/// indistinguishable from it: this returns [`ToolchainError::Stamp`], and
-/// [`enforce_handshake`] applies the severity policy (fail closed in `Error`,
-/// log-and-continue in `Warn`) on top.
+/// Read the stamp, returning `Ok(None)` only when the file is absent.
 ///
 /// # Errors
-/// [`ToolchainError::Stamp`] when the stamp file exists but its content does
-/// not parse as JSON in the [`ToolchainStamp`] shape — a truncated/partial
-/// write that somehow survived [`write_stamp`]'s atomic rename, or
-/// hand-corrupted content.
+/// [`ToolchainError::Stamp`] if the file cannot be read or decoded, or its
+/// schema requires regeneration through `scripts/redeploy.sh`.
 pub fn read_stamp(path: &Path) -> Result<Option<ToolchainStamp>, ToolchainError> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Ok(None);
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(ToolchainError::Stamp {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
     };
     match serde_json::from_str::<ToolchainStamp>(&text) {
         Ok(s) if s.schema == STAMP_SCHEMA => Ok(Some(s)),
-        Ok(_) => Ok(None),
+        Ok(stamp) => Err(ToolchainError::Stamp {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "stamp schema {} requires schema {STAMP_SCHEMA}; run {REDEPLOY}",
+                    stamp.schema
+                ),
+            ),
+        }),
         Err(source) => Err(ToolchainError::Stamp {
             path: path.to_path_buf(),
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
@@ -894,7 +862,8 @@ pub fn read_stamp(path: &Path) -> Result<Option<ToolchainStamp>, ToolchainError>
 /// survives a crash.
 ///
 /// # Errors
-/// [`ToolchainError::Stamp`] if the stamp cannot be created or written.
+/// [`ToolchainError::Stamp`] if the stamp cannot be created or written, or
+/// [`ToolchainError::StdlibManifest`] if the source tree is incomplete.
 pub fn write_stamp(
     endpoint: &tidepool_extract_cmd::CompilerEndpoint,
     extract_path: &Path,
@@ -911,7 +880,7 @@ fn write_stamp_identity(
     let stamp = ToolchainStamp {
         schema: STAMP_SCHEMA,
         extract: producer_identity,
-        stdlib: stdlib_fingerprint(stdlib),
+        stdlib: stdlib_fingerprint(stdlib)?,
         extract_path: extract_path.display().to_string(),
         stdlib_path: stdlib.display().to_string(),
         written_by: format!("tidepool {}", env!("CARGO_PKG_VERSION")),
@@ -1022,8 +991,8 @@ pub enum HandshakeOutcome {
 /// [`enforce_handshake`] applies the severity policy.
 ///
 /// # Errors
-/// [`ToolchainError::Stamp`] when the stamp file exists but its content is
-/// corrupt ([`read_stamp`] fails closed rather than treating it as absent).
+/// [`ToolchainError::Stamp`] if the stamp is unreadable, corrupt, or requires
+/// migration; [`ToolchainError::StdlibManifest`] if source inspection fails.
 pub fn check_handshake(
     endpoint: &tidepool_extract_cmd::CompilerEndpoint,
     extract_path: &Path,
@@ -1042,7 +1011,7 @@ fn check_handshake_identity(
         return Ok(HandshakeOutcome::NoStamp { path });
     };
 
-    let stdlib_now = stdlib_fingerprint(stdlib);
+    let stdlib_now = stdlib_fingerprint(stdlib)?;
     let mut sides = Vec::new();
     if extract_now != stamp.extract {
         sides.push(SkewSide::Extract);
@@ -1123,13 +1092,8 @@ fn enforce_handshake_identity(
     }
     let outcome = match check_handshake_identity(producer_identity, extract_path, stdlib) {
         Ok(outcome) => outcome,
-        // The only error `check_handshake` can produce is a corrupt stamp
-        // (`read_stamp` fails closed on a parse failure). `Error` severity
-        // propagates it as-is below (fail closed); `Warn` logs it here and
-        // degrades to the same no-stamp-detected outcome rather than
-        // aborting startup.
         Err(e) if severity == HandshakeSeverity::Warn => {
-            tracing::warn!("toolchain stamp is corrupt, treating as absent: {e}");
+            tracing::warn!("toolchain handshake could not be verified: {e}");
             HandshakeOutcome::NoStamp { path: stamp_path() }
         }
         Err(e) => return Err(e),
@@ -1272,9 +1236,19 @@ mod tests {
         std::fs::create_dir_all(tp.join("Internal")).unwrap();
         std::fs::write(tp.join("Prelude.hs"), prelude_body).unwrap();
         std::fs::write(tp.join("Table.hs"), "module Tidepool.Table where\n").unwrap();
-        // Excluded by the filter — must not move the fingerprint.
-        std::fs::write(tp.join("Internal").join("Probe.hs"), "probe\n").unwrap();
+        // Production Internal modules ship with every other namespace.
+        std::fs::write(
+            tp.join("Internal").join("ExitCell.hs"),
+            "module Tidepool.Internal.ExitCell where\n",
+        )
+        .unwrap();
         std::fs::write(tp.join("notes.txt"), "not haskell\n").unwrap();
+        std::fs::create_dir_all(root.join("Jev")).unwrap();
+        std::fs::write(
+            root.join("Jev/Operators.hs"),
+            "module Jev.Operators where\n",
+        )
+        .unwrap();
     }
 
     /// The fingerprint is content-addressed, not path-addressed: the same tree
@@ -1287,44 +1261,62 @@ mod tests {
         write_stdlib(a.path(), "module Tidepool.Prelude where\n");
         write_stdlib(b.path(), "module Tidepool.Prelude where\n");
         assert_eq!(
-            stdlib_fingerprint(a.path()),
-            stdlib_fingerprint(b.path()),
+            stdlib_fingerprint(a.path()).unwrap(),
+            stdlib_fingerprint(b.path()).unwrap(),
             "same content at different paths must fingerprint identically"
         );
     }
 
-    /// A content edit to any shipped `.hs` moves the fingerprint; an edit to a
-    /// filtered-out file does not (it is not part of what ships).
     #[test]
-    fn stdlib_fingerprint_tracks_shipped_content_only() {
+    fn stdlib_fingerprint_tracks_all_shipped_namespaces_and_ignores_generated_artifacts() {
         let dir = tempfile::TempDir::new().unwrap();
         write_stdlib(dir.path(), "module Tidepool.Prelude where\n");
-        let base = stdlib_fingerprint(dir.path());
-
+        let initial = stdlib_fingerprint(dir.path()).unwrap();
         std::fs::write(
-            dir.path()
-                .join("Tidepool")
-                .join("Internal")
-                .join("Probe.hs"),
-            "different probe\n",
+            dir.path().join("Tidepool/Internal/ExitCell.hs"),
+            "module Tidepool.Internal.ExitCell where\nvalue = ()\n",
         )
         .unwrap();
-        assert_eq!(
-            base,
-            stdlib_fingerprint(dir.path()),
-            "Internal/ is excluded from the embed, so it must not move the fingerprint"
+        let internal = stdlib_fingerprint(dir.path()).unwrap();
+        assert_ne!(
+            initial, internal,
+            "production Internal modules must be covered"
+        );
+        std::fs::write(
+            dir.path().join("Jev/Operators.hs"),
+            "module Jev.Operators where\nvalue = ()\n",
+        )
+        .unwrap();
+        let namespaces = stdlib_fingerprint(dir.path()).unwrap();
+        assert_ne!(
+            internal, namespaces,
+            "every shipped namespace must be covered"
         );
 
+        let generated = dir.path().join("Tidepool/Prelude_cbor");
+        std::fs::create_dir_all(&generated).unwrap();
+        std::fs::write(generated.join("Generated.hs"), "not shipped\n").unwrap();
+        std::os::unix::fs::symlink("absent.hs", generated.join("Incomplete.hs")).unwrap();
+        std::fs::write(dir.path().join("Tidepool/Prelude.hs-boot"), "not shipped\n").unwrap();
+        std::fs::write(dir.path().join("Tidepool/notes.txt"), "changed notes\n").unwrap();
+        assert_eq!(namespaces, stdlib_fingerprint(dir.path()).unwrap());
         std::fs::write(
-            dir.path().join("Tidepool").join("Prelude.hs"),
+            dir.path().join("Tidepool/Prelude.hs"),
             "module Tidepool.Prelude where\nnewThing = ()\n",
         )
         .unwrap();
-        assert_ne!(
-            base,
-            stdlib_fingerprint(dir.path()),
-            "a shipped stdlib edit must move the fingerprint"
-        );
+        assert_ne!(namespaces, stdlib_fingerprint(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn stdlib_fingerprint_refuses_incomplete_source_evidence() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("absent");
+        assert_eq!(stdlib_fingerprint(&missing).unwrap_err().path, missing);
+        write_stdlib(dir.path(), "module Tidepool.Prelude where\n");
+        let broken = dir.path().join("Jev/Broken.hs");
+        std::os::unix::fs::symlink("missing.hs", &broken).unwrap();
+        assert_eq!(stdlib_fingerprint(dir.path()).unwrap_err().path, broken);
     }
 
     #[test]
@@ -1461,24 +1453,48 @@ mod tests {
         ));
     }
 
-    /// A stamp from a future (or ancient) schema is treated as absent, not as a
-    /// skew: an old stamp must never brick a newer server.
+    /// Different fingerprint algorithms require an explicit deployment migration.
     #[test]
     #[serial]
-    fn stamp_with_a_foreign_schema_reads_as_absent() {
+    fn stamp_with_a_foreign_schema_requires_regeneration() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("stamp.json");
-        std::fs::write(
-            &path,
-            serde_json::json!({
-                "schema": STAMP_SCHEMA + 1,
-                "extract": "aa", "stdlib": "bb",
-                "extract_path": "/x", "stdlib_path": "/y", "written_by": "future",
-            })
-            .to_string(),
-        )
-        .unwrap();
-        assert!(read_stamp(&path).unwrap().is_none());
+        for schema in [2, STAMP_SCHEMA + 1] {
+            std::fs::write(
+                &path,
+                serde_json::json!({
+                    "schema": schema,
+                    "extract": "aa", "stdlib": "bb",
+                    "extract_path": "/x", "stdlib_path": "/y", "written_by": "other schema",
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let error = read_stamp(&path).unwrap_err().to_string();
+            assert!(error.contains("schema"), "{error}");
+            assert!(error.contains(REDEPLOY), "{error}");
+        }
+    }
+
+    #[test]
+    fn unreadable_stamp_is_refused_and_missing_stamp_is_absent() {
+        let directory = tempfile::TempDir::new().unwrap();
+        assert!(read_stamp(directory.path()).is_err());
+        assert!(read_stamp(&directory.path().join("absent.json"))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn incomplete_stdlib_cannot_write_a_deployment_stamp() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        isolate_cache(tmp.path());
+        let extract = tmp.path().join("extract");
+        std::fs::write(&extract, "producer").unwrap();
+        let error = write_stamp_test(&extract, &tmp.path().join("missing-stdlib")).unwrap_err();
+        assert!(matches!(error, ToolchainError::StdlibManifest(_)));
+        assert!(!stamp_path().exists());
     }
 
     /// Simulates a crash between `NamedTempFile` creation and `persist`'s

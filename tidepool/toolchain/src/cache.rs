@@ -74,12 +74,49 @@ fn source_error(path: &Path, source: std::io::Error) -> SourceManifestError {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SourceSelection {
+    Dependencies,
+    ShippedHaskell,
+}
+
+impl SourceSelection {
+    fn includes_directory(self, path: &Path) -> bool {
+        match self {
+            Self::Dependencies => true,
+            Self::ShippedHaskell => path.file_name().is_none_or(|name| name != "Prelude_cbor"),
+        }
+    }
+
+    fn includes_file(self, path: &Path) -> bool {
+        match self {
+            Self::Dependencies => is_haskell_dependency_source(path),
+            Self::ShippedHaskell => path.extension().is_some_and(|extension| extension == "hs"),
+        }
+    }
+}
+
+/// Complete evidence for the Haskell sources shipped by release bundles.
+/// Every namespace is included; generated Prelude_cbor trees are excluded.
+pub fn shipped_haskell_source_manifest(
+    root: &Path,
+) -> Result<SourceRootManifest, SourceManifestError> {
+    selected_source_manifest(root, SourceSelection::ShippedHaskell)
+}
+
 /// Enumerate Haskell home-module sources by their visible relative paths.
-/// The ancestor set breaks cycles while retaining distinct directory aliases.
 fn dependency_source_manifest(root: &Path) -> Result<SourceRootManifest, SourceManifestError> {
+    selected_source_manifest(root, SourceSelection::Dependencies)
+}
+
+// The ancestor set breaks cycles while retaining distinct directory aliases.
+fn selected_source_manifest(
+    root: &Path,
+    selection: SourceSelection,
+) -> Result<SourceRootManifest, SourceManifestError> {
     let mut manifest = SourceRootManifest { files: Vec::new() };
     let mut ancestors = std::collections::HashSet::new();
-    collect_dependency_sources(root, root, &mut manifest, &mut ancestors)?;
+    collect_dependency_sources(root, root, &mut manifest, &mut ancestors, selection)?;
     manifest.files.sort_by(|(a, _), (b, _)| a.cmp(b));
     Ok(manifest)
 }
@@ -139,6 +176,7 @@ fn collect_dependency_sources(
     dir: &Path,
     out: &mut SourceRootManifest,
     ancestors: &mut std::collections::HashSet<PathBuf>,
+    selection: SourceSelection,
 ) -> Result<(), SourceManifestError> {
     let canonical = fs::canonicalize(dir).map_err(|error| source_error(dir, error))?;
     if !ancestors.insert(canonical.clone()) {
@@ -154,10 +192,13 @@ fn collect_dependency_sources(
     entries.sort_by_key(std::fs::DirEntry::path);
     for entry in entries {
         let path = entry.path();
+        if !selection.includes_directory(&path) {
+            continue;
+        }
         let metadata = fs::metadata(&path).map_err(|error| source_error(&path, error))?;
         if metadata.is_dir() {
-            collect_dependency_sources(root, &path, out, ancestors)?;
-        } else if is_haskell_dependency_source(&path) {
+            collect_dependency_sources(root, &path, out, ancestors, selection)?;
+        } else if selection.includes_file(&path) {
             let bytes = fs::read(&path).map_err(|error| source_error(&path, error))?;
             let digest = blake3::hash(&bytes);
             let rel = path.strip_prefix(root).map_err(|error| {
