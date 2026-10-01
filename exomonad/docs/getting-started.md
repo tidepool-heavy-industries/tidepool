@@ -87,6 +87,21 @@ pins. When the project already has a `flake.nix`, `exomonad new` leaves it alone
 and prints the input line to add and the lock command to run. Until the pin
 resolves, a session still starts, without `J`, and the agent is told so.
 
+The resident compiler is owned by the run's Compiler tmux window. Its worker
+count and per-worker RSS rotation ceiling can be set in `.exomonad/config.toml`:
+
+```toml
+[compiler]
+workers = 2
+rss_ceiling_mb = 10240
+```
+
+Both values must be positive. Omitted settings retain one worker and a 7168 MiB
+ceiling. The example is the approved swarm-01 measurement configuration; each
+worker may reach 10 GiB, and the enclosing systemd slice remains the aggregate
+memory limit. The compiler trace records daemon epoch, daemon/worker PIDs,
+queue wait, service time and worker RSS so rotation is visible in measurements.
+
 Child agents are launched from committed checkouts. Commit the package before
 you ask an agent to delegate.
 

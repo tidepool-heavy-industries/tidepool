@@ -119,6 +119,23 @@ class ResidentPerformanceReport(unittest.TestCase):
                 row["source_digest"] = "0" * 64
         self.assertFalse(REPORT.analyze(samples, events, manifest)["accepted"])
 
+    def test_worker_phase_costs_and_io_counts_remain_separate_from_wall_clock(self):
+        samples, events, manifest = self.fixture()
+        for line in (
+            "tidepool-timing phase=exact_iface_decode ms=12",
+            "tidepool-timing phase=exact_iface_decode ms=23",
+            "tidepool-count name=exact_iface_decode_reads.Session.Val.G1 count=2",
+            "private diagnostic without a machine counter",
+        ):
+            events.append({"fields": {"message": "compiler timing", "line": line}})
+        report = REPORT.analyze(samples, events, manifest)
+        self.assertEqual(report["compiler_phases_ms"]["exact_iface_decode"], {
+            "count": 2, "total_ms": 35, "p95_ms": 23,
+        })
+        self.assertEqual(report["compiler_counts"], {"exact_iface_decode_reads.Session.Val.G1": 2})
+        self.assertIsNone(report["worker_peak_observed_rss_mb"])
+        self.assertTrue(report["accepted"])
+
     def test_nearest_rank_and_empty_evidence(self):
         self.assertEqual(REPORT.percentile(list(range(1, 51)), 0.95), 48)
         self.assertIsNone(REPORT.percentile([], 0.95))

@@ -297,6 +297,8 @@ pub(crate) struct ExomonadConfig {
     #[serde(default)]
     pub(crate) launch: LaunchConfig,
     #[serde(default)]
+    compiler: CompilerConfig,
+    #[serde(default)]
     pub(crate) resources: exomonad_node::command_resources::CommandResourcePolicy,
     pub(crate) defaults: ExomonadAgentDefaults,
     #[serde(default)]
@@ -307,6 +309,23 @@ pub(crate) struct ExomonadConfig {
     haskell: workspace::HaskellConfig,
     #[serde(default)]
     prompts: workspace::PromptConfig,
+}
+
+/// Per-worker rotation is separate from the enclosing systemd memory bound.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct CompilerConfig {
+    workers: std::num::NonZeroUsize,
+    rss_ceiling_mb: std::num::NonZeroU64,
+}
+
+impl Default for CompilerConfig {
+    fn default() -> Self {
+        Self {
+            workers: std::num::NonZeroUsize::new(1).unwrap(),
+            rss_ceiling_mb: std::num::NonZeroU64::new(7168).unwrap(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1024,6 +1043,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         compiler_program,
         &run_id,
         &compiler_log_path,
+        &configuration.compiler,
     );
     compiler_launch
         .environment
@@ -1279,6 +1299,7 @@ fn compiler_daemon_launch(
     program: String,
     run_id: &str,
     log_path: &Path,
+    compiler: &CompilerConfig,
 ) -> TmuxLaunch {
     TmuxLaunch {
         window_name: "Compiler".into(),
@@ -1290,9 +1311,9 @@ fn compiler_daemon_launch(
             socket.display().to_string(),
             "--persistent".into(),
             "--workers".into(),
-            "1".into(),
+            compiler.workers.to_string(),
             "--rss-ceiling-mb".into(),
-            "7168".into(),
+            compiler.rss_ceiling_mb.to_string(),
             "--run-id".into(),
             run_id.into(),
             "--log-path".into(),
@@ -3665,6 +3686,7 @@ mod tests {
             "/tmp/tidepool-extract".into(),
             "run-1",
             log_path,
+            &CompilerConfig::default(),
         );
 
         assert_eq!(launch.window_name, "Compiler");
@@ -3687,6 +3709,32 @@ mod tests {
                 "/tmp/workspace/.exomonad/logs/run-1-compiler.log"
             ]
         );
+        let configured: ExomonadConfig = toml::from_str(
+            "[defaults]\nmodel = \"test\"\n[compiler]\nworkers = 2\nrss_ceiling_mb = 10240\n",
+        )
+        .unwrap();
+        let configured_launch = compiler_daemon_launch(
+            workspace,
+            socket,
+            "/tmp/tidepool-extract".into(),
+            "run-1",
+            log_path,
+            &configured.compiler,
+        );
+        assert!(configured_launch
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--workers", "2"]));
+        assert!(configured_launch
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--rss-ceiling-mb", "10240"]));
+        for setting in ["workers = 0", "rss_ceiling_mb = 0", "unknown = 2"] {
+            assert!(toml::from_str::<ExomonadConfig>(&format!(
+                "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
+            ))
+            .is_err());
+        }
         assert!(!launch
             .environment
             .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV));

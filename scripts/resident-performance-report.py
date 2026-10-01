@@ -10,6 +10,7 @@ import argparse
 import json
 import math
 import hashlib
+import re
 from pathlib import Path
 
 PREFIX = "resident-performance "
@@ -60,12 +61,21 @@ def analyze(samples, events, manifest):
     ready = {}
     requests = {}
     queue = []
+    phases = {}
+    counts = {}
     for event in events:
         row = fields(event)
         if row.get("message") == "compiler daemon ready":
             ready[row.get("daemon_epoch")] = row
-        if row.get("message") == "compiler job dequeued":
-            queue.append(row.get("queue_ms", 0))
+        if row.get("message") == "compiler job dequeued" and "queue_ms" in row:
+            queue.append(row["queue_ms"])
+        if row.get("message") == "compiler timing":
+            phase = re.fullmatch(r"tidepool-timing phase=([a-zA-Z0-9_]+) ms=([0-9]+)", row.get("line", ""))
+            count = re.fullmatch(r"tidepool-count name=([a-zA-Z0-9_.]+) count=([0-9]+)", row.get("line", ""))
+            if phase:
+                phases.setdefault(phase[1], []).append(int(phase[2]))
+            if count:
+                counts[count[1]] = counts.get(count[1], 0) + int(count[2])
         if row.get("message") == "compiler request finished":
             key = (row.get("daemon_epoch"), row.get("compile_request"))
             requests.setdefault(key, []).append(row)
@@ -110,6 +120,9 @@ def analyze(samples, events, manifest):
             if type(active) is not int or type(row.get("started_ns")) is not int or active < 0 or active > row["started_ns"] or row.get("acknowledged") is not True:
                 problems.append(f"cancel sample {key} has no proved active effect and acknowledgment")
         if kind == "warm_cell":
+            source_digest = row.get("source_digest")
+            if not isinstance(source_digest, str) or len(source_digest) != 64 or any(char not in "0123456789abcdef" for char in source_digest):
+                problems.append(f"warm sample {key} has no actual cell source digest")
             if row.get("displayed") is not True:
                 problems.append(f"warm sample {key} has no display evidence")
             epoch = row.get("daemon_epoch")
@@ -173,7 +186,9 @@ def analyze(samples, events, manifest):
         "samples": result, "evidence_problems": sorted(set(problems)),
         "daemon_epochs": sorted(str(epoch) for epoch in ready),
         "worker_pids": sorted({row.get("worker_pid") for row in service if row.get("worker_pid")}),
-        "worker_peak_observed_rss_mb": max((row.get("worker_rss_mb", 0) for row in service), default=0),
+        "worker_peak_observed_rss_mb": max((row["worker_rss_mb"] for row in service if "worker_rss_mb" in row), default=None),
+        "compiler_phases_ms": {name: {"count": len(values), "total_ms": sum(values), "p95_ms": percentile(values, 0.95)} for name, values in sorted(phases.items())},
+        "compiler_counts": dict(sorted(counts.items())),
         "queue_p95_ms": percentile(queue, 0.95),
         "compiler_service_p95_ms": percentile([row["elapsed_ms"] for row in service if "elapsed_ms" in row], 0.95),
         "accepted": not problems and all(result[kind]["latency_met"] for kind in MIN_COUNTS),
