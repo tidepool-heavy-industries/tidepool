@@ -14,12 +14,13 @@ use std::path::PathBuf;
 use thiserror::Error;
 use tidepool_repr::serial::ReadError;
 
-pub mod artifacts;
 pub mod artifact_inventory;
+pub mod artifacts;
 pub mod cache;
 pub mod cell_plan;
 pub mod certified_products;
 pub mod checked_cell;
+mod compile_input;
 mod declaration_context;
 pub mod declaration_join;
 pub mod diag;

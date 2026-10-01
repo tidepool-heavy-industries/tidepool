@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub use crate::compile_input::SealedCompileInputIdentity;
 use serde::Deserialize;
 use tempfile::TempDir;
 use tidepool_extract_cmd::ExtractCmd;
@@ -268,6 +269,7 @@ pub struct CompiledArtifacts {
 /// never authority for a cached product.
 pub struct ModuleCandidateOffer {
     selected: Option<module_candidates::CandidateSet>,
+    admitted_producer: bool,
     producer: Vec<u8>,
     include: Vec<PathBuf>,
     exact: Option<crate::declaration_context::ExactCompilationRequest>,
@@ -356,9 +358,22 @@ fn immutable_candidates_in_context(
 }
 
 impl ModuleCandidateOffer {
+    /// Select immutable source candidates under configured compiler authority.
+    /// This capability permits the validated seal to issue input continuity.
+    pub fn select_admitted(
+        endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+        include: &[PathBuf],
+        scratch: &Path,
+    ) -> Self {
+        let mut offer = Self::select(endpoint.identity().producer_bytes(), include, scratch);
+        offer.admitted_producer = true;
+        offer
+    }
+
     pub fn select(producer: &[u8], include: &[PathBuf], scratch: &Path) -> Self {
         Self {
             selected: module_candidates::select(producer, include, scratch),
+            admitted_producer: false,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: None,
@@ -378,6 +393,7 @@ impl ModuleCandidateOffer {
     ) -> Result<Self, CompileError> {
         Ok(Self {
             selected: None,
+            admitted_producer: false,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation(&scratch.join("exact-scope"), producer)?),
@@ -422,6 +438,7 @@ impl ModuleCandidateOffer {
         let context = checked_offer_context(context)?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
+            admitted_producer: false,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -480,6 +497,7 @@ impl ModuleCandidateOffer {
         let context = checked_offer_context(context)?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
+            admitted_producer: false,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -534,6 +552,7 @@ impl ModuleCandidateOffer {
         )?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
+            admitted_producer: false,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -591,6 +610,7 @@ impl ModuleCandidateOffer {
         )?;
         Ok(Self {
             selected: immutable_candidates_in_context(&context, producer, include, scratch),
+            admitted_producer: false,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(context.prepare_compilation_with_authorization(
@@ -995,6 +1015,7 @@ impl ModuleCandidateOffer {
     fn program_offer(&self, exact: crate::declaration_context::ExactCompilationRequest) -> Self {
         Self {
             selected: None,
+            admitted_producer: self.admitted_producer,
             producer: self.producer.clone(),
             include: self.include.clone(),
             exact: Some(exact),
@@ -1339,6 +1360,7 @@ struct ProgramNativeOutput {
 
 #[derive(Debug)]
 pub struct SealedTurnProducts {
+    pub compile_input_identity: Option<Arc<SealedCompileInputIdentity>>,
     pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     pub pending_imports: Vec<certified_products::PendingImportOwner>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
@@ -1518,7 +1540,30 @@ pub fn seal_turn_outputs(
             source,
         );
     }
+    let certified_groups: Arc<[_]> = certified.groups.into();
+    let compile_input_identity = if offer.admitted_producer && offer.exact.is_none() {
+        let (table, _) = read_metadata(&read_sidecar("meta.cbor")?)?;
+        let sites = read_yield_sites(&output_dir.join("asks.json"))?;
+        crate::compile_input::seal(
+            &offer.producer,
+            &offer.include,
+            valid,
+            &package_closure,
+            source,
+            target,
+            prepared,
+            &certified_groups,
+            &pending_imports,
+            &package_interfaces,
+            table,
+            sites,
+        )?
+        .map(Arc::new)
+    } else {
+        None
+    };
     Ok(Some(SealedTurnProducts {
+        compile_input_identity,
         checked_display: offer
             .checked_display
             .as_ref()
@@ -1551,7 +1596,7 @@ pub fn seal_turn_outputs(
                 )
             })
             .transpose()?,
-        certified_groups: certified.groups.into(),
+        certified_groups,
         pending_imports,
         recovery_products: certified.recovery_products,
         package_interfaces,

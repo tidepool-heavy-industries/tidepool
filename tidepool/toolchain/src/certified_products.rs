@@ -126,6 +126,12 @@ pub struct CertifiedTargetPackageInterfaces {
 }
 
 impl CertifiedTargetPackageInterfaces {
+    pub(crate) fn matches_bundle(&self, other: &Self, target: &PreparedProgram) -> bool {
+        self.matches_target(target)
+            && other.matches_target(target)
+            && self.interfaces == other.interfaces
+    }
+
     pub fn matches_target(&self, target: &PreparedProgram) -> bool {
         self.target
             .as_deref()
@@ -2504,6 +2510,78 @@ mod tests {
             group: Arc::new(testing::projected_group(wire, 7).unwrap()),
             imports: vec![import].into(),
         }
+    }
+
+    #[test]
+    fn compile_input_proof_rejects_substituted_dependency_bundle() {
+        let source = "module Fresh where";
+        let target = Arc::new(testing::prepare(testing::wire_program()).unwrap());
+        let packages = BTreeMap::new();
+        let interfaces = certify_target_package_interfaces(&target, &packages).unwrap();
+        let owner = inherited_owner("Driver");
+        let import = PendingImportOwner::Source {
+            owner: owner.clone(),
+            original_ordinal: 1,
+            binder: testing::identity("Driver", "entry"),
+        };
+        let groups: Arc<[_]> = vec![inherited_group(&owner, import.clone())].into();
+        let table = tidepool_repr::DataConTable::default();
+        let proof = crate::compile_input::seal(
+            b"admitted-producer",
+            &[],
+            &evidence(source),
+            &packages,
+            source,
+            "root",
+            &target,
+            &groups,
+            &[import.clone()],
+            &interfaces,
+            table.clone(),
+            vec![],
+        )
+        .unwrap()
+        .unwrap();
+        assert!(proof.matches_bundle(
+            &target,
+            &groups,
+            &[import.clone()],
+            &interfaces,
+            &table,
+            &[]
+        ));
+        let mut changed_owner = owner.clone();
+        changed_owner.module_version = ModuleVersion([99; 32]);
+        let changed_groups = vec![inherited_group(&changed_owner, import.clone())];
+        assert!(!proof.matches_bundle(
+            &target,
+            &changed_groups,
+            &[import.clone()],
+            &interfaces,
+            &table,
+            &[]
+        ));
+        let changed_import = PendingImportOwner::Source {
+            owner: owner.clone(),
+            original_ordinal: 2,
+            binder: testing::identity("Driver", "entry"),
+        };
+        assert!(!proof.matches_bundle(
+            &target,
+            &groups,
+            &[changed_import],
+            &interfaces,
+            &table,
+            &[]
+        ));
+        assert!(!proof.matches_bundle(
+            &target,
+            &groups,
+            &[import],
+            &CertifiedTargetPackageInterfaces::default(),
+            &table,
+            &[]
+        ));
     }
 
     #[test]
