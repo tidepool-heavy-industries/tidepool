@@ -3,5 +3,5 @@ let optionalDefinition = coordinationActor "optional-observer" OptionalObserver 
 optional <- R.start optionalDefinition
 let staleObservation = observeOptional (R.client optional)
 optional <- R.replace optional optionalDefinition
-let optionalSink = observeWork "stale" staleObservation Just (observeWork "failed-handler" (observeOptional (R.client optional)) Just (notifyWork me (workMessage id)))
+let optionalSink = Exomonad.Contrib.Routing.observeWork "stale" staleObservation Just (Exomonad.Contrib.Routing.observeWork "failed-handler" (observeOptional (R.client optional)) Just (notifyWork me (workMessage id)))
 Right collection <- followWork [("producer", producer, updates)] optionalSink
