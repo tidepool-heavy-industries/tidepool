@@ -382,6 +382,7 @@ async fn resident_await_watch_case(case: WatchCase) {
         tidepool_mcp::actor_local_decl(),
         tidepool_mcp::commands_decl(),
         tidepool_mcp::fs_read_decl(),
+        tidepool_mcp::sleep_decl(),
     ];
     let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
     let mut include = effects.include_paths().to_vec();
@@ -394,7 +395,7 @@ async fn resident_await_watch_case(case: WatchCase) {
     let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
     let preamble = format!(
         "{preamble}\
-         type ActorEffects = '[AgentTools, Actor, Commands, Watch.Watches]\n\
+         type ActorEffects = '[AgentTools, Actor, Commands, Watch.Watches, Sleep]\n\
          data WaitInput = WaitInput {{ delay :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
          data WaitOutput = WaitOutput {{ settled :: Bool }} deriving (Generic, ToJSON, JsonSchema)\n\
          data ResidentTools mode = ResidentTools {{ waitForCommand :: mode :- Call WaitInput WaitOutput }} deriving (Generic)\n"
@@ -473,6 +474,7 @@ async fn resident_await_watch_case(case: WatchCase) {
                 exomonad_actor::EffectiveRole::root().with_effect_keys(vec![
                     exomonad_actor::ActorEffectKey::Commands,
                     exomonad_actor::ActorEffectKey::Watches,
+                    exomonad_actor::ActorEffectKey::Sleep,
                 ]),
             )
             .await
