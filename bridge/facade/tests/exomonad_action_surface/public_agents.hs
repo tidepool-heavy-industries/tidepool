@@ -61,6 +61,16 @@ submit
   -> Eff ActorEffects (Response result)
 submit actor name value = request actor (assignment name value)
 
+submitPersisted
+  :: AgentRef
+  -> Label
+  -> input
+  -> Eff ActorEffects (Response result)
+submitPersisted actor name value = do
+  response <- request actor (assignment name value)
+  Right () <- detachRequest response
+  pure response
+
 submitProgress
   :: AgentRef
   -> Assignment input

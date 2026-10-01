@@ -595,7 +595,7 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
     .await;
     committed(
         root.as_ref(),
-        "response <- request @Text worker (assignment [label|notebook-reply|] (\"ready\" :: Text))\n",
+        "response <- do { issued <- request @Text worker (assignment [label|notebook-reply|] (\"ready\" :: Text)); Right () <- detachRequest issued; pure issued }\n",
     )
     .await;
     let child = campaign
@@ -1182,7 +1182,7 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
             "case sessionInput of BrokenPreview n -> respond (Report n)",
         ),
     ] {
-        committed(root.as_ref(), &format!("let previewLabel = [label|{label}|]\npreviewResponse <- request @Report worker (assignment previewLabel {input})")).await;
+        committed(root.as_ref(), &format!("let previewLabel = [label|{label}|]\npreviewResponse <- do {{ issued <- request @Report worker (assignment previewLabel {input}); Right () <- detachRequest issued; pure issued }}")).await;
         let activation = campaign
             .next_deployment(
                 "preview activation",
@@ -2322,7 +2322,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         .unwrap();
     assert!(worker.actor.terminal().get().is_none());
     assert!(observer.actor.terminal().get().is_none());
-    committed(observer.policy.as_ref(), "let followupLabel = [label|peer-followup|]\nfollowup <- request @Text retainedPeer (assignment followupLabel (\"after planner retirement\" :: Text))").await;
+    committed(observer.policy.as_ref(), "let followupLabel = [label|peer-followup|]\nfollowup <- do { issued <- request @Text retainedPeer (assignment followupLabel (\"after planner retirement\" :: Text)); Right () <- detachRequest issued; pure issued }").await;
     let worker_actor = worker.actor.identity();
     campaign
         .next_deployment(

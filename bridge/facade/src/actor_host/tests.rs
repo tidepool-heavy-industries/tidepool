@@ -4731,7 +4731,7 @@ async fn settlement_notice_carries_a_readable_reply_preview() {
         root.as_ref(),
         "worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"reply-preview-recipient\"))\n\
          let requestName = [label|reply-preview|]\n\
-         answer <- request @String worker (assignment requestName (\"a readable reply\" :: String))",
+         answer <- do { issued <- request @String worker (assignment requestName (\"a readable reply\" :: String)); Right () <- detachRequest issued; pure issued }",
     )
     .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
@@ -4802,7 +4802,7 @@ async fn settlement_notice_carries_a_readable_reply_preview_for_text() {
         root.as_ref(),
         "worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"reply-preview-text-recipient\"))\n\
          let requestName = [label|reply-preview-text|]\n\
-         answer <- request @Text worker (assignment requestName (\"a readable reply\" :: Text))",
+         answer <- do { issued <- request @Text worker (assignment requestName (\"a readable reply\" :: Text)); Right () <- detachRequest issued; pure issued }",
     )
     .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
@@ -4870,7 +4870,7 @@ async fn settlement_notice_carries_a_structured_reply_whole_within_budget() {
         root.as_ref(),
         "worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"reply-whole-recipient\"))\n\
          let requestName = [label|reply-whole|]\n\
-         answer <- request @[Text] worker (assignment requestName [\"reply line \" <> tshow n | n <- [10 .. 99 :: Int]])",
+         answer <- do { issued <- request @[Text] worker (assignment requestName [\"reply line \" <> tshow n | n <- [10 .. 99 :: Int]]); Right () <- detachRequest issued; pure issued }",
     )
     .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
