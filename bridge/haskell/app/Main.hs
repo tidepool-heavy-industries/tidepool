@@ -47,7 +47,7 @@ import Tidepool.Binders
   , extractStmtBinders, classifyBlock, exportItemName
   , analyzeCell, analyzeOrderedCell, cellInferenceSegments, renderCellCheckSource, CellSplitError(..), CellSourceSpan(..)
   , CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), BoundBinder(..),
-    SourcePrologue(..), LocatedImport(..), ExpressionLiftPlan(..), ExpressionPresentation(..), installCellDisplayDeclarations
+    SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ExpressionLiftPlan(..), ExpressionPresentation(..), installCellDisplayDeclarations
   , declarationSourceWithTemplate, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
@@ -975,7 +975,7 @@ compileClassifiedTurn
   -> IORef (Maybe (FilePath, String))
   -> IO TurnOut
 compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt =
-  compiledTurn <$> compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt []
+  compiledTurn <$> compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt [] Nothing
 
 data CompiledTurnOutput = CompiledTurnOutput
   { compiledTurn :: TurnOut
@@ -987,8 +987,8 @@ data CompiledTurnOutput = CompiledTurnOutput
 compileClassifiedTurnKeeping
   :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
   -> String -> StmtBinders -> String -> [String] -> Maybe CheckedItemAdmission -> Maybe CheckedDisplayAdmission
-  -> IORef (Maybe (FilePath, String)) -> [String] -> IO CompiledTurnOutput
-compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt programImports = do
+  -> IORef (Maybe (FilePath, String)) -> [String] -> Maybe SourcePrologue -> IO CompiledTurnOutput
+compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt programImports prologue = do
     let templates = requestTurnTemplates args
         -- Splice @tmplFile@ against the turn text, write the spliced module
         -- to a scratch file under 'outDir', and return it alongside the
@@ -1000,7 +1000,14 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
         -- (session.rs), which this mode's templates carry over unchanged.
         spliceInto :: FilePath -> IO (String, String, FilePath)
         spliceInto tmplFile = do
-          tmplSrc <- readFile tmplFile
+          originalTemplate <- readFile tmplFile
+          tmplSrc <- case prologue of
+            Nothing -> pure originalTemplate
+            Just authored -> do
+              withImports <- replaceRecipeMarker "default (Int, Double, Text)\n"
+                (concatMap ((++ "\n") . locatedImportSource) (prologueImports authored)
+                  ++ "default (Int, Double, Text)\n") originalTemplate
+              pure (concatMap ((++ "\n") . locatedPragmaSource) (prologuePragmas authored) ++ withImports)
           let original = case (display, admitted) of
                 (Just authority, Nothing) -> displayPlannedDeclaration authority
                 (Nothing, Just authority) -> itemPlannedDeclaration authority
@@ -1289,7 +1296,8 @@ runLegacyCellMode compiler caches args cellPath = do
 -- The worker owns all GHC passes of a cell. Interfaces produced here are
 -- type evidence; no value or effect is evaluated by this transaction.
 data ProgramCellState = ProgramCellState
-  { programExact :: ExactScope
+  { programPrologue :: SourcePrologue
+  , programExact :: ExactScope
   , programValues :: [CompletedValueImport]
   , programOriginal :: Maybe ((String,String),String)
   , programOriginals :: [((String,String),String)]
@@ -1321,7 +1329,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
       (fail "compiled cell reservation count differs from parser")
     root <- requireArg "--session-root" (requestSessionRoot args)
     let outDir = fromMaybe (takeDirectory cellPath </> "cell-program") (requestOutDir args)
-        initialState = ProgramCellState exact [] Nothing [] (requestRetainedGenerations args)
+        initialState = ProgramCellState (cellPlanPrologue initial) exact [] Nothing [] (requestRetainedGenerations args)
           [] [] [] [] [] []
     createDirectoryIfMissing True outDir
     settled <- foldM (compileSegment timing admission template root outDir)
@@ -1451,7 +1459,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
       validateCheckedItemAdmission localArgs itemAdmission source verdict
       lastAttempt <- newIORef Nothing
       output <- timePhase timing "cell_program_native" $ compileClassifiedTurnKeeping scoped caches localArgs timing directory
-        source verdict (intercalate ", " (sbBinders verdict)) [] (Just itemAdmission) Nothing lastAttempt (priorProgramImports state)
+        source verdict (intercalate ", " (sbBinders verdict)) [] (Just itemAdmission) Nothing lastAttempt (priorProgramImports state) (Just (programPrologue state))
       extended <- retainProgramProducts directory (compiledPipeline output)
         [originalProduct | originalProduct@(_,owner,_,_) <- compiledOriginalProducts output, T.unpack owner /= compiledModule output] scope
       let turn = compiledTurn output
@@ -1488,7 +1496,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
       createDirectoryIfMissing True directory
       lastAttempt <- newIORef Nothing
       output <- timePhase timing "cell_program_display" $ compileClassifiedTurnKeeping scoped caches localArgs timing directory
-        "" verdict (intercalate ", " (sbBinders verdict)) [] Nothing (Just display) lastAttempt (priorProgramImports state)
+        "" verdict (intercalate ", " (sbBinders verdict)) [] Nothing (Just display) lastAttempt (priorProgramImports state) Nothing
       extended <- retainProgramProducts directory (compiledPipeline output)
         [originalProduct | originalProduct@(_,owner,_,_) <- compiledOriginalProducts output, T.unpack owner /= compiledModule output] scope
       let turn = compiledTurn output
@@ -1823,7 +1831,7 @@ checkedDisplayRecipeWithInputs generic admission template = do
   withImports <- replaceRecipeMarker "default (Int, Double, Text)\n"
     ("import qualified Tidepool.Inspection as TidepoolInspection\n"
       ++ (if generic then "import qualified \"ghc-internal\" GHC.Internal.Types as TidepoolProgramTypes\nimport qualified \"text\" Data.Text as TidepoolProgramText\n" else "")
-      ++ concatMap (\(name, binders) -> "import " ++ name ++ " (" ++ intercalate ", " binders ++ ")\n")
+      ++ concatMap (\(name, binders) -> "import " ++ name ++ " (" ++ intercalate ", " (map renderProgramBinder binders) ++ ")\n")
         (displayValueImports admission) ++ "default (Int, Double, Text)\n") template
   unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` withImports)
     (fail "display requires canonical bind recipe version one")
