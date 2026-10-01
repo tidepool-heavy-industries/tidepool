@@ -145,13 +145,28 @@ Select the embedded backend in the project's `.exomonad/config.toml`:
 backend = "embedded"
 ```
 
-Configure `[launch.embedded]` with `listen`, `session_secret_file`,
+Configure `[launch.embedded]` with `listen`,
 `codex_auth_file`, and the model's `context_capacity_tokens`. The listener must
 use loopback or a local Tailscale address. File paths must be absolute;
 `asset_root` must contain the browser's `index.html`, or be supplied by the
-package through `EXOMONAD_EMBEDDED_ASSET_ROOT`. The session secret file supplies
-browser authentication; the Codex credential file is read-only provider
-authentication. Model and effort selection remain in `[defaults]` and the
+package through `EXOMONAD_EMBEDDED_ASSET_ROOT`. The Codex credential file supplies
+read-only provider authentication, independently of browser access.
+For automatic browser access from your Tailscale devices, configure an explicit
+numeric Tailscale user allowlist:
+
+```toml
+[launch.embedded.browser_auth]
+mode = "tailscale"
+allowed_user_ids = [123456789]
+```
+
+Replace the example ID with your Tailscale user ID. This mode requires a listener
+address assigned to `tailscale0`, verifies the actual remote device through the
+local Tailscale daemon, and rejects tagged, shared, and local-self peers. It does
+not use `session_secret_file`. Access is rechecked during live browser streams.
+For secret-based access, omit `browser_auth` and supply an absolute
+`session_secret_file`; the browser signs in with that file's contents.
+Model and effort selection remain in `[defaults]` and the
 workspace's `[models]` aliases. Backend selection is a config setting; `init`
 has no `--backend` flag.
 
@@ -161,7 +176,7 @@ exomonad init
 ```
 
 The first live run is operator-driven: start it when ready, open the browser
-listener reported by the host, authenticate with the session secret, and submit
+listener reported by the host, authenticate using the configured mode, and submit
 the root task there. Embedded implementation and focused checks do not by
 themselves establish full engine acceptance; see the
 [current delivery status](../../plans/README.md). Selecting this backend for a

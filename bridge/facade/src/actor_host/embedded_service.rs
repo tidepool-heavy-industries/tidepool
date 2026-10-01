@@ -20,7 +20,29 @@ use super::{
     embedded_policy::EmbeddedPolicyInstallation,
     embedded_projection::LifecyclePublisher,
 };
-use crate::exomonad::EmbeddedLaunchConfig;
+use crate::exomonad::{EmbeddedBrowserAuth, EmbeddedLaunchConfig};
+
+struct TailscaleBrowserAuth(exomonad_node::network::TailscalePeerVerifier);
+
+#[async_trait::async_trait]
+impl harness::server::BrowserPeerAuthenticator for TailscaleBrowserAuth {
+    async fn authenticate(
+        &self,
+        peer: std::net::SocketAddr,
+    ) -> Result<(), harness::server::PeerAuthError> {
+        self.0
+            .authorize_peer(peer)
+            .await
+            .map_err(|error| match error {
+                exomonad_node::network::TailscalePeerError::Denied => {
+                    harness::server::PeerAuthError::Denied
+                }
+                exomonad_node::network::TailscalePeerError::Unavailable => {
+                    harness::server::PeerAuthError::Unavailable
+                }
+            })
+    }
+}
 
 pub(super) struct EmbeddedService {
     _owner: Arc<super::HostIncarnationLease>,
@@ -96,16 +118,36 @@ impl EmbeddedService {
             .store()
             .recover_embedded_command_claims(&super::runtime_namespace(run_root))
             .map_err(|error| error.to_string())?;
-        let secret = std::fs::read_to_string(&settings.session_secret_file)
-            .map_err(|error| error.to_string())?;
-        let secret = SessionSecret::new(secret.trim_end_matches(['\r', '\n']).to_owned())
-            .map_err(str::to_owned)?;
         let server_config = ServerConfig::new(settings.asset_root.clone())
             .with_history_store(runtime.store())
-            .with_browser_session(secret, std::time::Duration::from_secs(8 * 60 * 60))
-            .map_err(str::to_owned)?
             .with_public_origin_scheme(settings.public_origin_scheme.as_str())
             .map_err(str::to_owned)?;
+        let server_config = match &settings.browser_auth {
+            EmbeddedBrowserAuth::Secret => {
+                let path = settings.session_secret_file.as_deref().ok_or_else(|| {
+                    "embedded secret authentication requires session_secret_file".to_owned()
+                })?;
+                let secret = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+                let secret = SessionSecret::new(secret.trim_end_matches(['\r', '\n']).to_owned())
+                    .map_err(str::to_owned)?;
+                server_config
+                    .with_browser_session(secret, std::time::Duration::from_secs(8 * 60 * 60))
+                    .map_err(str::to_owned)?
+            }
+            EmbeddedBrowserAuth::Tailscale {
+                allowed_user_ids,
+                localapi_socket,
+            } => {
+                let verifier = exomonad_node::network::TailscalePeerVerifier::new(
+                    localapi_socket.clone(),
+                    allowed_user_ids.clone(),
+                )
+                .map_err(|error| error.to_string())?;
+                server_config
+                    .with_browser_peer_auth(Arc::new(TailscaleBrowserAuth(verifier)))
+                    .map_err(str::to_owned)?
+            }
+        };
         let listener = TcpListener::bind(settings.listen)
             .await
             .map_err(|error| error.to_string())?;
@@ -114,9 +156,12 @@ impl EmbeddedService {
         let server_owner = Arc::clone(&owner);
         let server = tokio::spawn(async move {
             let _server_owner = server_owner;
-            axum::serve(listener, router)
-                .await
-                .map_err(|error| error.to_string())
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .map_err(|error| error.to_string())
         });
         Ok(Self {
             _owner: owner,

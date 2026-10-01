@@ -10,11 +10,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use exomonad_actor::ActorRef;
-use exomonad_agent::{BackendThreadId, InteractiveLaunchMode, ReasoningEffort};
 #[cfg(feature = "codex-compat")]
 use exomonad_agent::{
-    InteractiveAgentInstallation, copy_interactive_binding, read_interactive_binding,
+    copy_interactive_binding, read_interactive_binding, InteractiveAgentInstallation,
 };
+use exomonad_agent::{BackendThreadId, InteractiveLaunchMode, ReasoningEffort};
 #[cfg(feature = "codex-compat")]
 use exomonad_node::host_command::{HostCommand, HostCommandSpec, HostExit, HostStdin, HostStream};
 use exomonad_node::{TmuxLaunch, TmuxSession};
@@ -22,9 +22,9 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tracing::Instrument;
-use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 #[cfg(feature = "codex-compat")]
 use crate::actor_host::ACTOR_PROJECT_ROOT;
@@ -347,11 +347,66 @@ pub struct EmbeddedLaunchConfig {
     pub(crate) public_origin_scheme: EmbeddedPublicOriginScheme,
     #[serde(default = "default_embedded_asset_root")]
     pub(crate) asset_root: PathBuf,
-    pub(crate) session_secret_file: PathBuf,
+    #[serde(default)]
+    pub(crate) browser_auth: EmbeddedBrowserAuth,
+    pub(crate) session_secret_file: Option<PathBuf>,
     pub(crate) codex_auth_file: PathBuf,
     pub(crate) context_capacity_tokens: u64,
     #[serde(default = "default_embedded_concurrent_jobs")]
     pub(crate) concurrent_jobs: usize,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase", deny_unknown_fields)]
+pub(crate) enum EmbeddedBrowserAuth {
+    #[default]
+    Secret,
+    Tailscale {
+        allowed_user_ids: Vec<std::num::NonZeroU64>,
+        #[serde(default = "default_tailscale_localapi_socket")]
+        localapi_socket: PathBuf,
+    },
+}
+
+fn default_tailscale_localapi_socket() -> PathBuf {
+    PathBuf::from("/var/run/tailscale/tailscaled.sock")
+}
+
+impl EmbeddedBrowserAuth {
+    fn validate(&self, secret_file: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+        match self {
+            Self::Secret => {
+                let path = secret_file.ok_or_else(|| {
+                    runtime_error("embedded secret authentication requires session_secret_file")
+                })?;
+                if !path.is_absolute() {
+                    return Err(runtime_error(
+                        "embedded session_secret_file must be absolute",
+                    ));
+                }
+                let secret = std::fs::read_to_string(path)?;
+                harness::server::SessionSecret::new(
+                    secret.trim_end_matches(['\r', '\n']).to_owned(),
+                )
+                .map_err(runtime_error)?;
+            }
+            Self::Tailscale {
+                allowed_user_ids,
+                localapi_socket,
+            } => {
+                if secret_file.is_some() {
+                    return Err(runtime_error(
+                        "embedded Tailscale authentication does not use session_secret_file",
+                    ));
+                }
+                exomonad_node::network::TailscalePeerVerifier::new(
+                    localapi_socket.clone(),
+                    allowed_user_ids.clone(),
+                )?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -383,6 +438,13 @@ fn default_embedded_concurrent_jobs() -> usize {
 
 impl EmbeddedLaunchConfig {
     pub(crate) fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if matches!(self.browser_auth, EmbeddedBrowserAuth::Tailscale { .. })
+            && !exomonad_node::network::tailnet_address_is_local(self.listen.ip())?
+        {
+            return Err(runtime_error(
+                "embedded Tailscale authentication requires a listener assigned to tailscale0",
+            ));
+        }
         if !self.listen.ip().is_loopback()
             && !exomonad_node::network::tailnet_address_is_local(self.listen.ip())?
         {
@@ -400,11 +462,7 @@ impl EmbeddedLaunchConfig {
                 "embedded browser asset_root is required unless EXOMONAD_EMBEDDED_ASSET_ROOT is set",
             ));
         }
-        for path in [
-            &self.asset_root,
-            &self.session_secret_file,
-            &self.codex_auth_file,
-        ] {
+        for path in [&self.asset_root, &self.codex_auth_file] {
             if !path.is_absolute() {
                 return Err(runtime_error(format!(
                     "embedded path must be absolute: {}",
@@ -424,9 +482,8 @@ impl EmbeddedLaunchConfig {
                 self.codex_auth_file.display()
             )));
         }
-        let secret = std::fs::read_to_string(&self.session_secret_file)?;
-        harness::server::SessionSecret::new(secret.trim_end_matches(['\r', '\n']).to_owned())
-            .map_err(runtime_error)?;
+        self.browser_auth
+            .validate(self.session_secret_file.as_deref())?;
         Ok(())
     }
 }
@@ -2617,12 +2674,10 @@ mod tests {
         let run = directory.path().join("run");
         let selected = super::retain_run_executable(&run, "runner", &source).unwrap();
         std::fs::remove_dir_all(target).unwrap();
-        assert!(
-            std::process::Command::new(selected)
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(std::process::Command::new(selected)
+            .status()
+            .unwrap()
+            .success());
         assert!(run.join("bin/runner.blake3").is_file());
     }
 
@@ -2634,14 +2689,12 @@ mod tests {
             HostBackendOptions::from_parts(ExomonadBackend::Embedded, None, None).unwrap(),
             HostBackendOptions::Embedded
         ));
-        assert!(
-            HostBackendOptions::from_parts(
-                ExomonadBackend::Embedded,
-                Some(PathBuf::from("/unused/codex")),
-                Some("unused".into()),
-            )
-            .is_err()
-        );
+        assert!(HostBackendOptions::from_parts(
+            ExomonadBackend::Embedded,
+            Some(PathBuf::from("/unused/codex")),
+            Some("unused".into()),
+        )
+        .is_err());
     }
 
     #[cfg(not(feature = "codex-compat"))]
@@ -2650,11 +2703,9 @@ mod tests {
         let error = HostBackendOptions::from_parts(ExomonadBackend::Codex, None, None)
             .err()
             .expect("Codex request must be rejected without codex-compat");
-        assert!(
-            error
-                .to_string()
-                .contains("does not include the codex-compat feature")
-        );
+        assert!(error
+            .to_string()
+            .contains("does not include the codex-compat feature"));
     }
 
     #[test]
@@ -2700,9 +2751,52 @@ mod tests {
     }
 
     #[test]
+    fn embedded_browser_auth_requires_explicit_valid_authority() {
+        let secret: EmbeddedBrowserAuth = toml::from_str("mode = 'secret'").unwrap();
+        assert!(secret.validate(None).is_err());
+        let tailnet: EmbeddedBrowserAuth =
+            toml::from_str("mode = 'tailscale'\nallowed_user_ids = [123]\n").unwrap();
+        assert!(tailnet.validate(None).is_ok());
+        assert!(tailnet.validate(Some(Path::new("/unused/secret"))).is_err());
+        for source in [
+            "mode = 'tailscale'\nallowed_user_ids = []\n",
+            "mode = 'tailscale'\nallowed_user_ids = [123, 123]\n",
+            "mode = 'tailscale'\nallowed_user_ids = [123]\nlocalapi_socket = 'relative.sock'\n",
+        ] {
+            let auth: EmbeddedBrowserAuth = toml::from_str(source).unwrap();
+            assert!(auth.validate(None).is_err());
+        }
+        for source in [
+            "mode = 'tailscale'\nallowed_user_ids = [0]\n",
+            "mode = 'tailscale'\nallowed_user_ids = [123]\nlogin_name = 'ignored-policy'\n",
+            "mode = 'guess-from-host'\n",
+        ] {
+            assert!(toml::from_str::<EmbeddedBrowserAuth>(source).is_err());
+        }
+    }
+
+    #[test]
+    fn embedded_tailscale_auth_rejects_loopback_listener_before_files() {
+        let config: EmbeddedLaunchConfig = toml::from_str(
+            "listen = '127.0.0.1:8080'\nasset_root = '/tmp/assets'\ncodex_auth_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n[browser_auth]\nmode = 'tailscale'\nallowed_user_ids = [123]\n",
+        ).unwrap();
+        assert!(config.session_secret_file.is_none());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("tailscale0"));
+    }
+
+    #[test]
     fn embedded_origin_scheme_preserves_https_and_accepts_explicit_http() {
         let config = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncodex_auth_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n";
         let existing: EmbeddedLaunchConfig = toml::from_str(config).unwrap();
+        assert!(matches!(existing.browser_auth, EmbeddedBrowserAuth::Secret));
+        assert_eq!(
+            existing.session_secret_file,
+            Some(PathBuf::from("/tmp/secret"))
+        );
         assert_eq!(
             existing.public_origin_scheme,
             EmbeddedPublicOriginScheme::Https
@@ -2710,12 +2804,10 @@ mod tests {
         let direct: EmbeddedLaunchConfig =
             toml::from_str(&format!("{config}public_origin_scheme = 'http'\n")).unwrap();
         assert_eq!(direct.public_origin_scheme.as_str(), "http");
-        assert!(
-            toml::from_str::<EmbeddedLaunchConfig>(&format!(
-                "{config}public_origin_scheme = 'ftp'\n"
-            ))
-            .is_err()
-        );
+        assert!(toml::from_str::<EmbeddedLaunchConfig>(&format!(
+            "{config}public_origin_scheme = 'ftp'\n"
+        ))
+        .is_err());
     }
 
     #[test]
@@ -2725,13 +2817,11 @@ mod tests {
                 "listen = '{listen}'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncodex_auth_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n"
             ))
             .unwrap();
-            assert!(
-                config
-                    .validate()
-                    .unwrap_err()
-                    .to_string()
-                    .contains("tailscale0")
-            );
+            assert!(config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("tailscale0"));
         }
     }
 
@@ -2773,12 +2863,10 @@ mod tests {
             .unwrap();
             assert_eq!(config.defaults.effort, effort);
         }
-        assert!(
-            toml::from_str::<ExomonadConfig>(
-                "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
-            )
-            .is_err()
-        );
+        assert!(toml::from_str::<ExomonadConfig>(
+            "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
+        )
+        .is_err());
     }
 
     /// A lock step that produces what `nix flake lock` would, so scaffolding
@@ -3313,12 +3401,10 @@ mod tests {
             "depth = 3",
         ] {
             std::fs::write(&path, format!("{base}\n[research]\n{invalid}\n")).unwrap();
-            assert!(
-                read_project_config(workspace.path())
-                    .unwrap_err()
-                    .to_string()
-                    .contains("invalid Exomonad configuration")
-            );
+            assert!(read_project_config(workspace.path())
+                .unwrap_err()
+                .to_string()
+                .contains("invalid Exomonad configuration"));
         }
     }
 
@@ -3340,12 +3426,10 @@ mod tests {
             .unwrap();
         };
         write_config("tracked");
-        assert!(
-            read_project_config(repo.path())
-                .unwrap_err()
-                .to_string()
-                .contains("contains tracked source")
-        );
+        assert!(read_project_config(repo.path())
+            .unwrap_err()
+            .to_string()
+            .contains("contains tracked source"));
         write_config("scratch");
         assert_eq!(
             read_project_config(repo.path())
@@ -3667,12 +3751,10 @@ mod tests {
             "session": "exomonad-work",
             "phase": {"state": "awaiting_input", "root_actor": root_actor},
         });
-        assert!(
-            decode_run_status(&serde_json::to_vec(&old).unwrap())
-                .unwrap_err()
-                .to_string()
-                .contains("unsupported Exomonad run status version 3")
-        );
+        assert!(decode_run_status(&serde_json::to_vec(&old).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported Exomonad run status version 3"));
     }
 
     #[test]
@@ -3845,31 +3927,23 @@ mod tests {
             log_path,
             &configured.compiler,
         );
-        assert!(
-            configured_launch
-                .args
-                .windows(2)
-                .any(|pair| pair == ["--workers", "2"])
-        );
-        assert!(
-            configured_launch
-                .args
-                .windows(2)
-                .any(|pair| pair == ["--rss-ceiling-mb", "10240"])
-        );
+        assert!(configured_launch
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--workers", "2"]));
+        assert!(configured_launch
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--rss-ceiling-mb", "10240"]));
         for setting in ["workers = 0", "rss_ceiling_mb = 0", "unknown = 2"] {
-            assert!(
-                toml::from_str::<ExomonadConfig>(&format!(
-                    "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
-                ))
-                .is_err()
-            );
+            assert!(toml::from_str::<ExomonadConfig>(&format!(
+                "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
+            ))
+            .is_err());
         }
-        assert!(
-            !launch
-                .environment
-                .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
-        );
+        assert!(!launch
+            .environment
+            .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV));
         assert_eq!(
             host_environment(socket)
                 .get(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
@@ -3978,11 +4052,9 @@ mod tests {
         let error = resolve_root_launch_mode(true, &missing)
             .await
             .expect_err("resume must not silently become fresh");
-        assert!(
-            error
-                .to_string()
-                .contains("cannot resume the requested root conversation")
-        );
+        assert!(error
+            .to_string()
+            .contains("cannot resume the requested root conversation"));
         assert_eq!(
             resolve_root_launch_mode(false, &missing).await.unwrap(),
             InteractiveLaunchMode::Fresh
@@ -4100,11 +4172,9 @@ mod tests {
         let error = validate_recreate_continuity(&root_binding_path)
             .await
             .expect_err("a present but corrupt binding must still fail closed");
-        assert!(
-            error
-                .to_string()
-                .contains("cannot resume the requested root conversation")
-        );
+        assert!(error
+            .to_string()
+            .contains("cannot resume the requested root conversation"));
     }
 
     #[cfg(unix)]
