@@ -2570,10 +2570,24 @@ pub(crate) async fn spawn_local_actor_in_directory<B>(
 where
     B: KernelBehavior,
 {
+    spawn_local_actor_in_directory_with_factory(name, incarnation, directory, |_| behavior).await
+}
+
+/// Build admission state from the original identity issued by this directory.
+pub(crate) async fn spawn_local_actor_in_directory_with_factory<B, F>(
+    name: Option<String>,
+    incarnation: crate::Incarnation,
+    directory: LocalActorDirectory,
+    build: F,
+) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr>
+where
+    B: KernelBehavior,
+    F: FnOnce(ActorRef) -> B,
+{
     let identity = directory
         .reserve(incarnation)
         .map_err(|error| ractor::SpawnErr::StartupFailed(std::io::Error::other(error).into()))?;
-    spawn_reserved_local_actor(name, behavior, identity, directory).await
+    spawn_reserved_local_actor(name, build(identity), identity, directory).await
 }
 
 pub(crate) async fn spawn_local_actor_in_directory_with_identity<B>(
