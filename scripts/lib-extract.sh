@@ -311,8 +311,18 @@ prepare_battery_artifacts() {
 
 finalize_battery_artifacts() {
   local status="$1"
+  local finalize_status=0
   [[ -n "$BATTERY_ARTIFACT_DIR" ]] || return 0
-  if [[ "$status" -eq 0 && "$BATTERY_DAEMON_START_FAILED" = 0 && "${TIDEPOOL_KEEP_TEST_LOGS:-0}" != 1 ]]; then
+  if [[ "${TIDEPOOL_EXTRACT_MEASUREMENT:-0}" = 1 && "$BATTERY_DAEMON_OWNED" = 1 ]]; then
+    # The raw trace is written while the daemon is alive. Stop through the
+    # owning teardown helper first so its final buffered records are flushed,
+    # retain the trace below, then let the caller's ordinary teardown remove
+    # the owned temporary directory.
+    teardown_battery_daemon --preserve-logs
+  fi
+  if [[ "$status" -eq 0 && "$BATTERY_DAEMON_START_FAILED" = 0 \
+      && "${TIDEPOOL_KEEP_TEST_LOGS:-0}" != 1 \
+      && "${TIDEPOOL_EXTRACT_MEASUREMENT:-0}" != 1 ]]; then
     rm -rf "$BATTERY_ARTIFACT_DIR"
     return 0
   fi
@@ -350,11 +360,51 @@ with tempfile.TemporaryDirectory(prefix=".compiler-trace-", dir=destination.pare
 PYTRACE
       then
         echo "warning: could not retain the explicitly selected raw compiler trace" >&2
+        if [[ "${TIDEPOOL_EXTRACT_MEASUREMENT:-0}" = 1 ]]; then
+          finalize_status=1
+          status=1
+        fi
       fi
     fi
   fi
+  if [[ "${TIDEPOOL_EXTRACT_MEASUREMENT:-0}" = 1 ]]; then
+    if [[ -n "${TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT:-}" && -s "$TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT" ]]; then
+      :
+    elif [[ "$status" -eq 0 ]]; then
+      echo "error: measurement run has no retained compiler trace" >&2
+      status=1
+      finalize_status=1
+    else
+      finalize_status=1
+    fi
+    if [[ -n "${TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID:-}" \
+        && -n "${TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER:-}" \
+        && -n "${TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH:-}" ]]; then
+      if ! python3 - "$BATTERY_ARTIFACT_DIR/measurement-daemon.json" \
+          "$TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID" \
+          "$TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER" \
+          "$TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH" \
+          "${TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT:-${TIDEPOOL_PERFORMANCE_COMPILER_TRACE:-}}" <<'PYMETA'
+import json, sys
+from pathlib import Path
+destination, pid, producer, epoch, trace = sys.argv[1:]
+Path(destination).write_text(json.dumps({
+    "pid": int(pid), "producer": producer, "epoch": epoch, "trace": trace,
+}, indent=2) + "\n")
+PYMETA
+      then
+        echo "error: could not retain valid measurement daemon metadata" >&2
+        finalize_status=1
+        status=1
+      fi
+    else
+      echo "error: measurement daemon identity is incomplete" >&2
+      finalize_status=1
+      status=1
+    fi
+  fi
   scripts/toolchain-doctor.sh >"$BATTERY_ARTIFACT_DIR/toolchain-doctor.log" 2>&1 || true
-  if [[ "$status" -eq 0 && "$BATTERY_DAEMON_START_FAILED" = 0 ]]; then
+  if [[ "$status" -eq 0 && "$finalize_status" = 0 && "$BATTERY_DAEMON_START_FAILED" = 0 ]]; then
     # Only marked successful runs are eligible for bounded retention. Never
     # prune failure evidence or arbitrary directories under the artifact root.
     python3 - "$BATTERY_ARTIFACT_DIR" <<'PYLOG'
@@ -409,6 +459,7 @@ PYLOG
     echo "==> test/daemon failure artifacts: $BATTERY_ARTIFACT_DIR" >&2
   fi
   echo "==> reproduce: $BATTERY_ARTIFACT_DIR/reproduce.sh" >&2
+  return "$finalize_status"
 }
 
 # Best-effort liveness check for an inherited $TIDEPOOL_EXTRACT_DAEMON_SOCKET
@@ -493,6 +544,23 @@ start_battery_daemon() {
   BATTERY_DAEMON_OWNED=0
   BATTERY_DAEMON_START_FAILED=0
 
+  local measurement=0
+  [ "${TIDEPOOL_EXTRACT_MEASUREMENT:-0}" != 1 ] || measurement=1
+  if [ "$measurement" = 1 ]; then
+    if [ -n "${TIDEPOOL_EXTRACT_DAEMON_SOCKET:-}" ]; then
+      echo "error: measurement mode requires an exclusively owned compile daemon; inherited TIDEPOOL_EXTRACT_DAEMON_SOCKET is not allowed" >&2
+      return 1
+    fi
+    if [ "${TIDEPOOL_EXTRACT_NO_DAEMON:-0}" = 1 ]; then
+      echo "error: measurement mode requires an owned compile daemon; TIDEPOOL_EXTRACT_NO_DAEMON=1 is not allowed" >&2
+      return 1
+    fi
+    unset TIDEPOOL_PERFORMANCE_COMPILER_TRACE \
+      TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID \
+      TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER \
+      TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH
+  fi
+
   if [ "${TIDEPOOL_EXTRACT_NO_DAEMON:-0}" = "1" ]; then
     unset TIDEPOOL_EXTRACT_DAEMON_SOCKET
     validate_tidepool_extract_endpoint || return 1
@@ -500,7 +568,7 @@ start_battery_daemon() {
     return 0
   fi
 
-  if [ -n "${TIDEPOOL_EXTRACT_DAEMON_SOCKET:-}" ] && _battery_daemon_socket_alive "$TIDEPOOL_EXTRACT_DAEMON_SOCKET"; then
+  if [ "$measurement" != 1 ] && [ -n "${TIDEPOOL_EXTRACT_DAEMON_SOCKET:-}" ] && _battery_daemon_socket_alive "$TIDEPOOL_EXTRACT_DAEMON_SOCKET"; then
     echo "==> reusing already-running compile daemon at $TIDEPOOL_EXTRACT_DAEMON_SOCKET (outer wrapper owns its lifecycle)" >&2
     return 0
   fi
@@ -517,12 +585,12 @@ start_battery_daemon() {
   local _persistent_sock _persistent_producer_file _per_run_args=()
   _persistent_sock="$(_persistent_daemon_dir)/extract.sock"
   _persistent_producer_file="$(_persistent_daemon_dir)/producer"
-  if [ "${TIDEPOOL_PERSISTENT_DAEMON_ADOPTED:-0}" = 1 ] && _battery_daemon_socket_alive "$_persistent_sock"; then
+  if [ "$measurement" != 1 ] && [ "${TIDEPOOL_PERSISTENT_DAEMON_ADOPTED:-0}" = 1 ] && _battery_daemon_socket_alive "$_persistent_sock"; then
     export TIDEPOOL_EXTRACT_DAEMON_SOCKET="$_persistent_sock"
     echo "==> reusing persistent compile daemon at $_persistent_sock (producer sources match)" >&2
     return 0
   fi
-  if _battery_daemon_socket_alive "$_persistent_sock"; then
+  if [ "$measurement" != 1 ] && _battery_daemon_socket_alive "$_persistent_sock"; then
     local _current_producer
     _current_producer="$(_current_producer_hex 2>/dev/null)" || _current_producer=""
     if [ -n "$_current_producer" ] && [ -f "$_persistent_producer_file" ] \
@@ -576,6 +644,11 @@ start_battery_daemon() {
       echo "==> compile daemon exited before readiness (see $log)" >&2
       wait "$BATTERY_DAEMON_PID" 2>/dev/null || true
       BATTERY_DAEMON_PID=""
+      if [ "$measurement" = 1 ]; then
+        BATTERY_DAEMON_START_FAILED=1
+        echo "error: measurement compile daemon exited before readiness; direct fallback is forbidden (see $log)" >&2
+        return 1
+      fi
       _battery_direct_fallback
       return $?
     fi
@@ -583,6 +656,11 @@ start_battery_daemon() {
       echo "==> compile daemon was not ready within 30s (see $log)" >&2
       _terminate_and_wait "$BATTERY_DAEMON_PID" "compile daemon startup"
       BATTERY_DAEMON_PID=""
+      if [ "$measurement" = 1 ]; then
+        BATTERY_DAEMON_START_FAILED=1
+        echo "error: measurement compile daemon was not ready within 30s; direct fallback is forbidden (see $log)" >&2
+        return 1
+      fi
       _battery_direct_fallback
       return $?
     fi
@@ -592,6 +670,70 @@ start_battery_daemon() {
   export TIDEPOOL_EXTRACT_DAEMON_SOCKET="$sock"
   BATTERY_DAEMON_OWNED=1
   echo "==> compile daemon up: pid=$BATTERY_DAEMON_PID socket=$sock" >&2
+  if [ "$measurement" = 1 ]; then
+    local identity expected_producer deadline=$((SECONDS + 10))
+    expected_producer="$(_current_producer_hex 2>/dev/null)" || {
+      echo "error: could not determine the resolved compile producer identity" >&2
+      BATTERY_DAEMON_START_FAILED=1
+      teardown_battery_daemon --preserve-logs
+      return 1
+    }
+    while :; do
+      identity="$(_measurement_daemon_identity "${compiler_log%.log}.jsonl" "$BATTERY_DAEMON_PID" "$expected_producer")" || identity=""
+      [ -n "$identity" ] && break
+      if [ "$SECONDS" -ge "$deadline" ] || ! kill -0 "$BATTERY_DAEMON_PID" 2>/dev/null; then
+        echo "error: owned compile daemon did not publish matching producer/pid/epoch evidence (see $log and $compiler_log)" >&2
+        BATTERY_DAEMON_START_FAILED=1
+        teardown_battery_daemon --preserve-logs
+        return 1
+      fi
+      sleep 0.1
+    done
+    IFS=$'\t' read -r TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER \
+      TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH <<<"$identity"
+    TIDEPOOL_PERFORMANCE_COMPILER_TRACE="${compiler_log%.log}.jsonl"
+    export TIDEPOOL_PERFORMANCE_COMPILER_TRACE \
+      TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID \
+      TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER \
+      TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH
+    echo "==> measurement daemon identity: producer=$TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER pid=$TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID epoch=$TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH trace=$TIDEPOOL_PERFORMANCE_COMPILER_TRACE" >&2
+  fi
+}
+
+# Emits the ready record's producer, daemon PID and epoch only when it matches
+# this owned process and the resolved frontend's producer identity.
+_measurement_daemon_identity() {
+  python3 - "$1" "$2" "$3" <<'PYIDENTITY'
+import json, re, sys
+path, expected_pid, expected_producer = sys.argv[1:]
+if not expected_producer:
+    raise SystemExit(1)
+try:
+    lines = open(path, encoding="utf-8")
+except OSError:
+    raise SystemExit(1)
+match = None
+ready_records = 0
+for line in lines:
+    try:
+        event = json.loads(line)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        continue
+    fields = event.get("fields", {})
+    if fields.get("message") != "compiler daemon ready":
+        continue
+    ready_records += 1
+    producer = fields.get("producer", "")
+    pid = str(fields.get("daemon_pid", ""))
+    epoch = fields.get("daemon_epoch", "")
+    if (producer == expected_producer and pid == expected_pid
+            and re.fullmatch(r"[0-9a-f]{64}", epoch)):
+        match = (producer, pid, epoch)
+if ready_records == 1 and match:
+    print("\t".join(match))
+else:
+    raise SystemExit(1)
+PYIDENTITY
 }
 
 _battery_direct_fallback() {
@@ -643,12 +785,14 @@ _terminate_and_wait() {
 # start_battery_daemon runs, so it also fires if a signal lands mid-boot
 # (see start_battery_daemon's comment).
 teardown_battery_daemon() {
+  local preserve_logs=0
+  [ "${1:-}" != "--preserve-logs" ] || preserve_logs=1
   if [ "$BATTERY_DAEMON_OWNED" = 1 ] && [ -n "$BATTERY_DAEMON_PID" ]; then
     _terminate_and_wait "$BATTERY_DAEMON_PID" "compile daemon"
     echo "==> compile daemon (pid $BATTERY_DAEMON_PID) torn down" >&2
   fi
   BATTERY_DAEMON_PID=""
-  if [ -n "$BATTERY_DAEMON_SOCKET_DIR" ] && [ -d "$BATTERY_DAEMON_SOCKET_DIR" ]; then
+  if [ "$preserve_logs" = 0 ] && [ -n "$BATTERY_DAEMON_SOCKET_DIR" ] && [ -d "$BATTERY_DAEMON_SOCKET_DIR" ]; then
     if [ "$BATTERY_DAEMON_START_FAILED" = 1 ] && [ -z "$BATTERY_ARTIFACT_DIR" ]; then
       echo "==> retained compile daemon startup log: $BATTERY_DAEMON_SOCKET_DIR/daemon.log" >&2
     else
@@ -658,9 +802,11 @@ teardown_battery_daemon() {
   if [ "$BATTERY_DAEMON_OWNED" = 1 ]; then
     unset TIDEPOOL_EXTRACT_DAEMON_SOCKET
   fi
-  BATTERY_DAEMON_SOCKET_DIR=""
-  BATTERY_DAEMON_OWNED=0
-  unset TIDEPOOL_EXTRACT_DAEMON_LOG
+  if [ "$preserve_logs" = 0 ]; then
+    BATTERY_DAEMON_SOCKET_DIR=""
+    BATTERY_DAEMON_OWNED=0
+    unset TIDEPOOL_EXTRACT_DAEMON_LOG
+  fi
 }
 
 # --- Persistent compile daemon ---

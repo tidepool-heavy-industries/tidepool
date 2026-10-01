@@ -45,9 +45,12 @@ prepare_battery_artifacts battery scripts/battery.sh "$@"
 tmp_log="$BATTERY_NEXTEST_LOG"
 cleanup_exit() {
   local status=$?
-  finalize_battery_artifacts "$status"
+  local final_status="$status"
+  if ! finalize_battery_artifacts "$status"; then
+    [ "$final_status" -ne 0 ] || final_status=1
+  fi
   teardown_battery_daemon
-  return "$status"
+  exit "$final_status"
 }
 trap cleanup_exit EXIT
 # A signal sent directly to this script's pid (as opposed to a terminal

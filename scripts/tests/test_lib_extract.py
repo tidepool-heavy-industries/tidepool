@@ -13,7 +13,7 @@ import unittest
 LIBRARY = Path(__file__).resolve().parents[1] / "lib-extract.sh"
 EXOMONAD_SCRIPTS = Path(__file__).resolve().parents[2] / "exomonad" / "scripts"
 FRONTEND = r'''#!/usr/bin/env python3
-import os, signal, socket, sys, time
+import json, os, signal, socket, sys, time
 from pathlib import Path
 if len(sys.argv) == 1:
     print("Usage: tidepool-extract", file=sys.stderr)
@@ -53,7 +53,8 @@ assert sys.argv[1] == "--daemon"
 Path(os.environ["DAEMON_PID_FILE"]).write_text(str(os.getpid()))
 Path(os.environ["DAEMON_PID_FILE"] + ".argv").write_text("\n".join(sys.argv[1:]))
 if "--log-path" in sys.argv:
-    Path(sys.argv[sys.argv.index("--log-path") + 1]).write_text("compile timing fixture\n")
+    log_path = Path(sys.argv[sys.argv.index("--log-path") + 1])
+    log_path.write_text("compile timing fixture\n")
 mode = os.environ.get("DAEMON_MODE", "ready")
 if mode == "exit":
     print("daemon startup failure", file=sys.stderr)
@@ -63,6 +64,17 @@ if mode == "hang":
     while True:
         time.sleep(0.01)
 daemon_sock_path = sys.argv[sys.argv.index("--socket") + 1]
+if "--log-path" in sys.argv:
+    producer_byte = int(os.environ.get("PRODUCER_BYTE", "0"))
+    ready_pid = os.getpid() + (1 if os.environ.get("BAD_READY_PID") else 0)
+    ready_producer = ("01" if os.environ.get("BAD_READY_PRODUCER") else f"{producer_byte:02x}") * 32
+    ready = {"fields": {"message": "compiler daemon ready", "producer": ready_producer,
+                        "daemon_pid": ready_pid, "daemon_epoch": "ab" * 32}}
+    ready_trace = Path(sys.argv[sys.argv.index("--log-path") + 1]).with_suffix(".jsonl")
+    ready_lines = [json.dumps(ready)]
+    if os.environ.get("DUP_READY_IDENTITY"):
+        ready_lines.append(json.dumps(ready))
+    ready_trace.write_text("\n".join(ready_lines) + "\n")
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.bind(daemon_sock_path)
 sock.listen()
@@ -362,6 +374,115 @@ exit 9
         self.run_shell("start_battery_daemon", success=False,
                        TIDEPOOL_EXTRACT=str(self.frontend), TIDEPOOL_EXTRACT_NO_DAEMON="1",
                        BAD_ENDPOINT="1")
+
+    def test_measurement_mode_owns_daemon_and_retains_trace_after_stop(self):
+        destination = self.root / 'measurement "quoted"\nline/compiler.jsonl'
+        destination.parent.mkdir()
+        result = self.run_shell(
+            'prepare_battery_artifacts measurement true\n'
+            'trap teardown_battery_daemon EXIT\n'
+            'start_battery_daemon\n'
+            '[[ "$BATTERY_DAEMON_OWNED" = 1 ]]\n'
+            '[[ "$TIDEPOOL_PERFORMANCE_COMPILER_TRACE" = "$BATTERY_DAEMON_SOCKET_DIR/compiler.jsonl" ]]\n'
+            '[[ -f "$TIDEPOOL_PERFORMANCE_COMPILER_TRACE" ]]\n'
+            'finalize_battery_artifacts 0',
+            TIDEPOOL_EXTRACT=str(self.frontend), TIDEPOOL_EXTRACT_MEASUREMENT="1",
+            TIDEPOOL_KEEP_TEST_LOGS="1",
+            TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT=str(destination),
+            TIDEPOOL_TEST_ARTIFACT_ROOT=str(self.root / "artifacts"))
+        self.assertIn("measurement daemon identity", result.stderr)
+        artifact = next((self.root / "artifacts").iterdir())
+        identity = json.loads((artifact / "measurement-daemon.json").read_text())
+        self.assertEqual(identity["pid"], int((self.root / "daemon.pid").read_text()))
+        self.assertEqual(identity["producer"], "00" * 32)
+        self.assertEqual(identity["epoch"], "ab" * 32)
+        self.assertEqual(identity["trace"], str(destination))
+        retained = artifact / "compiler.jsonl"
+        self.assertTrue(destination.is_file())
+        self.assertEqual(destination.read_bytes(), retained.read_bytes())
+        self.assertIn('"compiler daemon ready"', destination.read_text())
+        self.assertEqual(list(self.root.glob("tidepool-extract-daemon.*")), [])
+        self.assert_daemon_reaped()
+
+    def test_measurement_mode_rejects_inherited_socket_and_direct_mode(self):
+        for env in ({"TIDEPOOL_EXTRACT_DAEMON_SOCKET": "/inherited"},
+                    {"TIDEPOOL_EXTRACT_NO_DAEMON": "1"}):
+            result = self.run_shell("start_battery_daemon", success=False,
+                                    TIDEPOOL_EXTRACT=str(self.frontend),
+                                    TIDEPOOL_EXTRACT_MEASUREMENT="1", **env)
+            self.assertIn("measurement mode", result.stderr)
+            self.assertFalse((self.root / "daemon.pid").exists())
+
+    def test_measurement_mode_does_not_adopt_live_persistent_daemon(self):
+        env = self.persistent_env(TIDEPOOL_EXTRACT_MEASUREMENT="1")
+        self.run_shell("daemon_start_persistent", **self.persistent_env())
+        self.addCleanup(lambda: self.run_shell("daemon_stop_persistent", **self.persistent_env()))
+        persistent_pid = int((self.persistent_dir() / "daemon.pid").read_text())
+        result = self.run_shell(
+            'trap teardown_battery_daemon EXIT\nstart_battery_daemon\n'
+            'printf "OWNED=%s\\n" "$BATTERY_DAEMON_OWNED"',
+            **env)
+        self.assertIn("OWNED=1", result.stdout)
+        self.assertIn("measurement daemon identity", result.stderr)
+        os.kill(persistent_pid, 0)
+
+    def test_measurement_mode_never_falls_back_or_accepts_mismatched_identity(self):
+        result = self.run_shell("start_battery_daemon", success=False,
+                                TIDEPOOL_EXTRACT=str(self.frontend),
+                                TIDEPOOL_EXTRACT_MEASUREMENT="1", DAEMON_MODE="exit")
+        self.assertIn("direct fallback is forbidden", result.stderr)
+        self.assertNotIn("direct compiler endpoint validated", result.stderr)
+        result = self.run_shell("start_battery_daemon", success=False,
+                                TIDEPOOL_EXTRACT=str(self.frontend),
+                                TIDEPOOL_EXTRACT_MEASUREMENT="1", BAD_READY_PID="1")
+        self.assertIn("did not publish matching producer/pid/epoch evidence", result.stderr)
+        self.assertNotIn("direct compiler endpoint validated", result.stderr)
+        result = self.run_shell("start_battery_daemon", success=False,
+                                TIDEPOOL_EXTRACT=str(self.frontend),
+                                TIDEPOOL_EXTRACT_MEASUREMENT="1", DUP_READY_IDENTITY="1")
+        self.assertIn("did not publish matching producer/pid/epoch evidence", result.stderr)
+        self.assertNotIn("direct compiler endpoint validated", result.stderr)
+
+    def test_battery_exit_trap_propagates_finalization_failure_and_still_tears_down(self):
+        self.executable(
+            "cargo-nextest", "#!/bin/sh\nprintf '%s\\n' 'Summary: 1 tests run: 1 passed'\nexit \"${NEXTTEST_STATUS:-0}\"\n")
+        self.executable(
+            "cargo", "#!/bin/sh\n[ \"$1\" = nextest ] || exit 88\n"
+            "printf '%s\\n' 'Summary: 1 tests run: 1 passed'\nexit \"${NEXTTEST_STATUS:-0}\"\n")
+        manifest = self.root / "compiler-deployment.json"
+        manifest.write_text("{}\n")
+        destination = self.root / "measurement/already-retained.jsonl"
+        destination.parent.mkdir()
+        prior_trace = b'{"prior":"evidence"}\n'
+        destination.write_bytes(prior_trace)
+        selected = self.env | {
+            "PATH": f"{self.root / 'bin'}:{os.environ['PATH']}",
+            "TIDEPOOL_EXTRACT": str(self.frontend),
+            "TIDEPOOL_EXTRACT_WORKER": str(self.worker),
+            "TIDEPOOL_COMPILER_DEPLOYMENT": str(manifest),
+            "TIDEPOOL_EXTRACT_MEASUREMENT": "1",
+            "TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT": str(destination),
+            "TIDEPOOL_TEST_ARTIFACT_ROOT": str(self.root / "artifacts"),
+            "TIDEPOOL_ALLOW_STALE_EXTRACT": "1",
+            "DAEMON_PID_FILE": str(self.root / "battery-daemon.pid"),
+            "TIDEPOOL_GHC_LIBDIR": "/ghc/lib",
+            "XDG_CACHE_HOME": str(self.root / "cache"),
+        }
+        for nextest_status, expected_status in ((0, 1), (7, 7)):
+            result = subprocess.run(["bash", str(Path(__file__).resolve().parents[1] / "battery.sh"),
+                                     "-p", "fixture", "--lib"],
+                                    env=selected | {"NEXTTEST_STATUS": str(nextest_status)},
+                                    cwd=Path(__file__).resolve().parents[2],
+                                    text=True, capture_output=True, timeout=40)
+            self.assertEqual(result.returncode, expected_status)
+            self.assertIn("could not retain the explicitly selected raw compiler trace", result.stderr)
+            self.assertEqual(destination.read_bytes(), prior_trace)
+            if nextest_status == 0:
+                self.assertFalse(list((self.root / "artifacts").glob("*/.successful-run")))
+            self.assertEqual(list(self.root.glob("tidepool-extract-daemon.*")), [])
+            pid = int((self.root / "battery-daemon.pid").read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
 
     def test_timed_out_endpoint_is_rejected_even_after_identity(self):
         self.executable("timeout", '#!/usr/bin/env python3\nimport sys\n'
