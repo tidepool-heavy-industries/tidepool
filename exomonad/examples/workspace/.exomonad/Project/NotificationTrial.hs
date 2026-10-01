@@ -11,8 +11,8 @@ module Project.NotificationTrial
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Worktree (renderGitOid)
-import Project.Routing
-import Project.Types
+import Exomonad.Contrib.Routing
+import Exomonad.Contrib.Types
 import Project.WorkflowReminders
 
 data NotificationDecision = RecordOnly | InterruptOwner | RoutingUncertain Text

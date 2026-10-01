@@ -5,7 +5,7 @@
 -- actor whose checkout contains the source. The notice carries the compact
 -- terminal facts; call 'readChecks' and 'foldGate' only when a decision needs
 -- the retained typed result.
-module Project.FocusedGateExample
+module Exomonad.Contrib.CheckPlan
   ( GateStart (..), startGate, startPreparedGate, reopenGate, readGate, foldGate
   , CheckPreparation (..), PlanCheck (..), PlanStart (..), PlanReport (..)
   , startCheckPlan, startCheckPlanInto, readCheckPlan, planPassed, planSummary
@@ -15,7 +15,7 @@ import Control.Monad (forM, forM_)
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Project.CheckResults
+import Exomonad.Contrib.CheckResults
 import qualified Tidepool.Actor.Record as R
 import Tidepool.Actors.Exomonad (AgentRef)
 import qualified Tidepool.Command as Cmd

@@ -1,8 +1,8 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
-module Project.Types
-  ( Task (..), labelCampaign, task, AcceptedDecision (..)
+module Exomonad.Contrib.Types
+  ( Task (..), AcceptedDecision (..)
   , Candidate (..), RepairOwner (..), ReviewBasis (..), reviewBase, reviewOwnedPaths, reviewAcceptance
   , ReviewRequest (..), ReviewedCandidate (..), ReviewDecision (..), RepairTask (..)
   , Outcome (..), ReportedDelivery (..), Delivery, DesignQuestion (..), DesignAnswer (..)
@@ -11,7 +11,7 @@ module Project.Types
   , ReviewEvidenceIssue (..), admitReviewedCheckpoint, candidateAtSubmission
   , reviewCandidateAtSubmission, cleanReviewCheckout
   , WorkProgress, pattern WorkProgress, workEvidence, workQuestions, workReviewed, withReviewedCheckpoint, mergeWorkProgress
-  , Question (..), Attention
+  , Question (..), Attention, sameQuestion
   ) where
 
 import Control.Monad.Freer (Eff, Member)
@@ -23,9 +23,7 @@ import Tidepool.Agent.Reply
   , ResponseFailure, WorktreeEvidence (..), ExecutionReceipt (..), pollResponse, requestId )
 import Tidepool.Actors.Exomonad
   ( AgentRef, Label, ForkGroupPath, ForkEffort, GitOid, Model, WatchLabel
-  , CampaignLabel, campaignLabel, batch
   )
-import Tidepool.Agent.Assignment (labelText)
 import Tidepool.Inspection (Display (..), application, displayRecord)
 import Tidepool.Worktree
   ( DirtySummary (..), HeadState (..), SubmissionObservation (..)
@@ -57,37 +55,6 @@ instance Display Task where
     , ("acceptance", displayTree (acceptance t))
     , ("acceptedDecisions", displayTree (acceptedDecisions t))
     ]
-
--- Turn an already-validated fork Label into a group path's campaign segment.
--- Label and CampaignLabel share the same kebab-case, <=48-char validator
--- (Tidepool.Agent.Assignment.Internal / Tidepool.Actors.Unfold), so a Label's
--- own text always satisfies campaignLabel; the Left branch is unreachable in
--- practice, not a real runtime possibility this constructor has to reject.
-labelCampaign :: Label -> CampaignLabel
-labelCampaign label = either (error . show) id (campaignLabel (labelText label))
-
--- A defaults constructor for the harness's number-one missing primitive (the
--- wave-3 root interview): a fork that only needs "objective, owned paths,
--- acceptance". Derives a fork group from the label (batch <label> "work",
--- the least surprising reading of ForkGroupPath's batch/subgroup shapes: a
--- fresh two-segment path named after who is doing the work), points at the
--- workspace's shared vocabulary plan, and leaves no rationale or accepted
--- decisions yet -- ordinary record fields any caller can still override with
--- a record update. The source revision has no sensible default: a
--- WorktreeSeed (Project.Work's lunaTaskFrom/solTaskFrom) does not carry a
--- resolvable GitOid purely, so it is unavoidable to require one here,
--- explicitly, last.
-task :: Label -> Text -> [Text] -> Text -> GitOid -> Task
-task label objective owned accept source = Task
-  { taskGroup = batch (labelCampaign label) "work"
-  , planPath = ".exomonad/plans/language.md"
-  , taskSource = source
-  , obligation = objective
-  , rationale = ""
-  , ownedPaths = owned
-  , acceptance = accept
-  , acceptedDecisions = []
-  }
 
 -- The owner records its supported choice at the incorporated source revision.
 -- This is evidence-bearing task data; the record grants no runtime authority.
@@ -373,5 +340,9 @@ data Question = Question
   { questionKey :: Text
   , questionDetails :: DesignQuestion
   } deriving (Show, Eq, Ord)
+
+sameQuestion :: Question -> Question -> Bool
+sameQuestion left right = questionKey left == questionKey right
+  && questionPlan (questionDetails left) == questionPlan (questionDetails right)
 
 type Attention = [Question]

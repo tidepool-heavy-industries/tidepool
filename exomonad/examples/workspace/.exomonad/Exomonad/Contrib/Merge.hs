@@ -15,7 +15,7 @@
 -- check advances an optional named publication branch; red evidence remains in
 -- the integration checkout. ReviewFlow calls this owner. Local
 -- component integration uses this mechanism at every implementation depth.
-module Project.Merge
+module Exomonad.Contrib.Merge
   ( -- The merge target: supplied by whoever starts a review
     MergeTarget (..)
     -- The merge actor: one per merge target

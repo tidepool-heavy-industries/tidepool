@@ -5,12 +5,12 @@
 -- and acceptance rules in the shared owner; specialize commands and policy here.
 module SessionHelpers.TestEvidence
   ( module Project.TestEvidence, runTests, CheckDefinition (..), checkAt, runCheck
-  , module Project.FocusedGateExample, plannedCheck
+  , module Exomonad.Contrib.CheckPlan, plannedCheck
   ) where
 
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
-import Project.FocusedGateExample
+import Exomonad.Contrib.CheckPlan
 import Project.TestEvidence
 import qualified Tidepool.Command as Cmd
 import Tidepool.Actors.Exomonad (AgentRef)

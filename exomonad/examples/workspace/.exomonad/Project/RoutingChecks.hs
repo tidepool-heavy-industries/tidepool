@@ -50,7 +50,7 @@ routing = do
   pending <- turn (checkActor producer) "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply"
   check "publishing progress preserves the original reply" ("ReplyOpen" `Text.isSuffixOf` output pending)
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
-  closed <- turn owner "(== ([WorkClosed])) . map Project.Routing.sourceStatus . collectedWork <$> readWork forwarding"
+  closed <- turn owner "(== ([WorkClosed])) . map Exomonad.Contrib.Routing.sourceStatus . collectedWork <$> readWork forwarding"
   check "source closure leaves the actor's retained state queryable" (output closed == "True")
   void $ turn owner "finishWork forwarding"
   void restart
@@ -426,7 +426,7 @@ independentSources = do
   script (checkActor left) "attention-sources-question"
   script (checkActor right) "attention-sources-question"
   void $ turn (checkActor left) "reportProgress (WorkProgress [] [first,second])"
-  first <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkOpen),(\"right\",[],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), Project.Routing.sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
+  first <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkOpen),(\"right\",[],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), Exomonad.Contrib.Routing.sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
   check "left progresses while right is silent" (output first == "True")
   void $ turn owner "Right replacementSpec <- pure (workDefinition [(\"left\", left, leftProgress), (\"right\", right, rightProgress)] countChanges)\ncollection <- R.replace collection replacementSpec"
   void $ turn (checkActor left) "reportProgress (WorkProgress [] [second,first,first])"
@@ -437,13 +437,13 @@ independentSources = do
   both <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"]),(\"right\",[\"same-key\"])])) [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
   check "same-key questions retain both source identities" (output both == "True")
   void $ turn (checkActor left) "respond (\"finished\" :: Text)"
-  closed <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkClosed),(\"right\",[\"same-key\"],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), Project.Routing.sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
+  closed <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkClosed),(\"right\",[\"same-key\"],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), Exomonad.Contrib.Routing.sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
   check "closure retains unanswered questions" (output closed == "True")
   void $ turn (checkActor right) "reportProgress (WorkProgress [] [])"
   resolved <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"]),(\"right\",[])])) [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
   check "one resolution cannot erase another source's questions" (output resolved == "True")
   void $ turn (checkActor right) "respond (\"finished\" :: Text)"
-  final <- turn owner "(== ([WorkClosed,WorkClosed])) . map Project.Routing.sourceStatus . collectedWork <$> readWork collection"
+  final <- turn owner "(== ([WorkClosed,WorkClosed])) . map Exomonad.Contrib.Routing.sourceStatus . collectedWork <$> readWork collection"
   check "both sources close without rearming" (output final == "True")
   void $ turn owner "finishWork collection"
 

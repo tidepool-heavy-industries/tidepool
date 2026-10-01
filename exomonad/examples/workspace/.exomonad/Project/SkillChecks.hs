@@ -141,7 +141,7 @@ notebookForms = root >>= checkNotebookForms
 
 checkNotebookForms :: Member RecipeCheck effects => CheckActor -> Eff effects ()
 checkNotebookForms owner = do
-  -- The project-free record definition: no Project.Actors wrapper, the row
+  -- The project-free record definition: no Exomonad.Contrib.Actors wrapper, the row
   -- named in the cell and pinned by a signature on the definition.
   tallied <- example owner "exomonad-define-actors" 3
   check "a record definition pins its own effect row without a project wrapper"

@@ -1,7 +1,7 @@
 {-# LANGUAGE QuasiQuotes #-}
 import qualified Tidepool.Actor.Record as R
 import Tidepool.Effects.Core (GitRef (..))
-import qualified Project.Merge as Merge
+import qualified Exomonad.Contrib.Merge as Merge
 Right campaign <- pure (campaignLabel ("checked-review-" <> scenario))
 let task = Task (batch campaign "component") "plans/component.md" sourceHead
       "Repair the recovery fixture" "Exercise a counted check before exact review"

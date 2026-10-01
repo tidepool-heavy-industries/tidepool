@@ -7,7 +7,7 @@ module Project.WorkflowExamples (PreparedCheckIssue (..), prepareFocused, awaitF
 import Control.Monad.Freer (Eff, Member)
 import qualified Tidepool.Command as Cmd
 import Tidepool.Effects.Core (Commands)
-import Project.PrepareContinue
+import Exomonad.Contrib.PrepareContinue
 import Project.TestEvidence
 
 data PreparedCheckIssue issue

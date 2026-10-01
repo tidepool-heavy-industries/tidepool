@@ -35,14 +35,14 @@ maximum_depth = 8
 [haskell]
 source_roots = [".", "workspace"]
 modules = [
-  "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.DecisionAnswers", "Project.Observe",
-  "Project.Shell", "Project.Sift", "Project.Lookup", "Project.Reflex", "Project.Evidence", "Project.Contract",
-  "Project.Investigate", "Project.Merge", "Project.Review", "Project.Search", "Project.History",
+  "Exomonad.Contrib.Types", "Exomonad.Contrib.Actors", "Project.Work", "Exomonad.Contrib.Routing", "Project.DecisionAnswers", "Project.Observe",
+  "Project.Shell", "Project.Sift", "Project.Lookup", "Project.Reflex", "Project.Evidence",
+  "Project.Investigate", "Exomonad.Contrib.Merge", "Project.ReviewPolicy", "Project.Search", "Project.History",
   "Project.FieldNotes", "Project.RebaseRouter", "Project.SupervisionProfiles",
-  "Project.Service", "Project.Repository", "Project.CheckResults",
-  "Project.PrepareContinue", "Project.RetainedEvidence", "Project.AssumptionWatch",
+  "Project.Service", "Project.Repository", "Exomonad.Contrib.CheckResults",
+  "Exomonad.Contrib.PrepareContinue", "Exomonad.Contrib.RetainedEvidence", "Project.AssumptionWatch",
   "Project.ParallelInvestigate", "Project.SlowCommandWatch", "Project.Interview",
-  "Project.FocusedGateExample", "Project.ReviewFlow", "Project.BackgroundInvestigator",
+  "Exomonad.Contrib.CheckPlan", "Project.TestEvidence", "Exomonad.Contrib.ReviewFlow", "Project.BackgroundInvestigator",
   "Project.BaselineIncorporation", "Project.WorkflowReminders", "Project.WorkflowReminderExamples",
 ]
 spec = "AgentSpec.agentSpec"
@@ -59,20 +59,28 @@ checks = [
   "Project.RoutingChecks.routing",
   "Project.RoutingChecks.candidateHistory",
   "Project.RoutingChecks.notificationRetention",
-  "Project.RoutingChecks.automaticReview",
-  "Project.RoutingChecks.requestRecovery",
-  "Project.RoutingChecks.declaredRepair",
   "Project.RoutingChecks.forwardingFailure",
   "Project.RoutingChecks.handlerCall",
   "Project.CollaborationChecks.collaboration",
   "Project.SkillChecks.skills",
   "Project.SkillChecks.reviewProvenance",
   "Project.JevChecks.investigation",
-  "Project.JevChecks.review",
   "Project.JevChecks.reflex",
   "Project.RebaseRouterChecks.agentRef",
   "Project.RebaseRouterChecks.facts",
   "Project.FieldNotesChecks.policy",
+  "Project.ReviewFlowChecks.lateCandidate",
+  "Project.ReviewFlowChecks.replacement",
+  "Project.ReviewFlowChecks.sourcePreflight",
+  "Project.ReviewFlowChecks.emptyFindings",
+  "Project.CheckedReviewChecks.selectionMismatch",
+  "Project.CheckedReviewChecks.duplicateSelection",
+  "Project.MergeChecks.greenReceipt",
+  "Project.MergeChecks.commandFailure",
+  "Project.MergeChecks.checkedHeadChanged",
+  "Project.CheckResultsChecks.preparedCompletion",
+  "Project.CheckResultsChecks.managedEvidence",
+  "Project.CheckResultsChecks.runningCommandCleanup",
 ]
 
 # jev-dsl is compiled from the revision `flake.nix` pins, not from a copy in

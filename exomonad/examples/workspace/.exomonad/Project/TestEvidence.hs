@@ -3,13 +3,13 @@
 
 -- | Project policy for running focused Cargo checks in this repository.
 module Project.TestEvidence
-  ( module Project.CargoCheck
+  ( module Exomonad.Contrib.Check.Cargo
   , startFocused, startFocusedIn, startFocusedAfter
   ) where
 
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
-import Project.CargoCheck
+import Exomonad.Contrib.Check.Cargo
 import qualified Tidepool.Command as Cmd
 import Tidepool.Effects.Core (Commands)
 

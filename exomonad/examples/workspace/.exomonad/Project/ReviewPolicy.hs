@@ -19,9 +19,9 @@ import Tidepool.Actors.Exomonad
 import Tidepool.Aeson.Value (object, (.=))
 import Tidepool.Effects.Core (GitRef (..), Jev)
 import Tidepool.Worktree (renderGitOid)
-import Project.Types
+import Exomonad.Contrib.Types
 import Project.Work (projectPrompt, reviewContext)
-import Project.ReviewFlow
+import Exomonad.Contrib.ReviewFlow
 
 defaultReviewFlowPolicy :: ReviewFlowPolicy
 defaultReviewFlowPolicy = ReviewFlowPolicy

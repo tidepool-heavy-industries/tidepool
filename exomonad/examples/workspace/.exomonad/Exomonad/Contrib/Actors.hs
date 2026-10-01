@@ -4,7 +4,7 @@
 
 -- Project-sized defaults for authored actor records. Runtime roles, scheduling
 -- and resource authority remain with Exomonad's existing owners.
-module Project.Actors (CoordinationEffects, coordinationActor, releaseGroup) where
+module Exomonad.Contrib.Actors (CoordinationEffects, coordinationActor, releaseGroup) where
 
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)

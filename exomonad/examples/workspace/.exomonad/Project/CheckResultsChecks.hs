@@ -24,7 +24,7 @@ import Tidepool.Check
 import Tidepool.Effects.Core (Actor, Commands)
 import Tidepool.Effects.Row (knownEffects)
 import Tidepool.Worktree (createWorktree, fromCurrentRepository, worktreeId)
-import Project.CheckResults
+import Exomonad.Contrib.CheckResults
 
 -- Preparation and test execution share the original command. These checks
 -- exercise failure classification without making Jev infer a prerequisite.
@@ -146,7 +146,7 @@ completionRouting = do
   check ("late completion, failed exit and missing evidence all settle: " <> observed)
     (all (`Text.isInfixOf` observed) ["Just CheckPassed", "Just CheckFailed", "Just CheckUnknown"])
   details <- turn owner
-    "view <- readChecks watcher\n[(Project.CheckResults.checkName e, fmap (Cmd.commandCleanup . checkCompletion) (checkOutcome e), fmap (focusedEvidence . checkFocused) (checkOutcome e)) | e <- checkEntries view]"
+    "view <- readChecks watcher\n[(Exomonad.Contrib.CheckResults.checkName e, fmap (Cmd.commandCleanup . checkCompletion) (checkOutcome e), fmap (focusedEvidence . checkFocused) (checkOutcome e)) | e <- checkEntries view]"
   check "completion keeps cleanup and parsed evidence separately"
     (all (`Text.isInfixOf` output details) ["CommandClean", "fixture-digest", "focused runner did not report"])
   mismatch <- turn owner

@@ -4,7 +4,7 @@
 {-# LANGUAGE TypeApplications #-}
 
 -- | Exact source, artifact and test-count evidence for a focused Cargo check.
-module Project.CargoCheck
+module Exomonad.Contrib.Check.Cargo
   ( FocusedSpec (..), FocusedSetupIssue (..), FocusedRun (..), FocusedRecord (..)
   , FocusedResult (..), CheckExecution (..), SourceAssurance (..)
   , FailureEvidence (..), FocusedDiagnosis (..)

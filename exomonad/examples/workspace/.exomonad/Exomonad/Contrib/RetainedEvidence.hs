@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 
 -- | Bounded pages from an existing command job. Reading never submits work.
-module Project.RetainedEvidence
+module Exomonad.Contrib.RetainedEvidence
   ( EvidenceBudget, evidenceBudget, EvidenceBudgetIssue (..)
   , StreamStop (..), StreamEvidence (..), RetainedEvidence (..), recoverRetained
   ) where

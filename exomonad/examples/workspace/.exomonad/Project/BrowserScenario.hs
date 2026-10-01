@@ -33,9 +33,9 @@ import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
-import Project.CheckResults
+import Exomonad.Contrib.CheckResults
   ( CheckActor, CheckSetupIssue, NoticePolicy (NotifyAllTerminal), watchChecks )
-import Project.PrepareContinue (PreparationFailure, verifyPrepared)
+import Exomonad.Contrib.PrepareContinue (PreparationFailure, verifyPrepared)
 import Project.TestEvidence
   ( FocusedRun, FocusedSetupIssue, FocusedSpec (..), startFocusedIn )
 import qualified Tidepool.Actor as Actor

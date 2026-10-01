@@ -122,11 +122,8 @@ splitSections tokens = go
 presentSelected ::
   (Member Commands effects, Member Jev effects, Member Reflect effects) =>
   Command.ObservationPresenter effects
-presentSelected mode _command _purpose focus observation retained = do
-  let observe = case mode of
-        Command.CompletionOrNotify -> Cmd.observeWithCompletion
-        Command.ObserveOnce -> Cmd.observeWith
-  (_, prepared) <- observe observation retained (prepare focus)
+presentSelected Command.ObserveOnce _command _purpose focus observation retained = do
+  (_, prepared) <- Cmd.observeWith observation retained (prepare focus)
   pure prepared
 
 -- | Without a focus, output that fits 'Cmd.presentedByteBudget' is shown

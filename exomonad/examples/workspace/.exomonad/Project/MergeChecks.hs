@@ -27,7 +27,7 @@ redPreserved = do
   let branch = "recipe/red-preserved"
   void $ git owner ["branch", branch, before]
   created <- turn owner $ Text.unlines
-    [ "import qualified Project.Merge as M"
+    [ "import qualified Exomonad.Contrib.Merge as M"
     , "Right sourceTree <- createWorktree (fromRef \"recipe/red-preserved\" \"red-source\")"
     , "Right integration <- createWorktree (fromRef \"recipe/red-preserved\" \"red-preserved\")"
     , "merger <- R.start (M.mergeInto (worktreeId integration) (Just \"recipe/red-preserved\") [\"sh\", \"-c\", \"printf 'staged-check\\n' > red-preserved.txt; git add -- red-preserved.txt; printf 'working-check\\n' > red-preserved.txt; printf intentional-red >&2; exit 7\"])"
@@ -95,7 +95,7 @@ greenReceipt = do
   owner <- root
   before <- checkpoint owner ".gitignore" "ignored-build/\n" "ignore disposable check output"
   void $ turn owner $ Text.unlines
-    [ "import qualified Project.Merge as M"
+    [ "import qualified Exomonad.Contrib.Merge as M"
     , "Right sourceTree <- createWorktree (fromRef \"HEAD\" \"green-source\")"
     , "Right integration <- createWorktree (fromRef \"HEAD\" \"green-receipt\")"
     , "let command = [\"sh\", \"-c\", \"mkdir -p ignored-build; printf artifact > ignored-build/output; printf zero-tests\"]"
@@ -122,7 +122,7 @@ commandFailure = do
   owner <- root
   before <- git owner ["rev-parse", "HEAD"]
   observed <- turn owner $ Text.unlines
-    [ "import qualified Project.Merge as M"
+    [ "import qualified Exomonad.Contrib.Merge as M"
     , "Right sourceTree <- createWorktree (fromRef \"HEAD\" \"git-failure-source\")"
     , "Right integration <- createWorktree (fromRef \"HEAD\" \"git-failure\")"
     , "merger <- R.start (M.mergeInto (worktreeId integration) (Just \"recipe/missing-publication-branch\") [\"sh\", \"-c\", \"touch should-not-run\"])"
@@ -147,7 +147,7 @@ checkedHeadChanged = do
   let branch = "recipe/changed-check-head"
   void $ git owner ["branch", branch, before]
   observed <- turn owner $ Text.unlines
-    [ "import qualified Project.Merge as M"
+    [ "import qualified Exomonad.Contrib.Merge as M"
     , "Right sourceTree <- createWorktree (fromRef \"HEAD\" \"changed-head-source\")"
     , "Right integration <- createWorktree (fromRef \"HEAD\" \"changed-head\")"
     , "merger <- R.start (M.mergeInto (worktreeId integration) (Just \"recipe/changed-check-head\") [\"git\", \"-c\", \"user.name=Recipe\", \"-c\", \"user.email=recipe@example.invalid\", \"commit\", \"--allow-empty\", \"-m\", \"unchecked command commit\"])"

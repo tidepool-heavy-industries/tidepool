@@ -35,9 +35,9 @@ import Tidepool.Aeson.Value (Value, encodeValue, object, (.=))
 import Tidepool.Effects.Core (Jev)
 import Tidepool.Effects.Row (knownEffects)
 import Tidepool.Worktree (renderGitOid)
-import Project.Routing
-import Project.Types
-import Project.Work (sameQuestion, decisionContext)
+import Exomonad.Contrib.Routing
+import Exomonad.Contrib.Types
+import Project.Work (decisionContext)
 
 data AnswerTarget = AnswerTarget
   { answerName :: Text, answerRecipient :: AgentRef, answerTask :: Task }

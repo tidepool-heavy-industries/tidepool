@@ -8,9 +8,9 @@ import Control.Monad (void)
 import Control.Monad.Freer (Eff, Member)
 import qualified Data.Text as Text
 import Tidepool.Check
-import Project.CheckResults (CheckState (..))
+import Exomonad.Contrib.CheckResults (CheckState (..))
 import Project.HandoffExamples (handoffProposal)
-import Project.Types (Outcome (..))
+import Exomonad.Contrib.Types (Outcome (..))
 import qualified Project.AssumptionChecks as Assumption
 import qualified Project.AutomationRuntimeChecks as Commands
 import qualified Project.InterviewChecks as Interview

@@ -2,7 +2,7 @@
 
 -- | Await preparation and establish caller-defined readiness in the same
 -- pending tool continuation. Readiness is separate from command completion.
-module Project.PrepareContinue
+module Exomonad.Contrib.PrepareContinue
   ( PreparationFailure (..), awaitPrepared, verifyPrepared
   ) where
 

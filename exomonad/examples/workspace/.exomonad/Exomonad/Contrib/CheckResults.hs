@@ -6,8 +6,8 @@
 {-# LANGUAGE TypeOperators #-}
 
 -- | Route named focused checks without making a model poll their command jobs.
-module Project.CheckResults
-  ( module Project.CargoCheck
+module Exomonad.Contrib.CheckResults
+  ( module Exomonad.Contrib.Check.Cargo
   , NoticePolicy (..), CheckSetupIssue (..), CheckVerdict (..)
   , CheckExecution (..), SourceAssurance (..), CheckOutcome (..), CheckEntry (..)
   , CheckState (..), CheckNotice (..), CheckActor (checkSnapshot)
@@ -25,7 +25,7 @@ import Tidepool.Actors.Exomonad
 import qualified Tidepool.Command as Cmd
 import Tidepool.Effects.Core (Actor, Commands)
 import Tidepool.Effects.Row (knownEffects)
-import Project.CargoCheck
+import Exomonad.Contrib.Check.Cargo
 
 data NoticePolicy = NotifyProblems | NotifyAllTerminal | NotifySummary deriving (Eq, Show)
 

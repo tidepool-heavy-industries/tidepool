@@ -8,8 +8,8 @@
 -- Branches and exact-source review for recursive local work. Importing the
 -- module admits nothing; the execution owner composes each ready frontier.
 module Project.Work
-  ( projectPrompt, taskContext, reviewContext, decisionContext
-  , withDecision, updateDecision, designQuestion, sameQuestion, raiseQuestion, resolveQuestion
+  ( task, labelCampaign, projectPrompt, taskContext, reviewContext, decisionContext
+  , withDecision, updateDecision, designQuestion, raiseQuestion, resolveQuestion
   , lunaTask, lunaTaskFrom, lunaTaskInputFrom, lunaLead, lunaLeadFrom
   , solTask, solTaskFrom, implement, reviewCandidate, reviewCommit, requestReview, repair
   , candidateAtSubmission, reviewCandidateAtSubmission, admitReviewedCheckpoint
@@ -22,13 +22,30 @@ import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Actors.Exomonad
+import Tidepool.Agent.Assignment (labelText)
 import Tidepool.Effects.Core (AgentInspection, Commands, Forks, GitRef (..))
 import Tidepool.Inspection (WorkbenchDisplay)
 import Tidepool.Worktree (renderGitOid)
 import qualified Tidepool.Command as Cmd
-import Project.Types
+import Exomonad.Contrib.Types
 import Project.Evidence (numstatFiles)
 import Exomonad.Workspace (workspacePrompt)
+
+-- Project task defaults keep the shared data types free of workspace paths.
+labelCampaign :: Label -> CampaignLabel
+labelCampaign label = either (error . show) id (campaignLabel (labelText label))
+
+task :: Label -> Text -> [Text] -> Text -> GitOid -> Task
+task label objective owned accept source = Task
+  { taskGroup = batch (labelCampaign label) "work"
+  , planPath = ".exomonad/WORKBENCH.md"
+  , taskSource = source
+  , obligation = objective
+  , rationale = ""
+  , ownedPaths = owned
+  , acceptance = accept
+  , acceptedDecisions = []
+  }
 
 -- Keys are the workspace's authored resource names; selecting prose grants no
 -- permission and does not create a runtime role.
@@ -56,10 +73,6 @@ withDecision decision task = task
   , acceptedDecisions = filter (not . sameQuestion (decisionQuestion decision) . decisionQuestion)
       (acceptedDecisions task) ++ [decision]
   }
-
-sameQuestion :: Question -> Question -> Bool
-sameQuestion left right = questionKey left == questionKey right
-  && questionPlan (questionDetails left) == questionPlan (questionDetails right)
 
 raiseQuestion :: Question -> Attention -> Attention
 raiseQuestion question current = filter (not . sameQuestion question) current ++ [question]
@@ -111,7 +124,7 @@ solTask label effort = solTaskFrom label effort currentCheckout
 -- executing actor's checkout; an exact
 -- committed review seed uses atRef. Fresh context is an explicit withContext.
 --
--- An ordinary assignment reports settlement to its requester. Project.Routing's
+-- An ordinary assignment reports settlement to its requester. Exomonad.Contrib.Routing's
 -- workChild selects Silent when the batch collector owns that notification.
 -- Custom collectors should likewise select one notification owner explicitly.
 lunaTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result
@@ -192,11 +205,7 @@ reviewCandidate task owner candidate =
 -- as reviewCandidate (fixed Medium, same effect constraints). The exact
 -- scope stays distinct from a Task in the accepted result.
 --
--- Takes its own campaign label rather than nesting under the caller's path
--- (subgroup): the root itself has no allocated actor path to nest under
--- (Task's batch/"work" split has the same shape, one level up -- see
--- Project.Types's task constructor), and a caller-supplied label keeps
--- concurrent reviewCommit calls from the same actor in separate groups.
+-- The caller supplies an independent campaign label for each root review.
 reviewCommit
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
   => Label -> GitOid -> GitOid -> Text -> [Text] -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)

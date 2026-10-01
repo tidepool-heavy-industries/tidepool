@@ -2007,7 +2007,7 @@ async fn work_actor_consumes_later_progress_without_rearming() {
     let replied =
         dispatch_haskell_script(producer.policy.as_ref(), "respond (\"finished\" :: Text)").await;
     assert_eq!(replied["status"], "replied", "{replied}");
-    let closed = committed(root.as_ref(), "view <- readWork forwarding\ninspectFull (map Project.Routing.sourceStatus (collectedWork view))\nfinishWork forwarding").await;
+    let closed = committed(root.as_ref(), "view <- readWork forwarding\ninspectFull (map Exomonad.Contrib.Routing.sourceStatus (collectedWork view))\nfinishWork forwarding").await;
     assert_eq!(closed["items"][1]["output"], "[WorkClosed]", "{closed}");
     assert!(
         closed["items"][2]["output"]

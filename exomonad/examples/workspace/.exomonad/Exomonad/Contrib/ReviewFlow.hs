@@ -16,7 +16,7 @@
 -- One Task's committed candidate, fresh review, and bounded same-child repair.
 -- An optional merge target publishes checked local delivery. The owner retains
 -- product acceptance, scope decisions and deliberate resource retirement.
-module Project.ReviewFlow
+module Exomonad.Contrib.ReviewFlow
   ( ReviewFlow (reviewSnapshot, reviewCleanup)
   , ReviewFlowState (..), flowQuestions
   , ReviewCleanupRequest (..)
@@ -49,12 +49,12 @@ import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (GitRef (..), Jev, WorktreeHandle (..), WorktreeIntegration, ActorLocal, Commands)
 import Tidepool.Actors.Worktree (boundWorktree)
 import Tidepool.Worktree (WorktreeReceipt (..), renderGitOid, renderWorktreeError, renderWorktreeId)
-import qualified Project.Merge as Merge
+import qualified Exomonad.Contrib.Merge as Merge
 import Tidepool.Agent.Reply (requestIdNumber)
-import Project.CheckResults
-import Project.FocusedGateExample (PlanCheck (..), PlanStart (..), PlanReport (..), startCheckPlanInto, planPassed, planSummary)
-import Project.Types
-import Project.Routing (WorkEvent, workChange, workQuestionsMessage)
+import Exomonad.Contrib.CheckResults
+import Exomonad.Contrib.CheckPlan (PlanCheck (..), PlanStart (..), PlanReport (..), startCheckPlanInto, planPassed, planSummary)
+import Exomonad.Contrib.Types
+import Exomonad.Contrib.Routing (WorkEvent, workChange, workQuestionsMessage)
 
 data ReviewChoice = HonorReview | EscalateReview Text
   deriving (Show, Eq)

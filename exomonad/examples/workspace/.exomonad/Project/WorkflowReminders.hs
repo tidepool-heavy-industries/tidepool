@@ -32,7 +32,7 @@ import qualified Tidepool.Actor.Record as R
 import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (Actor, Jev, Notifications)
 import Tidepool.Effects.Row (knownEffects)
-import Project.Routing (WorkEvent, WorkSink, observeWork)
+import Exomonad.Contrib.Routing (WorkEvent, WorkSink, observeWork)
 
 data ReminderPolicy = ReminderPolicy
   { reminderContext :: Text

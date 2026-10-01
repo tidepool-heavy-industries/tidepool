@@ -16,9 +16,9 @@ import Tidepool.Actors.Exomonad
 import Tidepool.Worktree (renderGitOid)
 import Tidepool.Effects.Core (AgentInspection)
 import Exomonad.Workspace (workspaceIdentity)
-import Project.Types
+import Exomonad.Contrib.Types
 import Project.Work (projectPrompt)
-import Project.Routing (WorkState (..), WorkSource (..), WorkEvent (..), WorkDelta (..), outstandingEvidence)
+import Exomonad.Contrib.Routing (WorkState (..), WorkSource (..), WorkEvent (..), WorkDelta (..), outstandingEvidence)
 
 -- Existing owned handles and observations are the evidence. This value is a
 -- snapshot to inspect or pass on, not another registry or mutable task record.

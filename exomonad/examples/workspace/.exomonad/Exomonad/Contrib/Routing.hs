@@ -10,9 +10,9 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE FlexibleContexts #-}
 
--- Project policy for live waves. The kernel owns ordered delivery and lifetime;
--- this actor retains engineering evidence and chooses which changes need judgment.
-module Project.Routing
+-- Typed evidence collection for live batches. Runtime owners retain ordered
+-- delivery and lifetime; callers choose notification and observation policy.
+module Exomonad.Contrib.Routing
   ( WorkActor (workSnapshot, workNotification, acknowledgeWork), WorkState (..), WorkSource (..), WorkStatus (..)
   , WorkEvent (..), WorkDelta (..), workChange, Notice (..), WorkSink (..), WorkDelivery (..), ObserverAdmission (..), noWorkDelivery, observeWork
   , WorkNoticePolicy (..), WorkPolicyReceipt (..), setWorkNoticePolicy
@@ -33,9 +33,8 @@ import qualified Tidepool.Actor as Actor
 import Tidepool.Actors.Exomonad
 import Tidepool.Worktree (renderGitOid)
 import Tidepool.Effects.Core (Actor)
-import Project.Types
-import Project.Actors (CoordinationEffects, coordinationActor)
-import Project.Work (sameQuestion)
+import Exomonad.Contrib.Types
+import Exomonad.Contrib.Actors (CoordinationEffects, coordinationActor)
 
 -- Applicative admission retains the original handle product. Only the event
 -- projection changes a result's value; execution and worktree receipts survive.
