@@ -420,6 +420,9 @@ impl DeploymentModulePackage {
             .map_err(|_| ModulePackageError::Format("package imports"))?;
             records.push(record);
         }
+        for record in &records {
+            require_complete_cohort(&records, &record.evidence)?;
+        }
         validate_closed(&records, &self.catalog.source_root)?;
         Ok(records)
     }
@@ -499,15 +502,21 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::with_modules(&["Library"])
+        }
+
+        fn with_modules(names: &[&str]) -> Self {
             let root = tempfile::tempdir().unwrap();
             let source = root.path().join("sources");
             let output = root.path().join("products");
             fs::create_dir(&source).unwrap();
-            fs::write(
-                source.join("Library.hs"),
-                "module Library where\nvalue = 7\n",
-            )
-            .unwrap();
+            for name in names {
+                fs::write(
+                    source.join(format!("{name}.hs")),
+                    format!("module {name} where\nvalue = 7\n"),
+                )
+                .unwrap();
+            }
             let source = absolute(&source).unwrap();
             let producer_identity = [3; 32];
             let authority = CompilerDeploymentAuthority {
@@ -522,28 +531,35 @@ mod tests {
                 version: 4,
                 cache_safe: true,
                 selection_complete: true,
-                sources: vec![
+                sources: std::iter::once(SourceEvidence {
+                    path: "@generated-source".into(),
+                    sha256: sha(b"target"),
+                })
+                .chain(names.iter().map(|name| {
+                    let path = source.join(format!("{name}.hs"));
                     SourceEvidence {
-                        path: "@generated-source".into(),
-                        sha256: sha(b"target"),
-                    },
-                    SourceEvidence {
-                        path: source.join("Library.hs"),
-                        sha256: sha(&fs::read(source.join("Library.hs")).unwrap()),
-                    },
-                ],
-                modules: vec![ModuleEvidence {
-                    unit: "u".into(),
-                    module: "Library".into(),
-                    boot: false,
-                    source: source.join("Library.hs"),
-                    imports: vec![],
-                    product: ProductAvailability::Ready,
-                }],
+                        sha256: sha(&fs::read(&path).unwrap()),
+                        path,
+                    }
+                }))
+                .collect(),
+                modules: names
+                    .iter()
+                    .map(|name| ModuleEvidence {
+                        unit: "u".into(),
+                        module: (*name).into(),
+                        boot: false,
+                        source: source.join(format!("{name}.hs")),
+                        imports: vec![],
+                        product: ProductAvailability::Ready,
+                    })
+                    .collect(),
                 packages: vec![],
                 resolutions: vec![],
             };
-            let bytes = product_bytes("u", "Library", &[0x42]);
+            let bytes = combine_rows(names.iter().map(|name| product_bytes("u", name, &[0x42])));
+            let packages =
+                combine_rows(names.iter().map(|name| package_bundle("u", name, &[0x42])));
             let products = tidepool_repr::execution_schema::parse_module_products(
                 &bytes,
                 &crate::prepared_artifact::production_requirements().unwrap(),
@@ -562,7 +578,7 @@ mod tests {
                 &evidence,
                 &products,
                 &bytes,
-                &package_bundle("u", "Library", &[0x42]),
+                &packages,
                 "target",
                 RootPolicy::Fixture,
             )
@@ -586,6 +602,28 @@ mod tests {
         fn catalog(&self) -> Catalog {
             serde_json::from_slice(&fs::read(self.output.join("catalog.json")).unwrap()).unwrap()
         }
+    }
+
+    fn combine_rows(encoded: impl IntoIterator<Item = Vec<u8>>) -> Vec<u8> {
+        use ciborium::value::Value;
+        let mut header = None;
+        let mut rows = Vec::new();
+        for bytes in encoded {
+            let Value::Array(mut fields) = ciborium::de::from_reader(bytes.as_slice()).unwrap()
+            else {
+                panic!("fixture array")
+            };
+            let Value::Array(mut next) = fields.pop().unwrap() else {
+                panic!("fixture rows")
+            };
+            rows.append(&mut next);
+            header.get_or_insert(fields);
+        }
+        let mut fields = header.unwrap();
+        fields.push(Value::Array(rows));
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&Value::Array(fields), &mut bytes).unwrap();
+        bytes
     }
 
     #[test]
@@ -871,6 +909,30 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn catalog_shrinking_refuses_the_retained_full_producing_cohort() {
+        let fixture = Fixture::with_modules(&["Library", "Tidepool.Prelude"]);
+        assert_eq!(fixture.load().unwrap().records.len(), 2);
+        let mut catalog = fixture.catalog();
+        catalog.modules.retain(|files| {
+            let owner: Owner =
+                serde_json::from_slice(&fs::read(fixture.output.join(&files.owner.path)).unwrap())
+                    .unwrap();
+            owner.module != "Tidepool.Prelude"
+        });
+        assert_eq!(catalog.modules.len(), 1);
+        fs::write(
+            fixture.output.join("catalog.json"),
+            serde_json::to_vec(&catalog).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            matches!(fixture.load(), Err(ModulePackageError::IncompleteProduct {
+            module, availability: ProductAvailability::Ready, ..
+        }) if module == "Tidepool.Prelude")
+        );
     }
 }
 
