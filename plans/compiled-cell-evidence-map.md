@@ -1,6 +1,6 @@
 # Compiled-cell evidence map
 
-Static source audit of revision `cedb5f978a06a1170ebacc928577075a24b79fa5` against [engine-compiled-cell-delivery.md](engine-compiled-cell-delivery.md). This records test entrypoints and their visible boundaries; no tests or builds were run for this audit. A named test is not treated as executed evidence unless its runner, required environment, and retained result are identified.
+Static source audit of revision `cedb5f978a06a1170ebacc928577075a24b79fa5` (2026-09-30 18:28 PDT) against [engine-compiled-cell-delivery.md](engine-compiled-cell-delivery.md). This records test entrypoints and their visible boundaries; no tests or builds were run for this audit. A named test is not treated as executed evidence unless its runner, required environment, and retained result are identified.
 
 ## Current production route and direct evidence gap
 
@@ -40,15 +40,30 @@ The admitted actor route is `ResidentActorWorkbench::prepare_cell` → `prepare_
 | `session::exact_recovery_acceptance_tests::exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_dependencies_and_retractions` (launches ignored child `...::exact_recovery_fresh_process_child`) | `tidepool-runtime` | Fresh-process durable hydration/publication, preserves originals/hidden dependencies/retractions and verifies recovery does not rewrite the manifest or replay effects. | Parent launches the child explicitly with fresh-process worker configuration. It compiles a *new* consumer after hydration; that is not replay of authored source/effects to restore prior values. |
 | `newrecovery_v2::tests::old_recovery_formats_are_refused_without_rewriting_bytes`; `...::future_recovery_format_is_distinctly_refused_without_rewriting_bytes` | `tidepool-runtime` | Typed refusal of unsupported older/future format bytes without rewriting them. | These are intentional compatibility-boundary tests, not stale tests expecting old formats to load. |
 
-## Validation status and acceptance items not established by these entrypoints
+## Historical validation status from the source audit
 
-At refresh time, coordinator-reported status is that two durable baseline attempts failed and the third attempt is still running. Treat these as failure/in-progress evidence only; test/helper source existence is not a pass. The earlier failure details retained in [engine-resident-performance.md](engine-resident-performance.md) concern revision `e9be683815` and must not be conflated with current-revision outcomes. No performance results were independently inspected or executed for this source audit.
+The source audit at `cedb5f978a06a1170ebacc928577075a24b79fa5` recorded coordinator status that two durable baseline attempts had failed and a third was running. That was historical status only. The earlier failure details retained in [engine-resident-performance.md](engine-resident-performance.md) concern revision `e9be683815` and are not current-revision outcomes. No performance results were independently inspected or executed for that source audit.
 
 - The added facade preflight fixture reaches the installed AgentSpec/admitted-actor raw-dispatch boundary, but its required-worker execution remains pending. Runtime-session tests exercise `compile_cell_program_admitted`, program item/display consumption, publication, and pre-submission authority refusal separately.
 - The added admitted-actor preflight fixture specifies the decisive later-type-error/zero-earlier-effect assertion, retained retry and no-publication probe. It closes no acceptance obligation until executed with the matching worker and a retained nonzero test result.
 - B0/B100 × N1/N10/N100 exists in the ephemeral complete-cell helper path. Durable coverage adds only the two-cell B0 baseline and opt-in N10 at B0/B100; it does not cover the full B/N matrix durably, eight actors, or all graph/decode/encode/hash/write counters in the plan.
 - Actor capture and parked-cell tests cover slices of M2 behavior, not the full acceptance matrix or eight-actor overlap. The ignored facade report has no assertions and requires a live daemon.
 - The inspected local gates do not establish the plan's full browser request/reconnect/cancel matrix, native browser failure evidence, startup/five-package p95 behavior, full Haskell corpus/worker/Buck boundary, or independent adversarial review. This map makes no claim about evidence stored elsewhere.
+
+## Subsequent retained execution evidence
+
+The following log review updates execution status after the static audit; it does not change that audit's source snapshot. These are selected tests and partial runs, not full M1/M2 or performance acceptance.
+
+| Source / attempt | Retained evidence | Current result and boundary |
+|---|---|---|
+| Actor capture/workspace two-gate at `aa367` | `/tmp/actor-native-two-gates-object.log` | One capture-reader test passed: `two_captured_readers_reply_before_parent_failure_and_survive_final_checkpoint_release` (1/1). The workspace-admission case `two_checkpoint_children_remint_after_workspace_wait_token_release_and_issuer_failure` failed because the fixture's `capturedValue` was out of scope (0/1). Overall: 1 passed, 1 failed; this is partial actor evidence, not M2 acceptance. |
+| Startup pure smoke at `f1fdcca1` | `/tmp/startup-facade-pure-smoke.log` | The single selected `production_authored_root_failure_is_not_evaluated_before_durable_binding` test passed (1 passed, 631 skipped). This checks that pure startup boundary only. |
+| Runtime v5 pure-startup set | `/tmp/tidepool-joined-startup-v5-tests.log` | Nine selected runtime unit tests passed, 381 skipped. They cover startup pin release, v5 manifest/checksum validation and startup authorization/source-seal conditions; they do not run a production startup/recovery process. |
+| Authentic native-marker recovery at `c04f3404`, subsequently joined at `d9174798ff` | `/tmp/tidepool-recovery-v5-authentic-runtime-markers-final.log` | `private_recovery_validates_authentic_native_markers_and_later_tamper` passed (1 passed, 373 skipped). This is one runtime hydration/tamper test, not full recovery or M1/M2 acceptance. |
+| Startup facade eight-test campaign at `225c5989` | `/tmp/startup-facade-v5-final-tests.log` | Still running at the last process check; the selected campaign had started 8 tests, and test 2 failed after 345 seconds. The production cold-successor test reported `extractor contract failure: artifact inventory: incomplete interface requirements`; its nested production process failed for the same reason. The run uses `--no-fail-fast`, so there is no final campaign count yet. Treat the campaign as in progress with observed failures, not as a pass. |
+| Same-two-cell startup baseline at `0092148c` | Review status supplied by coordinator; no execution log inspected here | Pending review. Do not count it as executed or passing evidence. |
+
+The current evidence narrows specific startup and native-marker questions while leaving the full delivery plan's actor, recovery, browser, compiler, and performance acceptance gates open.
 
 ## Tests that look stale when cited for the new route
 
