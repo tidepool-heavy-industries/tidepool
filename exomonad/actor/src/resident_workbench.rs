@@ -15366,7 +15366,7 @@ mod request_tests {
 
     #[tokio::test]
     async fn concurrent_child_retirements_share_one_cleanup_owner() {
-        let (runner, machines, child_id, custody) = child_session_with_outstanding_custody();
+        let (runner, machines, child_id, custody, _root) = child_session_with_binding_lease();
         let (first, second) = tokio::join!(
             runner.retire_child_session(child_id, false),
             runner.retire_child_session(child_id, false),
@@ -15403,7 +15403,7 @@ mod request_tests {
 
     #[tokio::test]
     async fn canceled_child_retirement_keeps_the_cleanup_owner_until_last_reader_drops() {
-        let (runner, machines, child_id, custody) = child_session_with_outstanding_custody();
+        let (runner, machines, child_id, custody, _root) = child_session_with_binding_lease();
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let blocker_access = runner.access.sharing();
