@@ -400,30 +400,30 @@ impl ModuleCandidateOffer {
         let run = endpoint
             .execute(&command)
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        let compile_input_identity = if request.supports_compile_input_identity()
-            && run.success()
+        let (turn, native) = if run.success()
             && diag::decode_extract_result(true, &run.output.stdout, &run.output.stderr).is_ok()
         {
-            self.seal_admitted_turn_identity(directory.path())
+            self.read_admitted_turn(directory.path(), request.supports_compile_input_identity())
                 .map_err(|error| self.retain_failure(directory.path(), &run.output.stderr, error))?
         } else {
-            None
+            (None, None)
         };
         Ok(AdmittedTurnOutput {
             directory,
             run,
-            compile_input_identity,
+            turn,
+            native,
         })
     }
 
-    fn seal_admitted_turn_identity(
+    fn read_admitted_turn(
         &self,
         directory: &Path,
-    ) -> Result<Option<Arc<SealedCompileInputIdentity>>, CompileError> {
-        let value = crate::checked_cell::decode(&crate::checked_cell::read(
-            directory.join("turn.cbor"),
-            32 << 20,
-        )?)?;
+        issue_identity: bool,
+    ) -> Result<(Option<Arc<[u8]>>, Option<NativeTurnOutput>), CompileError> {
+        let turn: Arc<[u8]> =
+            crate::checked_cell::read(directory.join("turn.cbor"), 32 << 20)?.into();
+        let value = crate::checked_cell::decode(&turn)?;
         let row = crate::checked_cell::row(&value, 2)?;
         let (source, site_observations) = match crate::checked_cell::string(&row[0])? {
             "Bind" => {
@@ -434,7 +434,7 @@ impl ModuleCandidateOffer {
                 let fields = crate::checked_cell::row(&row[1], 3)?;
                 (crate::checked_cell::string(&fields[2])?, &fields[1])
             }
-            "Decl" => return Ok(None),
+            "Decl" => return Ok((Some(turn), None)),
             _ => {
                 return Err(CompileError::ExtractFailed(
                     "admitted turn result kind".into(),
@@ -442,24 +442,29 @@ impl ModuleCandidateOffer {
             }
         };
         let sites = decode_turn_yield_sites(site_observations)?;
+        let mut output = read_native_turn_artifacts(directory, turn.clone(), source.to_owned())?;
+        let (table, warnings) = read_metadata(&output.metadata)?;
         let module = extract_module_name(source).ok_or_else(|| {
             CompileError::ExtractFailed("admitted turn source module missing".into())
         })?;
-        let target = Arc::new(tidepool_repr::execution_schema::parse_program(
-            &crate::checked_cell::read(directory.join("__prepared.prepared.cbor"), 128 << 20)?,
-            &crate::prepared_artifact::production_requirements()?,
-            DecodeLimits::default(),
-        )?);
-        Ok(seal_turn_outputs_inner(
+        output.products = seal_turn_outputs_inner(
             self,
             directory,
             &directory.join(format!("{module}.hs")),
             source,
-            &target,
+            &output.target,
             "__prepared",
-            Some(&sites),
+            issue_identity.then_some((&table, sites.as_slice())),
         )?
-        .and_then(|sealed| sealed.compile_input_identity))
+        .map(Arc::new);
+        Ok((
+            Some(turn),
+            Some(NativeTurnOutput {
+                output,
+                table,
+                warnings,
+            }),
+        ))
     }
 
     pub fn select(producer: &[u8], include: &[PathBuf], scratch: &Path) -> Self {
@@ -1067,7 +1072,7 @@ impl ModuleCandidateOffer {
             let observation = CellProgramObservations {
                 turn: output.turn,
                 metadata: output.metadata,
-                products: output.products,
+                products: output.products.expect("program output was sealed"),
             };
             let display_observations =
                 display_outputs
@@ -1075,7 +1080,7 @@ impl ModuleCandidateOffer {
                     .map(|output| CellProgramObservations {
                         turn: output.turn,
                         metadata: output.metadata,
-                        products: output.products,
+                        products: output.products.expect("program output was sealed"),
                     });
             items.push(CellProgramItem {
                 checked: item,
@@ -1125,37 +1130,24 @@ impl ModuleCandidateOffer {
         }
         let source =
             crate::checked_cell::string(&crate::checked_cell::row(&record[1], 5)?[4])?.to_owned();
-        let module = extract_module_name(&source).ok_or_else(|| {
+        let mut output = read_native_turn_artifacts(directory, turn, source)?;
+        let module = extract_module_name(&output.source).ok_or_else(|| {
             CompileError::ExtractFailed("program native source has no module owner".into())
         })?;
-        let target = Arc::new(tidepool_repr::execution_schema::parse_program(
-            &crate::checked_cell::read(directory.join("__prepared.prepared.cbor"), 128 << 20)?,
-            &crate::prepared_artifact::production_requirements()?,
-            DecodeLimits::default(),
-        )?);
-        let metadata: Arc<[u8]> =
-            crate::checked_cell::read(directory.join("meta.cbor"), 32 << 20)?.into();
-        let products = Arc::new(
+        output.products = Some(Arc::new(
             seal_turn_outputs(
                 self,
                 directory,
                 &directory.join(format!("{module}.hs")),
-                &source,
-                &target,
+                &output.source,
+                &output.target,
                 "__prepared",
             )?
             .ok_or_else(|| {
                 CompileError::ExtractFailed("program native products are not sealed".into())
             })?,
-        );
-        Ok(ProgramNativeOutput {
-            directory: directory.to_owned(),
-            target,
-            turn,
-            metadata,
-            products,
-            source,
-        })
+        ));
+        Ok(output)
     }
 
     fn admit_program_support(
@@ -1170,6 +1162,8 @@ impl ModuleCandidateOffer {
         })?;
         let support = output
             .products
+            .as_ref()
+            .expect("program output was sealed")
             .recovery_products
             .iter()
             .filter(|product| product.owner().module != module)
@@ -1418,13 +1412,68 @@ impl ModuleCandidateOffer {
     }
 }
 
+#[derive(Debug)]
 struct ProgramNativeOutput {
     directory: PathBuf,
     target: Arc<PreparedProgram>,
     turn: Arc<[u8]>,
     metadata: Arc<[u8]>,
-    products: Arc<SealedTurnProducts>,
+    products: Option<Arc<SealedTurnProducts>>,
     source: String,
+}
+
+fn read_native_turn_artifacts(
+    directory: &Path,
+    turn: Arc<[u8]>,
+    source: String,
+) -> Result<ProgramNativeOutput, CompileError> {
+    let target = Arc::new(tidepool_repr::execution_schema::parse_program(
+        &crate::checked_cell::read(directory.join("__prepared.prepared.cbor"), 128 << 20)?,
+        &crate::prepared_artifact::production_requirements()?,
+        DecodeLimits::default(),
+    )?);
+    let metadata = crate::checked_cell::read(directory.join("meta.cbor"), 32 << 20)?.into();
+    Ok(ProgramNativeOutput {
+        directory: directory.to_owned(),
+        target,
+        turn,
+        metadata,
+        products: None,
+        source,
+    })
+}
+
+/// Immutable native products and observations retained by the execution owner.
+/// Reading the diagnostic directory cannot change this compiled bundle.
+#[derive(Debug)]
+pub struct NativeTurnOutput {
+    output: ProgramNativeOutput,
+    table: DataConTable,
+    warnings: MetaWarnings,
+}
+
+impl NativeTurnOutput {
+    pub fn target_owned(&self) -> Arc<PreparedProgram> {
+        self.output.target.clone()
+    }
+    pub fn table(&self) -> &DataConTable {
+        &self.table
+    }
+    pub fn warnings(&self) -> &MetaWarnings {
+        &self.warnings
+    }
+    pub fn turn_bytes(&self) -> &[u8] {
+        &self.output.turn
+    }
+    pub fn metadata_bytes(&self) -> &[u8] {
+        &self.output.metadata
+    }
+    pub fn products(&self) -> Option<&SealedTurnProducts> {
+        self.output.products.as_deref()
+    }
+    pub fn source(&self) -> &str {
+        &self.output.source
+    }
 }
 
 #[derive(Debug)]
@@ -1486,7 +1535,8 @@ fn ensure_no_uncertified_globals(artifacts: &CompiledArtifacts) -> Result<(), Co
 pub struct AdmittedTurnOutput {
     directory: TempDir,
     run: tidepool_extract_cmd::ExtractRun,
-    compile_input_identity: Option<Arc<SealedCompileInputIdentity>>,
+    turn: Option<Arc<[u8]>>,
+    native: Option<NativeTurnOutput>,
 }
 
 impl AdmittedTurnOutput {
@@ -1500,7 +1550,17 @@ impl AdmittedTurnOutput {
         self.run.elapsed
     }
     pub fn compile_input_identity(&self) -> Option<&Arc<SealedCompileInputIdentity>> {
-        self.compile_input_identity.as_ref()
+        self.native
+            .as_ref()?
+            .products()?
+            .compile_input_identity
+            .as_ref()
+    }
+    pub fn native_output(&self) -> Option<&NativeTurnOutput> {
+        self.native.as_ref()
+    }
+    pub fn turn_bytes(&self) -> Option<&[u8]> {
+        self.turn.as_deref()
     }
 }
 
@@ -1534,7 +1594,7 @@ fn seal_turn_outputs_inner(
     source: &str,
     prepared: &Arc<PreparedProgram>,
     target: &str,
-    inline_sites: Option<&[YieldSite]>,
+    identity_metadata: Option<(&DataConTable, &[YieldSite])>,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
         return Err(CompileError::ExtractFailed(
@@ -1655,27 +1715,26 @@ fn seal_turn_outputs_inner(
         );
     }
     let certified_groups: Arc<[_]> = certified.groups.into();
-    let compile_input_identity = if let Some(sites) = inline_sites.filter(|_| offer.exact.is_none())
-    {
-        let (table, _) = read_metadata(&read_sidecar("meta.cbor")?)?;
-        crate::compile_input::seal(
-            &offer.producer,
-            &offer.include,
-            valid,
-            &package_closure,
-            source,
-            target,
-            prepared,
-            &certified_groups,
-            &pending_imports,
-            &package_interfaces,
-            table,
-            sites.to_vec(),
-        )?
-        .map(Arc::new)
-    } else {
-        None
-    };
+    let compile_input_identity =
+        if let Some((table, sites)) = identity_metadata.filter(|_| offer.exact.is_none()) {
+            crate::compile_input::seal(
+                &offer.producer,
+                &offer.include,
+                valid,
+                &package_closure,
+                source,
+                target,
+                prepared,
+                &certified_groups,
+                &pending_imports,
+                &package_interfaces,
+                table.clone(),
+                sites.to_vec(),
+            )?
+            .map(Arc::new)
+        } else {
+            None
+        };
     Ok(Some(SealedTurnProducts {
         compile_input_identity,
         checked_display: offer
@@ -3350,6 +3409,41 @@ mod constructor_identity_tests {
     fn prepared_fixture_bytes() -> Vec<u8> {
         include_bytes!("../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor")
             .to_vec()
+    }
+
+    #[test]
+    fn immutable_native_turn_output_ignores_mutated_diagnostic_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let metadata = write_metadata(&DataConTable::new(), &MetaWarnings::default()).unwrap();
+        std::fs::write(
+            directory.path().join("__prepared.prepared.cbor"),
+            prepared_fixture_bytes(),
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("meta.cbor"), &metadata).unwrap();
+        let turn: Arc<[u8]> = b"retained turn observation".as_slice().into();
+        let output =
+            read_native_turn_artifacts(directory.path(), turn.clone(), "module Input where".into())
+                .unwrap();
+        let (table, warnings) = read_metadata(&output.metadata).unwrap();
+        let retained = NativeTurnOutput {
+            output,
+            table,
+            warnings,
+        };
+        let target = retained.target_owned();
+        std::fs::write(
+            directory.path().join("__prepared.prepared.cbor"),
+            b"invalid",
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("meta.cbor"), b"invalid").unwrap();
+        drop(directory);
+        assert!(Arc::ptr_eq(&target, &retained.target_owned()));
+        assert_eq!(retained.turn_bytes(), turn.as_ref());
+        assert_eq!(retained.metadata_bytes(), metadata.as_slice());
+        assert_eq!(retained.source(), "module Input where");
+        assert!(retained.products().is_none());
     }
 
     /// A table entry that agrees with `decl` on every fact this crate checks
