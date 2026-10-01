@@ -9,10 +9,15 @@ import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, tails)
 import Data.Char (isDigit)
+import Data.Data (Data, Typeable, cast, gmapQ)
 import qualified Data.Text as Text
 import GHC
 import GHC.Builtin.Types (intTy)
-import GHC.Types.Name.Occurrence (mkVarOcc)
+import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
+import GHC.Types.Name (nameModule_maybe, nameOccName)
+import GHC.Tc.Types (tcg_rn_decls)
+import GHC.Types.SourceText (il_value)
+import GHC.Types.Fixity (Fixity(..))
 import GHC.Driver.Session (parseDynamicFilePragma)
 import GHC.Driver.Env (hsc_HPT)
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
@@ -38,7 +43,7 @@ import Tidepool.Introspection (InfoEntry(..), InspectionResult(..), runInspectio
 import Tidepool.DependencyEvidence
 import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..), SessionScope(..)
-  , mkThinSessionIface, writeSessionIface )
+  , mkThinSessionIface, writeSessionIface, injectSessionIface, renderSessionModule )
 import Tidepool.Timing
   ( InterfaceStage(..), InterfaceReuse(..), measureModuleInterface )
 import System.Directory
@@ -55,6 +60,7 @@ main = getArgs >>= \case
   ["--ordered-segments"] -> orderedInferenceSegments >> putStrLn "ordered inference segments: 1 passed"
   ["--program-originals"] -> programOriginalImportsCompilation >> putStrLn "program original imports: 1 passed"
   ["--function-value-iface"] -> functionValueInterfaceCompilation >> putStrLn "function value interface: 1 passed"
+  ["--session-fixities"] -> sessionFixitiesCompilation >> putStrLn "session fixities: 1 passed"
   _ -> runAllTests
 
 runAllTests :: IO ()
@@ -169,6 +175,79 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
       createDirectory path
       pure path
 
+-- Serialized value interfaces carry the exact exported binder's fixity.
+-- Nested same-spelling binders and captured expression-local operators have
+-- different renamed identities and cannot supply that row.
+sessionFixitiesCompilation :: IO ()
+sessionFixitiesCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let scopeRoot = root </> "session"
+      build fixture generation binders expected = do
+        let path = root </> fixture ++ ".hs"
+            owner = SessionModule ValMod (Generation generation)
+        readFile ("test-cell-splitter/fixtures/session-fixities" </> fixture ++ ".hs") >>= writeFile path
+        prepared <- runPipelineSelected PreparedStg path [root]
+        let result = pprPipelineResult prepared
+        _ <- mkBoundBinders binders generation scopeRoot result
+        hydrated <- injectSessionIface scopeRoot owner (prHscEnv result)
+        iface <- maybe (fail "serialized value interface was not installed") (pure . hm_iface)
+          (lookupHpt (hsc_HPT hydrated) (renderSessionModule owner))
+        unless (mi_fixities iface == expected)
+          (fail (fixture ++ " exported another binder's fixity"))
+        pure owner
+      check label owner expected = do
+        let path = root </> label ++ ".hs"
+            scope = SessionScope scopeRoot [owner] Nothing Nothing
+        writeFile path (unlines ["module " ++ label ++ " where"
+          , "import " ++ showSDocUnsafe (ppr (renderSessionModule owner)) ++ " (minus)"
+          , "__result = 10 `minus` 3 `minus` 1"])
+        checked <- runPipelineSessionSelected CheckedEnvironment mempty GeneralCompile
+          (Just scope) path [root] Nothing
+        case [body | FunBind { fun_id = name, fun_matches = MG { mg_alts = matches } }
+                  <- (collectFixityData (tcg_rn_decls (crTargetTcGblEnv checked)) :: [HsBind GhcRn])
+                  , occNameString (nameOccName (unLoc name)) == "__result"
+                  , L _ Match { m_grhss = GRHSs { grhssGRHSs = [L _ (GRHS _ [] body)] } }
+                  <- unLoc matches] of
+          [body] -> valueOf owner body >>= assertEqual label expected
+          _ -> fail "fixity consumer has no unique renamed result"
+  right <- build "RightFixity" 1 ["minus"] [(mkVarOcc "minus", Fixity 5 InfixR)]
+  check "RightConsumer" right 8
+  left <- build "LeftFixity" 2 ["minus"] [(mkVarOcc "minus", Fixity 5 InfixL)]
+  check "LeftConsumer" left 6
+  defaultOwner <- build "DefaultFixity" 3 ["minus"] []
+  check "DefaultConsumer" defaultOwner 6
+  check "OlderCapturedConsumer" right 8
+  _ <- build "CapturedFixity" 4 ["__observation"] []
+  multi <- build "MultiFixity" 5 ["minus", "plus"]
+    [(mkVarOcc "minus", Fixity 5 InfixR), (mkVarOcc "plus", Fixity 7 InfixL)]
+  check "MultiConsumer" multi 8
+  pure ()
+  where
+    valueOf :: SessionModule -> LHsExpr GhcRn -> IO Integer
+    valueOf owner expression = case unLoc expression of
+      HsPar _ inner -> valueOf owner inner
+      HsOverLit _ OverLit { ol_val = HsIntegral literal } -> pure (il_value literal)
+      OpApp _ left operator right -> do
+        case unLoc operator of
+          HsVar _ name -> unless
+            (occNameString (nameOccName (unLoc name)) == "minus"
+              && fmap moduleName (nameModule_maybe (unLoc name)) == Just (renderSessionModule owner))
+            (fail "fixity consumer resolved another original binder")
+          _ -> fail "fixity consumer has no resolved operator Name"
+        (-) <$> valueOf owner left <*> valueOf owner right
+      _ -> fail "fixity consumer changed its sample expression"
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path,handle) <- openTempFile parent "tidepool-session-fixities"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+collectFixityData :: (Data value, Typeable selected) => value -> [selected]
+collectFixityData value = case cast value of
+  Just selected -> [selected]
+  Nothing -> concat (gmapQ collectFixityData value)
+
 orderedInferenceSegments :: IO ()
 orderedInferenceSegments = do
   forM_ ["-fdefer-type-errors", "-fdefer-typed-holes", "-fdefer-out-of-scope-variables"] $ \option -> do
@@ -176,7 +255,7 @@ orderedInferenceSegments = do
     case deferred of
       Left CellPrologueFailure {} -> pure ()
       _ -> fail ("ordered program accepted deferred errors: " ++ option)
-  rejected <- analyzeOrderedCell template "let { infixr 5 minus; minus = (-) :: Int -> Int -> Int }\n10 `minus` 3 `minus` 1"
+  rejected <- analyzeOrderedCell template "let { infixr 5 `minus`; minus = (-) :: Int -> Int -> Int }\n10 `minus` 3 `minus` 1"
   case rejected of
     Left CellUnsupportedLocalFixity {} -> pure ()
     _ -> fail ("ordered program accepted a local fixity absent from future Val evidence: " ++ show rejected)

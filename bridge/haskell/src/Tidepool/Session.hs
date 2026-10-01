@@ -13,7 +13,7 @@
 -- The boundary has three operations:
 --
 --   * 'mkThinSessionIface' — synthesize a THIN 'ModIface' for a session module
---     @Tidepool.Session.Val.G<g>@ carrying ONLY the binder's type 'IfaceDecl'.
+--     @Tidepool.Session.Val.G<g>@ carrying the binder's type 'IfaceDecl' and fixity.
 --     NO @mi_extra_decls@ (we never set @Opt_WriteIfSimplifiedCore@ here) and NO
 --     @ifIdUnfolding@ — so the front-end typechecker sees the type but GHC has
 --     no body to inline. Built directly from @(OccName, Type)@ pairs,
@@ -59,8 +59,9 @@ module Tidepool.Session
   , SessionScope(..)
   , emptySessionScope
   , isSessionScopeActive
-    -- * Type-only interface transport
+    -- * Thin interface transport
   , mkThinSessionIface
+  , mkThinSessionIfaceWithFixities
   , writeSessionIface
   , injectSessionIface
   , injectSessionScope, registerSessionInterfaceLocation
@@ -84,6 +85,7 @@ import GHC.Driver.Session (targetProfile)
 import GHC.Types.Avail (AvailInfo(..))
 import GHC.Types.Name (Name, mkExternalName)
 import GHC.Types.Name.Occurrence (OccName)
+import GHC.Types.Fixity (Fixity)
 import GHC.Types.Id (mkVanillaGlobal)
 import GHC.Types.TyThing (TyThing(..))
 import GHC.Types.Unique (mkUniqueGrimily)
@@ -97,7 +99,7 @@ import GHC.Iface.Load (readIface)
 import GHC.IfaceToCore (typecheckIface)
 import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Unit.Module.ModIface
-  ( ModIface, emptyFullModIface, set_mi_decls, set_mi_exports )
+  ( ModIface, emptyFullModIface, set_mi_decls, set_mi_exports, set_mi_fixities )
 import GHC.Unit.Module.ModDetails (ModDetails)
 
 import GHC.Unit.Home (homeUnitAsUnit)
@@ -117,10 +119,10 @@ import GHC.Utils.Outputable (text)
 import GHC.Types.SrcLoc (noSrcSpan)
 import qualified GHC.Data.Maybe as MErr
 
-import Control.Monad (foldM)
+import Control.Monad (foldM, unless)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Char (isDigit)
-import Data.List (isPrefixOf, stripPrefix)
+import Data.List (isPrefixOf, stripPrefix, nub)
 import Data.Word (Word64)
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory, (</>), (<.>))
@@ -222,8 +224,8 @@ isSessionScopeActive scope = not (null (ssValIfaces scope))
 -- mkThinSessionIface — synthesize a type-only iface from TyThings
 --------------------------------------------------------------------------------
 
--- | Build a THIN 'ModIface' for a session module carrying ONLY the given
--- binders' type 'IfaceDecl's. No @mi_extra_decls@, no unfoldings: there is
+-- | Build a THIN 'ModIface' for a session module carrying the given
+-- binders' type 'IfaceDecl's with default fixities. No @mi_extra_decls@, no unfoldings: there is
 -- nothing for GHC to inline, so a reference to a session binder survives to
 -- Core as a bare external @Var@.
 --
@@ -233,7 +235,17 @@ isSessionScopeActive scope = not (null (ssValIfaces scope))
 -- 'Name's are content-addressed by @(Module, OccName)@), so its only job is to
 -- keep the binders distinct within this one iface.
 mkThinSessionIface :: HscEnv -> SessionModule -> [(OccName, Type)] -> IO ModIface
-mkThinSessionIface hsc sm binders = pure iface
+mkThinSessionIface hsc sm binders = mkThinSessionIfaceWithFixities hsc sm binders []
+
+-- | Retain the exported binders' GHC-resolved fixities beside their types.
+-- The interface still has no executable bodies or unfolding authority.
+mkThinSessionIfaceWithFixities
+  :: HscEnv -> SessionModule -> [(OccName, Type)] -> [(OccName, Fixity)] -> IO ModIface
+mkThinSessionIfaceWithFixities hsc sm binders fixities = do
+  unless (length (map fst fixities) == length (nub (map fst fixities))
+      && all (\(occurrence,_) -> length (filter ((== occurrence) . fst) binders) == 1) fixities)
+    (fail "session fixity does not name one unique exported binder")
+  pure iface
   where
     modl = mkModule (homeUnitAsUnit (hsc_home_unit hsc)) (renderSessionModule sm)
     mkBinder (i, (occ, ty)) =
@@ -243,7 +255,8 @@ mkThinSessionIface hsc sm binders = pure iface
     tts     = map mkBinder (zip [(0 :: Int) ..] binders)
     decls   = [ (fingerprint0, tyThingToIfaceDecl False tt) | (_, tt) <- tts ]
     exports = mkIfaceExports [ Avail nm | (nm, _) <- tts ]
-    iface   = set_mi_exports exports
+    iface   = set_mi_fixities fixities
+            $ set_mi_exports exports
             $ set_mi_decls   decls
             $ emptyFullModIface modl
 
