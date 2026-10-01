@@ -22,10 +22,12 @@ pub(super) fn admit_authored_artifact_closure(
     CompileError,
 > {
     let scratch = tempfile::tempdir()?;
-    let references = crate::recovery_artifacts::materialize_certified_products(
+    let references = crate::recovery_artifacts::materialize_certified_products_with_validation(
         scratch.path(),
         toolchain_identity_sha256,
         products,
+        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        crate::recovery_artifacts::MaterializationMode::Scratch,
     )
     .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
     let verified = references
@@ -133,7 +135,7 @@ pub(super) fn admit_authored_artifact_closure(
     let joined_interfaces =
         context.map_or_else(Vec::new, |context| context.joined_interfaces().to_vec());
     if let Some(context) = context {
-        let inherited = context.materialize(scratch.path())?;
+        let inherited = context.materialize_scratch(&scratch)?;
         artifacts.extend(
             inherited
                 .artifacts

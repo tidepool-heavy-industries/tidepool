@@ -935,7 +935,7 @@ impl DeclarationPublicationBase {
             ExactDeclarationContext::new(&authored, &[], lexical)?
         };
         let scratch = tempfile::tempdir()?;
-        let materialized = context.materialize(scratch.path())?;
+        let materialized = context.materialize_scratch(&scratch)?;
         let anchor = |generation: Generation| -> Result<ModuleSnapshot, SessionError> {
             let module = SessionModule::lib(generation).module_name();
             let artifact = materialized

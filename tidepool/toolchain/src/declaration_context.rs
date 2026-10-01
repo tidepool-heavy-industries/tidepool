@@ -18,7 +18,8 @@ use crate::declaration_join::{
 };
 use crate::recovery_artifacts::{
     self, CertifiedJoinedInterface, CertifiedRecoveryProduct, CertifiedValueInterface,
-    PackageInterfaceValidation, RecoveryArtifactRef, RecoveryJoinRef, RecoveryValueInterfaceRef,
+    MaterializationMode, PackageInterfaceValidation, RecoveryArtifactRef, RecoveryJoinRef,
+    RecoveryValueInterfaceRef,
 };
 use crate::CompileError;
 
@@ -486,8 +487,12 @@ impl ExactCompilationRequest {
             std::fs::create_dir_all(root)?;
         }
         let mut validation = PackageInterfaceValidation::default();
-        let (mut materialized, references) =
-            context.materialize_entries_with_validation(root, &new_entries, &mut validation)?;
+        let (mut materialized, references) = context.materialize_entries_with_validation(
+            root,
+            &new_entries,
+            &mut validation,
+            MaterializationMode::Scratch,
+        )?;
         materialized
             .artifacts
             .extend(self.artifacts.iter().cloned());
@@ -1303,14 +1308,34 @@ impl ExactDeclarationContext {
         &self,
         root: &Path,
     ) -> Result<MaterializedExactDeclarationContext, CompileError> {
-        self.materialize_with_validation(root, &mut PackageInterfaceValidation::default())
-            .map(|(materialized, _)| materialized)
+        self.materialize_with_validation(
+            root,
+            &mut PackageInterfaceValidation::default(),
+            MaterializationMode::Durable,
+        )
+        .map(|(materialized, _)| materialized)
+    }
+
+    /// Materialize inspection inputs for the supplied temporary owner. Keep
+    /// that owner alive while using the returned paths; recovery publication
+    /// continues through the durable `materialize` entry point.
+    pub fn materialize_scratch(
+        &self,
+        directory: &tempfile::TempDir,
+    ) -> Result<MaterializedExactDeclarationContext, CompileError> {
+        self.materialize_with_validation(
+            directory.path(),
+            &mut PackageInterfaceValidation::default(),
+            MaterializationMode::Scratch,
+        )
+        .map(|(materialized, _)| materialized)
     }
 
     fn materialize_with_validation(
         &self,
         root: &Path,
         validation: &mut PackageInterfaceValidation,
+        mode: MaterializationMode,
     ) -> Result<
         (
             MaterializedExactDeclarationContext,
@@ -1318,7 +1343,7 @@ impl ExactDeclarationContext {
         ),
         CompileError,
     > {
-        self.materialize_entries_with_validation(root, &self.inventory.entries(), validation)
+        self.materialize_entries_with_validation(root, &self.inventory.entries(), validation, mode)
     }
 
     fn materialize_entries_with_validation(
@@ -1326,6 +1351,7 @@ impl ExactDeclarationContext {
         root: &Path,
         entries: &[Arc<ArtifactEntry>],
         validation: &mut PackageInterfaceValidation,
+        mode: MaterializationMode,
     ) -> Result<
         (
             MaterializedExactDeclarationContext,
@@ -1348,6 +1374,7 @@ impl ExactDeclarationContext {
                 self.producer,
                 &products,
                 validation,
+                mode,
             )
             .map_err(failure)?
         };
@@ -1357,7 +1384,7 @@ impl ExactDeclarationContext {
                 ArtifactPayload::Interface(interface, _) => Some(interface),
                 _ => None,
             })
-            .map(|interface| interface.materialize_with_validation(root, validation))
+            .map(|interface| interface.materialize_with_validation(root, validation, mode))
             .collect::<Result<Vec<_>, _>>()
             .map_err(failure)?;
         let requirements = entries
@@ -1470,7 +1497,8 @@ impl ExactDeclarationContext {
         // Package reads share one synchronous preparation snapshot. It does not
         // escape this stage; post-worker verification opens a fresh snapshot.
         let mut validation = PackageInterfaceValidation::default();
-        let (materialized, references) = self.materialize_with_validation(root, &mut validation)?;
+        let (materialized, references) =
+            self.materialize_with_validation(root, &mut validation, MaterializationMode::Scratch)?;
         self.validate_artifacts(&materialized.artifacts)?;
         let groups = self.materialized_groups(root, &references, &mut validation)?;
         let semantic_sha256 = self.semantic_sha256();

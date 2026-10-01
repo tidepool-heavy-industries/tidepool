@@ -1,15 +1,24 @@
-//! Run-owned retention of exact compiler artifacts. The compile cache can be
-//! regenerated; recovery manifests refer only to this fsynced closure.
+//! Materialization of exact compiler artifacts. Disposable request inputs are
+//! verified without durability work; recovery manifests use fsynced run-owned
+//! closures independently of the regenerable compile cache.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tidepool_repr::execution_schema::CachedHomeOwner;
+
+/// Compiler requests own disposable inputs; recovery publications must survive
+/// a crash. Both modes verify the same immutable bytes and path ownership.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MaterializationMode {
+    Scratch,
+    Durable,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RecoveryArtifactRef {
@@ -160,13 +169,18 @@ impl CertifiedJoinedInterface {
         self.toolchain_identity_sha256
     }
     pub fn materialize(&self, root: &Path) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
-        self.materialize_with_validation(root, &mut PackageInterfaceValidation::default())
+        self.materialize_with_validation(
+            root,
+            &mut PackageInterfaceValidation::default(),
+            MaterializationMode::Durable,
+        )
     }
 
     pub(crate) fn materialize_with_validation(
         &self,
         root: &Path,
         validation: &mut PackageInterfaceValidation,
+        mode: MaterializationMode,
     ) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
         materialize_owned_join(
             root,
@@ -176,6 +190,7 @@ impl CertifiedJoinedInterface {
             &self.interface_bytes,
             &self.package_imports_bytes,
             validation,
+            mode,
         )
     }
 }
@@ -690,24 +705,51 @@ fn read_checked(path: &Path, expected: &[u8; 32]) -> Result<Vec<u8>, RecoveryArt
     Ok(bytes)
 }
 
-fn durable_copy(path: &Path, bytes: &[u8], digest: &[u8; 32]) -> Result<(), RecoveryArtifactError> {
+fn materialize_copy(
+    path: &Path,
+    bytes: &[u8],
+    digest: &[u8; 32],
+    mode: MaterializationMode,
+) -> Result<(), RecoveryArtifactError> {
     reject_symlink(path)?;
-    if verify_existing_durable(path, bytes.len(), digest)? {
+    if verify_existing_materialization(path, bytes.len(), digest, mode)? {
         return Ok(());
     }
-    tidepool_atomic_write::write_durable_new(path, bytes).map_err(io::Error::from)?;
+    match mode {
+        MaterializationMode::Durable => {
+            tidepool_atomic_write::write_durable_new(path, bytes).map_err(io::Error::from)?;
+        }
+        MaterializationMode::Scratch => {
+            let mut temporary = tempfile::NamedTempFile::new_in(
+                path.parent()
+                    .ok_or(RecoveryArtifactError::InvalidReference)?,
+            )?;
+            temporary.write_all(bytes)?;
+            match temporary.persist_noclobber(path) {
+                Ok(_) => {}
+                Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.error.into()),
+            }
+        }
+    }
     reject_symlink(path)?;
-    if verify_existing_durable(path, bytes.len(), digest)? {
+    if verify_existing_materialization(path, bytes.len(), digest, mode)? {
         Ok(())
     } else {
         Err(RecoveryArtifactError::Unavailable(path.to_path_buf()))
     }
 }
 
-fn verify_existing_durable(
+#[cfg(test)]
+fn durable_copy(path: &Path, bytes: &[u8], digest: &[u8; 32]) -> Result<(), RecoveryArtifactError> {
+    materialize_copy(path, bytes, digest, MaterializationMode::Durable)
+}
+
+fn verify_existing_materialization(
     path: &Path,
     expected_len: usize,
     digest: &[u8; 32],
+    mode: MaterializationMode,
 ) -> Result<bool, RecoveryArtifactError> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
@@ -754,10 +796,12 @@ fn verify_existing_durable(
             return Err(RecoveryArtifactError::InvalidReference);
         }
     }
-    // A readable existing file is not evidence that a previous publication's
-    // durability completed. Confirm this descriptor and its directory now.
-    file.sync_all()?;
-    tidepool_atomic_write::sync_parent_directory(path).map_err(io::Error::from)?;
+    // A readable existing file is not evidence that a previous durable
+    // publication completed. Durable callers confirm it and its directory.
+    if mode == MaterializationMode::Durable {
+        file.sync_all()?;
+        tidepool_atomic_write::sync_parent_directory(path).map_err(io::Error::from)?;
+    }
     Ok(true)
 }
 
@@ -772,9 +816,12 @@ fn reject_symlink(path: &Path) -> Result<(), RecoveryArtifactError> {
     }
 }
 
-/// The run owner controls this directory while publishing; checking its
+/// The materialization owner controls this directory; checking its
 /// canonical identity before writing rejects preexisting redirects.
-fn prepare_owned_directory(recovery_root: &Path) -> Result<PathBuf, RecoveryArtifactError> {
+fn prepare_owned_directory(
+    recovery_root: &Path,
+    mode: MaterializationMode,
+) -> Result<PathBuf, RecoveryArtifactError> {
     let canonical_root = fs::canonicalize(recovery_root)?;
     let owned = recovery_root.join("artifacts");
     match fs::symlink_metadata(&owned) {
@@ -797,7 +844,9 @@ fn prepare_owned_directory(recovery_root: &Path) -> Result<PathBuf, RecoveryArti
     if canonical_owned != canonical_root.join("artifacts") {
         return Err(RecoveryArtifactError::InvalidReference);
     }
-    File::open(&canonical_root)?.sync_all()?;
+    if mode == MaterializationMode::Durable {
+        File::open(&canonical_root)?.sync_all()?;
+    }
     Ok(canonical_owned)
 }
 
@@ -851,6 +900,7 @@ pub(crate) fn materialize_joined_interface_with_validation(
         &bytes,
         &package_imports,
         validation,
+        MaterializationMode::Durable,
     )
 }
 
@@ -862,6 +912,7 @@ fn materialize_owned_join(
     bytes: &[u8],
     package_imports: &[u8],
     validation: &mut PackageInterfaceValidation,
+    mode: MaterializationMode,
 ) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
     if toolchain_identity_sha256 == [0; 32] || unit.is_empty() || module.is_empty() {
         return Err(RecoveryArtifactError::InvalidReference);
@@ -876,11 +927,11 @@ fn materialize_owned_join(
         validation,
     )?;
     let package_imports_sha256: [u8; 32] = Sha256::digest(&package_imports).into();
-    let owned = prepare_owned_directory(recovery_root)?;
+    let owned = prepare_owned_directory(recovery_root, mode)?;
     let interface_path =
         PathBuf::from("artifacts").join(format!("{}.joined.hi", hex(&skinny_iface_sha256)));
     let package_imports_path = package_sidecar_path(&interface_path);
-    durable_copy(
+    materialize_copy(
         &owned.join(
             interface_path
                 .file_name()
@@ -888,8 +939,9 @@ fn materialize_owned_join(
         ),
         bytes,
         &skinny_iface_sha256,
+        mode,
     )?;
-    durable_copy(
+    materialize_copy(
         &owned.join(
             package_imports_path
                 .file_name()
@@ -897,8 +949,11 @@ fn materialize_owned_join(
         ),
         package_imports,
         &package_imports_sha256,
+        mode,
     )?;
-    File::open(&owned)?.sync_all()?;
+    if mode == MaterializationMode::Durable {
+        File::open(&owned)?.sync_all()?;
+    }
     Ok(RecoveryJoinRef {
         toolchain_identity_sha256,
         unit: unit.to_owned(),
@@ -922,6 +977,7 @@ pub fn materialize_certified_products(
         toolchain_identity_sha256,
         products,
         &mut PackageInterfaceValidation::default(),
+        MaterializationMode::Durable,
     )
 }
 
@@ -930,11 +986,12 @@ pub(crate) fn materialize_certified_products_with_validation(
     toolchain_identity_sha256: [u8; 32],
     products: &[CertifiedRecoveryProduct],
     validation: &mut PackageInterfaceValidation,
+    mode: MaterializationMode,
 ) -> Result<Vec<RecoveryArtifactRef>, RecoveryArtifactError> {
     if toolchain_identity_sha256 == [0; 32] {
         return Err(RecoveryArtifactError::InvalidReference);
     }
-    let owned = prepare_owned_directory(recovery_root)?;
+    let owned = prepare_owned_directory(recovery_root, mode)?;
     let mut refs = Vec::with_capacity(products.len());
     for product in products {
         let owner = &product.owner;
@@ -979,7 +1036,7 @@ pub(crate) fn materialize_certified_products_with_validation(
         let package_imports_sha256: [u8; 32] =
             Sha256::digest(&product.package_imports_bytes).into();
         let certification_sha256: [u8; 32] = Sha256::digest(&product.certification_bytes).into();
-        durable_copy(
+        materialize_copy(
             &owned.join(
                 interface_path
                     .file_name()
@@ -987,8 +1044,9 @@ pub(crate) fn materialize_certified_products_with_validation(
             ),
             &product.interface_bytes,
             &owner.skinny_iface_sha256,
+            mode,
         )?;
-        durable_copy(
+        materialize_copy(
             &owned.join(
                 product_path
                     .file_name()
@@ -996,8 +1054,9 @@ pub(crate) fn materialize_certified_products_with_validation(
             ),
             &product.product_bytes,
             &owner.product_sha256,
+            mode,
         )?;
-        durable_copy(
+        materialize_copy(
             &owned.join(
                 package_imports_path
                     .file_name()
@@ -1005,8 +1064,9 @@ pub(crate) fn materialize_certified_products_with_validation(
             ),
             &product.package_imports_bytes,
             &package_imports_sha256,
+            mode,
         )?;
-        durable_copy(
+        materialize_copy(
             &owned.join(
                 certification_path
                     .file_name()
@@ -1014,6 +1074,7 @@ pub(crate) fn materialize_certified_products_with_validation(
             ),
             &product.certification_bytes,
             &certification_sha256,
+            mode,
         )?;
         refs.push(RecoveryArtifactRef {
             toolchain_identity_sha256,
@@ -1030,7 +1091,9 @@ pub(crate) fn materialize_certified_products_with_validation(
             product_path,
         });
     }
-    File::open(&owned)?.sync_all()?;
+    if mode == MaterializationMode::Durable {
+        File::open(&owned)?.sync_all()?;
+    }
     Ok(refs)
 }
 
@@ -1077,6 +1140,7 @@ pub fn materialize_recovery_closure(
         toolchain_identity_sha256,
         &products,
         &mut validation,
+        MaterializationMode::Durable,
     )
 }
 
@@ -1202,6 +1266,161 @@ mod tests {
     use super::*;
     use tidepool_repr::execution_schema::ModuleVersion;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "fault-injection child; invoked by materialization_modes_preserve_durable_sync"]
+    fn materialization_sync_fault_child() {
+        let root = PathBuf::from(std::env::var_os("MATERIALIZATION_FAULT_ROOT").unwrap());
+        let mode = match std::env::var("MATERIALIZATION_FAULT_MODE")
+            .unwrap()
+            .as_str()
+        {
+            "scratch" => MaterializationMode::Scratch,
+            "durable" => MaterializationMode::Durable,
+            other => panic!("unknown materialization mode {other}"),
+        };
+        let digest: [u8; 32] = Sha256::digest(b"owned").into();
+        let operation = std::env::var("MATERIALIZATION_OPERATION").unwrap();
+        let result = if operation == "copy" {
+            materialize_copy(&root.join("value"), b"owned", &digest, mode)
+                .map_err(|error| error.to_string())
+        } else {
+            use crate::declaration_context::ExactDeclarationContext;
+            use crate::declaration_join::ExactModuleIdentity;
+            let producer = b"materialization-test-producer";
+            let value = Arc::new(
+                CertifiedValueInterface::from_checked_compilation(
+                    Sha256::digest(producer).into(),
+                    ExactModuleIdentity {
+                        unit: "main".into(),
+                        module: "Tidepool.Session.Val.G1".into(),
+                    },
+                    b"owned".to_vec(),
+                    package_witness("main", "Tidepool.Session.Val.G1", &digest, Vec::new()),
+                    Vec::new(),
+                )
+                .unwrap(),
+            );
+            let empty = Arc::new(ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap());
+            let context = Arc::new(
+                (*empty)
+                    .clone()
+                    .extend_program_value_interface(value)
+                    .unwrap(),
+            );
+            match operation.as_str() {
+                "request" => context
+                    .prepare_compilation(&root.join("request"), producer)
+                    .map(|_| ()),
+                "growth" => empty
+                    .prepare_compilation_with_authorization(
+                        &root.join("request"),
+                        producer,
+                        Some(ciborium::value::Value::Null),
+                    )
+                    .and_then(|request| request.in_program_context(&root.join("growth"), context))
+                    .map(|_| ()),
+                "public" => context.materialize(&root).map(|_| ()),
+                "inspection" => {
+                    let directory = tempfile::tempdir_in(&root).unwrap();
+                    context.materialize_scratch(&directory).map(|_| ())
+                }
+                other => panic!("unknown operation {other}"),
+            }
+            .map_err(|error| error.to_string())
+        };
+        let expected_ok = std::env::var("MATERIALIZATION_EXPECT_OK").unwrap() == "yes";
+        assert_eq!(result.is_ok(), expected_ok, "{result:?}");
+        if expected_ok && operation == "copy" {
+            assert_eq!(fs::read(root.join("value")).unwrap(), b"owned");
+            assert_eq!(fs::read_dir(root).unwrap().count(), 1);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous C fault-library compilation and child test invocation"
+    )]
+    fn materialization_modes_preserve_durable_sync() {
+        use std::process::Command;
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("fault.c");
+        fs::write(
+            &source,
+            include_str!("../tests/fixtures/materialization-fault.c"),
+        )
+        .unwrap();
+        let library = temporary.path().join("fault.so");
+        assert!(Command::new("cc")
+            .args(["-shared", "-fPIC", "-Wall", "-Werror"])
+            .arg(source)
+            .arg("-o")
+            .arg(&library)
+            .arg("-ldl")
+            .status()
+            .unwrap()
+            .success());
+        for (index, (operation, mode, existing, fault, ok, file_syncs, directory_syncs)) in [
+            ("copy", "scratch", false, "trace", true, 0, 0),
+            ("copy", "durable", false, "trace", true, 2, 2),
+            ("copy", "scratch", true, "trace", true, 0, 0),
+            ("copy", "durable", true, "trace", true, 1, 1),
+            ("copy", "scratch", false, "file", true, 0, 0),
+            ("copy", "durable", false, "file", false, 1, 0),
+            ("copy", "scratch", true, "directory", true, 0, 0),
+            ("copy", "durable", true, "directory", false, 1, 1),
+            ("request", "scratch", false, "file", true, 0, 0),
+            ("growth", "scratch", false, "file", true, 0, 0),
+            ("public", "durable", false, "trace", true, 4, 6),
+            ("public", "durable", false, "directory", false, 0, 1),
+            ("inspection", "scratch", false, "directory", true, 0, 0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = temporary.path().join(index.to_string());
+            fs::create_dir(&root).unwrap();
+            if existing {
+                // A readable winner is deliberately not an established durable receipt.
+                fs::write(root.join("value"), b"owned").unwrap();
+            }
+            let log = temporary.path().join(format!("syncs-{index}"));
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "recovery_artifacts::tests::materialization_sync_fault_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("LD_PRELOAD", &library)
+                .env("MATERIALIZATION_FAULT_ROOT", &root)
+                .env("MATERIALIZATION_FAULT_KIND", fault)
+                .env("MATERIALIZATION_FAULT_LOG", &log)
+                .env("MATERIALIZATION_FAULT_MODE", mode)
+                .env("MATERIALIZATION_OPERATION", operation)
+                .env("MATERIALIZATION_EXPECT_OK", if ok { "yes" } else { "no" })
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed; 0 failed"),
+                "{operation}/{mode}/{existing}/{fault}: {stdout} {}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            let syncs = fs::read_to_string(log).unwrap_or_default();
+            assert_eq!(
+                syncs.lines().filter(|line| *line == "file").count(),
+                file_syncs
+            );
+            assert_eq!(
+                syncs.lines().filter(|line| *line == "directory").count(),
+                directory_syncs,
+            );
+        }
+    }
+
     #[test]
     #[ignore = "requires an exact retained original declaration packet"]
     fn retained_original_durable_copy_cost() {
@@ -1270,115 +1489,119 @@ mod tests {
     }
 
     #[test]
-    fn durable_copy_existing_payload_refuses_wrong_digest_bytes_and_symlink() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("owned.cbor");
-        let digest: [u8; 32] = Sha256::digest(b"owned").into();
-        durable_copy(&path, b"owned", &digest).unwrap();
-        durable_copy(&path, b"owned", &digest).unwrap();
-        assert!(matches!(
-            durable_copy(&path, b"owned", &[0; 32]),
-            Err(RecoveryArtifactError::DigestMismatch(_))
-        ));
-        fs::write(&path, b"other").unwrap();
-        assert!(matches!(
-            durable_copy(&path, b"owned", &digest),
-            Err(RecoveryArtifactError::DigestMismatch(_))
-        ));
-        assert_eq!(fs::read(&path).unwrap(), b"other");
-        fs::write(&path, b"different-length").unwrap();
-        assert!(durable_copy(&path, b"owned", &digest).is_err());
-        assert_eq!(fs::read(&path).unwrap(), b"different-length");
-        #[cfg(unix)]
-        {
-            let target = root.path().join("target.cbor");
-            fs::write(&target, b"owned").unwrap();
-            fs::remove_file(&path).unwrap();
-            std::os::unix::fs::symlink(&target, &path).unwrap();
+    fn materialization_modes_existing_payload_refuses_wrong_digest_bytes_and_symlink() {
+        for mode in [MaterializationMode::Scratch, MaterializationMode::Durable] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("owned.cbor");
+            let digest: [u8; 32] = Sha256::digest(b"owned").into();
+            materialize_copy(&path, b"owned", &digest, mode).unwrap();
+            materialize_copy(&path, b"owned", &digest, mode).unwrap();
             assert!(matches!(
-                durable_copy(&path, b"owned", &digest),
-                Err(RecoveryArtifactError::InvalidReference)
+                materialize_copy(&path, b"owned", &[0; 32], mode),
+                Err(RecoveryArtifactError::DigestMismatch(_))
             ));
-            assert_eq!(fs::read(&target).unwrap(), b"owned");
+            fs::write(&path, b"other").unwrap();
+            assert!(matches!(
+                materialize_copy(&path, b"owned", &digest, mode),
+                Err(RecoveryArtifactError::DigestMismatch(_))
+            ));
+            assert_eq!(fs::read(&path).unwrap(), b"other");
+            fs::write(&path, b"different-length").unwrap();
+            assert!(materialize_copy(&path, b"owned", &digest, mode).is_err());
+            assert_eq!(fs::read(&path).unwrap(), b"different-length");
+            #[cfg(unix)]
+            {
+                let target = root.path().join("target.cbor");
+                fs::write(&target, b"owned").unwrap();
+                fs::remove_file(&path).unwrap();
+                std::os::unix::fs::symlink(&target, &path).unwrap();
+                assert!(matches!(
+                    materialize_copy(&path, b"owned", &digest, mode),
+                    Err(RecoveryArtifactError::InvalidReference)
+                ));
+                assert_eq!(fs::read(&target).unwrap(), b"owned");
+            }
         }
     }
 
     #[cfg(unix)]
     #[test]
-    fn durable_copy_nonregular_fifo_refuses_without_blocking() {
-        use std::os::unix::ffi::OsStrExt;
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("fifo");
-        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-        // SAFETY: the C string is terminated and valid for the call; the path
-        // is a new entry in this test's private directory.
-        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        let digest: [u8; 32] = Sha256::digest(b"owned").into();
-        let started = std::time::Instant::now();
-        assert!(matches!(
-            durable_copy(&path, b"owned", &digest),
-            Err(RecoveryArtifactError::InvalidReference)
-        ));
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
-        assert!(matches!(
-            durable_copy(root.path(), b"owned", &digest),
-            Err(RecoveryArtifactError::InvalidReference)
-        ));
+    fn materialization_modes_nonregular_fifo_refuses_without_blocking() {
+        for mode in [MaterializationMode::Scratch, MaterializationMode::Durable] {
+            use std::os::unix::ffi::OsStrExt;
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("fifo");
+            let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            // SAFETY: the C string is terminated and valid for the call; the path
+            // is a new entry in this test's private directory.
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            let digest: [u8; 32] = Sha256::digest(b"owned").into();
+            assert!(matches!(
+                materialize_copy(&path, b"owned", &digest, mode),
+                Err(RecoveryArtifactError::InvalidReference)
+            ));
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+            assert!(matches!(
+                materialize_copy(root.path(), b"owned", &digest, mode),
+                Err(RecoveryArtifactError::InvalidReference)
+            ));
+        }
     }
 
     #[test]
-    fn durable_copy_racing_publishers_verify_the_actual_winner() {
-        use std::sync::{Arc, Barrier};
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("same.cbor");
-        let digest: [u8; 32] = Sha256::digest(b"owned").into();
-        let barrier = Arc::new(Barrier::new(2));
-        let threads: Vec<_> = (0..2)
-            .map(|_| {
+    fn materialization_modes_racing_publishers_verify_the_actual_winner() {
+        for mode in [MaterializationMode::Scratch, MaterializationMode::Durable] {
+            use std::sync::{Arc, Barrier};
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("same.cbor");
+            let digest: [u8; 32] = Sha256::digest(b"owned").into();
+            let barrier = Arc::new(Barrier::new(2));
+            let threads: Vec<_> = (0..2)
+                .map(|_| {
+                    let path = path.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        materialize_copy(&path, b"owned", &digest, mode)
+                    })
+                })
+                .collect();
+            for thread in threads {
+                thread.join().unwrap().unwrap();
+            }
+            assert_eq!(fs::read(&path).unwrap(), b"owned");
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+
+            let path = root.path().join("mixed.cbor");
+            let barrier = Arc::new(Barrier::new(2));
+            let wrong = {
                 let path = path.clone();
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    durable_copy(&path, b"owned", &digest)
+                    tidepool_atomic_write::write_durable_new(&path, b"other").unwrap()
                 })
-            })
-            .collect();
-        for thread in threads {
-            thread.join().unwrap().unwrap();
+            };
+            let correct = {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    materialize_copy(&path, b"owned", &digest, mode)
+                })
+            };
+            if wrong.join().unwrap() {
+                assert!(matches!(
+                    correct.join().unwrap(),
+                    Err(RecoveryArtifactError::DigestMismatch(_))
+                ));
+                assert_eq!(fs::read(&path).unwrap(), b"other");
+            } else {
+                correct.join().unwrap().unwrap();
+                assert_eq!(fs::read(&path).unwrap(), b"owned");
+            }
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
         }
-        assert_eq!(fs::read(&path).unwrap(), b"owned");
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
-
-        let path = root.path().join("mixed.cbor");
-        let barrier = Arc::new(Barrier::new(2));
-        let wrong = {
-            let path = path.clone();
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                tidepool_atomic_write::write_durable_new(&path, b"other").unwrap()
-            })
-        };
-        let correct = {
-            let path = path.clone();
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                durable_copy(&path, b"owned", &digest)
-            })
-        };
-        if wrong.join().unwrap() {
-            assert!(matches!(
-                correct.join().unwrap(),
-                Err(RecoveryArtifactError::DigestMismatch(_))
-            ));
-            assert_eq!(fs::read(&path).unwrap(), b"other");
-        } else {
-            correct.join().unwrap().unwrap();
-            assert_eq!(fs::read(&path).unwrap(), b"owned");
-        }
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
     }
 
     #[test]

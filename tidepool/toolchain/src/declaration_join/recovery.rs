@@ -127,7 +127,7 @@ pub fn certify_recovered_declaration_tip_in_context(
         return Err(contract("recovered root lacks a certified lexical owner"));
     }
     let scratch = tempfile::tempdir()?;
-    let materialized = context.materialize(scratch.path())?;
+    let materialized = context.materialize_scratch(&scratch)?;
     let roots = materialized
         .artifacts
         .iter()
