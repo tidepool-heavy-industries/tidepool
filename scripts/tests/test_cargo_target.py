@@ -54,6 +54,12 @@ class TargetOwnership(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "belongs to another checkout"):
             target.resolve_target(self.checkout, other / "target" / "not-created")
 
+    def test_nested_git_checkout_keeps_its_own_target(self):
+        nested = self.checkout / "nested"
+        subprocess.run(["git", "init", "-q", str(nested)], check=True)
+        with self.assertRaisesRegex(ValueError, "belongs to another checkout"):
+            target.resolve_target(self.checkout, nested / "target")
+
     def test_symlink_into_another_checkout_cannot_hide_target_ownership(self):
         other = self.base / "other"
         subprocess.run(["git", "init", "-q", str(other)], check=True)
@@ -91,6 +97,47 @@ class TargetOwnership(unittest.TestCase):
         result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
         self.assertIn("belongs to another checkout", result.stderr)
+
+        # The supported env prefix runs after the shell entrypoint unless its
+        # assignments are normalized there. The last assignment wins.
+        external = self.base / "prefix-external"
+        env["CARGO_TARGET_DIR"] = str(other / "target")
+        prefix_command = ["bash", "scripts/dev-shell.sh", "env", "--",
+                          "CARGO_TARGET_DIR=" + str(other / "target"),
+                          "CARGO_TARGET_DIR=" + str(external), "PRESERVED=value",
+                          sys.executable, "-c",
+                          'import os; print(os.environ["CARGO_TARGET_DIR"]); '
+                          'print(os.environ["PRESERVED"])']
+        result = subprocess.run(prefix_command, cwd=ROOT, env=env,
+                                capture_output=True, text=True)
+        expected = str(target.resolve_target(ROOT, external))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [expected, "value"])
+        self.assertIn(expected, result.stderr)
+
+        prefix_command[4] = "CARGO_TARGET_DIR=" + str(other / "target")
+        prefix_command.pop(5)
+        result = subprocess.run(prefix_command, cwd=ROOT, env=env,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("belongs to another checkout", result.stderr)
+
+        for option in (["-i"], ["-u", "CARGO_TARGET_DIR"],
+                       ["--unset=CARGO_TARGET_DIR"]):
+            command = ["bash", "scripts/dev-shell.sh", "env", *option,
+                       sys.executable, "-c",
+                       'import os; print(os.environ["CARGO_TARGET_DIR"])']
+            result = subprocess.run(command, cwd=ROOT, env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), str(ROOT / "target"))
+
+        command = ["bash", "scripts/dev-shell.sh", "env", "-C", str(self.base),
+                   "CARGO_TARGET_DIR=relative", sys.executable, "-c", "pass"]
+        result = subprocess.run(command, cwd=ROOT, env=env,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unsupported env option -C", result.stderr)
 
 
 if __name__ == "__main__":

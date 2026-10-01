@@ -8,15 +8,62 @@ if [[ ${1:-} == --exomonad ]]; then
   shift
 fi
 source_root=$(git rev-parse --show-toplevel)
+requested_cargo_target=${CARGO_TARGET_DIR:-}
+env_command=()
+env_assignments=()
+if [[ ${1:-} == env || ${1:-} == */env ]]; then
+  # Keep env's options and unrelated assignments in the executed command, but
+  # resolve its target override before entering Nix or taking the fast path.
+  env_command=("$1")
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -i|--ignore-environment|-)
+        requested_cargo_target=
+        env_command+=("$1"); shift ;;
+      -u|--unset)
+        if [[ $# -lt 2 ]]; then
+          echo 'dev-shell: env unset option requires a variable name' >&2
+          exit 2
+        fi
+        [[ $2 != CARGO_TARGET_DIR ]] || requested_cargo_target=
+        env_command+=("$1" "$2"); shift 2 ;;
+      --unset=*|-u?*)
+        env_unset=${1#--unset=}
+        [[ $1 == --unset=* ]] || env_unset=${1#-u}
+        [[ $env_unset != CARGO_TARGET_DIR ]] || requested_cargo_target=
+        env_command+=("$1"); shift ;;
+      -v|--debug)
+        env_command+=("$1"); shift ;;
+      --)
+        env_command+=("$1"); shift; break ;;
+      -*)
+        echo "dev-shell: unsupported env option $1 for Cargo target resolution; place env options before dev-shell" >&2
+        exit 2 ;;
+      *) break ;;
+    esac
+  done
+  while [[ $# -gt 0 && $1 == *=* ]]; do
+    if [[ $1 == CARGO_TARGET_DIR=* ]]; then
+      requested_cargo_target=${1#CARGO_TARGET_DIR=}
+    else
+      env_assignments+=("$1")
+    fi
+    shift
+  done
+fi
 cargo_target_args=("$source_root")
-if [[ -n ${CARGO_TARGET_DIR:-} ]]; then
-  cargo_target_args+=("$CARGO_TARGET_DIR")
+if [[ -n $requested_cargo_target ]]; then
+  cargo_target_args+=("$requested_cargo_target")
 fi
 resolved_cargo_target=$(python3 "$source_root/scripts/cargo-target.py" "${cargo_target_args[@]}")
-if [[ ${CARGO_TARGET_DIR:-} != "$resolved_cargo_target" ]]; then
+if [[ $requested_cargo_target != "$resolved_cargo_target" ]]; then
   echo "Cargo build directory: $resolved_cargo_target" >&2
 fi
 export CARGO_TARGET_DIR="$resolved_cargo_target"
+if [[ ${#env_command[@]} -gt 0 ]]; then
+  set -- "${env_command[@]}" "${env_assignments[@]}" "CARGO_TARGET_DIR=$resolved_cargo_target" "$@"
+fi
 if [[ $shell == exomonad ]]; then
   # Only exomonad's flake forces the codex path input, so only it needs the
   # vendor/codex source capture verified before Nix evaluates anything.

@@ -16,9 +16,6 @@ def resolve_target(checkout, requested=None, cwd=None):
     if not target.is_absolute():
         target = Path(cwd or Path.cwd()) / target
     target = target.resolve()
-    if target.is_relative_to(checkout):
-        return target
-
     # Inspect existing ancestors without creating a directory or claiming any
     # output. A different Git checkout must retain its own build state.
     ancestor = target
@@ -35,6 +32,8 @@ def resolve_target(checkout, requested=None, cwd=None):
                 f"Cargo target {target} belongs to another checkout ({other}); "
                 "use this checkout's target or an external build base"
             )
+    if target.is_relative_to(checkout):
+        return target
 
     suffix = "tidepool-" + hashlib.sha256(str(checkout).encode()).hexdigest()[:16]
     # Nested dev shells inherit the resolved directory rather than adding a

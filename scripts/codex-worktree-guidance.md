@@ -24,6 +24,9 @@ identity; it refuses a target inside another Git checkout and reports the
 resolved directory. Share compiler caches such as sccache separately, never a
 mutable Cargo target tree. Sequential use of one target by different checkouts
 can reuse stale dependency metadata because Cargo freshness uses source mtimes.
+The supported `dev-shell.sh env NAME=value ... COMMAND` prefix resolves target
+assignments too. Put env options that change directories or split commands
+before `dev-shell.sh`; the entrypoint rejects those options in its command prefix.
 
 For acceptance, build the exact candidate in its own target, then retain the
 source OID (and content hashes of any dirty inputs), command, toolchain and flags,
