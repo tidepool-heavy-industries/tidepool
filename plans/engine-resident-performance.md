@@ -9,6 +9,47 @@ must identify the production consumer, the work that disappears, and the
 authority or ownership checks that remain. Report structural reductions
 separately from measured latency improvements.
 
+## Latest executed baseline
+
+The resident two-test baseline passed on
+`cf5d7244d24c896d867c389d41836fd2ef7bda63` (joined root `611b32438a` plus the
+explicit daemon-argument override): two tests executed, 403 skipped, exit zero.
+This used the Cargo debug profile and the frozen `1b874b9896` compiler pair after
+checking that its producer inputs match this consumer revision. The compiler
+manifest was regenerated for the selected paths. Evidence, exact commands and
+binary hashes are retained under
+`target/completion-evidence/compiled-cell/resident-611-two/`; the original
+workspaces remain in the scheduling owner's checkout.
+
+| Completed phase | Warm cell 0 | Warm cell 1 |
+|---|---:|---:|
+| Complete durable cell | 16.976 s | 18.944 s |
+| Complete-cell compilation | 15.407 s | 17.484 s |
+| Native observation | 178.551 ms | 184.436 ms |
+| Native display | 220.842 ms | 187.479 ms |
+| Metadata staging and file sync | 949.622 ms | 847.267 ms |
+| Publication rename and directory sync | 0.920 ms | 0.454 ms |
+
+Foundation publication took 121.862 seconds; the separate warm-up took
+17.175 seconds. Both measured cells displayed 42 and committed durably. Their
+v5 manifests are 137,212 and 137,377 bytes; the foundation manifest is 132,332
+bytes. All 18 native item/display phase observations preserved the compiler
+submission count. One owned worker completed all 11 compiler requests without
+rotation, and the daemon and worker exited. The scope peaked at 8.911 GiB.
+
+These are passing resident semantics and diagnostic timings, not acceptance of
+the packaged Engine/Store route or its latency targets. Complete-cell compilation
+dominates these two debug samples. The optimized, precompiled packaged candidate
+must be measured before choosing further performance repairs.
+
+Cold declaration recovery is still blocked. The frozen `1b874b9896` recovery run
+completed original publication, then refused successor startup because identical
+checked inputs received different bootstrap input identities. Native product
+availability incorrectly influenced the package-interface identity. The compiler
+owner is separating complete input proof from optional native output inventory;
+the failed run and causal packet are retained in
+`/tmp/tidepool-retained-package-witness/target/completion-evidence/cold-original-b53-exportfix/`.
+
 ## Current structural reductions
 
 - Recovery publication: the retained v4 foundation snapshot at
@@ -17,9 +58,10 @@ separately from measured latency improvements.
   present in sealed artifacts. Joined v5 persists interface selection
   and derives native requirements from verified artifacts, preserving exact
   lost-binding refusal. Focused validation includes authentic native markers and
-  tampering after hydration. The latest real foundation manifest is 388,062 bytes,
+  tampering after hydration. An earlier real foundation manifest was 388,062 bytes,
   with 157 interface rows; the following warm-up also published and displayed 42.
-  Both selected baseline tests still failed later admission checks. A
+  That historical run failed later admission checks; the latest passing baseline
+  and its compact manifest sizes are recorded above. A
   structural projection of that v4 snapshot is 132,000 compact bytes, compared
   with 4,220,736 compact v4 bytes. This is not a valid emitted v5 manifest or a
   measured latency result; see the retained size diagnostic under
@@ -46,17 +88,18 @@ separately from measured latency improvements.
   Four focused resolver checks passed. Tool dispatch also borrows declaration
   shape instead of cloning its schema for every invocation; registration owns
   schema validation and retains typed errors.
-  Skipping reload compilation is not yet justified: an unchanged run module
-  does not establish unchanged helper sources or resident compilation inputs.
+  Joined reload validation now checks the current published source graph without
+  producing a discarded driver. An unchanged run module alone still does not
+  establish unchanged helper sources or resident compilation inputs.
 - Immutable library startup: the package currently ships source text. The
   delivery plan now specifies a closed precompiled support cohort admitted by
   the existing GHC candidate mechanism, plus direct use of its pinned immutable
   source root. This removes repeated lowering/product emission and source copies
   when accepted. Implementation and real cold-start evidence remain pending.
 
-These observations do not establish the production latency targets. The
-retained baseline above completed foundation publication but failed a later
-cell; it is diagnostic evidence, not a passing warm benchmark.
+These observations do not establish the production latency targets. The latest
+resident baseline passes; production acceptance still requires the packaged route
+and the specified sample counts.
 
 ## Production measurement
 
