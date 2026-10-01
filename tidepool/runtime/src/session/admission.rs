@@ -153,6 +153,37 @@ struct AdmittedNativeImports {
     commitment: [u8; 32],
 }
 
+/// A checked cell borrows its immutable admission ledger and indexes only
+/// native owners added by its own settled items. Snapshots retain the ledger
+/// independently; this mutable suffix remains under the prefix state lock.
+#[derive(Debug)]
+struct CheckedNativeIndex {
+    base: Arc<AdmittedNativeImports>,
+    added: std::collections::BTreeMap<(SymbolIdentity, u64), u64>,
+}
+
+impl CheckedNativeIndex {
+    fn new(base: Arc<AdmittedNativeImports>) -> Self {
+        Self {
+            base,
+            added: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn get(&self, key: &(SymbolIdentity, u64)) -> Option<&u64> {
+        self.added.get(key).or_else(|| self.base.owners.get(key))
+    }
+
+    fn extend(&mut self, added: Vec<((SymbolIdentity, u64), u64)>) {
+        // append has already checked every identity, generation, and root.
+        // Existing owners are never replaced, including package generation 0.
+        for (key, root) in added {
+            debug_assert!(self.get(&key).is_none());
+            self.added.insert(key, root);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CheckedNativeImports {
     base: Arc<AdmittedNativeImports>,
@@ -233,7 +264,7 @@ impl CheckedNativeImports {
     fn append(
         &self,
         delta: CapturedNativeDelta,
-        index: &std::collections::BTreeMap<(SymbolIdentity, u64), u64>,
+        index: &CheckedNativeIndex,
     ) -> Result<(Self, Vec<((SymbolIdentity, u64), u64)>), SessionError> {
         let mut added = Vec::new();
         let mut imports = Vec::new();
@@ -420,7 +451,7 @@ struct RuntimeCheckedState {
     display_in_flight: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>>,
     reservation: Option<CheckedItemReservation>,
     interface_index: std::collections::BTreeMap<u64, [u8; 32]>,
-    native_index: std::collections::BTreeMap<(SymbolIdentity, u64), u64>,
+    native_index: CheckedNativeIndex,
 }
 
 #[derive(Debug)]
@@ -1712,7 +1743,7 @@ impl PersistentSession {
                 std::sync::atomic::Ordering::Acquire,
             )
             .map_err(|_| SessionError::StaleStagedDeclaration)?;
-        let native_index = admission.native_imports.owners.clone();
+        let native_index = CheckedNativeIndex::new(admission.native_imports.clone());
         Ok(Arc::new(RuntimeCheckedPrefix {
             admission,
             first_item,
@@ -2255,7 +2286,7 @@ impl PersistentSession {
         scope: ScopeId,
         generation: u64,
         program: Option<tidepool_codegen::prepared_program::ProgramId>,
-        known_owners: &std::collections::BTreeMap<(SymbolIdentity, u64), u64>,
+        known_owners: &CheckedNativeIndex,
         definitions: impl Iterator<Item = &'a SymbolIdentity>,
         bound_rows: impl Iterator<Item = (&'a str, u64)>,
         allow_absent_bindings: bool,
@@ -2810,6 +2841,7 @@ mod tests {
                 .capture_admitted_native_imports(ScopeId::ROOT)
                 .unwrap(),
         );
+        let mut index = CheckedNativeIndex::new(baseline.clone());
         let ambient_identity = testing::identity("Fixture", "entry");
         let ambient = session
             .install_prepared(testing::prepare(testing::wire_program()).unwrap())
@@ -2828,7 +2860,7 @@ mod tests {
                 ScopeId::ROOT,
                 0,
                 Some(own),
-                &baseline.owners,
+                &index,
                 [&ambient_identity, &own_identity].into_iter(),
                 [].into_iter(),
                 false,
@@ -2837,9 +2869,8 @@ mod tests {
         assert_eq!(delta.imports.len(), 1);
         assert_eq!(delta.imports[0].identity, own_identity);
         let (ledger, added) = CheckedNativeImports::base(baseline.clone())
-            .append(delta, &baseline.owners)
+            .append(delta, &index)
             .unwrap();
-        let mut index = baseline.owners.clone();
         index.extend(added);
         assert!(!ledger
             .imports()
@@ -2886,6 +2917,137 @@ mod tests {
     }
 
     #[test]
+    fn checked_native_index_shares_live_baseline_and_keeps_exact_delta_owners() {
+        use tidepool_repr::execution_schema::{testing, Group};
+        let mut session = PersistentSession::new(None, 1024 * 1024);
+        let package_identity = testing::identity("Fixture", "entry");
+        session
+            .install_prepared(testing::prepare(testing::wire_program()).unwrap())
+            .unwrap();
+        let mut value = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "answer",
+            924,
+        );
+        value.value.identity.module = value.module.module_name();
+        value.value.identity.namespace = "value".into();
+        value.value.identity.occurrence = value.name.0.clone();
+        let value_identity = value.value.identity.clone();
+        session.bind_in(ScopeId::ROOT, value).unwrap();
+        let baseline = Arc::new(
+            session
+                .capture_admitted_native_imports(ScopeId::ROOT)
+                .unwrap(),
+        );
+        let retained = Arc::downgrade(&baseline);
+        let mut index = CheckedNativeIndex::new(baseline.clone());
+        let ledger = CheckedNativeImports::base(baseline.clone());
+        assert!(Arc::ptr_eq(&index.base, &ledger.base));
+        assert!(index.added.is_empty());
+        assert!(index.get(&(package_identity.clone(), 0)).is_some());
+        assert!(index.get(&(package_identity.clone(), 1)).is_none());
+        assert!(index.get(&(value_identity.clone(), 924)).is_some());
+        assert!(index.get(&(value_identity.clone(), 925)).is_none());
+        let mut foreign_package = package_identity.clone();
+        foreign_package.unit.push_str("-foreign");
+        assert!(index.get(&(foreign_package.clone(), 0)).is_none());
+
+        // Runtime capture may reuse an exact baseline package export; neither
+        // a different package nor a wrong value generation acquires its root.
+        let reused = session
+            .capture_checked_native_delta(
+                ScopeId::ROOT,
+                924,
+                None,
+                &index,
+                [&package_identity, &foreign_package].into_iter(),
+                [("answer", 924)].into_iter(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(reused.imports.len(), 2);
+        let (unchanged, added) = ledger.append(reused, &index).unwrap();
+        assert!(added.is_empty());
+        assert!(unchanged.tail.as_ref().unwrap().imports.is_empty());
+        assert_eq!(unchanged.tail.as_ref().unwrap().bindings.len(), 1);
+        assert!(session
+            .capture_checked_native_delta(
+                ScopeId::ROOT,
+                925,
+                None,
+                &index,
+                [].into_iter(),
+                [("answer", 924)].into_iter(),
+                false,
+            )
+            .is_err());
+        for ((identity, generation), root) in &baseline.owners {
+            assert!(ledger
+                .append(
+                    CapturedNativeDelta {
+                        imports: vec![SettledNativeImport {
+                            identity: identity.clone(),
+                            generation: *generation,
+                            root_id: root + 1,
+                        }],
+                        bindings: Vec::new(),
+                    },
+                    &index,
+                )
+                .is_err());
+        }
+
+        // Only the later real installation enters the mutable suffix.
+        let mut wire = testing::wire_program();
+        let own_identity = testing::identity("Later", "entry");
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.identity = own_identity.clone();
+        let program = session
+            .install_prepared(testing::prepare(wire).unwrap())
+            .unwrap();
+        let delta = session
+            .capture_checked_native_delta(
+                ScopeId::ROOT,
+                0,
+                Some(program),
+                &index,
+                [&own_identity].into_iter(),
+                [].into_iter(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(delta.imports.len(), 1);
+        let root = delta.imports[0].root_id;
+        let (settled, added) = ledger.append(delta, &index).unwrap();
+        index.extend(added);
+        assert_eq!(index.added.len(), 1);
+        assert_eq!(index.get(&(own_identity.clone(), 0)), Some(&root));
+        assert!(baseline.owners.get(&(own_identity.clone(), 0)).is_none());
+        assert!(settled
+            .append(
+                CapturedNativeDelta {
+                    imports: vec![SettledNativeImport {
+                        identity: own_identity,
+                        generation: 0,
+                        root_id: root + 1,
+                    }],
+                    bindings: Vec::new(),
+                },
+                &index,
+            )
+            .is_err());
+        drop(baseline);
+        drop(ledger);
+        drop(unchanged);
+        drop(settled);
+        assert!(retained.upgrade().is_some());
+        drop(index);
+        assert!(retained.upgrade().is_none());
+    }
+
+    #[test]
     fn failed_display_delta_records_only_actual_native_rows_and_root_identity() {
         let mut session = PersistentSession::new(None, 1024 * 1024);
         let baseline = Arc::new(
@@ -2893,6 +3055,7 @@ mod tests {
                 .capture_admitted_native_imports(ScopeId::ROOT)
                 .unwrap(),
         );
+        let index = CheckedNativeIndex::new(baseline.clone());
         let scope = session.mint_scope(ScopeId::ROOT).unwrap();
         let mut page = crate::session::prepared::tests::rooted_publication_fixture(
             &mut session,
@@ -2910,7 +3073,7 @@ mod tests {
                 scope,
                 920,
                 None,
-                &baseline.owners,
+                &index,
                 [].into_iter(),
                 [("__page", page_id), ("cellDisplay", 921)].into_iter(),
                 true,
@@ -2921,7 +3084,7 @@ mod tests {
         assert_eq!(delta.imports.len(), 1);
         assert_eq!(delta.imports[0].identity, page_identity);
         let (ledger, added) = CheckedNativeImports::base(baseline.clone())
-            .append(delta, &baseline.owners)
+            .append(delta, &index)
             .unwrap();
         assert_eq!(added.len(), 1);
         assert!(ledger
@@ -2936,7 +3099,7 @@ mod tests {
                 scope,
                 920,
                 None,
-                &baseline.owners,
+                &index,
                 [].into_iter(),
                 [("__page", page_id), ("cellDisplay", 921)].into_iter(),
                 false,
@@ -2956,7 +3119,7 @@ mod tests {
                 scope,
                 920,
                 None,
-                &baseline.owners,
+                &index,
                 [].into_iter(),
                 [("cellDisplay", 921)].into_iter(),
                 true,
@@ -2967,14 +3130,16 @@ mod tests {
                 scope,
                 920,
                 None,
-                &baseline.owners,
+                &index,
                 [].into_iter(),
                 [("__page", page_id)].into_iter(),
                 false,
             )
             .unwrap();
-        let mut replaced_owner = baseline.owners.clone();
-        replaced_owner.insert((page_identity, 920), delta.imports[0].root_id + 1);
+        let mut replaced_owner = CheckedNativeIndex::new(baseline.clone());
+        replaced_owner
+            .added
+            .insert((page_identity, 920), delta.imports[0].root_id + 1);
         assert!(ledger.append(delta, &replaced_owner).is_err());
     }
 
