@@ -16,6 +16,7 @@ mkdir "$evidence"
 export TIDEPOOL_DAEMON_ARGS='--workers 2 --rss-ceiling-mb 10240'
 export TIDEPOOL_TIMING=1 TIDEPOOL_KEEP_TEST_LOGS=1
 export TIDEPOOL_TEST_ARTIFACT_ROOT="$evidence/battery"
+export TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT="$evidence/compiler.jsonl"
 export TIDEPOOL_PERFORMANCE_WORKSPACE_ROOT="$evidence/workspaces"
 mkdir "$TIDEPOOL_PERFORMANCE_WORKSPACE_ROOT"
 unset TIDEPOOL_EXTRACT_NO_DAEMON TIDEPOOL_EXTRACT_DAEMON_SOCKET
@@ -62,6 +63,10 @@ manifest['test_count_matches'] = manifest['executed_test_count'] == manifest['ex
 if not manifest['test_count_matches']:
     manifest['exit_code'] = 1
 manifest['selected_files_unchanged'] = all(hashlib.sha256(pathlib.Path(row['path']).read_bytes()).hexdigest() == row['sha256'] for row in manifest['selected_files'].values())
+trace = path.parent / 'compiler.jsonl'
+manifest['compiler_trace'] = ({'path': str(trace), 'sha256': hashlib.sha256(trace.read_bytes()).hexdigest(), 'bytes': trace.stat().st_size} if trace.is_file() else None)
+if manifest['battery_exit_code'] == 0 and manifest['compiler_trace'] is None:
+    manifest['exit_code'] = 1
 try:
     cgroup = next(line.split(':', 2)[2] for line in pathlib.Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0::'))
     manifest['scope_cgroup'] = cgroup
@@ -75,5 +80,7 @@ if not manifest['selected_files_unchanged']:
     raise SystemExit('frozen compiler files changed during baseline')
 if not manifest['test_count_matches']:
     raise SystemExit('resident baseline must execute exactly two tests')
+if manifest['battery_exit_code'] == 0 and manifest['compiler_trace'] is None:
+    raise SystemExit('resident baseline must retain its complete raw compiler trace')
 PY
 exit "$status"

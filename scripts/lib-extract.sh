@@ -328,6 +328,23 @@ finalize_battery_artifacts() {
   local compiler_trace="${compiler_log%.log}.jsonl"
   if [[ -n "$daemon_log" && -f "$compiler_trace" ]]; then
     cp "$compiler_trace" "$BATTERY_ARTIFACT_DIR/compiler.jsonl"
+    # An explicitly owned measurement keeps its raw trace outside the bounded
+    # battery copies. Never edit the live daemon trace or overwrite evidence.
+    if [[ -n "${TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT:-}" ]]; then
+      if ! python3 - "$compiler_trace" "$TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT" "$BATTERY_ARTIFACT_DIR" <<'PYTRACE'
+from pathlib import Path
+import shutil
+import sys
+source, destination, current = map(Path, sys.argv[1:])
+if not destination.is_absolute() or destination.resolve().is_relative_to(current.parent.resolve()):
+    raise SystemExit("raw compiler trace must select an absolute file outside bounded battery runs")
+with source.open("rb") as incoming, destination.open("xb") as outgoing:
+    shutil.copyfileobj(incoming, outgoing)
+PYTRACE
+      then
+        echo "warning: could not retain the explicitly selected raw compiler trace" >&2
+      fi
+    fi
   fi
   scripts/toolchain-doctor.sh >"$BATTERY_ARTIFACT_DIR/toolchain-doctor.log" 2>&1 || true
   if [[ "$status" -eq 0 && "$BATTERY_DAEMON_START_FAILED" = 0 ]]; then
@@ -335,16 +352,44 @@ finalize_battery_artifacts() {
     # prune failure evidence or arbitrary directories under the artifact root.
     python3 - "$BATTERY_ARTIFACT_DIR" <<'PYLOG'
 from pathlib import Path
+import json
 import shutil
 import sys
 current = Path(sys.argv[1])
+limit = 4 * 1024 * 1024
 for log in current.glob("*.log"):
-    limit = 4 * 1024 * 1024
     if log.stat().st_size > limit:
         with log.open("rb") as stream:
             stream.seek(-limit, 2)
             tail = stream.read()
         log.write_bytes(b"[truncated: last 4 MiB]\n" + tail)
+for trace in current.glob("*.jsonl"):
+    original_bytes = trace.stat().st_size
+    if original_bytes <= limit:
+        continue
+    with trace.open("rb") as stream:
+        # Include one preceding byte so an exactly aligned record is retained.
+        offset = original_bytes - limit - 1
+        stream.seek(offset)
+        tail = stream.read()
+    boundary = tail.find(b"\n") + 1
+    if boundary == 0:
+        boundary = len(tail)
+    tail = tail[boundary:]
+    complete_bytes = tail.rfind(b"\n") + 1
+    discarded_suffix_bytes = len(tail) - complete_bytes
+    tail = tail[:complete_bytes]
+    trace.write_bytes(tail)
+    trace.with_name(trace.name + ".truncation.json").write_text(json.dumps({
+        "schema": 1,
+        "policy": "successful-log-tail",
+        "byte_limit": limit,
+        "original_bytes": original_bytes,
+        "retained_bytes": len(tail),
+        "retained_records": tail.count(b"\n"),
+        "discarded_prefix_bytes": offset + boundary,
+        "discarded_suffix_bytes": discarded_suffix_bytes,
+    }, indent=2) + "\n")
 (current / ".successful-run").touch()
 runs = sorted((p.parent for p in current.parent.glob("*/.successful-run")),
               key=lambda p: p.stat().st_mtime, reverse=True)

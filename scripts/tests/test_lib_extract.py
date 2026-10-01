@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Focused process-level contracts for the shared shell toolchain helpers."""
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -402,6 +403,92 @@ exit 9
         trace.unlink()
         self.assertEqual(len(list(artifact_root.glob("*/compiler.jsonl"))), 1)
         self.assertEqual(next(artifact_root.glob("*/compiler.jsonl")).read_text(), payload)
+
+    def test_successful_json_trace_is_record_bounded_and_owned_raw_trace_survives(self):
+        logs = self.root / "daemon logs"
+        logs.mkdir()
+        daemon = logs / "daemon.log"
+        daemon.write_text("daemon diagnostic")
+        trace = logs / "compiler.jsonl"
+        payload = b"".join(
+            (json.dumps({"ordinal": index, "text": "λ" * 210_000}, ensure_ascii=False) + "\n").encode()
+            for index in range(12)
+        )
+        trace.write_bytes(payload)
+        artifact_root = self.root / "artifacts"
+        artifact_root.mkdir()
+        for index in range(7):
+            old = artifact_root / str(index)
+            old.mkdir()
+            (old / ".successful-run").touch()
+        failure = artifact_root / "failure"
+        failure.mkdir()
+        (failure / "compiler.jsonl").write_bytes(payload)
+        raw_trace = self.root / "measurement/compiler.jsonl"
+        raw_trace.parent.mkdir()
+        self.run_shell('prepare_battery_artifacts fixture true\n'
+                       'finalize_battery_artifacts 0\n',
+                       TIDEPOOL_KEEP_TEST_LOGS="1",
+                       TIDEPOOL_TEST_ARTIFACT_ROOT=str(artifact_root),
+                       TIDEPOOL_EXTRACT_DAEMON_LOG=str(daemon),
+                       TIDEPOOL_TEST_COMPILER_TRACE_OUTPUT=str(raw_trace))
+        retained = next(p.parent for p in artifact_root.glob("*/compiler.jsonl.truncation.json"))
+        tail = (retained / "compiler.jsonl").read_bytes()
+        metadata = json.loads((retained / "compiler.jsonl.truncation.json").read_text())
+        rows = [json.loads(line) for line in tail.decode().splitlines()]
+        self.assertLessEqual(len(tail), 4 * 1024 * 1024)
+        self.assertTrue(tail.endswith(b"\n"))
+        self.assertEqual(rows[-1]["ordinal"], 11)
+        self.assertGreater(rows[0]["ordinal"], 0)
+        self.assertTrue(payload.endswith(tail))
+        self.assertEqual(metadata["original_bytes"], len(payload))
+        self.assertEqual(metadata["retained_bytes"], len(tail))
+        self.assertEqual(metadata["retained_records"], len(rows))
+        self.assertEqual(metadata["discarded_prefix_bytes"], len(payload) - len(tail))
+        self.assertEqual(metadata["discarded_suffix_bytes"], 0)
+        self.assertEqual(len(list(artifact_root.glob("*/.successful-run"))), 5)
+        self.assertEqual((failure / "compiler.jsonl").read_bytes(), payload)
+        self.assertEqual(trace.read_bytes(), payload)
+        self.assertEqual(raw_trace.read_bytes(), payload)
+
+    def test_failed_large_json_trace_is_retained_without_truncation(self):
+        logs = self.root / "daemon logs"
+        logs.mkdir()
+        daemon = logs / "daemon.log"
+        daemon.write_text("daemon diagnostic")
+        payload = (json.dumps({"failure": "x" * (5 * 1024 * 1024)}) + "\n").encode()
+        (logs / "compiler.jsonl").write_bytes(payload)
+        artifact_root = self.root / "artifacts"
+        self.run_shell('prepare_battery_artifacts fixture true\n'
+                       'finalize_battery_artifacts 1\n',
+                       TIDEPOOL_TEST_ARTIFACT_ROOT=str(artifact_root),
+                       TIDEPOOL_EXTRACT_DAEMON_LOG=str(daemon))
+        self.assertEqual(next(artifact_root.glob("*/compiler.jsonl")).read_bytes(), payload)
+        self.assertFalse(list(artifact_root.glob("*/compiler.jsonl.truncation.json")))
+        self.assertFalse(list(artifact_root.glob("*/.successful-run")))
+
+    def test_json_trace_truncation_omits_oversized_and_incomplete_records(self):
+        logs = self.root / "daemon logs"
+        logs.mkdir()
+        daemon = logs / "daemon.log"
+        daemon.write_text("daemon diagnostic")
+        oversized = (json.dumps({"large": "x" * (5 * 1024 * 1024)}) + "\n").encode()
+        complete = b'{"last_complete":true}\n'
+        incomplete = b'{"incomplete":'
+        payload = oversized + complete + incomplete
+        (logs / "compiler.jsonl").write_bytes(payload)
+        artifact_root = self.root / "artifacts"
+        self.run_shell('prepare_battery_artifacts fixture true\n'
+                       'finalize_battery_artifacts 0\n',
+                       TIDEPOOL_KEEP_TEST_LOGS="1",
+                       TIDEPOOL_TEST_ARTIFACT_ROOT=str(artifact_root),
+                       TIDEPOOL_EXTRACT_DAEMON_LOG=str(daemon))
+        retained = next(artifact_root.glob("*/compiler.jsonl"))
+        self.assertEqual(retained.read_bytes(), complete)
+        metadata = json.loads(retained.with_name("compiler.jsonl.truncation.json").read_text())
+        self.assertEqual(metadata["discarded_prefix_bytes"], len(oversized))
+        self.assertEqual(metadata["discarded_suffix_bytes"], len(incomplete))
+        self.assertEqual(metadata["retained_records"], 1)
 
     def test_successful_tests_preserve_daemon_failure_artifacts(self):
         (self.root / "scripts").mkdir()
