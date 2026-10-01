@@ -72,11 +72,23 @@ use crate::{
     ResidentToolEndpoint,
 };
 
+/// The original executable retained by the actor's existing boot owner.
+pub enum ResidentRootEntry {
+    Prepared(ResidentOutcome),
+    Startup(tidepool_runtime::session::PreparedStartupEntry),
+}
+
+impl From<ResidentOutcome> for ResidentRootEntry {
+    fn from(outcome: ResidentOutcome) -> Self {
+        Self::Prepared(outcome)
+    }
+}
+
 /// A compiled root at the point where ownership moves into its local actor.
 pub struct ResidentActorRoot<H, O> {
     descriptor: ActorDescriptor,
     machine: ResidentSession<H, O>,
-    outcome: ResidentOutcome,
+    outcome: ResidentRootEntry,
 }
 
 impl<H, O> ResidentActorRoot<H, O> {
@@ -89,11 +101,24 @@ impl<H, O> ResidentActorRoot<H, O> {
         Self {
             descriptor,
             machine,
-            outcome,
+            outcome: outcome.into(),
         }
     }
 
-    pub fn into_parts(self) -> (ActorDescriptor, ResidentSession<H, O>, ResidentOutcome) {
+    /// Native installation has completed, but no authored entry has executed.
+    pub fn pending(
+        descriptor: ActorDescriptor,
+        machine: ResidentSession<H, O>,
+        entry: tidepool_runtime::session::PreparedStartupEntry,
+    ) -> Self {
+        Self {
+            descriptor,
+            machine,
+            outcome: ResidentRootEntry::Startup(entry),
+        }
+    }
+
+    pub fn into_parts(self) -> (ActorDescriptor, ResidentSession<H, O>, ResidentRootEntry) {
         (self.descriptor, self.machine, self.outcome)
     }
 }
@@ -684,6 +709,7 @@ impl std::fmt::Debug for RootStartupRelease {
 enum ResidentBoot {
     Workbench,
     Prepared(Box<ResidentOutcome>),
+    Startup(tidepool_runtime::session::PreparedStartupEntry),
     Entry(RootCustody),
     Replacement(Box<replacement::PreparedSuccessor>),
 }
@@ -1790,12 +1816,15 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     fn prepared(
         descriptor: ActorDescriptor,
         environment: ResidentEnvironment<H, O>,
-        outcome: ResidentOutcome,
+        outcome: impl Into<ResidentRootEntry>,
     ) -> Self {
         Self::with_boot(
             descriptor,
             environment,
-            ResidentBoot::Prepared(Box::new(outcome)),
+            match outcome.into() {
+                ResidentRootEntry::Prepared(outcome) => ResidentBoot::Prepared(Box::new(outcome)),
+                ResidentRootEntry::Startup(entry) => ResidentBoot::Startup(entry),
+            },
             Vec::new(),
         )
     }
@@ -6426,6 +6455,12 @@ where
                 return Ok(KernelStep::Continue(()));
             }
             ResidentBoot::Prepared(outcome) => *outcome,
+            ResidentBoot::Startup(entry) => {
+                self.environment
+                    .runner
+                    .run_startup_entry(context.clone(), entry)
+                    .await?
+            }
             ResidentBoot::Entry(entry) => {
                 let mut outcome = match self.child_scope_lease.as_ref() {
                     Some(lease) => {
@@ -11795,7 +11830,7 @@ where
     pub async fn admit_root(
         &self,
         descriptor: ActorDescriptor,
-        outcome: ResidentOutcome,
+        outcome: impl Into<ResidentRootEntry> + Send,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
         let admission = self.environment.root_admission_closed.read().await;
         if *admission {
@@ -11811,7 +11846,7 @@ where
     pub async fn admit_pending_root<F>(
         &self,
         descriptor: ActorDescriptor,
-        outcome: ResidentOutcome,
+        outcome: impl Into<ResidentRootEntry> + Send,
         intent: F,
     ) -> Result<
         (
@@ -11833,7 +11868,7 @@ where
     pub async fn admit_pending_root_with_identity(
         &self,
         descriptor: ActorDescriptor,
-        outcome: ResidentOutcome,
+        outcome: impl Into<ResidentRootEntry> + Send,
         identity: ActorRef,
         intent: crate::RootStartupIntent,
     ) -> Result<
@@ -11851,7 +11886,7 @@ where
     async fn admit_pending_root_inner<F>(
         &self,
         descriptor: ActorDescriptor,
-        outcome: ResidentOutcome,
+        outcome: impl Into<ResidentRootEntry> + Send,
         identity: Option<ActorRef>,
         intent: F,
     ) -> Result<
@@ -11885,14 +11920,22 @@ where
                 "pending root requires its exact independent durable placement",
             ));
         }
+        let ResidentRootEntry::Startup(entry) = outcome.into() else {
+            return Err(refuse(
+                "pending root requires its original unexecuted startup entry",
+            ));
+        };
         let placement = descriptor.placement();
         let latch = Arc::new(Mutex::new(RootStartupState::Pending));
         let mut original_intent = None;
         let build = |identity| {
             let intent = intent(identity);
             original_intent = Some(intent.clone());
-            let mut behavior =
-                ResidentKernelBehavior::prepared(descriptor, self.environment.clone(), outcome);
+            let mut behavior = ResidentKernelBehavior::prepared(
+                descriptor,
+                self.environment.clone(),
+                ResidentRootEntry::Startup(entry),
+            );
             behavior.root_startup = Some((intent, Arc::clone(&latch)));
             behavior
         };
@@ -12024,7 +12067,7 @@ where
     async fn admit_prepared_root(
         &self,
         descriptor: ActorDescriptor,
-        outcome: ResidentOutcome,
+        outcome: impl Into<ResidentRootEntry> + Send,
         _admission: &tokio::sync::RwLockReadGuard<'_, bool>,
         recovery: PreparedRootAdmission,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {

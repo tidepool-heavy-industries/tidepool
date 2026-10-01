@@ -8421,6 +8421,21 @@ where
         }
     }
 
+    /// Consume the original installed root only after its actor's durable release.
+    pub(crate) async fn run_startup_entry(
+        &self,
+        context: crate::ActorSessionContext,
+        entry: tidepool_runtime::session::PreparedStartupEntry,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session
+                    .run_startup_entry(entry)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
     pub async fn run_rooted_entry(
         &self,
         context: crate::ActorSessionContext,
