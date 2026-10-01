@@ -1375,16 +1375,7 @@ impl PersistentSession {
             .iter()
             .flat_map(super::ExportItem::value_names)
             .collect::<Vec<_>>();
-        let visible_entries = self
-            .bindings
-            .iter_current_in(&self.scopes, scope)
-            .into_iter()
-            .filter(|(name, _)| {
-                !replaced_names
-                    .iter()
-                    .any(|replaced| replaced == &name.0.as_str())
-            })
-            .collect::<Vec<_>>();
+        let visible_entries = self.bindings.iter_current_in(&self.scopes, scope);
         let visible_values = visible_entries
             .iter()
             .map(|(_, entry)| (entry.id, entry.module.module_name()))
@@ -1392,6 +1383,11 @@ impl PersistentSession {
         let import_modules = value_import_specs(
             visible_entries
                 .iter()
+                .filter(|(name, _)| {
+                    !replaced_names
+                        .iter()
+                        .any(|replaced| replaced == &name.0.as_str())
+                })
                 .map(|(name, entry)| (name.0.clone(), entry.module)),
         );
         Ok((persistent_imports, import_modules, visible_values))
@@ -1468,14 +1464,7 @@ impl PersistentSession {
             return Err(SessionError::DeadScope(scope));
         }
         let next_epoch = self.prepare_public_visibility_advance(scope)?;
-        let mut replaced_names: Vec<String> = staged
-            .items()
-            .iter()
-            .flat_map(super::ExportItem::value_names)
-            .map(str::to_owned)
-            .collect();
-        replaced_names.sort();
-        replaced_names.dedup();
+        let replaced_names = staged.replaced_value_names();
         let mut evicted_values: Vec<String> = self
             .bindings
             .iter_current_in(&self.scopes, scope)
@@ -1488,7 +1477,6 @@ impl PersistentSession {
             .bindings
             .iter_current_in(&self.scopes, scope)
             .into_iter()
-            .filter(|(name, _)| !replaced_names.iter().any(|replaced| replaced == &name.0))
             .map(|(_, entry)| (entry.id, entry.module.module_name()))
             .collect::<Vec<_>>();
         let captured_values = visible_values

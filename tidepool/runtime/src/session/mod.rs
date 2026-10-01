@@ -773,6 +773,35 @@ enum DeclarationPersistence {
 }
 
 impl StagedDeclaration {
+    fn replaced_value_names(&self) -> Vec<String> {
+        use tidepool_toolchain::declaration_join::ExportNamespace;
+        let mut names = match &self.certified_authored {
+            Some(certificate) => certificate
+                .introduced_exports()
+                .iter()
+                .flat_map(|export| std::iter::once(&export.head).chain(export.children.iter()))
+                .filter(|identity| {
+                    matches!(
+                        identity.namespace,
+                        ExportNamespace::Value
+                            | ExportNamespace::Constructor
+                            | ExportNamespace::Field
+                    )
+                })
+                .map(|identity| identity.occurrence.clone())
+                .collect::<Vec<_>>(),
+            None => self
+                .items()
+                .iter()
+                .flat_map(ExportItem::value_names)
+                .map(str::to_owned)
+                .collect(),
+        };
+        names.sort();
+        names.dedup();
+        names
+    }
+
     #[must_use]
     pub fn generation(&self) -> Generation {
         self.generation
