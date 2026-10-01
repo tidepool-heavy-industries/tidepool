@@ -6,4 +6,4 @@ let revision = handedRequest handoff
 let repairedLabel = "repaired" :: WatchLabel
 repaired <- case handoffRetention handoff of
   Right () -> watch repairedLabel (awaitSettled revision)
-  Left issue -> error (show issue)
+  Left issue -> error (T.pack (show issue))
