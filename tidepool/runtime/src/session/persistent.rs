@@ -469,14 +469,38 @@ impl PersistentSession {
                                 generation: *generation,
                             });
                         }
+                        return Err(PreparedRuntimeError::MissingRetainedCertifiedOwner {
+                            identity: identity.clone(),
+                            generation: *generation,
+                        });
+                    }
+                    if let PendingImportOwner::RetainedPackage {
+                        unit,
+                        module,
+                        binder,
+                        generation,
+                        interface_digest,
+                    } = owner
+                    {
+                        if binder != &global.identity
+                            || &binder.unit != unit
+                            || &binder.module != module
+                            || global.required_generation != Some(*generation)
+                        {
+                            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                        }
                         return self
                             .machine
                             .as_ref()
                             .and_then(|engine| {
-                                engine.retained_code_export_owner(identity, *generation)
+                                engine.retained_package_code_export_owner(
+                                    binder,
+                                    *generation,
+                                    interface_digest,
+                                )
                             })
                             .ok_or_else(|| PreparedRuntimeError::MissingRetainedCertifiedOwner {
-                                identity: identity.clone(),
+                                identity: binder.clone(),
                                 generation: *generation,
                             });
                     }
@@ -526,6 +550,7 @@ impl PersistentSession {
                             })
                         }
                         PendingImportOwner::Retained { .. }
+                        | PendingImportOwner::RetainedPackage { .. }
                         | PendingImportOwner::Package { .. } => None,
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1512,6 +1537,22 @@ impl PersistentSession {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
+        if let Some(certificate) = &staged.certified_authored {
+            let view = certificate.artifact_view();
+            let owner = certificate.product().owner();
+            let root = view
+                .descriptors()
+                .into_iter()
+                .find(|entry| {
+                    entry.kind
+                        == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
+                        && entry.owner.unit == owner.unit
+                        && entry.owner.module == owner.module
+                })
+                .ok_or(SessionError::StaleStagedDeclaration)?
+                .id;
+            self.validate_native_package_requirements(view, &[root])?;
+        }
         let next_epoch = self.prepare_public_visibility_advance(scope)?;
         let replaced_names = staged.replaced_value_names();
         let mut evicted_values: Vec<String> = self
@@ -1553,6 +1594,30 @@ impl PersistentSession {
                 }
             })
             .into_result()
+    }
+
+    fn validate_native_package_requirements(
+        &self,
+        view: &tidepool_toolchain::artifact_inventory::ArtifactView,
+        roots: &[tidepool_toolchain::artifact_inventory::ArtifactId],
+    ) -> Result<(), SessionError> {
+        for requirement in view.native_requirements_from_roots(roots)?.packages {
+            if self
+                .machine
+                .as_ref()
+                .and_then(|engine| {
+                    engine.retained_package_code_export_owner(
+                        &requirement.identity,
+                        requirement.generation,
+                        &requirement.interface_digest,
+                    )
+                })
+                .is_none()
+            {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+        }
+        Ok(())
     }
 
     pub fn discard_staged_declaration(&self, staged: &super::StagedDeclaration) {
@@ -2518,6 +2583,33 @@ impl PersistentSession {
         {
             return Ok(PublicManifestCommit::Stale);
         }
+        if let Some(declaration) = &ticket.declaration {
+            let native_owners = declaration
+                .joined
+                .evidence
+                .exports()
+                .iter()
+                .flat_map(|export| std::iter::once(&export.head).chain(export.children.iter()))
+                .map(
+                    |identity| tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                        unit: identity.unit.clone(),
+                        module: identity.module.clone(),
+                    },
+                )
+                .collect::<std::collections::BTreeSet<_>>();
+            let view = declaration.joined.context.artifact_view();
+            let roots = view
+                .descriptors()
+                .into_iter()
+                .filter(|entry| {
+                    entry.kind
+                        == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
+                        && native_owners.contains(&entry.owner)
+                })
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>();
+            self.validate_native_package_requirements(view, &roots)?;
+        }
         let next_epoch = self.prepare_public_visibility_advance(ticket.public_scope)?;
         let prepared = self
             .bindings
@@ -3462,14 +3554,15 @@ mod checkpoint_scope_tests {
     }
 
     #[test]
-    fn certification_resolves_advertised_native_exports_without_session_binding_ids() {
+    fn retained_package_certification_resolves_exact_export_and_refuses_plain_retained() {
         use tidepool_repr::execution_schema::{
             testing, Atom, ExprFrame, GlobalId, Group, RuntimeRep, SignatureId, ValueRef,
         };
         let binder = testing::identity("Fixture", "entry");
-        let (engine, _) =
-            PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
-        let expected = engine.retained_code_export_owner(&binder, 0).unwrap();
+        let (engine, _) = super::super::prepared::tests::certified_package_export_fixture([9; 32]);
+        let expected = engine
+            .retained_package_code_export_owner(&binder, 0, &[9; 32])
+            .unwrap();
         let mut session = PersistentSession::new(None, 64 * 1024);
         session.machine = Some(engine);
         assert!(session.prepared_retained().contains(&(binder.clone(), 0)));
@@ -3497,6 +3590,31 @@ mod checkpoint_scope_tests {
                 generation: 0,
             }],
             ..TurnCertification::default()
+        };
+        assert!(
+            matches!(session.resolve_certification_in(ScopeId::ROOT, &prepared, &certification),
+            Err(PreparedRuntimeError::MissingRetainedCertifiedOwner { identity, generation: 0 }) if identity == binder)
+        );
+        let mut certification = certification;
+        for digest in [[0; 32], [8; 32]] {
+            certification.target_owners[0] = PendingImportOwner::RetainedPackage {
+                unit: binder.unit.clone(),
+                module: binder.module.clone(),
+                binder: binder.clone(),
+                generation: 0,
+                interface_digest: digest,
+            };
+            assert!(
+                matches!(session.resolve_certification_in(ScopeId::ROOT, &prepared, &certification),
+                Err(PreparedRuntimeError::MissingRetainedCertifiedOwner { identity, generation: 0 }) if identity == binder)
+            );
+        }
+        certification.target_owners[0] = PendingImportOwner::RetainedPackage {
+            unit: binder.unit.clone(),
+            module: binder.module.clone(),
+            binder: binder.clone(),
+            generation: 0,
+            interface_digest: [9; 32],
         };
         let resolved = session
             .resolve_certification_in(ScopeId::ROOT, &prepared, &certification)

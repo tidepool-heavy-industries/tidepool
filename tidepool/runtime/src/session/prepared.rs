@@ -2512,8 +2512,22 @@ impl PreparedEngine {
                 binder: identity.clone(),
                 generation,
                 root_id: export.handle.raw().0,
+                interface_digest: export.interface_digest,
             }
         })
+    }
+
+    pub(crate) fn retained_package_code_export_owner(
+        &self,
+        identity: &SymbolIdentity,
+        generation: u64,
+        interface_digest: &[u8; 32],
+    ) -> Option<ImportOwner> {
+        let export = self.code_exports.get(identity)?;
+        if !matches_protected_package_interface(export, interface_digest) {
+            return None;
+        }
+        self.retained_code_export_owner(identity, generation)
     }
 
     pub(crate) fn retained_code_export_owner_installed_by(
@@ -2535,6 +2549,7 @@ impl PreparedEngine {
             binder,
             generation,
             root_id,
+            interface_digest,
         } = owner
         else {
             unreachable!("code export import has a code export owner")
@@ -2548,6 +2563,9 @@ impl PreparedEngine {
                     && *generation == CODE_EXPORT_GENERATION
                     && export.handle.raw().0 == *root_id
                     && export.handle.rep() == declaration.rep
+                    && interface_digest
+                        .as_ref()
+                        .is_none_or(|digest| matches_protected_package_interface(export, digest))
                     && self.machine.prepared_handle_of(export.handle.raw()) == Some(export.handle)
             })
             .ok_or_else(|| PreparedRuntimeError::MissingCertifiedOwner(owner.clone()))?;
@@ -6113,6 +6131,7 @@ pub(super) mod tests {
                     binder: binder.clone(),
                     generation: 1,
                     root_id,
+                    interface_digest: None,
                 },
                 target(binder.clone(), 1, false),
             ),
@@ -6121,6 +6140,7 @@ pub(super) mod tests {
                     binder: wrong_identity.clone(),
                     generation: 0,
                     root_id,
+                    interface_digest: None,
                 },
                 target(wrong_identity, 0, false),
             ),
@@ -6161,6 +6181,72 @@ pub(super) mod tests {
         assert!(engine.retained_code_export_owner(&binder, 0).is_none());
         engine.quiesce_and_collect_now().unwrap();
         assert_eq!(engine.residency().programs, 0);
+    }
+
+    #[test]
+    fn retained_package_exports_require_original_provenance_and_live_root() {
+        let binder = testing::identity("Fixture", "entry");
+        let (mut engine, _) = certified_package_export_fixture([9; 32]);
+        let (foreign, _) = certified_package_export_fixture([9; 32]);
+        let owner = engine
+            .retained_package_code_export_owner(&binder, 0, &[9; 32])
+            .unwrap();
+        let declaration = GlobalDecl {
+            identity: binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: Some(SignatureId(0)),
+            required_evaluated: true,
+            required_generation: Some(0),
+        };
+        assert!(engine.code_export_import(&owner, &declaration).is_ok());
+        for (identity, generation, digest) in [
+            (binder.clone(), 0, [0; 32]),
+            (binder.clone(), 0, [8; 32]),
+            (binder.clone(), 1, [9; 32]),
+            (testing::identity("Absent", "entry"), 0, [9; 32]),
+        ] {
+            assert!(engine
+                .retained_package_code_export_owner(&identity, generation, &digest)
+                .is_none());
+        }
+        let (legacy, _) =
+            PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
+        assert!(legacy
+            .retained_package_code_export_owner(&binder, 0, &[9; 32])
+            .is_none());
+        assert_eq!(legacy.code_exports[&binder].interface_digest, None);
+        let foreign_owner = foreign
+            .retained_package_code_export_owner(&binder, 0, &[9; 32])
+            .unwrap();
+        assert!(
+            matches!(engine.code_export_import(&foreign_owner, &declaration),
+            Err(PreparedRuntimeError::MissingCertifiedOwner(actual)) if actual == foreign_owner)
+        );
+        for changed in [None, Some([8; 32])] {
+            engine
+                .code_exports
+                .get_mut(&binder)
+                .unwrap()
+                .interface_digest = changed;
+            assert!(matches!(engine.code_export_import(&owner, &declaration),
+                Err(PreparedRuntimeError::MissingCertifiedOwner(actual)) if actual == owner));
+        }
+        engine
+            .code_exports
+            .get_mut(&binder)
+            .unwrap()
+            .interface_digest = Some([9; 32]);
+        let mut wrong_rep = declaration.clone();
+        wrong_rep.rep = RuntimeRep::Address;
+        assert!(matches!(engine.code_export_import(&owner, &wrong_rep),
+            Err(PreparedRuntimeError::MissingCertifiedOwner(actual)) if actual == owner));
+        let export = engine.code_exports.remove(&binder).unwrap();
+        assert!(engine
+            .retained_package_code_export_owner(&binder, 0, &[9; 32])
+            .is_none());
+        assert!(matches!(engine.code_export_import(&owner, &declaration),
+            Err(PreparedRuntimeError::MissingCertifiedOwner(actual)) if actual == owner));
+        assert!(engine.release(export.handle));
     }
 
     #[test]
@@ -6722,6 +6808,34 @@ pub(super) mod tests {
             body: 0,
         };
         testing::prepare(wire).expect("producer fixture")
+    }
+
+    pub(in crate::session) fn certified_package_export_fixture(
+        digest: [u8; 32],
+    ) -> (PreparedEngine, ProgramId) {
+        let registry = ImageRegistry::new();
+        let prepared = testing::prepare(testing::wire_program()).unwrap();
+        let binder = testing::identity("Fixture", "entry");
+        let target = CertifiedTargetImage::compile(prepared, &registry).unwrap();
+        let mut engine = PreparedEngine::empty_certified(64 * 1024, None).unwrap();
+        // Native transaction fixture: the real producer lane supplies this
+        // same private sealed package map, never caller-requested provenance.
+        let staged = engine
+            .install_certified_turn_admitted(
+                target,
+                &[],
+                &BTreeMap::new(),
+                vec![],
+                &[],
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &BindingTable::new(),
+                BTreeMap::new(),
+                BTreeMap::from([(binder, digest)]),
+            )
+            .unwrap();
+        let program = engine.commit_certified_turn(staged);
+        (engine, program)
     }
 
     pub(in crate::session) fn rooted_publication_fixture(

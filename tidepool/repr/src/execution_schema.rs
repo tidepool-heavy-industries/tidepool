@@ -1108,6 +1108,9 @@ pub enum ImportOwner {
         binder: SymbolIdentity,
         generation: u64,
         root_id: u64,
+        /// Producer-authenticated package provenance, when required by a
+        /// retained-package certificate. It never authorizes a missing export.
+        interface_digest: Option<[u8; 32]>,
     },
     Package {
         unit: String,
@@ -1664,6 +1667,7 @@ mod projected_group_tests {
                 binder: binder.clone(),
                 generation: 1,
                 root_id: 99,
+                interface_digest: None,
             }],
         )
         .unwrap();
