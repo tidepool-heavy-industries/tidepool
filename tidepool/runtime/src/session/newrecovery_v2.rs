@@ -2099,9 +2099,14 @@ mod tests {
             });
         graph.seal().unwrap();
 
-        let RecoveryArtifactClosure::ValueInterface(value) = &mut graph.artifacts[1] else {
-            unreachable!()
-        };
+        let value = graph
+            .artifacts
+            .iter_mut()
+            .find_map(|artifact| match artifact {
+                RecoveryArtifactClosure::ValueInterface(value) => Some(value),
+                _ => None,
+            })
+            .expect("fixture retains its value interface");
         value.artifact_id = ArtifactId([0xff; 32]);
         assert!(graph
             .seal()
