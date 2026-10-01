@@ -2521,6 +2521,8 @@ fn pane_environment() -> std::collections::BTreeMap<String, String> {
         "XDG_CONFIG_HOME",
         "TIDEPOOL_EXTRACT",
         "TIDEPOOL_EXTRACT_WORKER",
+        tidepool_toolchain::toolchain::ENV_COMPILER_DEPLOYMENT,
+        tidepool_toolchain::toolchain::ENV_COMPILER_MODULES,
         "TIDEPOOL_PRELUDE_DIR",
         "TIDEPOOL_GHC_LIBDIR",
         "TIDEPOOL_COMPILE_CACHE_DIR",
