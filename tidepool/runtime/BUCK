@@ -226,13 +226,14 @@ tidepool_rust_test_cases(
     timeout = 600,
     test_rule_timeout_ms = 660000,
     env = {
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     haskell_worker = True,
-    resources = ["//bridge/haskell:facade_embedded_sources"],
+    resources = ["//bridge/haskell:facade_embedded_sources", "//build/package:compiler_deployment"],
     visibility = ["PUBLIC"],
 )
 
@@ -245,13 +246,14 @@ tidepool_rust_test_cases(
     timeout = 600,
     test_rule_timeout_ms = 660000,
     env = {
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     haskell_worker = True,
-    resources = ["//bridge/haskell:facade_embedded_sources"],
+    resources = ["//bridge/haskell:facade_embedded_sources", "//build/package:compiler_deployment"],
     visibility = ["PUBLIC"],
 )
 
@@ -274,12 +276,16 @@ tidepool_rust_test_cases(
     test_rule_timeout_ms = 660000,
     env = {
         "TIDEPOOL_CELL_TEST_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     haskell_worker = True,
-    resources = ["//bridge/haskell:facade_embedded_sources"],
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//build/package:compiler_deployment",
+    ],
     visibility = ["PUBLIC"],
 )

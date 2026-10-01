@@ -32,6 +32,7 @@ path = "empty.rs"
 "log" = { package = "log", version = "=0.4.33", default-features = true, features = [] }
 "num-bigint" = { package = "num-bigint", version = "=0.4.8", default-features = true, features = [] }
 "parking_lot" = { package = "parking_lot", version = "=0.12.5", default-features = true, features = [] }
+"petgraph" = { package = "petgraph", version = "=0.8.3", default-features = true, features = [] }
 "proc-macro2" = { package = "proc-macro2", version = "=1.0.107", default-features = true, features = [] }
 "proptest" = { package = "proptest", version = "=1.11.0", default-features = true, features = [] }
 "quote" = { package = "quote", version = "=1.0.47", default-features = true, features = [] }

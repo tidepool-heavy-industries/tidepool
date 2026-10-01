@@ -29,6 +29,7 @@ tidepool_rust_library(
     edition = "2021",
     srcs_filegroup = ":tidepool_extract_cmd_sources",
     deps = [
+        "//bridge/atomic-write:tidepool_atomic_write",
         "//third-party/rust:blake3",
         "//third-party/rust:tracing",
         "//third-party/rust:tracing-appender",
@@ -65,6 +66,7 @@ tidepool_rust_binary(
     edition = "2021",
     srcs_filegroup = ":tidepool-extract_sources",
     deps = [
+        "//bridge/atomic-write:tidepool_atomic_write",
         "//third-party/rust:blake3",
         "//third-party/rust:tracing",
         "//third-party/rust:tracing-appender",
@@ -101,6 +103,7 @@ tidepool_rust_isolated_test(
     edition = "2021",
     srcs_filegroup = ":tidepool_extract_cmd_unit_tests_sources",
     deps = [
+        "//bridge/atomic-write:tidepool_atomic_write",
         "//third-party/rust:blake3",
         "//third-party/rust:serde_json",
         "//third-party/rust:tempfile",

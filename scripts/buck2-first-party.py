@@ -597,14 +597,43 @@ def runtime_test_cases(binary):
             "    expected_count = 1,", "    jobs = 1,", "    timeout = 600,",
             "    test_rule_timeout_ms = 660000,",
             "    env = {",
+            '        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",',
             '        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",',
             '        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",',
             '        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",',
             '        "TIDEPOOL_KEEP_TEST_LOGS": "1",',
             "    },", "    haskell_worker = True,",
-            '    resources = ["//bridge/haskell:facade_embedded_sources"],',
+            '    resources = ["//bridge/haskell:facade_embedded_sources", "//build/package:compiler_deployment"],',
             '    visibility = ["PUBLIC"],', ")", "",
         ]))
+    fixture_tests = ["session::turn::tests::" + name for name in (
+        "compiled_cell_fixture_rejects_a_missing_worker",
+        "whole_cell_check_harvests_downstream_fixed_local_type",
+        "whole_cell_check_harvests_same_cell_nominal_type",
+        "checked_handler_pin_carries_qualified_type_imports",
+        "whole_cell_check_reports_missing_record_fields_without_rejecting_declaration",
+        "checked_expression_plans_cover_all_execution_and_presentation_quadrants",
+        "a_final_pure_cell_is_accepted_as_effectful",
+        "a_genuinely_pure_final_expression_still_takes_the_pure_path",
+    )]
+    rules.append("\n".join([
+        "tidepool_rust_test_cases(",
+        '    name = "runtime_compiled_cell_fixture_test",',
+        f"    binary = {json.dumps(':' + binary)},",
+        "    exact_tests = [", render_strings(fixture_tests, 8), "    ],",
+        f"    expected_count = {len(fixture_tests)},", "    jobs = 1,", "    timeout = 600,",
+        "    test_rule_timeout_ms = 660000,", "    env = {",
+        '        "TIDEPOOL_CELL_TEST_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",',
+        '        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",',
+        '        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",',
+        '        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",',
+        '        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",',
+        '        "TIDEPOOL_KEEP_TEST_LOGS": "1",',
+        "    },", "    haskell_worker = True,", "    resources = [",
+        '        "//bridge/haskell:facade_embedded_sources",',
+        '        "//build/package:compiler_deployment",',
+        "    ],", '    visibility = ["PUBLIC"],', ")", "",
+    ]))
     return "\n".join(rules)
 
 
@@ -617,6 +646,7 @@ def facade_test_cases(binary):
     host_env = {
         **process_env,
         "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
@@ -629,7 +659,11 @@ def facade_test_cases(binary):
         "PLAYWRIGHT_BROWSERS_PATH": "$(location toolchains//:playwright_browsers)",
     }
     process_resources = ["toolchains//:test_tools_closure"]
-    host_resources = process_resources + ["//web:dist", "//bridge/haskell:facade_embedded_sources"]
+    host_resources = process_resources + [
+        "//web:dist",
+        "//bridge/haskell:facade_embedded_sources",
+        "//build/package:compiler_deployment",
+    ]
     browser_resources = host_resources + [
         "//build/testing/browser:driver_bundle",
         "toolchains//:browser_test_closure",
