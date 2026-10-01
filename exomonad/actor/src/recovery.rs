@@ -868,6 +868,9 @@ fn validate_startup(
         || admission.supervisor_parent.is_some()
         || admission.context_parent.is_some()
         || owner_for_admission(admission).is_none()
+        || records
+            .values()
+            .any(|record| owner_for_admission(&record.admission) == owner_for_admission(admission))
     {
         return Err(std::io::Error::other(
             "startup intent requires a canonical independent root",
