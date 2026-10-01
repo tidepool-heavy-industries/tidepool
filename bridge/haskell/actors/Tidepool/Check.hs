@@ -9,7 +9,7 @@ module Tidepool.Check
   , root, turn, activation, git, writeFile, readFile
   , present, notPresented, unconfirmed, check, restart
   , assertThat, assertEventually, assertCell, awaitCell
-  , output, lastOutput, literal, gitOidLiteral, checkpoint, awaitOutput
+  , output, literal, gitOidLiteral, checkpoint
   ) where
 
 import Prelude hiding (readFile, writeFile)
@@ -118,13 +118,6 @@ restart = send RecipeRestart
 output :: Value -> Text
 output = Text.intercalate "\n" . outputs
 
--- Setup bindings in a multi-unit example also have output. Assertions about
--- its final expression should not depend on those workbench display receipts.
-lastOutput :: Value -> Text
-lastOutput value = case reverse (outputs value) of
-  final : _ -> final
-  [] -> ""
-
 outputs :: Value -> [Text]
 outputs (Object fields) = case KeyMap.lookup "items" fields of
   Just (Array items) -> [text | Object item <- items, Just (String text) <- [KeyMap.lookup "output" item]]
@@ -144,14 +137,3 @@ checkpoint actor path contents message = do
   _ <- git actor ["add", "--", path]
   _ <- git actor ["-c", "commit.gpgsign=false", "commit", "--quiet", "-m", message]
   git actor ["rev-parse", "HEAD"]
-
--- Poll a retained observation while an automatic callback finishes. This does
--- not launch work or infer readiness from elapsed time.
-awaitOutput :: Member RecipeCheck effects => CheckActor -> Text -> (Text -> Bool) -> Eff effects Text
-awaitOutput actor source ready = go (120 :: Int)
-  where
-    go remaining = do
-      observed <- output <$> turn actor source
-      if ready observed then pure observed
-      else if remaining == 0 then error (Text.unpack ("Check observation never became ready: " <> observed))
-      else go (remaining - 1)

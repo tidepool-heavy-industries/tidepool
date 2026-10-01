@@ -9,13 +9,10 @@
 module Project.Checks (pinned) where
 
 import Control.Monad.Freer (Eff, Member)
-import qualified Data.Text as Text
 import Tidepool.Check
 
 pinned :: Member RecipeCheck effects => Eff effects ()
 pinned = do
   owner <- root
-  cell <- turn owner "tiny + 1"
-  let observed = lastOutput cell
-  check ("a prepared cell evaluates the flake-pinned module: " <> observed)
-        ("42" `Text.isInfixOf` observed)
+  assertCell owner "a prepared cell evaluates the flake-pinned module"
+    "tiny + 1 == (42 :: Int)"
