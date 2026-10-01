@@ -1839,7 +1839,7 @@ pub struct CompiledTurn {
 
 #[derive(Clone, Debug, Default)]
 pub struct TurnCertification {
-    pub groups: Vec<PendingCertifiedGroup>,
+    pub groups: Arc<[PendingCertifiedGroup]>,
     pub target_owners: Vec<PendingImportOwner>,
     pub package_interfaces:
         tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces,
@@ -7336,8 +7336,8 @@ mod tests {
     ) -> (std::ffi::OsString, std::ffi::OsString) {
         let frontend = frontend
             .expect("TIDEPOOL_CELL_TEST_EXTRACT is required for compiled-cell fixture tests");
-        let worker = worker
-            .expect("TIDEPOOL_EXTRACT_WORKER is required for compiled-cell fixture tests");
+        let worker =
+            worker.expect("TIDEPOOL_EXTRACT_WORKER is required for compiled-cell fixture tests");
         use tidepool_toolchain::toolchain::{probe_extract_binary, ExtractBinaryRole};
 
         let frontend_role = probe_extract_binary(std::path::Path::new(&frontend));

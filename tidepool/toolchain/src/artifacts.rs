@@ -1276,7 +1276,7 @@ struct ProgramNativeOutput {
 
 #[derive(Debug)]
 pub struct SealedTurnProducts {
-    pub certified_groups: Vec<certified_products::PendingCertifiedGroup>,
+    pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     pub pending_imports: Vec<certified_products::PendingImportOwner>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     pub package_interfaces: certified_products::CertifiedTargetPackageInterfaces,
@@ -1488,7 +1488,7 @@ pub fn seal_turn_outputs(
                 )
             })
             .transpose()?,
-        certified_groups: certified.groups,
+        certified_groups: certified.groups.into(),
         pending_imports,
         recovery_products: certified.recovery_products,
         package_interfaces,
