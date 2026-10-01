@@ -12973,18 +12973,29 @@ mod request_tests {
         let (page, metadata, cell_display) =
             display_bundle_binders(&bound, &page_name, &metadata_name)
                 .expect("expected page/metadata/cellDisplay binder shape");
+        let mut page = page.clone();
+        let metadata = metadata.clone();
+        let mut cell_display = cell_display.clone();
+        let original_page_id = page.var_id;
+        let original_alias_id = cell_display.var_id;
         // The Cranelift half off-checkout too: snapshot the install, compile
         // with no session borrowed, then revalidate, install and run.
         assert!(split_session.prepared_machine_ready());
         let pending = split_session
             .snapshot_display_bundle(
                 cloned_turn_code(&compiled),
-                page,
-                metadata,
-                cell_display,
+                &page,
+                &metadata,
+                &cell_display,
                 ready.generation,
             )
             .expect("display install snapshot");
+        // Caller-owned rows can change after capture; installation uses the
+        // original rows retained inside the capsule.
+        page.name = "foreignCapsulePage".into();
+        page.var_id += 1;
+        cell_display.name = "foreignCapsuleAlias".into();
+        cell_display.var_id += 1;
         let program = pending
             .compile_off_checkout()
             .expect("display bundle compiles off-checkout");
@@ -12992,6 +13003,21 @@ mod request_tests {
             .revalidate_and_run_display_bundle(program)
             .expect("display bundle runs")
             .expect("nothing changed between snapshot and install");
+        let public = split_session
+            .public_visibility_snapshot_in(split_context.placement.lexical_scope)
+            .expect("installed display scope");
+        assert!(public.bindings.contains(&(
+            page_name.clone(),
+            tidepool_runtime::session::SessionVarId::from_extract(original_page_id),
+        )));
+        assert!(public.bindings.contains(&(
+            "cellDisplay".into(),
+            tidepool_runtime::session::SessionVarId::from_extract(original_alias_id),
+        )));
+        assert!(!public
+            .bindings
+            .iter()
+            .any(|(name, _)| { name == &page.name || name == &cell_display.name }));
         let split_output =
             decode_display_bundle(&bundle, "displaySplitSeen").expect("display bundle decodes");
 

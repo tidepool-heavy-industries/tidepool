@@ -1,0 +1,19 @@
+error[E0061]: this method takes 1 argument but 4 arguments were supplied
+  --> tests/compile_fail/prepared_install_crossed_display.rs:12:10
+   |
+12 |         .revalidate_and_run_display_bundle(a, compiled_b, page, alias)
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ -              ----  ----- unexpected argument #4 of type `&BoundBinder`
+   |                                            |              |
+   |                                            |              unexpected argument #3 of type `&BoundBinder`
+   |                                            unexpected argument #1 of type `PendingDisplayInstall`
+   |
+note: method defined here
+  --> src/session/resident.rs
+   |
+   |     pub fn revalidate_and_run_display_bundle(
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra arguments
+   |
+12 -         .revalidate_and_run_display_bundle(a, compiled_b, page, alias)
+12 +         .revalidate_and_run_display_bundle(compiled_b)
+   |

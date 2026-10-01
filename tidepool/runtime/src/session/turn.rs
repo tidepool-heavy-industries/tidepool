@@ -6306,15 +6306,35 @@ mod tests {
         let [page, metadata, alias] = display_bound.as_slice() else {
             panic!("canonical display rows")
         };
-        let failure = resident
-            .run_checked_display_bundle_with_sites(
-                display_compiled.code(),
+        let display_code = display_compiled.into_code();
+        let mut substituted_alias = alias.clone();
+        substituted_alias.var_id += 1;
+        let residency = resident.residency();
+        assert!(resident
+            .snapshot_checked_display_bundle(
+                display_code.clone(),
+                page,
+                metadata,
+                &substituted_alias,
+                display.generation(),
+                display.clone(),
+            )
+            .is_err());
+        assert_eq!(resident.residency(), residency);
+        assert_eq!(prefix.snapshot().display_settlement(), None);
+        let pending = resident
+            .snapshot_checked_display_bundle(
+                display_code,
                 page,
                 metadata,
                 alias,
                 display.generation(),
                 display,
             )
+            .unwrap();
+        let ready = pending.compile_off_checkout().unwrap();
+        let failure = resident
+            .revalidate_and_run_display_bundle(ready)
             .unwrap_err();
         assert!(
             failure.to_string().contains("checked-display-sentinel"),

@@ -1,0 +1,31 @@
+error[E0382]: use of moved value: `pending`
+ --> tests/compile_fail/prepared_install_consumes_pending.rs:5:19
+  |
+3 | fn compile_twice(pending: PendingPreparedInstall) {
+  |                  ------- move occurs because `pending` has type `PendingPreparedInstall`, which does not implement the `Copy` trait
+4 |     let _first = pending.compile_off_checkout().unwrap();
+  |                          ---------------------- `pending` moved due to this method call
+5 |     let _second = pending.compile_off_checkout().unwrap();
+  |                   ^^^^^^^ value used here after move
+  |
+note: `PendingPreparedInstall::compile_off_checkout` takes ownership of the receiver `self`, which moves `pending`
+ --> src/session/resident.rs
+  |
+  |     pub fn compile_off_checkout(self) -> Result<ReadyPreparedInstall, PreparedRuntimeError> {
+  |                                 ^^^^
+
+error[E0382]: use of moved value: `pending`
+  --> tests/compile_fail/prepared_install_consumes_pending.rs:10:19
+   |
+ 8 | fn compile_display_twice(pending: PendingDisplayInstall) {
+   |                          ------- move occurs because `pending` has type `PendingDisplayInstall`, which does not implement the `Copy` trait
+ 9 |     let _first = pending.compile_off_checkout().unwrap();
+   |                          ---------------------- `pending` moved due to this method call
+10 |     let _second = pending.compile_off_checkout().unwrap();
+   |                   ^^^^^^^ value used here after move
+   |
+note: `PendingDisplayInstall::compile_off_checkout` takes ownership of the receiver `self`, which moves `pending`
+  --> src/session/resident.rs
+   |
+   |     pub fn compile_off_checkout(self) -> Result<ReadyDisplayInstall, PreparedRuntimeError> {
+   |                                 ^^^^

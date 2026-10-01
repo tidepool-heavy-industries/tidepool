@@ -1,0 +1,16 @@
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+ --> tests/compile_fail/prepared_install_crossed_image.rs:9:13
+  |
+9 |     session.revalidate_and_run_prepared(a, compiled_b).unwrap();
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ - unexpected argument #1 of type `PendingPreparedInstall`
+  |
+note: method defined here
+ --> src/session/resident.rs
+  |
+  |     pub fn revalidate_and_run_prepared(
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+  |
+9 -     session.revalidate_and_run_prepared(a, compiled_b).unwrap();
+9 +     session.revalidate_and_run_prepared(compiled_b).unwrap();
+  |

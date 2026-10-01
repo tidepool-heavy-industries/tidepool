@@ -7073,25 +7073,51 @@ mod authored_publication_tests {
     }
 
     fn startup_code(fail: bool) -> TurnCode<'static> {
+        startup_code_with_value(fail, None)
+    }
+
+    fn startup_code_with_value(fail: bool, value: Option<i64>) -> TurnCode<'static> {
         use std::borrow::Cow;
         use tidepool_repr::execution_schema::{
             testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, FieldLayout,
-            Group, HeapBinding, HeapRhs, ResultContract, RuntimeRep, ValueId, ValueRef,
+            Group, HeapBinding, HeapRhs, ResultContract, RuntimeRep, ScalarLiteral, ValueId,
+            ValueRef,
         };
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
-        for (index, (name, fields)) in [("Done", 1), ("Suspended", 2), ("Unit", 0)]
+        let payload = if value.is_some() {
+            ("I#", 1)
+        } else {
+            ("Unit", 0)
+        };
+        for (index, (name, fields)) in [("Done", 1), ("Suspended", 2), payload]
             .into_iter()
             .enumerate()
         {
             let module = if index < 2 {
                 "Tidepool.Internal.Resume"
+            } else if value.is_some() {
+                "GHC.Types"
             } else {
                 "Fixture"
             };
+            let rep = if index == 2 && value.is_some() {
+                RuntimeRep::Int(64)
+            } else {
+                RuntimeRep::LiftedRef
+            };
             let mut identity = testing::identity(module, name);
             identity.namespace = "constructor".into();
-            let mut family = testing::identity(module, if index < 2 { "Settled" } else { "Unit" });
+            let mut family = testing::identity(
+                module,
+                if index < 2 {
+                    "Settled"
+                } else if value.is_some() {
+                    "Int"
+                } else {
+                    "Unit"
+                },
+            );
             family.namespace = "type".into();
             wire.constructors.push(ConstructorDecl {
                 identity,
@@ -7100,18 +7126,18 @@ mod authored_publication_tests {
                 result_rep: RuntimeRep::LiftedRef,
                 tag: if index == 1 { 2 } else { 1 },
                 family_size: if index < 2 { 2 } else { 1 },
-                field_reps: vec![RuntimeRep::LiftedRef; fields],
-                strict_fields: vec![false; fields],
+                field_reps: vec![rep.clone(); fields],
+                strict_fields: vec![index == 2 && value.is_some(); fields],
                 layout: CheckedLayout {
                     fields: (0..fields)
                         .map(|field| FieldLayout {
-                            rep: RuntimeRep::LiftedRef,
+                            rep: rep.clone(),
                             offset: field as u32 * 8,
                         })
                         .collect(),
                     alignment: if fields == 0 { 1 } else { 8 },
                     payload_size: fields as u32 * 8,
-                    root_mask: vec![true; fields],
+                    root_mask: vec![matches!(rep, RuntimeRep::LiftedRef); fields],
                 },
             });
         }
@@ -7131,7 +7157,15 @@ mod authored_publication_tests {
                         id: ValueId(1),
                         rhs: HeapRhs::Constructor {
                             constructor: ConstructorId(2),
-                            fields: vec![],
+                            fields: value
+                                .into_iter()
+                                .map(|value| {
+                                    Atom::Scalar(ScalarLiteral::Int {
+                                        bits: 64,
+                                        bytes: value.to_be_bytes().to_vec(),
+                                    })
+                                })
+                                .collect(),
                         },
                     }),
                     body: 0,
@@ -7165,6 +7199,105 @@ mod authored_publication_tests {
             table: Cow::Owned(table),
             sites: Cow::Borrowed(&[]),
             certification: Cow::Owned(None),
+        }
+    }
+
+    fn integer_capsule_session() -> (tempfile::TempDir, TestSession) {
+        let (root, mut session) = startup_session();
+        let entry = session
+            .prepare_startup_entry_installed(
+                startup_code_with_value(false, Some(0)),
+                StartupCompileIdentity::Fixture,
+            )
+            .unwrap();
+        session.run_startup_entry(entry).unwrap();
+        (root, session)
+    }
+
+    #[test]
+    fn prepared_capsules_keep_same_shape_images_and_original_binding_metadata_together() {
+        let (_root, mut session) = integer_capsule_session();
+        let binder = BoundBinder {
+            name: "originalCapsuleBinding".into(),
+            var_id: 1401,
+            module: SessionModule::val(Generation(41)).module_name(),
+            tier: ValueTier::ForceData,
+            type_display: "Int".into(),
+            root_head: None,
+            host_authority: None,
+        };
+        let a = session
+            .snapshot_run_prepared(
+                startup_code_with_value(false, Some(11)),
+                PendingPreparedMode::Binding {
+                    binder: binder.clone(),
+                    generation: Generation(41),
+                    observation: None,
+                },
+                None,
+            )
+            .unwrap();
+        let b = session
+            .snapshot_run_prepared(
+                startup_code_with_value(false, Some(22)),
+                PendingPreparedMode::Value,
+                None,
+            )
+            .unwrap();
+        // Both programs are import-free and have the same constructor shape.
+        // Compile in the opposite order to installation.
+        let b = b.compile_off_checkout().unwrap();
+        let a = a.compile_off_checkout().unwrap();
+        let Some(ResidentOutcome::Completed { result, .. }) =
+            session.revalidate_and_run_prepared(a).unwrap()
+        else {
+            panic!("original binding capsule must complete");
+        };
+        assert_eq!(result.to_json(), serde_json::json!(11));
+        let bindings = session.workbench_bindings_in(ScopeId::ROOT);
+        let original = bindings.iter().find(|row| row.name == binder.name).unwrap();
+        assert_eq!(
+            session
+                .state
+                .resolve_in(ScopeId::ROOT, &binder.name)
+                .unwrap()
+                .id,
+            SessionVarId::from_extract(binder.var_id),
+        );
+        assert_eq!(original.defining_generation(), Some(41));
+        assert_eq!(original.type_display.as_deref(), Some("Int"));
+        let Some(ResidentOutcome::Completed { result, .. }) =
+            session.revalidate_and_run_prepared(b).unwrap()
+        else {
+            panic!("value capsule must complete");
+        };
+        assert_eq!(result.to_json(), serde_json::json!(22));
+    }
+
+    #[test]
+    fn dropping_uninstalled_prepared_capsules_does_not_execute_or_retain_metadata() {
+        let (_root, mut session) = integer_capsule_session();
+        for compile in [false, true] {
+            let pending = session
+                .snapshot_run_prepared(
+                    startup_code_with_value(true, Some(77)),
+                    PendingPreparedMode::Value,
+                    None,
+                )
+                .unwrap();
+            let provenance = Arc::downgrade(&pending.metadata.provenance);
+            let residency = session.residency();
+            let public = session.public_visibility_snapshot_in(ScopeId::ROOT);
+            if compile {
+                drop(pending.compile_off_checkout().unwrap());
+            } else {
+                drop(pending);
+            }
+            assert!(provenance.upgrade().is_none());
+            assert_eq!(session.residency(), residency);
+            assert_eq!(session.public_visibility_snapshot_in(ScopeId::ROOT), public);
+            assert!(session.workbench_bindings_in(ScopeId::ROOT).is_empty());
+            assert!(session.parked.is_empty());
         }
     }
 
