@@ -810,6 +810,9 @@ renderUnfoldError failure = case failure of
 -- labeled wake for its settlement: 'unfold' followed by
 -- @watch label (awaitSettled response)@. Both handles are returned; the child
 -- starts at publication from an explicit checkpoint or selected context.
+-- Returning these handles does not extend the branch's lifetime. Use
+-- @awaitWatch@ within the admitting invocation, or explicitly choose
+-- @withLifetime ActorOwned@ when constructing a persistent branch.
 spawnWatched
   :: forall result parent
    . ( Member Forks parent, Member Replies parent, Member AgentInspection parent
@@ -823,24 +826,15 @@ spawnWatched label path planned = do
   settled <- watch label (awaitSettled response)
   pure (response, settled)
 
--- | One read-only errand: a name, a task, a reply.
+-- | Start one inspection-only question and return a watch for its prose reply.
+-- The child uses a fresh context, the caller's checkout and a descendant
+-- budget of zero. It is invocation-owned: compose or poll its watch, or use
+-- @awaitWatch@ within the same invocation. Returning the watch does not detach
+-- the worker; unfinished work ends when that invocation exits.
 --
--- @errand "repo-layout" "which crate owns the compile cache?"@ is the whole
--- call. There is no record to define, no client to construct, no state to
--- query and no retirement to write: the child holds no worktree, so it
--- resolves to the research role (inspection-only native tools,
--- inspection-only workspace, and a descendant budget of zero), and it is
--- started invocation-owned, so unfinished work ends with the invocation.
---
--- The direct launch uses a fresh context and the caller's checkout. Use
--- 'unfold' when the child needs an explicit capture or a managed checkout.
---
--- The reply is prose, not a record: read it off the returned watch with
--- @pollWatch@, then @settledValue@ on the settlement. That is the whole of
--- the difference from 'child' and @request@, which hold a child to a schema
--- derived from a result type you annotate. When the answer has structure
--- worth typing, those are still the calls to make; an errand is for the
--- answer you would have read yourself.
+-- For an ask that must outlive the invocation, use 'unfold' with an explicit
+-- 'selected' or 'fromCheckpoint' context and @withLifetime ActorOwned@.
+-- Typed structured results use 'child' or 'request' with a result annotation.
 errand
   :: forall parent
    . (Member AgentLaunch parent, Member Replies parent, Member Watches parent)
