@@ -83,6 +83,51 @@ expression yielding 42. Preserve original module/binding identities. A bad final
 item must execute zero effects. Keep reviewed parser/reservation/publication
 primitives, replacing unfinished per-item issuer machinery as needed.
 
+### Immutable support compilation
+
+Cold-start investigation found that the package supplies immutable library
+source but no compiler products for it. The existing GHC candidate admission
+already skips lowering and product emission for accepted modules. Extend that
+owner rather than introduce another compiler cache. This parcel is required
+before claiming the packaged cold-start target; its speedup remains unmeasured.
+
+- The artifact owner exports a closed `Tidepool.Prelude` support cohort through
+  the existing compile front door after dependency and target certification.
+  Keep original product bytes, owners, skinny interfaces and package witnesses.
+  Runtime-generated Effects dependencies and live values are excluded.
+- For the first version, compile and consume at identical canonical immutable
+  deployment roots. Nix supplies the final source root and product catalog;
+  Buck declares the resources it consumes. Do not relocate authored identities,
+  copy an ordinary cache tree into a package, or invoke Buck at runtime. The
+  initial producer action is batched; per-module files alone do not establish
+  independent per-module build actions or cache granularity.
+- The configured catalog binds source, producer, paths and file content. A
+  malformed, missing or mismatched configured catalog fails with a typed error.
+  Current GHC source selection, package interfaces and closed dependency checks
+  still decide which valid candidates can be reused. Shadowing invalidates the
+  affected candidate and its importers; ordinary authored-cache rules stay intact.
+- The facade represents frozen runtime libraries as captured sources or a pinned
+  deployment source root. Authored actors remain captured. Reuse deployment
+  sources directly, avoiding a second copy in every run. Resume refuses changes
+  of mode, source, producer, catalog or canonical deployment path. Older frozen
+  workspace formats may be refused while retaining their bytes.
+- Begin with ordinary startup and empty exact contexts. Subsequent private
+  contexts inherit only admitted originals through their existing artifact graph;
+  never inject the entire packaged instance environment into every context.
+
+Sequence: artifact API and strict exporter; facade source-root composition;
+declarative package wiring; joined production verification. Independent owners
+may prepare these components concurrently against the same frozen API. Root
+reviews their join and the package closure before running the cold gate.
+
+Acceptance requires fresh-process reuse with empty user caches and zero fresh
+lowering or product emission for the packaged cohort, followed by real native
+evaluation and display. Exercise instances/families, source shadowing, changed
+source/package/producer, missing closure and product tampering. Confirm later
+exact contexts retain original owners and refuse lost live values. The installed
+package must run without Buck or build scratch paths. Retain optimized timing
+separately from the existing debug investigation.
+
 ## Acceptance
 
 - M1 real Engine/Store/browser: raw Haskell and installed typed tools; retained

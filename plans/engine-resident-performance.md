@@ -14,26 +14,41 @@ separately from measured latency improvements.
 - Recovery publication: the retained v4 foundation snapshot at
   `baseline-488cf013c1-run2/workspaces/durable-workspace-9HdfEn/`
   is 12,663,202 bytes. Most graph rows repeat native dependency facts already
-  present in sealed artifacts. The v5 candidate persists interface selection
+  present in sealed artifacts. Joined v5 persists interface selection
   and derives native requirements from verified artifacts, preserving exact
-  lost-binding refusal. Its validation and byte comparison remain pending.
+  lost-binding refusal. Focused validation includes authentic native markers and
+  tampering after hydration; the real compiler baseline remains pending. A
+  structural projection of that v4 snapshot is 132,000 compact bytes, compared
+  with 4,220,736 compact v4 bytes. This is not a valid emitted v5 manifest or a
+  measured latency result; see the retained size diagnostic under
+  `target/completion-evidence/compiled-cell/recovery-v5-size-diagnostic.json`.
   Compact JSON is already joined; it removes formatting bytes, not graph work.
 - Startup compilation: the admitted execution seals its output privately,
-  then the runtime reads and certifies the same bundle again. The candidate
-  hands off the original immutable decoded bundle, eliminating the second
+  then the previous runtime read and certified the same bundle again. Joined
+  commits `d50d119202` and `2ce16592b4` hand off the original immutable decoded
+  bundle, eliminating the second
   certification and cache publication. Mutating a public runtime bundle must
-  still fail its compiler-issued proof check. Current startup acceptance tests
-  remain frozen on the prior implementation while this change is prepared.
-- Recovery hydration: the v5 candidate shares a verified artifact inventory
+  still fail its compiler-issued proof check. Independent source review and ten
+  focused checks passed; real startup execution with reuse remains pending.
+  `turn.cbor` still undergoes semantic decoding in both layers.
+- Recovery hydration: joined v5 shares a verified artifact inventory
   between manifest admission and hydration instead of discarding and decoding
   it again. Separate later filesystem admissions must still detect tampering.
 - Scheduler tests: joined retirement checks use an existing empty binding
   lease instead of compiling Haskell to exercise ownership alone. Native root
   retention remains covered by separate native tests.
-- AgentSpec setup: a small candidate moves the resolved source-root inventory
+- AgentSpec setup: joined code moves the resolved source-root inventory
   into its owner rather than cloning it through resolution and publication.
+  Four focused resolver checks passed. Tool dispatch also borrows declaration
+  shape instead of cloning its schema for every invocation; registration owns
+  schema validation and retains typed errors.
   Skipping reload compilation is not yet justified: an unchanged run module
   does not establish unchanged helper sources or resident compilation inputs.
+- Immutable library startup: the package currently ships source text. The
+  delivery plan now specifies a closed precompiled support cohort admitted by
+  the existing GHC candidate mechanism, plus direct use of its pinned immutable
+  source root. This removes repeated lowering/product emission and source copies
+  when accepted. Implementation and real cold-start evidence remain pending.
 
 These observations do not establish the production latency targets. The
 retained baseline above completed foundation publication but failed a later
