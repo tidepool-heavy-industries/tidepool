@@ -2579,87 +2579,139 @@ async fn command_settlement(campaign: &mut TestCampaign) -> exomonad_actor::Sett
 }
 
 #[tokio::test]
-async fn foreground_completion_budget_hands_off_the_same_job_once() {
-    let mut campaign = TestCampaign::start().await;
-    committed(&campaign, "job <- Cmd.start [bash|long-running|]").await;
+async fn structured_bash_explicit_yield_retains_owned_job_without_completion_notice() {
+    let mut campaign = TestCampaign::start_with_shell().await;
+    let policy = campaign.root_installation.policy.clone();
+    let running = tokio::spawn(policy.clone().dispatch_boxed(ToolInvocation {
+        context: None,
+        name: "bash".into(),
+        arguments: ToolArguments::Structured(
+            serde_json::json!({"cmd":"long-running","yield_time_ms":0}),
+        ),
+    }));
     let backend = TestCommands::new();
     backend_request(&mut campaign)
         .await
         .supply(Ok(backend.clone()));
-
-    let observed = committed(
-        &campaign,
-        "Cmd.observeCompletion (Cmd.Observation 10 1024) job",
-    )
-    .await;
+    let observed = running.await.unwrap().unwrap();
+    assert_eq!(observed["status"], "committed", "{observed}");
+    let binding = observed["items"][0]["installedBindings"][0]
+        .as_str()
+        .unwrap();
+    let status = committed(&campaign, &format!("Cmd.status {binding}")).await;
+    assert!(!status.to_string().contains("CommandFinished"), "{status}");
     assert!(
-        observed
-            .to_string()
-            .contains("A completion notice or an existing watch will wake you"),
-        "{observed}"
+        !backend.cancelled.load(std::sync::atomic::Ordering::Acquire),
+        "yield lost the live job"
     );
-    committed(
-        &campaign,
-        "Cmd.observeCompletion (Cmd.Observation 10 1024) job",
-    )
-    .await;
-    assert_eq!(backend.executions(), 1);
-
-    // Cancellation remains available after the handoff. Its terminal result
-    // settles the already-armed request instead of starting a replacement.
-    committed(&campaign, "Cmd.cancel job").await;
-    let notice = command_settlement(&mut campaign).await;
-    assert!(
-        notice
-            .reply_preview
-            .as_deref()
-            .is_some_and(|text| text.contains("cancelled")),
-        "{notice:?}"
-    );
-    assert_eq!(backend.executions(), 1);
-    assert!(campaign
-        .next_deployment_opt(Duration::from_millis(100), |event| match event {
-            LocalResidentDeployment::SettlementChanged { notification }
-                if notification.command_job.is_some() =>
-                Ok(notification),
-            other => Err(other),
+    let output = observed["items"][0]["output"].as_str().unwrap();
+    assert!(!output.contains("completion notice"), "{observed}");
+    let session = output
+        .split("session_id: ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+    let cancelled = policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "cancel_command".into(),
+            arguments: ToolArguments::Structured(
+                serde_json::json!({"session_id":session,"yield_time_ms":1000}),
+            ),
         })
         .await
-        .is_none());
+        .unwrap();
+    assert!(
+        cancelled.to_string().contains("CommandCancelled"),
+        "{cancelled}"
+    );
+    assert_eq!(
+        backend.executions(),
+        1,
+        "cancellation replaced the retained command"
+    );
+    assert!(
+        campaign
+            .next_deployment_opt(Duration::from_millis(100), |event| match event {
+                LocalResidentDeployment::SettlementChanged { notification }
+                    if notification.command_job.is_some() =>
+                    Ok(notification),
+                other => Err(other),
+            })
+            .await
+            .is_none(),
+        "an explicit yield armed a completion notice"
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
-async fn foreground_completion_before_budget_returns_inline_without_notice() {
-    let mut campaign = TestCampaign::start().await;
-    committed(&campaign, "job <- Cmd.start [bash|quick|]").await;
-    let backend = TestCommands::completed("done\n");
+async fn structured_bash_default_waits_until_terminal_without_completion_notice() {
+    let mut campaign = TestCampaign::start_with_shell().await;
+    let policy = campaign.root_installation.policy.clone();
+    let mut running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
+        context: None,
+        name: "bash".into(),
+        arguments: ToolArguments::Structured(serde_json::json!({"cmd":"long-running"})),
+    }));
+    let backend = TestCommands::new();
+    *backend.stdout.lock() = "default-terminal-output".into();
     backend_request(&mut campaign)
         .await
         .supply(Ok(backend.clone()));
-    let observed = committed(
-        &campaign,
-        "Cmd.observeCompletion (Cmd.Observation 1000 1024) job",
-    )
-    .await;
-    assert!(observed.to_string().contains("done"), "{observed}");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while backend.executions() == 0 {
+            assert!(
+                !running.is_finished(),
+                "default bash ended before execution"
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("command was not started");
     assert!(
-        !observed
-            .to_string()
-            .contains("A completion notice or an existing watch will wake you"),
-        "{observed}"
+        tokio::time::timeout(Duration::from_millis(50), &mut running)
+            .await
+            .is_err(),
+        "default bash returned for a running command"
+    );
+    assert!(!backend.cancelled.load(std::sync::atomic::Ordering::Acquire));
+    backend.finish();
+    let observed = running.await.unwrap().unwrap();
+    assert_eq!(observed["status"], "committed", "{observed}");
+    let output = observed["items"][0]["output"].as_str().unwrap();
+    assert!(output.contains("CommandExited 0"), "{observed}");
+    assert_eq!(
+        output.matches("default-terminal-output").count(),
+        1,
+        "default bash presented output more than once: {observed}"
+    );
+    assert!(!output.contains("completion notice"), "{observed}");
+    let binding = observed["items"][0]["installedBindings"][0]
+        .as_str()
+        .unwrap();
+    let retained = committed(&campaign, &format!("Cmd.status {binding}")).await;
+    assert!(
+        retained.to_string().contains("CommandExited 0"),
+        "{retained}"
     );
     assert_eq!(backend.executions(), 1);
-    assert!(campaign
-        .next_deployment_opt(Duration::from_millis(100), |event| match event {
-            LocalResidentDeployment::SettlementChanged { notification }
-                if notification.command_job.is_some() =>
-                Ok(notification),
-            other => Err(other),
-        })
-        .await
-        .is_none());
+    assert!(
+        campaign
+            .next_deployment_opt(Duration::from_millis(100), |event| match event {
+                LocalResidentDeployment::SettlementChanged { notification }
+                    if notification.command_job.is_some() =>
+                    Ok(notification),
+                other => Err(other),
+            })
+            .await
+            .is_none(),
+        "default bash armed a completion notice"
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
