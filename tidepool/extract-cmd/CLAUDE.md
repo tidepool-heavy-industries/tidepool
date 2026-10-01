@@ -124,6 +124,15 @@ worker descendants; process-tree ownership is not delegated to test scripts.
 
 ## Wire boundary
 
+Compiler stdout and stderr share a 16 MiB response payload budget. Frame
+lengths are checked before allocation in direct and daemon transports; oversized
+accepted responses remain indeterminate and cannot be replayed. The worker
+checks capture file sizes before reading them and returns a bounded infrastructure
+failure for oversized or changing captures, without truncating successful data.
+Compiler artifacts remain file-backed. This bounds response materialization;
+temporary capture files can still grow while the request handler runs, and fixed
+metadata subprocess probes do not use the framed response budget.
+
 The crate remains a dependency leaf for proc macros. In addition to `blake3`
 for immutable endpoint identity, it uses the workspace tracing stack because
 the compiler CLI owns daemon process observability. Its wire formats are small,

@@ -14,7 +14,9 @@ import Data.Word (Word32)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode(..))
 import System.IO
-  ( Handle, hClose, hFlush, openTempFile, stderr, stdin, stdout )
+  ( Handle, IOMode(ReadMode), hClose, hFileSize, hFlush, openTempFile
+  , stderr, stdin, stdout, withBinaryFile )
+import Tidepool.DiagJson (Diag(..), DiagSeverity(..), ReportOutcome(..), renderDiagsJson)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 
 type RequestHandler = FilePath -> [String] -> IO ExitCode
@@ -107,10 +109,42 @@ captureOutput action = do
         removeFile errPath `catch` \(_ :: IOException) -> pure ()
   (do
       exitCode <- runRedirected outHandle errHandle action
-      out <- BS.readFile outPath
-      err <- BS.readFile errPath
-      pure (exitCodeToInt exitCode, out, err)
+      captured <- readCapturedResponse outPath errPath
+      pure $ case captured of
+        Right (out, err) -> (exitCodeToInt exitCode, out, err)
+        Left message -> (1, TE.encodeUtf8 (T.pack
+          (renderDiagsJson ReportWorkerFailure [Diag Nothing DiagError message])), BS.empty)
     ) `finally` removeTemps
+
+-- Shared with the Rust response decoder. Prepared/native products remain files;
+-- exceeding this diagnostic budget is infrastructure failure, never truncation.
+maxResponsePayloadBytes :: Integer
+maxResponsePayloadBytes = 16777216
+
+readCapturedResponse :: FilePath -> FilePath -> IO (Either String (BS.ByteString, BS.ByteString))
+readCapturedResponse outPath errPath =
+  withBinaryFile outPath ReadMode $ \outHandle ->
+  withBinaryFile errPath ReadMode $ \errHandle -> do
+    outSize <- hFileSize outHandle
+    errSize <- hFileSize errHandle
+    if outSize + errSize > maxResponsePayloadBytes
+      then pure (Left ("compiler response capture exceeds " ++ show maxResponsePayloadBytes
+        ++ " bytes (stdout=" ++ show outSize ++ ", stderr=" ++ show errSize ++ ")"))
+      else do
+        -- Read only the measured lengths plus one growth sentinel per file.
+        -- A concurrent inherited writer cannot force unbounded allocation or
+        -- turn a partial captured response into successful typed data.
+        out <- BS.hGet outHandle (fromInteger outSize)
+        outExtra <- BS.hGet outHandle 1
+        err <- BS.hGet errHandle (fromInteger errSize)
+        errExtra <- BS.hGet errHandle 1
+        finalOutSize <- hFileSize outHandle
+        finalErrSize <- hFileSize errHandle
+        if toInteger (BS.length out) /= outSize || not (BS.null outExtra)
+            || toInteger (BS.length err) /= errSize || not (BS.null errExtra)
+            || finalOutSize /= outSize || finalErrSize /= errSize
+          then pure (Left "compiler response capture changed while being read")
+          else pure (Right (out, err))
 
 runRedirected :: Handle -> Handle -> IO ExitCode -> IO ExitCode
 runRedirected outHandle errHandle action = do

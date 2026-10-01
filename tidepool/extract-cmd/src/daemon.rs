@@ -61,6 +61,8 @@ use crate::ExtractRequest;
 // wedged daemon without mistaking ordinary queueing for failure.
 const IO_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_REQUEST_FRAME_BYTES: u32 = 16 * 1024 * 1024;
+// Compiler artifacts are file-backed; only complete diagnostics cross this boundary.
+const MAX_RESPONSE_PAYLOAD_BYTES: u32 = 16 * 1024 * 1024;
 const MAX_REQUEST_ARGS: u32 = 4096;
 const PREFLIGHT: &[u8; 8] = b"TPDPF001";
 const PREFLIGHT_RESPONSE: &[u8; 8] = b"TPDPI002";
@@ -511,6 +513,10 @@ pub(crate) enum DaemonError {
     /// The daemon acknowledged acceptance before the enclosed response error.
     AfterAcceptance(Box<DaemonError>),
     Protocol(String),
+    ResponseTooLarge {
+        declared: u64,
+        remaining: u64,
+    },
 }
 
 impl DaemonError {
@@ -545,6 +551,10 @@ impl std::fmt::Display for DaemonError {
                 write!(f, "daemon response failed after acceptance: {error}")
             }
             DaemonError::Protocol(message) => write!(f, "daemon protocol error: {message}"),
+            DaemonError::ResponseTooLarge { declared, remaining } => write!(
+                f,
+                "compiler response frame is {declared} bytes; remaining response payload budget is {remaining}"
+            ),
         }
     }
 }
@@ -935,8 +945,20 @@ fn read_u32<R: Read>(r: &mut R) -> Result<u32, DaemonError> {
 }
 
 fn read_frame<R: Read>(r: &mut R) -> Result<Vec<u8>, DaemonError> {
-    let n = read_u32(r)? as usize;
-    read_exact_or_crash(r, n)
+    let mut remaining = MAX_RESPONSE_PAYLOAD_BYTES;
+    read_response_frame(r, &mut remaining)
+}
+
+fn read_response_frame<R: Read>(r: &mut R, remaining: &mut u32) -> Result<Vec<u8>, DaemonError> {
+    let length = read_u32(r)?;
+    if length > *remaining {
+        return Err(DaemonError::ResponseTooLarge {
+            declared: u64::from(length),
+            remaining: u64::from(*remaining),
+        });
+    }
+    *remaining -= length;
+    read_exact_or_crash(r, length as usize)
 }
 
 /// Decode the wire's `response` shape from any [`Read`] — a real
@@ -946,8 +968,9 @@ fn read_frame<R: Read>(r: &mut R) -> Result<Vec<u8>, DaemonError> {
 pub(crate) fn decode_response<R: Read>(r: &mut R) -> Result<(i32, Vec<u8>, Vec<u8>), DaemonError> {
     let code_bytes = read_exact_or_crash(r, 4)?;
     let code = i32::from_le_bytes([code_bytes[0], code_bytes[1], code_bytes[2], code_bytes[3]]);
-    let stdout = read_frame(r)?;
-    let stderr = read_frame(r)?;
+    let mut remaining = MAX_RESPONSE_PAYLOAD_BYTES;
+    let stdout = read_response_frame(r, &mut remaining)?;
+    let stderr = read_response_frame(r, &mut remaining)?;
     Ok((code, stdout, stderr))
 }
 
@@ -2114,6 +2137,13 @@ pub(crate) fn write_response(
     stdout: &[u8],
     stderr: &[u8],
 ) -> Result<(), FrontendError> {
+    let total = stdout.len() as u64 + stderr.len() as u64;
+    if total > u64::from(MAX_RESPONSE_PAYLOAD_BYTES) {
+        return Err(daemon_frontend_error(DaemonError::ResponseTooLarge {
+            declared: total,
+            remaining: u64::from(MAX_RESPONSE_PAYLOAD_BYTES),
+        }));
+    }
     let mut response = code.to_le_bytes().to_vec();
     push_frame(&mut response, stdout);
     push_frame(&mut response, stderr);
@@ -3060,6 +3090,86 @@ tidepool-target phase=desugar module=Execute\n",
         push_frame(&mut buf, stdout);
         push_frame(&mut buf, stderr);
         buf
+    }
+
+    #[test]
+    fn response_payload_limit_refuses_forged_header_before_body_read() {
+        let mut bytes = 0i32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        let mut input = Cursor::new(bytes);
+        assert!(matches!(decode_response(&mut input),
+            Err(DaemonError::ResponseTooLarge { declared, remaining })
+            if declared == u64::from(u32::MAX) && remaining == u64::from(MAX_RESPONSE_PAYLOAD_BYTES)));
+        assert_eq!(input.position(), 8);
+        let mut rejection = Cursor::new(u32::MAX.to_le_bytes());
+        assert!(matches!(
+            read_frame(&mut rejection),
+            Err(DaemonError::ResponseTooLarge { .. })
+        ));
+        assert_eq!(rejection.position(), 4);
+    }
+
+    #[test]
+    fn response_payload_limit_accepts_exact_aggregate_and_refuses_overflow() {
+        let half = (MAX_RESPONSE_PAYLOAD_BYTES / 2) as usize;
+        let out = vec![b'o'; half];
+        let err = vec![b'e'; half];
+        let mut wire = Vec::new();
+        write_response(&mut wire, 0, &out, &err).unwrap();
+        let decoded = decode_response(&mut Cursor::new(wire)).unwrap();
+        assert_eq!(decoded, (0, out, err));
+
+        let mut overflow = 0i32.to_le_bytes().to_vec();
+        push_frame(&mut overflow, b"x");
+        overflow.extend_from_slice(&MAX_RESPONSE_PAYLOAD_BYTES.to_le_bytes());
+        let mut input = Cursor::new(overflow);
+        assert!(matches!(decode_response(&mut input),
+            Err(DaemonError::ResponseTooLarge { declared, remaining })
+            if declared == u64::from(MAX_RESPONSE_PAYLOAD_BYTES)
+                && remaining == u64::from(MAX_RESPONSE_PAYLOAD_BYTES - 1)));
+        assert_eq!(input.position(), 13);
+        let mut output = Vec::new();
+        assert!(write_response(
+            &mut output,
+            0,
+            &vec![0; MAX_RESPONSE_PAYLOAD_BYTES as usize],
+            b"x"
+        )
+        .is_err());
+        assert!(
+            output.is_empty(),
+            "oversized response must fail before output or encoding"
+        );
+    }
+
+    #[test]
+    fn response_payload_limit_matches_worker_capture_budget() {
+        let source = include_str!("../../../bridge/haskell/src/Tidepool/WorkerServer.hs");
+        let definition = format!("maxResponsePayloadBytes = {}", MAX_RESPONSE_PAYLOAD_BYTES);
+        assert!(source.lines().any(|line| line == definition));
+    }
+
+    #[test]
+    fn response_payload_limit_after_acceptance_is_indeterminate() {
+        let socket = test_socket("accepted-oversized");
+        fs::remove_file(&socket).ok();
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut header = [0u8; 40];
+            connection.read_exact(&mut header).unwrap();
+            read_request(&mut connection).unwrap();
+            connection.write_all(&[ACCEPTED]).unwrap();
+            connection.write_all(&0i32.to_le_bytes()).unwrap();
+            connection.write_all(&u32::MAX.to_le_bytes()).unwrap();
+        });
+        let error = execute(&socket, &[1; 32], Path::new("/tmp"), &["request".into()]).unwrap_err();
+        server.join().unwrap();
+        assert!(error.was_accepted());
+        assert!(!error.permits_rebind());
+        assert!(matches!(error,
+            DaemonError::AfterAcceptance(inner) if matches!(*inner, DaemonError::ResponseTooLarge { .. })));
+        fs::remove_file(socket).ok();
     }
 
     #[test]

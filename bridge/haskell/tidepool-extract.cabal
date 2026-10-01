@@ -448,3 +448,18 @@ test-suite family-consistency-test
     tidepool-extract-internal
   default-language: GHC2024
   ghc-options:      -Wall -rtsopts -with-rtsopts=-T
+
+
+test-suite worker-response-test
+  type:             exitcode-stdio-1.0
+  main-is:          WorkerResponseTest.hs
+  hs-source-dirs:   test-worker-response
+  build-depends:
+    base >= 4.20 && < 5,
+    bytestring,
+    directory,
+    process,
+    tidepool-extract-internal
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+  ghc-options:      -Wall
