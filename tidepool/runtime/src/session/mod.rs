@@ -2077,7 +2077,7 @@ impl SessionLib {
         let refs = tidepool_toolchain::recovery_artifacts::materialize_certified_products(
             root,
             certified.toolchain_identity_sha256(),
-            certified.recovery_products(),
+            &context.recovery_products(),
         )
         .map_err(|error| invalid(&error.to_string()))?;
         let own = certified.product().owner();
@@ -2117,14 +2117,28 @@ impl SessionLib {
                     .ok_or_else(|| invalid("unsupported authored export identity"))
             })
             .collect::<Result<Vec<_>, SessionError>>()?;
-        let artifacts = refs
+        let mut artifacts = refs
             .into_iter()
             .map(recovery::RecoveryArtifactClosure::Home)
             .collect::<Vec<_>>();
+        for interface in context.joined_interfaces() {
+            artifacts.push(recovery::RecoveryArtifactClosure::Join(
+                interface
+                    .materialize(root)
+                    .map_err(|error| invalid(&error.to_string()))?,
+            ));
+        }
+        for interface in context.value_interfaces() {
+            artifacts.push(recovery::RecoveryArtifactClosure::ValueInterface(
+                interface
+                    .materialize(root)
+                    .map_err(|error| invalid(&error.to_string()))?,
+            ));
+        }
         let mut graph = state.graph.clone();
         let artifact_refs = artifacts
             .iter()
-            .map(recovery::RecoveryArtifactClosure::key)
+            .map(recovery::RecoveryArtifactClosure::artifact_id)
             .collect();
         let mut live_dependencies = staged
             .turn
@@ -2180,11 +2194,20 @@ impl SessionLib {
             if !graph
                 .artifacts
                 .iter()
-                .any(|existing| existing.key() == artifact.key())
+                .any(|existing| existing.artifact_id() == artifact.artifact_id())
             {
                 graph.artifacts.push(artifact);
             }
         }
+        graph
+            .artifact_dependencies
+            .extend(context.artifact_view().dependencies().into_iter().map(
+                |(source, target, dependency)| recovery::RecoveryArtifactDependency {
+                    source,
+                    target,
+                    dependency,
+                },
+            ));
         graph.seal().map_err(|error| invalid(&error.to_string()))?;
         recovery::stage_v2(&state.path, root, &graph).map_err(|error| invalid(&error.to_string()))
     }

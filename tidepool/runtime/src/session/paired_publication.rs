@@ -1117,13 +1117,19 @@ impl AcceptedDeclarationPublication {
                         .into_iter()
                         .map(recovery::RecoveryArtifactClosure::Join),
                 )
+                .chain(
+                    materialized
+                        .value_interfaces
+                        .into_iter()
+                        .map(recovery::RecoveryArtifactClosure::ValueInterface),
+                )
                 .chain(std::iter::once(recovery::RecoveryArtifactClosure::Join(
                     materialized.join,
                 )))
                 .collect::<Vec<_>>();
             let artifact_refs = artifacts
                 .iter()
-                .map(recovery::RecoveryArtifactClosure::key)
+                .map(recovery::RecoveryArtifactClosure::artifact_id)
                 .collect();
             let live_dependencies = implementation_refs
                 .iter()
@@ -1166,11 +1172,20 @@ impl AcceptedDeclarationPublication {
                 if !graph
                     .artifacts
                     .iter()
-                    .any(|existing| existing.key() == artifact.key())
+                    .any(|existing| existing.artifact_id() == artifact.artifact_id())
                 {
                     graph.artifacts.push(artifact);
                 }
             }
+            graph
+                .artifact_dependencies
+                .extend(materialized.artifact_dependencies.into_iter().map(
+                    |(source, target, dependency)| recovery::RecoveryArtifactDependency {
+                        source,
+                        target,
+                        dependency,
+                    },
+                ));
             if let Some(surface) = graph
                 .public_surfaces
                 .iter_mut()

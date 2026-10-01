@@ -1626,7 +1626,7 @@ impl PersistentSession {
             .ok_or(SessionError::StaleStagedDeclaration)?;
         if program.admission_digest() != admission.digest()
             || !Arc::ptr_eq(program.parsed_plan(), planned.plan())
-            || program.slots() != planned.compiler_specification().slots
+            || program.slots() != planned.compiler_specification().slots.as_slice()
             || program.items().len() != planned.items().len()
             || program
                 .items()
@@ -1647,6 +1647,15 @@ impl PersistentSession {
             {
                 return Err(SessionError::StaleStagedDeclaration);
             }
+            admission
+                .prefix_started
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .map_err(|_| SessionError::StaleStagedDeclaration)?;
             return Ok(None);
         };
         self.begin_checked_prefix_inner(admission, first.checked_item().clone(), Some(program))
