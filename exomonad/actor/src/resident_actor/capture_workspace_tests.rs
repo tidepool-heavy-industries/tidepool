@@ -254,6 +254,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
             .expect("real fork reaches paused workspace admission"),
         );
     }
+    eprintln!("checkpoint workspace fixture: both launch workspace admissions are waiting");
     assert_ne!(admitted_paths[0], admitted_paths[1]);
     assert!(calls.iter().all(|call| !call.is_finished()));
     let progressing = tokio::time::timeout(
@@ -263,6 +264,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
     .await
     .expect("third cell progresses while both launches wait");
     assert_committed(&progressing);
+    eprintln!("checkpoint workspace fixture: independent third cell committed");
     assert!(calls.iter().all(|call| !call.is_finished()));
     let retired = forest
         .environment
@@ -290,6 +292,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
         .await
         .expect("actual issuer failure and root cleanup");
     assert_eq!(issuer.terminal().wait().await.kind, ActorExitKind::Failed);
+    eprintln!("checkpoint workspace fixture: original checkpoint scope retired and issuer failed");
     workspaces.release.add_permits(2);
     for call in calls {
         assert_committed(
@@ -300,6 +303,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
         );
     }
 
+    eprintln!("checkpoint workspace fixture: both launch cells committed their groups");
     let mut children = Vec::new();
     while children.len() < 2 {
         let event = tokio::time::timeout(std::time::Duration::from_secs(30), deployments.recv())
@@ -310,6 +314,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
             children.push(installation);
         }
     }
+    eprintln!("checkpoint workspace fixture: both actual child policies installed");
     assert_ne!(children[0].actor.identity(), children[1].actor.identity());
     for child in &children {
         let reply = child
@@ -444,6 +449,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         .fork_groups
         .settle_checkpoint(&token, session, true)
         .expect("private capture completed");
+    eprintln!("captured reader fixture: original private capture is published");
     let source = include_str!("captured_readers_parent.hs").replace("CHECKPOINT_TOKEN", &token);
     let endpoint = crate::ResidentInteractivePolicy::local(parent.clone());
     let call = tokio::spawn(async move {
@@ -485,6 +491,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         gate.publication().expect("published group"),
         crate::ForkGroupPublication::Captured
     );
+    eprintln!("captured reader fixture: real captured group committed before parent completion");
     for child in &children {
         assert_captured_reader(child).await;
         assert!(
@@ -534,6 +541,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         .reject
         .store(false, std::sync::atomic::Ordering::SeqCst);
     workspaces.release.add_permits(1);
+    eprintln!("captured reader fixture: parent cell failed, supervising actor remains live");
     let reused = include_str!("captured_reader_reuse.hs").replace("CHECKPOINT_TOKEN", &token);
     assert_committed(&run_cell(parent.clone(), reused).await);
     loop {
@@ -547,6 +555,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
             break;
         }
     }
+    eprintln!("captured reader fixture: fresh reader reused the original published capture");
     let retired = forest
         .environment
         .fork_groups
