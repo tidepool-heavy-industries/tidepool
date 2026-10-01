@@ -2,7 +2,7 @@ use super::*;
 use async_trait::async_trait;
 use harness::{
     engine::ResponsesTransport,
-    model::{AgentPath, CallId, ConversationIdentity},
+    model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
     transport::{ResponsesRequest, ResponsesTurn, TransportError, Usage},
     turn::JobOutput,
 };
@@ -29,20 +29,40 @@ struct CapturedHostTransport {
     scenario: CapturedScenario,
     root_origin: ConversationIdentity,
     root_round: AtomicUsize,
+    operations: Mutex<HashMap<(ConversationIdentity, String), OperationId>>,
     setup_requested: Notify,
     setup_ready: Notify,
     finish_parent: Notify,
     children: Mutex<HashMap<String, ChildRounds>>,
     parent_failed: watch::Sender<bool>,
+    reply_children: watch::Sender<bool>,
     after_failure_reads: Notify,
     finish_children: watch::Sender<bool>,
     reads: mpsc::UnboundedSender<(ConversationIdentity, String)>,
     requests: mpsc::UnboundedSender<ResponsesRequest>,
 }
 
-#[async_trait]
-impl ResponsesTransport for CapturedHostTransport {
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+impl CapturedHostTransport {
+    fn operation(&self, origin: &ConversationIdentity, call_id: &str) -> OperationId {
+        self.operations
+            .lock()
+            .get(&(origin.clone(), call_id.to_owned()))
+            .unwrap_or_else(|| panic!("provider did not issue operation {call_id} for {origin:?}"))
+            .clone()
+    }
+
+    async fn create_for_request(
+        &self,
+        request_id: &RequestId,
+        request: ResponsesRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let (prefix, incarnation) = request.session_id.rsplit_once(':').unwrap();
+        let (run, actor) = prefix.rsplit_once(':').unwrap();
+        let origin = ConversationIdentity::Embedded {
+            run: run.into(),
+            actor: AgentPath(actor.into()),
+            incarnation: incarnation.into(),
+        };
         let (_, path) = request
             .session_id
             .rsplit_once(':')
@@ -114,11 +134,11 @@ impl ResponsesTransport for CapturedHostTransport {
                         .store()
                         .claims(&CallId(current.into()))
                         .unwrap();
+                    let expected = self.operation(&self.root_origin, current);
                     let claim = claims
                         .iter()
                         .find(|claim| {
-                            claim.operation.origin == self.root_origin
-                                && claim.request == claim.operation.request
+                            claim.operation == expected && claim.request == expected.request
                         })
                         .expect("original captured operation remains admitted");
                     assert!(
@@ -131,8 +151,9 @@ impl ResponsesTransport for CapturedHostTransport {
                             .store()
                             .claims(&CallId(PENDING_CALL.into()))
                             .unwrap();
-                        assert!(original.iter().any(|claim| claim.operation.origin == self.root_origin
-                            && claim.request == claim.operation.request && claim.state == harness::store::ClaimState::Settled),
+                        let failed = self.operation(&self.root_origin, PENDING_CALL);
+                        assert!(original.iter().any(|claim| claim.operation == failed
+                            && claim.request == failed.request && claim.state == harness::store::ClaimState::Settled),
                             "failed original operation was not durably settled before capture reuse");
                     }
                     let input = serde_json::to_value(&request.input).unwrap();
@@ -151,6 +172,12 @@ impl ResponsesTransport for CapturedHostTransport {
                         "earlier provider provenance was lost"
                     );
                     self.requests.send(request.clone()).unwrap();
+                    if ordinal < 2 {
+                        let mut release = self.reply_children.subscribe();
+                        while !*release.borrow_and_update() {
+                            release.changed().await.unwrap();
+                        }
+                    }
                     vec![harness::item::Item(json!({
                         "type":"custom_tool_call", "call_id":format!("captured-child-{path}"),
                         "name":"haskell", "input":"respond getX"
@@ -196,11 +223,50 @@ impl ResponsesTransport for CapturedHostTransport {
             };
             (format!("captured-child-{path}-{round}"), items)
         };
+        for item in &items {
+            if item.0["type"] == "custom_tool_call" {
+                let call_id = item.0["call_id"].as_str().unwrap().to_owned();
+                let operation = OperationId {
+                    origin: origin.clone(),
+                    request: request_id.clone(),
+                    call: CallId(call_id.clone()),
+                };
+                assert!(
+                    self.operations
+                        .lock()
+                        .insert((origin.clone(), call_id), operation)
+                        .is_none(),
+                    "fixture unexpectedly reused a provider call identity"
+                );
+            }
+        }
         Ok(ResponsesTurn {
             response_id,
             items,
             usage: Usage::default(),
         })
+    }
+}
+
+#[async_trait]
+impl ResponsesTransport for CapturedHostTransport {
+    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        panic!("checkpoint gate requires the Engine's exact durable request identity")
+    }
+
+    async fn create_streaming_for_request(
+        &self,
+        request_id: &RequestId,
+        request: ResponsesRequest,
+        sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let turn = self.create_for_request(request_id, request).await?;
+        for item in &turn.items {
+            let _ = sink
+                .send(harness::transport::sse::StreamEvent::ItemDone(item.clone()))
+                .await;
+        }
+        Ok(turn)
     }
 }
 
@@ -221,17 +287,34 @@ fn assert_committed_haskell_value(response: &Value, expected: &str) {
 
 async fn embedded_operation(
     runtime: &embedded_harness::EmbeddedHarnessRuntime,
-    origin: &ConversationIdentity,
-    call_id: &str,
+    operation: &OperationId,
 ) -> Result<Value, String> {
-    let call = CallId(call_id.to_owned());
+    let call_id = &operation.call.0;
+    let call = &operation.call;
     let claim = runtime
         .store()
-        .claims(&call)
+        .claims(call)
         .unwrap()
         .into_iter()
-        .find(|claim| &claim.operation.origin == origin)
+        .find(|claim| &claim.operation == operation && claim.request == operation.request)
         .unwrap_or_else(|| panic!("embedded Haskell operation {call_id} was not admitted"));
+    let turns = runtime.store().replay_turns(&operation.request).unwrap();
+    assert_eq!(
+        turns
+            .iter()
+            .filter(|turn| turn.request == operation.request
+                && turn
+                    .model_response
+                    .items
+                    .iter()
+                    .any(|item| item.0["type"] == "custom_tool_call"
+                        && item.0["name"] == "haskell"
+                        && item.0["call_id"] == operation.call.0))
+            .count(),
+        1,
+        "exact checkpoint operation must belong to one recorded provider response"
+    );
+    eprintln!("[captured-engine] wait exact operation {operation:?}");
     match tokio::time::timeout(
         Duration::from_secs(90),
         runtime.scheduler().wait(&claim.operation),
@@ -300,11 +383,13 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         scenario,
         root_origin: root_origin.clone(),
         root_round: AtomicUsize::new(0),
+        operations: Mutex::new(HashMap::new()),
         setup_requested: Notify::new(),
         setup_ready: Notify::new(),
         finish_parent: Notify::new(),
         children: Mutex::new(HashMap::new()),
         parent_failed: watch::channel(false).0,
+        reply_children: watch::channel(false).0,
         after_failure_reads: Notify::new(),
         finish_children: watch::channel(false).0,
         reads: reads_tx,
@@ -388,9 +473,12 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     )
     .await
     .expect("root Engine did not request a turn after scope setup");
-    let setup = embedded_operation(&runtime, &root_origin, "captured-scope-setup")
-        .await
-        .unwrap();
+    let setup = embedded_operation(
+        &runtime,
+        &transport.operation(&root_origin, "captured-scope-setup"),
+    )
+    .await
+    .unwrap();
     assert_committed_haskell_value(&setup, "True");
     transport.setup_ready.notify_one();
     let mut sessions = std::collections::HashSet::new();
@@ -399,10 +487,40 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             .await
             .expect("captured children did not start while the parent call was pending")
             .unwrap();
-        sessions.insert(request.session_id);
+        let parent = transport.operation(&root_origin, PENDING_CALL);
+        assert!(
+            runtime
+                .store()
+                .claims(&parent.call)
+                .unwrap()
+                .iter()
+                .any(|claim| claim.operation == parent
+                    && claim.request == parent.request
+                    && claim.state == harness::store::ClaimState::Pending),
+            "original exact parent operation settled before both children were offered replies"
+        );
+        let (prefix, incarnation) = request.session_id.rsplit_once(':').unwrap();
+        let (run, actor) = prefix.rsplit_once(':').unwrap();
+        sessions.insert(ConversationIdentity::Embedded {
+            run: run.into(),
+            actor: AgentPath(actor.into()),
+            incarnation: incarnation.into(),
+        });
     }
     assert_eq!(sessions.len(), 2);
-    let result = embedded_operation(&runtime, &root_origin, PENDING_CALL).await;
+    eprintln!(
+        "[captured-engine] two child provider branches ready while exact parent claim is pending"
+    );
+    transport.reply_children.send_replace(true);
+    let result =
+        embedded_operation(&runtime, &transport.operation(&root_origin, PENDING_CALL)).await;
+    for origin in &sessions {
+        let call = format!("captured-child-{}", origin.actor().0);
+        let reply = embedded_operation(&runtime, &transport.operation(origin, &call))
+            .await
+            .unwrap();
+        assert_eq!(reply["status"], "replied", "{reply}");
+    }
     match scenario {
         CapturedScenario::Success => assert_committed_haskell_value(&result.unwrap(), "True"),
         CapturedScenario::FailureAfterReplies => {
@@ -412,6 +530,9 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             assert!(
                 failure.contains("intentional captured parent Haskell execution failure"),
                 "{failure}"
+            );
+            eprintln!(
+                "[captured-engine] actual parent execution failed after both typed child replies"
             );
             transport.parent_failed.send_replace(true);
             let mut retained = std::collections::HashSet::new();
@@ -423,7 +544,9 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                             "admitted children did not read their scope after parent cell failure",
                         )
                         .unwrap();
-                let value = embedded_operation(&runtime, &origin, &call).await.unwrap();
+                let value = embedded_operation(&runtime, &transport.operation(&origin, &call))
+                    .await
+                    .unwrap();
                 assert_committed_haskell_value(&value, "(41, 42)");
                 retained.insert(origin);
             }
@@ -433,10 +556,14 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 .await
                 .expect("the failed cell's retained capture did not admit another child")
                 .unwrap();
-            let reused = embedded_operation(&runtime, &root_origin, REUSE_CALL)
-                .await
-                .unwrap();
+            let reused =
+                embedded_operation(&runtime, &transport.operation(&root_origin, REUSE_CALL))
+                    .await
+                    .unwrap();
             assert_committed_haskell_value(&reused, "True");
+            eprintln!(
+                "[captured-engine] retained children and independently reused capture succeeded"
+            );
             transport.finish_children.send_replace(true);
         }
     }
