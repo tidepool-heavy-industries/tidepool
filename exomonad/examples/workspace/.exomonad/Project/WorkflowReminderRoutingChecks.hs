@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Project.WorkflowReminderRoutingChecks (questionRouting, snapshotTrial) where
@@ -31,39 +32,38 @@ questionRouting = do
     , "let second = Question \"ownership\" (DesignQuestion \"plans/review.md\" " <> gitOidLiteral source <> " \"Shared ownership changed\" [\"new owner question\"] [] [\"parent\"] )"
     , "reportProgress (WorkProgress [] [first])"
     ])
-  first <- turn owner (Text.unlines
-    [ "view <- readWork routed"
-    , "memory <- R.call (reminderRead (R.client reminders)) ()"
-    , "inspectFull (length (workNotices view) == 1 && length (reminderEntries memory) == 1"
-    , "  && map noticeEvent (workNotices view) == [0]"
-    , "  && length [() | Notice _ (Left NotificationUnavailable) <- workNotices view] == 1"
-    , "  && all (\\entry -> reminderDecision entry == Suggest && (case reminderReceipt entry of { Just (Left NotificationUnavailable) -> True; _ -> False })) (reminderEntries memory)"
-    , "  && all (\\entry -> \"plans/review.md#relay@\" `Text.isInfixOf` reminderFacts (reminderEpisode entry)"
-    , "    && \"review result for exact candidate\" `Text.isInfixOf` reminderEvidence (reminderEpisode entry)) (reminderEntries memory))"
+  awaitCell owner "opened question retains both typed failed sends and one reminder" (Text.unlines
+    [ "do"
+    , "  view <- readWork routed"
+    , "  memory <- R.call (reminderRead (R.client reminders)) ()"
+    , "  pure (length (workNotices view) == 1 && length (reminderEntries memory) == 1"
+    , "    && map noticeEvent (workNotices view) == [0]"
+    , "    && length [() | Notice _ (Left NotificationUnavailable) <- workNotices view] == 1"
+    , "    && all (\\entry -> reminderDecision entry == Suggest && (case reminderReceipt entry of { Just (Left NotificationUnavailable) -> True; _ -> False })) (reminderEntries memory))"
     ])
-  check "opened question retains both typed failed sends and one reminder" ("True" `Text.isSuffixOf` output first)
-  pending <- turn (checkActor producer) "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply"
-  check "routing leaves the worker's original reply pending" ("ReplyOpen" `Text.isSuffixOf` output pending)
+  void $ turn owner "memory <- R.call (reminderRead (R.client reminders)) ()"
+  assertCell owner "text: reminder retains source-identified question and review evidence"
+    "length (reminderEntries memory) == 1 && all (\\entry -> \"plans/review.md#relay@\" `Text.isInfixOf` reminderFacts (reminderEpisode entry) && \"review result for exact candidate\" `Text.isInfixOf` reminderEvidence (reminderEpisode entry)) (reminderEntries memory)"
+  void $ turn (checkActor producer) "import Tidepool.Agent.Reply (pollReply, ReplyState (..))\npending <- pollReply sessionReply"
+  assertCell (checkActor producer) "routing leaves the worker's original reply pending" "pending == ReplyOpen"
 
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first])"
-  duplicate <- turn owner "view <- readWork routed\nmemory <- R.call (reminderRead (R.client reminders)) ()\ninspectFull (length (workNotices view) == 1 && length (reminderEntries memory) == 1)"
-  check "same progress publication produces no duplicate notice or judgment" ("True" `Text.isSuffixOf` output duplicate)
+  awaitCell owner "same progress publication produces no duplicate notice or judgment"
+    "do { view <- readWork routed; memory <- R.call (reminderRead (R.client reminders)) (); pure (length (workNotices view) == 1 && length (reminderEntries memory) == 1) }"
 
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first,second])"
-  changed <- turn owner (Text.unlines
-    [ "view <- readWork routed"
-    , "memory <- R.call (reminderRead (R.client reminders)) ()"
-    , "inspectFull (length (workNotices view) == 2 && length (reminderEntries memory) == 2"
-    , "  && any (\\entry -> \"plans/review.md#ownership@\" `Text.isInfixOf` reminderFacts (reminderEpisode entry)) (reminderEntries memory))"
-    ])
-  check "new source-identified question receives its own episode" ("True" `Text.isSuffixOf` output changed)
+  awaitCell owner "new source-identified question receives its own episode"
+    "do { view <- readWork routed; memory <- R.call (reminderRead (R.client reminders)) (); pure (length (workNotices view) == 2 && length (reminderEntries memory) == 2) }"
+  void $ turn owner "memory <- R.call (reminderRead (R.client reminders)) ()"
+  assertCell owner "text: new question retains its own source identity"
+    "any (\\entry -> \"plans/review.md#ownership@\" `Text.isInfixOf` reminderFacts (reminderEpisode entry)) (reminderEntries memory)"
 
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [])"
-  resolved <- turn owner "view <- readWork routed\nmemory <- R.call (reminderRead (R.client reminders)) ()\ninspectFull (length (workNotices view) == 3 && length (reminderEntries memory) == 2)"
-  check "question resolution keeps ordinary sink notice without another reminder" ("True" `Text.isSuffixOf` output resolved)
+  awaitCell owner "question resolution keeps ordinary sink notice without another reminder"
+    "do { view <- readWork routed; memory <- R.call (reminderRead (R.client reminders)) (); pure (length (workNotices view) == 3 && length (reminderEntries memory) == 2) }"
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
-  terminal <- turn owner "view <- readWork routed\nmemory <- R.call (reminderRead (R.client reminders)) ()\ninspectFull (length (workNotices view) == 4 && length (reminderEntries memory) == 2)"
-  check "terminal result keeps ordinary sink notice without a reminder" ("True" `Text.isSuffixOf` output terminal)
+  awaitCell owner "terminal result keeps ordinary sink notice without a reminder"
+    "do { view <- readWork routed; memory <- R.call (reminderRead (R.client reminders)) (); pure (length (workNotices view) == 4 && length (reminderEntries memory) == 2) }"
   void $ turn (checkActor consumer) "respond (\"done\" :: Text)"
   void $ turn owner "finishWork routed\nR.finish reminders"
 
@@ -87,25 +87,27 @@ snapshotTrial = do
     [ "let question = Question \"ownership\" (DesignQuestion \"plans/component.md\" " <> gitOidLiteral source <> " \"Old status repeated, but who owns the new file?\" [\"ownership not assigned\"] [] [\"parent\"])"
     , "reportProgress (WorkProgress [Candidate " <> gitOidLiteral source <> " [\"unit-one\"] [\"browser gate remains\"]] [question])"
     ])
-  observed <- turn owner (Text.unlines
+  awaitCell owner "snapshot trial receives the original notice"
+    "do { view <- readWork routed; pure (length (workNotices view) == 1) }"
+  void $ turn owner (Text.unlines
     [ "view <- readWork routed"
     , "let Just episode = notificationEpisode QuestionsAndResults id view 0"
     , "judged <- R.call (reminderObserve (R.client (trialReminders trial))) episode"
     , "memory <- R.call (reminderRead (R.client (trialReminders trial))) ()"
-    , "inspectFull (length (workNotices view) == 1 && length (reminderEntries memory) == 1"
-    , "  && (case judged of { Right entry -> (case reminderReceipt entry of { Nothing -> True; Just _ -> False }) && notificationDecision entry == InterruptOwner; Left _ -> False })"
-    , "  && all (\\entry -> \"Unresolved questions: producer: ownership\" `T.isInfixOf` reminderFacts (reminderEpisode entry) && \"browser gate remains\" `T.isInfixOf` reminderFacts (reminderEpisode entry)) (reminderEntries memory))"
     ])
-  check "snapshot trial retains the original notice and judges its evidence" ("True" `Text.isSuffixOf` output observed)
+  assertCell owner "snapshot trial retains the original notice and judges its evidence"
+    "length (workNotices view) == 1 && length (reminderEntries memory) == 1 && (case judged of { Right entry -> (case reminderReceipt entry of { Nothing -> True; Just _ -> False }) && notificationDecision entry == InterruptOwner; Left _ -> False })"
+  assertCell owner "text: snapshot trial retains unresolved question and pending gate"
+    "length (reminderEntries memory) == 1 && all (\\entry -> \"Unresolved questions: producer: ownership\" `T.isInfixOf` reminderFacts (reminderEpisode entry) && \"browser gate remains\" `T.isInfixOf` reminderFacts (reminderEpisode entry)) (reminderEntries memory)"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [question])"
-  duplicate <- turn owner "view <- readWork routed\nmemory <- R.call (reminderRead (R.client (trialReminders trial))) ()\ninspectFull (length (workNotices view) == 1 && length (reminderEntries memory) == 1 && notificationEpisode QuestionsAndResults id view 1 == Nothing)"
-  check "unchanged progress does not produce another collector notice" ("True" `Text.isSuffixOf` output duplicate)
+  awaitCell owner "unchanged progress does not produce another collector notice"
+    "do { view <- readWork routed; memory <- R.call (reminderRead (R.client (trialReminders trial))) (); pure (length (workNotices view) == 1 && length (reminderEntries memory) == 1 && notificationEpisode QuestionsAndResults id view 1 == Nothing) }"
   void $ turn owner "R.finish (trialReminders trial)"
   void $ turn (checkActor producer) (Text.unlines
     [ "let second = Question \"new-gate\" (DesignQuestion \"plans/component.md\" " <> gitOidLiteral source <> " \"New gate needs owner attention\" [\"gate unresolved\"] [] [\"parent\"])"
     , "reportProgress (WorkProgress [] [question,second])"
     ])
-  afterTrial <- turn owner "view <- readWork routed\ninspectFull (length (workNotices view) == 2 && length (workHistory view) == 3)"
-  check "stopped trial does not affect later ordinary notices" ("True" `Text.isSuffixOf` output afterTrial)
+  awaitCell owner "stopped trial does not affect later ordinary notices"
+    "do { view <- readWork routed; pure (length (workNotices view) == 2 && length (workHistory view) == 3) }"
   void $ turn (checkActor producer) "respond (\"done\" :: Text)"
   void $ turn owner "finishWork routed"

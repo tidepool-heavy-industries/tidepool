@@ -1,11 +1,11 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Project.AssumptionChecks (changes) where
 
 import Control.Monad (void)
 import Control.Monad.Freer (Eff, Member)
-import qualified Data.Text as Text
 import Tidepool.Check
 
 changes :: Member RecipeCheck effects => Eff effects ()
@@ -16,13 +16,22 @@ changes = do
   producer <- activation
   void $ turn owner "let project observation = case observation of { ProgressUpdate _ value -> Just value; _ -> Nothing }\nwatcher <- watchAssumption me (0 :: Int) (R.progress updates) project (pure . regression id \"new build failures: revisit the pending work\")"
   void $ turn (checkActor producer) "reportProgress (2 :: Int)"
-  first <- awaitOutput owner "state <- R.call (assumptionView (R.client watcher)) ()\n(assumptionCurrent state == 2, assumptionChangeCount state == 1, fmap (changeDecision) (assumptionLastChange state) == Just (ReportChange \"new build failures: revisit the pending work\"))" (Text.isInfixOf "(True, True, True)")
-  check "a specialized policy observes and reports a typed regression" ("(True, True, True)" `Text.isInfixOf` first)
+  awaitCell owner "a specialized policy observes and reports a typed regression"
+    "do { state <- R.call (assumptionView (R.client watcher)) (); pure (assumptionCurrent state == 2 && assumptionChangeCount state == 1 && case assumptionLastChange state of { Just change -> case changeDecision change of { ReportChange _ -> True; _ -> False }; Nothing -> False }) }"
+  void $ turn owner "state <- R.call (assumptionView (R.client watcher)) ()"
+  assertCell owner "text: regression report retains the supplied message"
+    "case assumptionLastChange state of { Just change -> case changeDecision change of { ReportChange message -> message == \"new build failures: revisit the pending work\"; _ -> False }; Nothing -> False }"
   void $ turn (checkActor producer) "reportProgress (2 :: Int)"
   void $ turn (checkActor producer) "reportProgress (1 :: Int)"
-  second <- awaitOutput owner "state <- R.call (assumptionView (R.client watcher)) ()\n(assumptionCurrent state == 1, assumptionChangeCount state == 2, map changeDecision (assumptionRecentChanges state) == [IgnoreChange \"the observed measure did not increase\", ReportChange \"new build failures: revisit the pending work\"])" (Text.isInfixOf "(True, True, True)")
-  check "equal values skip policy; ignored changes retain their decision" ("(True, True, True)" `Text.isInfixOf` second)
+  awaitCell owner "equal values skip policy; ignored changes retain their decision"
+    "do { state <- R.call (assumptionView (R.client watcher)) (); pure (assumptionCurrent state == 1 && assumptionChangeCount state == 2 && case map changeDecision (assumptionRecentChanges state) of { [IgnoreChange _, ReportChange _] -> True; _ -> False }) }"
+  void $ turn owner "state <- R.call (assumptionView (R.client watcher)) ()"
+  assertCell owner "text: ignored and reported changes retain their messages"
+    "case map changeDecision (assumptionRecentChanges state) of { [IgnoreChange ignored, ReportChange reported] -> ignored == \"the observed measure did not increase\" && reported == \"new build failures: revisit the pending work\"; _ -> False }"
   void $ turn owner "unresolved <- watchAssumption me (0 :: Int) (R.progress updates) project (const (pure (UnresolvedChange \"missing task context\")))"
-  pending <- awaitOutput owner "state <- R.call (assumptionView (R.client unresolved)) ()\ncase assumptionLastChange state of { Just change -> (changeDecision change == UnresolvedChange \"missing task context\", case changeNotice change of { Just (Left NotificationUnavailable) -> True; _ -> False }); Nothing -> (False,False) }" (Text.isInfixOf "(True, True)")
-  check "late attachment retains unresolved decision and mock notification refusal" ("(True, True)" `Text.isInfixOf` pending)
+  awaitCell owner "late attachment retains unresolved decision and mock notification refusal"
+    "do { state <- R.call (assumptionView (R.client unresolved)) (); pure (case assumptionLastChange state of { Just change -> (case changeDecision change of { UnresolvedChange _ -> True; _ -> False }) && (case changeNotice change of { Just (Left NotificationUnavailable) -> True; _ -> False }); Nothing -> False }) }"
+  void $ turn owner "state <- R.call (assumptionView (R.client unresolved)) ()"
+  assertCell owner "text: unresolved change retains the supplied context"
+    "case assumptionLastChange state of { Just change -> case changeDecision change of { UnresolvedChange context -> context == \"missing task context\"; _ -> False }; Nothing -> False }"
   void $ turn owner "R.finish watcher\nR.finish unresolved"
