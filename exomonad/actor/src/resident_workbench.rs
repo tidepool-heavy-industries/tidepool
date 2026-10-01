@@ -2547,50 +2547,60 @@ impl<H, O> ResidentActorRunner<H, O> {
             .child_bootstrap_program
             .clone()
             .ok_or_else(|| "no child bootstrap program installed".to_string())?;
-        let mut machine = factory(session_id, source_layer)?;
-        let lexical_scope = machine.mint_isolated_scope();
-        machine
-            .set_actor_execution(
-                tidepool_runtime::session::SessionRunContext {
-                    resource_scope,
-                    lexical_scope,
-                    ..tidepool_runtime::session::SessionRunContext::ROOT
-                },
-                tidepool_effect::EffectRunPolicy::HandleOrSuspend,
-                tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        let source_layer = source_layer.to_vec();
+        let seed = seed.map(|seed| {
+            (
+                seed.facade.identity().relative_hs_path(),
+                seed.facade.source().to_owned(),
+                seed.lib_sources.clone(),
+                seed.val_generation,
             )
-            .map_err(|error| format!("child session bootstrap context: {error}"))?;
-        if let Some(seed) = seed {
-            let root = machine
-                .compile_view_in(tidepool_codegen::scope::ScopeId::ROOT)
-                .ok_or_else(|| {
-                    "child session has no compile view to seed with the parent's facade".to_string()
-                })?
-                .session_root()
-                .to_path_buf();
-            write_seed_source(
-                &root.join(seed.facade.identity().relative_hs_path()),
-                seed.facade.source(),
-            )?;
-            for (relative, source) in &seed.lib_sources {
-                write_seed_source(&root.join(relative), source)?;
+        });
+        let image_registry = self.access.image_registry.clone();
+        // The blocking task owns only an unregistered session. Cancellation
+        // drops its eventual result, so it cannot register an orphan after the
+        // awaiting launch's cleanup has already run.
+        let (machine, lexical_scope) = spawn_blocking_in_span(move || {
+            let mut machine = factory(session_id, &source_layer)?;
+            let lexical_scope = machine.mint_isolated_scope();
+            machine
+                .set_actor_execution(
+                    tidepool_runtime::session::SessionRunContext {
+                        resource_scope,
+                        lexical_scope,
+                        ..tidepool_runtime::session::SessionRunContext::ROOT
+                    },
+                    tidepool_effect::EffectRunPolicy::HandleOrSuspend,
+                    tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+                )
+                .map_err(|error| format!("child session bootstrap context: {error}"))?;
+            if let Some((facade_path, facade_source, lib_sources, val_generation)) = seed {
+                let root = machine
+                    .compile_view_in(tidepool_codegen::scope::ScopeId::ROOT)
+                    .ok_or_else(|| {
+                        "child session has no compile view to seed with the parent's facade"
+                            .to_string()
+                    })?
+                    .session_root()
+                    .to_path_buf();
+                write_seed_source(&root.join(facade_path), &facade_source)?;
+                for (relative, source) in &lib_sources {
+                    write_seed_source(&root.join(relative), source)?;
+                }
+                machine.set_val_gen(val_generation);
             }
-            machine.set_val_gen(seed.val_generation);
-        }
-        // Installs the shared program, bootstrapping the engine. Its own
-        // suspended boot handshake belongs to nobody here — only the
-        // install side effect matters, so the outcome is discarded exactly
-        // as the composition-root facade test
-        // (`composition_root_child_session_factory_runs_a_cell`) already
-        // does for the same call.
-        if let Some(registry) = &self.access.image_registry {
-            // Before the bootstrap, so the child's first install is the
-            // run's shared driver image rather than a second compile of it.
-            machine.set_image_registry(Arc::clone(registry));
-        }
-        machine
-            .run_with_sites("child_session_bootstrap", bootstrap_program.code())
-            .map_err(|error| format!("child session bootstrap install: {error}"))?;
+            if let Some(registry) = &image_registry {
+                // Before the bootstrap, so the child's first install is the
+                // run's shared driver image rather than a second compile of it.
+                machine.set_image_registry(Arc::clone(registry));
+            }
+            machine
+                .run_with_sites("child_session_bootstrap", bootstrap_program.code())
+                .map_err(|error| format!("child session bootstrap install: {error}"))?;
+            Ok::<_, String>((machine, lexical_scope))
+        })
+        .await
+        .map_err(|error| format!("child session preparation task: {error}"))??;
         // Atomic check-and-insert (`try_insert_idle`, not `insert_idle`):
         // the collision check must happen before any registry mutation, not
         // after — `insert_idle` would already have replaced whatever was at
@@ -14581,6 +14591,217 @@ mod request_tests {
             machines.kind(id),
             Some(tidepool_runtime::session::registry::SlotKind::Idle)
         );
+    }
+
+    fn child_bootstrap_fixture() -> Arc<tidepool_runtime::session::CompiledTurn> {
+        use tidepool_repr::execution_schema::{
+            testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, FieldLayout,
+            Group, HeapBinding, HeapRhs, ResultContract, RuntimeRep, ValueId, ValueRef,
+        };
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        for (index, (name, fields)) in [("Done", 1), ("Suspended", 2), ("Unit", 0)]
+            .into_iter()
+            .enumerate()
+        {
+            let module = if index < 2 {
+                "Tidepool.Internal.Resume"
+            } else {
+                "Fixture"
+            };
+            let mut identity = testing::identity(module, name);
+            identity.namespace = "constructor".into();
+            let mut family = testing::identity(module, if index < 2 { "Settled" } else { "Unit" });
+            family.namespace = "type".into();
+            wire.constructors.push(ConstructorDecl {
+                identity,
+                family,
+                host_id: tidepool_repr::DataConId(900 + index as u64),
+                result_rep: RuntimeRep::LiftedRef,
+                tag: if index == 1 { 2 } else { 1 },
+                family_size: if index < 2 { 2 } else { 1 },
+                field_reps: vec![RuntimeRep::LiftedRef; fields],
+                strict_fields: vec![false; fields],
+                layout: CheckedLayout {
+                    fields: (0..fields)
+                        .map(|field| FieldLayout {
+                            rep: RuntimeRep::LiftedRef,
+                            offset: field as u32 * 8,
+                        })
+                        .collect(),
+                    alignment: if fields == 0 { 1 } else { 8 },
+                    payload_size: fields as u32 * 8,
+                    root_mask: vec![true; fields],
+                },
+            });
+        }
+        wire.expressions.nodes = vec![
+            ExprFrame::Construct {
+                constructor: ConstructorId(0),
+                fields: vec![Atom::Ref(ValueRef::Local(ValueId(1)))],
+            },
+            ExprFrame::Let {
+                bindings: Group::NonRecursive(HeapBinding {
+                    id: ValueId(1),
+                    rhs: HeapRhs::Constructor {
+                        constructor: ConstructorId(2),
+                        fields: vec![],
+                    },
+                }),
+                body: 0,
+            },
+        ];
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Function { body, .. } = &mut top.binding.rhs else {
+            unreachable!()
+        };
+        *body = 1;
+        let mut table = DataConTable::new();
+        for constructor in &wire.constructors {
+            table.insert(tidepool_repr::DataCon {
+                id: constructor.host_id,
+                name: constructor.identity.occurrence.clone(),
+                tag: constructor.tag,
+                rep_arity: constructor.field_reps.len() as u32,
+                field_bangs: vec![],
+                qualified_name: Some(format!(
+                    "{}.{}",
+                    constructor.identity.module, constructor.identity.occurrence
+                )),
+                type_name: constructor.family.occurrence.clone(),
+            });
+        }
+        Arc::new(tidepool_runtime::session::CompiledTurn {
+            prepared: Arc::new(testing::prepare(wire).unwrap()),
+            table,
+            asks: Vec::new(),
+            warnings: Default::default(),
+            certification: None,
+        })
+    }
+
+    struct ChildOutputLifetime(Arc<tokio::sync::Notify>);
+
+    impl Drop for ChildOutputLifetime {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    #[derive(Clone)]
+    struct ChildOutput(Arc<ChildOutputLifetime>);
+
+    impl OutputSink for ChildOutput {
+        fn drain(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn snapshot(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    fn child_preparation_fixture(
+        id: tidepool_repr::SessionId,
+        root: PathBuf,
+        output: ChildOutput,
+    ) -> Box<ResidentSession<frunk::HNil, ChildOutput>> {
+        use tidepool_runtime::session::{ModuleEnv, SessionLib};
+        let library = SessionLib::open(id, &root, ModuleEnv::standalone_default()).unwrap();
+        Box::new(ResidentSession::unbootstrapped(
+            frunk::HNil,
+            output,
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(library),
+        ))
+    }
+
+    #[tokio::test]
+    async fn cancelling_child_preparation_cannot_register_a_late_machine() {
+        let id = tidepool_repr::SessionId(810);
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().to_path_buf();
+        let machines = Arc::new(ActorMachineRegistry::<frunk::HNil, ChildOutput>::new());
+        let dropped = Arc::new(tokio::sync::Notify::new());
+        let worker_dropped = Arc::clone(&dropped);
+        let (started, observe) = tokio::sync::oneshot::channel();
+        let started = std::sync::Mutex::new(Some(started));
+        let (release, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        let runner = ResidentActorRunner::new(
+            Arc::clone(&machines),
+            ActorWorkbenchSource::new("", Vec::new()),
+        )
+        .with_child_bootstrap_program(child_bootstrap_fixture())
+        .with_child_session_factory(Arc::new(move |id, _| {
+            let output = ChildOutput(Arc::new(ChildOutputLifetime(Arc::clone(&worker_dropped))));
+            let weak = Arc::downgrade(&output.0);
+            let machine = child_preparation_fixture(id, root_path.clone(), output);
+            started.lock().unwrap().take().unwrap().send(weak).unwrap();
+            wait.lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            Ok(machine)
+        }));
+        let task_runner = runner.clone();
+        let task = tokio::spawn(async move {
+            task_runner
+                .provision_child_session(id, RealmId::ROOT, None, &[])
+                .await
+        });
+        let lifetime = observe.await.unwrap();
+        // This current-thread runtime reached another task while preparation is
+        // synchronously blocked, proving the factory is off the async thread.
+        assert!(machines.kind(id).is_none());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), dropped.notified())
+            .await
+            .unwrap();
+        assert!(lifetime.upgrade().is_none());
+        assert!(machines.kind(id).is_none());
+        assert!(!runner.access.child_sessions.lock().unwrap().contains(&id));
+    }
+
+    #[tokio::test]
+    async fn prepared_child_registration_remains_owned_by_retirement() {
+        let id = tidepool_repr::SessionId(811);
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().to_path_buf();
+        let machines = Arc::new(ActorMachineRegistry::<frunk::HNil, ChildOutput>::new());
+        let dropped = Arc::new(tokio::sync::Notify::new());
+        let factory_dropped = Arc::clone(&dropped);
+        let runner = ResidentActorRunner::new(
+            Arc::clone(&machines),
+            ActorWorkbenchSource::new("", Vec::new()),
+        )
+        .with_child_bootstrap_program(child_bootstrap_fixture())
+        .with_child_session_factory(Arc::new(move |id, _| {
+            Ok(child_preparation_fixture(
+                id,
+                root_path.clone(),
+                ChildOutput(Arc::new(ChildOutputLifetime(Arc::clone(&factory_dropped)))),
+            ))
+        }));
+        let scope = runner
+            .provision_child_session(id, RealmId::ROOT, None, &[])
+            .await
+            .unwrap();
+        assert_ne!(scope, tidepool_codegen::scope::ScopeId::ROOT);
+        assert_eq!(
+            machines.kind(id),
+            Some(tidepool_runtime::session::registry::SlotKind::Idle)
+        );
+        assert!(runner.access.child_sessions.lock().unwrap().contains(&id));
+        runner.retire_child_session(id, false).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), dropped.notified())
+            .await
+            .unwrap();
+        assert!(machines.kind(id).is_none());
+        assert!(!runner.access.child_sessions.lock().unwrap().contains(&id));
     }
 
     #[test]
