@@ -763,8 +763,9 @@ async fn resident_cleanup_case(fail_hook: bool) {
          data SpawnOutput = SpawnOutput {{ started :: Bool }} deriving (Generic, ToJSON, JsonSchema)\n\
          data StateInput = StateInput {{ next :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
          data StateQuery = StateQuery deriving (Generic, FromJSON, JsonSchema)\n\
+         data FinishInput = FinishInput {{ confirm :: Bool }} deriving (Generic, FromJSON, JsonSchema)\n\
          data StateOutput = StateOutput {{ current :: Int }} deriving (Generic, ToJSON, JsonSchema)\n\
-         data ResidentTools mode = ResidentTools {{ doubleValue :: mode :- Call EchoInput EchoOutput, spawnChild :: mode :- Call SpawnInput SpawnOutput, currentValue :: mode :- Call StateQuery StateOutput, setValue :: mode :- Update StateInput StateOutput, finishValue :: mode :- Finish StateQuery StateOutput }} deriving (Generic)\n"
+         data ResidentTools mode = ResidentTools {{ doubleValue :: mode :- Call EchoInput EchoOutput, spawnChild :: mode :- Call SpawnInput SpawnOutput, currentValue :: mode :- Call StateQuery StateOutput, setValue :: mode :- Update StateInput StateOutput, finishValue :: mode :- Finish FinishInput StateOutput }} deriving (Generic)\n"
     );
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
@@ -921,7 +922,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
     for (name, arguments) in [
         ("double_value", serde_json::json!({"value": "bad"})),
         ("set_value", serde_json::json!({"next": "bad"})),
-        ("finish_value", serde_json::json!(false)),
+        ("finish_value", serde_json::json!({"confirm": "bad"})),
     ] {
         let error = policy
             .dispatch_boxed(ToolInvocation {
@@ -986,7 +987,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         .dispatch_boxed(ToolInvocation {
             context: None,
             name: "finish_value".into(),
-            arguments: ToolArguments::Structured(serde_json::json!({})),
+            arguments: ToolArguments::Structured(serde_json::json!({"confirm": true})),
         })
         .await
         .expect("finish value");
@@ -1042,7 +1043,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         .dispatch_boxed(ToolInvocation {
             context: None,
             name: "finish_value".into(),
-            arguments: ToolArguments::Structured(serde_json::json!({})),
+            arguments: ToolArguments::Structured(serde_json::json!({"confirm": true})),
         })
         .await
         .expect("retire sibling");
