@@ -5274,7 +5274,12 @@ async fn run_interactive_applications(
                             installation.context_parent,
                         ) {
                             (true, _, _) => None,
-                            (false, Some(checkpoint), _) => Some(BackendThreadId(checkpoint.boundary.thread_id.clone())),
+                            (false, Some(checkpoint), _) => {
+                                let Some(thread) = checkpoint.boundary.hosted().and_then(exomonad_tool::OriginalOperation::external_thread) else {
+                                    break Some("Codex checkpoint lacks its external conversation origin".into());
+                                };
+                                Some(BackendThreadId(thread.to_owned()))
+                            },
                             (false, None, None) => None,
                             (false, None, Some(parent)) => {
                                 let Some(thread) = deployments
@@ -6743,7 +6748,10 @@ async fn launch_prepared_interactive_application(
         let boundary = installation
             .fork_boundary
             .as_ref()
-            .filter(|boundary| boundary.thread_id == parent.0 && !boundary.call_id.is_empty())
+            .and_then(tidepool_runtime::session::WorkbenchForkBoundary::hosted)
+            .filter(|operation| {
+                operation.external_thread() == Some(parent.0.as_str()) && operation.is_complete()
+            })
             .ok_or_else(|| {
                 application_error(
                     actor_identity,

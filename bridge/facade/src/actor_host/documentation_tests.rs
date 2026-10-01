@@ -1370,10 +1370,10 @@ async fn reattachment_preserves_completed_unacknowledged_forks() {
     let result = root
         .dispatch_boxed(ToolInvocation {
             context: Some(ToolInvocationContext::external(
-                boundary.thread_id.clone(),
+                boundary.hosted().unwrap().external_thread().unwrap().into(),
                 "minimal-turn".into(),
                 "minimal-inner-call".into(),
-                Some(boundary.call_id.clone()),
+                Some(boundary.hosted().unwrap().call_id.clone()),
                 Some("haskell".into()),
             )),
             name: exomonad_actor::HASKELL_TOOL.into(),
@@ -1537,8 +1537,9 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
                     "explicit effort is preserved; omitted effort stays a host default"
                 );
                 let boundary = child.fork_boundary.as_ref().expect("hosted fork boundary");
-                assert_eq!(boundary.thread_id, "actor-host-vertical");
-                assert!(!boundary.call_id.is_empty());
+                let operation = boundary.hosted().expect("hosted operation");
+                assert_eq!(operation.external_thread(), Some("actor-host-vertical"));
+                assert!(!operation.call_id.is_empty());
                 if let Some(expected) = &fork_boundary {
                     assert_eq!(
                         boundary, expected,

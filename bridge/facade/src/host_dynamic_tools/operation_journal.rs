@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use tidepool_repr::jsonl::{SyncPolicy, TailPolicy};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -26,12 +26,7 @@ impl From<&CallRequest> for OperationKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct BoundaryKey {
-    pub thread_id: String,
-    pub context_call_id: String,
-}
+pub(super) type BoundaryKey = exomonad_tool::OriginalOperation;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
@@ -148,12 +143,13 @@ impl OperationJournal {
             .iter()
             .filter(|(_, record)| record.response.is_none())
             .filter_map(|(key, _)| {
-                key.context_call_id
-                    .as_ref()
-                    .map(|context_call_id| BoundaryKey {
-                        thread_id: key.thread_id.clone(),
-                        context_call_id: context_call_id.clone(),
-                    })
+                key.context_call_id.as_ref().map(|context_call_id| {
+                    super::external_operation(
+                        key.thread_id.clone(),
+                        key.turn_id.clone(),
+                        context_call_id.clone(),
+                    )
+                })
             })
             .filter(|boundary| !self.settled_boundaries.contains(boundary))
     }
@@ -377,10 +373,8 @@ mod tests {
     fn settled_boundaries_survive_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("operations.jsonl");
-        let boundary = BoundaryKey {
-            thread_id: "thread".into(),
-            context_call_id: "outer-call".into(),
-        };
+        let boundary =
+            super::super::external_operation("thread".into(), "turn".into(), "outer-call".into());
         let mut journal = OperationJournal::open(path.clone()).unwrap();
         journal.settle_boundary(boundary.clone()).unwrap();
         drop(journal);
@@ -405,11 +399,59 @@ mod tests {
         let journal = OperationJournal::open_existing(path).unwrap();
         assert_eq!(
             journal.uncertain_boundaries().collect::<Vec<_>>(),
-            vec![BoundaryKey {
-                thread_id: "thread".into(),
-                context_call_id: "outer-call".into(),
-            }]
+            vec![super::super::external_operation(
+                "thread".into(),
+                "turn".into(),
+                "outer-call".into(),
+            )]
         );
+    }
+
+    #[test]
+    fn reused_original_call_ids_keep_request_boundaries_separate_after_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("operations.jsonl");
+        let mut journal = OperationJournal::open(path.clone()).unwrap();
+        let first = request("effect-a");
+        let mut second = request("effect-b");
+        second.turn_id = "next-request".into();
+        assert!(matches!(journal.admit(&first).unwrap(), Admission::New));
+        assert!(matches!(journal.admit(&second).unwrap(), Admission::New));
+        let settled = super::super::external_operation(
+            first.thread_id.clone(),
+            first.turn_id.clone(),
+            first.context_call_id.clone().unwrap(),
+        );
+        journal.settle_boundary(settled.clone()).unwrap();
+        drop(journal);
+
+        let journal = OperationJournal::open_existing(path).unwrap();
+        assert_eq!(
+            journal.settled_boundaries().collect::<Vec<_>>(),
+            vec![&settled]
+        );
+        assert_eq!(
+            journal.uncertain_boundaries().collect::<Vec<_>>(),
+            vec![super::super::external_operation(
+                second.thread_id,
+                second.turn_id,
+                second.context_call_id.unwrap(),
+            ),]
+        );
+    }
+
+    #[test]
+    fn legacy_boundary_journal_is_rejected_without_modifying_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("operations.jsonl");
+        let legacy = concat!(
+            "{\"version\":1,\"sequence\":1,\"event\":\"created\"}\n",
+            "{\"version\":1,\"sequence\":2,\"event\":\"boundary_settled\",",
+            "\"boundary\":{\"threadId\":\"thread\",\"contextCallId\":\"reused\"}}\n",
+        );
+        std::fs::write(&path, legacy).unwrap();
+        assert!(OperationJournal::open_existing(path.clone()).is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), legacy);
     }
 
     #[test]

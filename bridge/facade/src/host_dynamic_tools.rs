@@ -19,7 +19,10 @@ use exomonad_agent::{
     accept_interactive_session_binding, BackendThreadId, InteractiveSessionBinding,
     HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
 };
-use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
+use exomonad_tool::{
+    ConversationOrigin, HostedTool, OriginalOperation, ToolArguments, ToolInvocation,
+    ToolInvocationContext,
+};
 use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -182,7 +185,7 @@ struct HostState {
     endpoint: Arc<dyn ResidentToolEndpoint>,
     binding_path: PathBuf,
     expected_thread: Option<BackendThreadId>,
-    boundaries: Arc<Mutex<HashMap<(String, String), HostBoundaryState>>>,
+    boundaries: Arc<Mutex<HashMap<OriginalOperation, HostBoundaryState>>>,
     operations: Option<Arc<parking_lot::Mutex<operation_journal::OperationJournal>>>,
 }
 
@@ -270,19 +273,13 @@ impl HostDynamicToolService {
         .map_err(|error| format!("cannot open hosted-operation journal: {error}"))?;
         let mut boundaries = journal
             .uncertain_boundaries()
-            .map(|boundary| {
-                (
-                    (boundary.thread_id, boundary.context_call_id),
-                    HostBoundaryState::Pending,
-                )
-            })
+            .map(|boundary| (boundary, HostBoundaryState::Pending))
             .collect::<HashMap<_, _>>();
-        boundaries.extend(journal.settled_boundaries().map(|boundary| {
-            (
-                (boundary.thread_id.clone(), boundary.context_call_id.clone()),
-                HostBoundaryState::Settled,
-            )
-        }));
+        boundaries.extend(
+            journal
+                .settled_boundaries()
+                .map(|boundary| (boundary.clone(), HostBoundaryState::Settled)),
+        );
         self.state.boundaries = Arc::new(Mutex::new(boundaries));
         self.state.operations = Some(Arc::new(parking_lot::Mutex::new(journal)));
         Ok(self)
@@ -368,7 +365,16 @@ enum DynamicTool {
     Function(DynamicToolFunctionSpec),
 }
 
-type CompletionRequest = codex_shoal_protocol::HostedCompletionRequest<String>;
+/// Completion requires the model request owning the original call. Legacy
+/// clients which omit `turnId` cannot acknowledge an exact hosted operation.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompletionRequest {
+    protocol_version: u32,
+    thread_id: String,
+    turn_id: String,
+    context_call_id: String,
+}
 
 /// Exact native/application custody supplied by the challenged session plus
 /// the complete hosted invocation coordinate. The resident owner derives its
@@ -478,8 +484,9 @@ async fn cancel_workbench(
             "tool host is draining".into(),
         ));
     }
+    let thread_id = request.thread_id.clone();
     let invocation = validate_exact_workbench_request(&state, request).await?;
-    let (thread_id, call_id) = (invocation.thread_id.clone(), invocation.call_id.clone());
+    let call_id = invocation.call_id.clone();
     let outcome = state.endpoint.cancel_workbench_boxed(invocation).await;
     // One line per validated request. `thread_id` names the actor through its
     // binding; `run-map` reads these as hosted-call cancellations.
@@ -532,7 +539,7 @@ async fn interrupted(
         ));
     }
     let boundary = validate_completion_boundary(&state, request).await?;
-    let key = (boundary.thread_id.clone(), boundary.call_id.clone());
+    let key = boundary.clone();
     let previous = {
         let mut boundaries = state.boundaries.lock().await;
         match boundaries.get(&key).copied() {
@@ -553,7 +560,13 @@ async fn interrupted(
             }
         }
     };
-    let response = match state.endpoint.reconcile_workbench_boxed(boundary).await {
+    let response = match state
+        .endpoint
+        .reconcile_workbench_boxed(tidepool_runtime::session::WorkbenchForkBoundary::Hosted(
+            boundary,
+        ))
+        .await
+    {
         Ok(response) => WorkbenchInterruptionResponse::from_reconciliation(response),
         Err(error) => {
             let mut boundaries = state.boundaries.lock().await;
@@ -637,13 +650,13 @@ async fn validate_exact_workbench_request(
         ));
     }
 
-    Ok(ToolInvocationContext {
-        context_call_id: request.context_call_id,
-        thread_id: request.thread_id,
-        turn_id: request.turn_id,
-        call_id: request.call_id,
-        namespace: request.namespace,
-    })
+    Ok(ToolInvocationContext::external(
+        request.thread_id,
+        request.turn_id,
+        request.call_id,
+        request.context_call_id,
+        request.namespace,
+    ))
 }
 
 async fn completed(
@@ -657,7 +670,7 @@ async fn completed(
         ));
     }
     let boundary = validate_completion_boundary(&state, request).await?;
-    let key = (boundary.thread_id.clone(), boundary.call_id.clone());
+    let key = boundary.clone();
     let previous = {
         let mut boundaries = state.boundaries.lock().await;
         match boundaries.get(&key).copied() {
@@ -678,7 +691,13 @@ async fn completed(
             }
         }
     };
-    if let Err(error) = state.endpoint.complete_boxed(boundary).await {
+    if let Err(error) = state
+        .endpoint
+        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::Hosted(
+            boundary,
+        ))
+        .await
+    {
         let mut boundaries = state.boundaries.lock().await;
         match previous {
             Some(previous) => {
@@ -693,10 +712,7 @@ async fn completed(
     if let Some(operations) = &state.operations {
         operations
             .lock()
-            .settle_boundary(operation_journal::BoundaryKey {
-                thread_id: key.0.clone(),
-                context_call_id: key.1.clone(),
-            })
+            .settle_boundary(key.clone())
             .map_err(|error| {
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -712,13 +728,23 @@ async fn completed(
     Ok(Json(serde_json::Value::Null))
 }
 
+fn external_operation(thread_id: String, request_id: String, call_id: String) -> OriginalOperation {
+    OriginalOperation {
+        origin: ConversationOrigin::External { thread_id },
+        request_id,
+        call_id,
+    }
+}
+
 async fn validate_completion_boundary(
     state: &HostState,
     request: CompletionRequest,
-) -> Result<tidepool_runtime::session::WorkbenchForkBoundary, (StatusCode, String)> {
+) -> Result<OriginalOperation, (StatusCode, String)> {
     if request.protocol_version != PROTOCOL_VERSION
         || request.context_call_id.is_empty()
         || request.context_call_id.len() > 256
+        || request.turn_id.is_empty()
+        || request.turn_id.len() > 256
         || state
             .control
             .bound_thread
@@ -732,10 +758,11 @@ async fn validate_completion_boundary(
             "invalid tool completion identity".into(),
         ));
     }
-    Ok(tidepool_runtime::session::WorkbenchForkBoundary {
-        thread_id: request.thread_id,
-        call_id: request.context_call_id,
-    })
+    Ok(external_operation(
+        request.thread_id,
+        request.turn_id,
+        request.context_call_id,
+    ))
 }
 
 async fn registration(State(state): State<HostState>) -> Result<Json<Registration>, StatusCode> {
@@ -960,6 +987,8 @@ enum HostToolFailure {
         expected: Option<&'static str>,
         actual: Option<String>,
     },
+    #[error("incomplete hosted operation identity")]
+    IncompleteIdentity,
     #[error("unknown actor-scoped tool `{0}`")]
     UnknownTool(String),
     #[error("dynamic-tool call thread {actual:?} does not match bound thread {expected:?}")]
@@ -1123,6 +1152,15 @@ async fn call(
             actual: request.thread_id,
         }));
     }
+    if request.turn_id.is_empty()
+        || request.call_id.is_empty()
+        || request
+            .context_call_id
+            .as_ref()
+            .is_some_and(String::is_empty)
+    {
+        return Json(CallResponse::failure(&HostToolFailure::IncompleteIdentity));
+    }
     let actual_argument_kind = json_kind(&request.arguments);
     let arguments = match (kind, request.arguments) {
         (ToolKind::Custom, serde_json::Value::String(source)) => ToolArguments::Raw(source),
@@ -1137,10 +1175,13 @@ async fn call(
             ));
         }
     };
-    let boundary_key = request
-        .context_call_id
-        .as_ref()
-        .map(|call_id| (request.thread_id.clone(), call_id.clone()));
+    let boundary_key = request.context_call_id.as_ref().map(|call_id| {
+        external_operation(
+            request.thread_id.clone(),
+            request.turn_id.clone(),
+            call_id.clone(),
+        )
+    });
     if let Some(key) = &boundary_key {
         let mut boundaries = state.boundaries.lock().await;
         match boundaries.get(key) {
@@ -1187,13 +1228,13 @@ async fn call(
         }
     }
     let invocation = ToolInvocation {
-        context: Some(ToolInvocationContext {
-            context_call_id: request.context_call_id.clone(),
-            thread_id: request.thread_id.clone(),
-            turn_id: request.turn_id.clone(),
-            call_id: request.call_id.clone(),
-            namespace: request.namespace.clone(),
-        }),
+        context: Some(ToolInvocationContext::external(
+            request.thread_id.clone(),
+            request.turn_id.clone(),
+            request.call_id.clone(),
+            request.context_call_id.clone(),
+            request.namespace.clone(),
+        )),
         name: request.tool,
         arguments,
     };
@@ -1279,7 +1320,7 @@ fn record_operation_response(
 pub(crate) mod tests {
     use super::*;
     use exomonad_actor::ResidentToolFuture;
-    use exomonad_tool::{CustomToolDeclaration, ToolDeclaration};
+    use exomonad_tool::{CustomToolDeclaration, ToolDeclaration, ToolInvocationOrigin};
     use std::num::NonZeroU64;
     use std::sync::Mutex as StdMutex;
     use tidepool_runtime::session::{WorkbenchExecutionId, WorkbenchResponse, WorkbenchRunStatus};
@@ -1303,10 +1344,17 @@ pub(crate) mod tests {
                 match invocation.arguments {
                     ToolArguments::Raw(source) => Ok(serde_json::json!({
                         "source": source,
-                        "threadId": context.as_ref().map(|value| &value.thread_id),
-                        "turnId": context.as_ref().map(|value| &value.turn_id),
+                        "threadId": context.as_ref().and_then(|value| match &value.origin {
+                            ToolInvocationOrigin::Model(operation) => match &operation.origin {
+                                ConversationOrigin::External { thread_id } => Some(thread_id),
+                                ConversationOrigin::Embedded { .. } => None,
+                            },
+                            ToolInvocationOrigin::Direct { origin: ConversationOrigin::External { thread_id }, .. } => Some(thread_id),
+                            ToolInvocationOrigin::Direct { .. } => None,
+                        }),
+                        "turnId": context.as_ref().map(ToolInvocationContext::request_id),
                         "callId": context.as_ref().map(|value| &value.call_id),
-                        "contextCallId": context.as_ref().and_then(|value| value.context_call_id.as_ref()),
+                        "contextCallId": context.as_ref().and_then(ToolInvocationContext::model_operation).map(|operation| &operation.call_id),
                         "namespace": context.as_ref().and_then(|value| value.namespace.as_ref()),
                     })),
                     ToolArguments::Structured(_) => Err(ResidentToolError::InvalidInvocation(
@@ -1395,15 +1443,17 @@ pub(crate) mod tests {
                     + 'static,
             >,
         > {
+            let tidepool_runtime::session::WorkbenchForkBoundary::Hosted(operation) = boundary
+            else {
+                panic!("HTTP completion must preserve its hosted operation")
+            };
             self.calls.lock().unwrap().push(ToolInvocationContext {
-                context_call_id: Some(boundary.call_id.clone()),
-                thread_id: boundary.thread_id,
-                turn_id: String::new(),
-                call_id: boundary.call_id.clone(),
+                call_id: operation.call_id.clone(),
+                origin: ToolInvocationOrigin::Model(operation.clone()),
                 namespace: None,
             });
             Box::pin(async move {
-                Ok(match boundary.call_id.as_str() {
+                Ok(match operation.call_id.as_str() {
                     "call-a" => WorkbenchBoundaryReconciliation::Recovered {
                         reply: Ok(WorkbenchResponse {
                             status: WorkbenchRunStatus::Committed,
@@ -1534,11 +1584,70 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn completion_refuses_legacy_and_empty_request_identity() {
+        let legacy = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "threadId": "01a05a16-97f5-7722-aa8d-467e01e2e5b4",
+            "contextCallId": "call-a",
+        });
+        assert!(serde_json::from_value::<CompletionRequest>(legacy).is_err());
+
+        let (endpoint, calls) = cancellation_endpoint();
+        let state = challenged_cancellation_state(endpoint).await;
+        for turn_id in ["", &"x".repeat(257)] {
+            let error = interrupted(
+                State(state.clone()),
+                Json(CompletionRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    thread_id: "01a05a16-97f5-7722-aa8d-467e01e2e5b4".into(),
+                    turn_id: turn_id.into(),
+                    context_call_id: "call-a".into(),
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        }
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(state.boundaries.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn completion_fences_only_the_original_request() {
+        let dispatches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = attached_state(counting_endpoint(Arc::clone(&dispatches))).await;
+        let _ = completed(
+            State(state.clone()),
+            Json(CompletionRequest {
+                protocol_version: PROTOCOL_VERSION,
+                thread_id: "01a05a16-97f5-7722-aa8d-467e01e2e5b4".into(),
+                turn_id: "first-request".into(),
+                context_call_id: "reused-call".into(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let mut request = call_request(serde_json::Value::String("effect".into()));
+        request.context_call_id = Some("reused-call".into());
+        request.turn_id = "second-request".into();
+        assert!(
+            call(State(state.clone()), Json(request.clone()))
+                .await
+                .0
+                .success
+        );
+        request.turn_id = "first-request".into();
+        assert!(!call(State(state), Json(request)).await.0.success);
+        assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn completion_during_interruption_is_retryable_until_settled() {
         let (endpoint, _) = cancellation_endpoint();
         let state = challenged_cancellation_state(endpoint).await;
         let thread_id = "01a05a16-97f5-7722-aa8d-467e01e2e5b4";
-        let key = (thread_id.to_owned(), "call-a".to_owned());
+        let key = external_operation(thread_id.into(), "turn".into(), "call-a".into());
         for boundary_state in [
             HostBoundaryState::Active,
             HostBoundaryState::Reconciling,
@@ -1554,6 +1663,7 @@ pub(crate) mod tests {
                 Json(CompletionRequest {
                     protocol_version: PROTOCOL_VERSION,
                     thread_id: thread_id.into(),
+                    turn_id: "turn".into(),
                     context_call_id: "call-a".into(),
                 }),
             )
@@ -1575,6 +1685,7 @@ pub(crate) mod tests {
             Json(CompletionRequest {
                 protocol_version: PROTOCOL_VERSION,
                 thread_id: thread_id.into(),
+                turn_id: "turn".into(),
                 context_call_id: "call-a".into(),
             }),
         )
@@ -1605,6 +1716,7 @@ pub(crate) mod tests {
                 Json(CompletionRequest {
                     protocol_version: PROTOCOL_VERSION,
                     thread_id: "01a05a16-97f5-7722-aa8d-467e01e2e5b4".into(),
+                    turn_id: "turn".into(),
                     context_call_id: call_id.into(),
                 }),
             )
@@ -1719,6 +1831,7 @@ pub(crate) mod tests {
             Json(CompletionRequest {
                 protocol_version: PROTOCOL_VERSION,
                 thread_id: thread.into(),
+                turn_id: "turn".into(),
                 context_call_id: "boundary".into(),
             }),
         ));

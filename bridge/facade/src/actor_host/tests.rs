@@ -710,8 +710,9 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
     };
     assert_eq!(observer.context_parent, Some(issuer.actor.identity()));
     let checkpoint = observer.checkpoint.as_ref().expect("delegated checkpoint");
-    assert_eq!(checkpoint.boundary.thread_id, "actor-host-vertical");
-    assert_eq!(checkpoint.boundary.call_id, capture_call_id);
+    let operation = checkpoint.boundary.hosted().expect("hosted checkpoint");
+    assert_eq!(operation.external_thread(), Some("actor-host-vertical"));
+    assert_eq!(operation.call_id, capture_call_id);
     campaign.authority.install_grant(
         observer.actor.identity().into(),
         worktree_grant(observer.effective_role.role()),

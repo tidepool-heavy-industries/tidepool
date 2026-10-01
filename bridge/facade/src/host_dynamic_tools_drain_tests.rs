@@ -136,9 +136,9 @@ async fn http_quiesce_preserves_completion_and_drain_retains_blocked_call() {
             StatusCode::SERVICE_UNAVAILABLE
         );
         // Quiesce still admits completion of a boundary that is not in flight.
-        assert_eq!(c.post(format!("{URL}/completed")).json(&serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD,"contextCallId":"retired-context"})).send().await.unwrap().status(),StatusCode::OK);
+        assert_eq!(c.post(format!("{URL}/completed")).json(&serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD,"turnId":"turn","contextCallId":"retired-context"})).send().await.unwrap().status(),StatusCode::OK);
         // The in-flight call's boundary is still active: retryable, not delivered.
-        let settling = c.post(format!("{URL}/completed")).json(&serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD,"contextCallId":"context"})).send().await.unwrap();
+        let settling = c.post(format!("{URL}/completed")).json(&serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD,"turnId":"turn","contextCallId":"context"})).send().await.unwrap();
         assert_eq!(settling.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(settling.text().await.unwrap().contains("still settling"));
     }
@@ -297,7 +297,7 @@ async fn assert_quiesced_but_completion_available(c: &reqwest::Client) {
         StatusCode::SERVICE_UNAVAILABLE
     );
     assert_eq!(c.post(format!("{URL}/completed"))
-        .json(&serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD,"contextCallId":"context"}))
+        .json(&serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD,"turnId":"turn","contextCallId":"context"}))
         .send().await.unwrap().status(), StatusCode::OK);
 }
 
@@ -737,7 +737,7 @@ mod actual_seal {
                 .contains("hosted work admission is sealed"),
             "{denied_late}"
         );
-        let completion = serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD,"contextCallId":"context"});
+        let completion = serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD,"turnId":"turn","contextCallId":"context"});
         let mut wrong = completion.clone();
         wrong["threadId"] = serde_json::json!("foreign");
         assert_eq!(

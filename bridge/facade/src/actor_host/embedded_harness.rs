@@ -459,19 +459,11 @@ impl HostActor for EmbeddedHostActor {
     }
 
     async fn output_committed(&self, operation: &OperationId) -> Result<(), String> {
-        let expected = ConversationIdentity::Embedded {
-            run: self.identity.run.clone(),
-            actor: self.identity.actor.clone(),
-            incarnation: self.identity.incarnation.clone(),
-        };
-        if operation.origin != expected {
-            return Err("foreign embedded output acknowledgment".into());
-        }
+        let original = original_operation(&self.identity, operation)?;
         self.installation
-            .complete(tidepool_runtime::session::WorkbenchForkBoundary {
-                thread_id: format!("{}:{}", self.identity.run, self.identity.actor.0),
-                call_id: operation.call.0.clone(),
-            })
+            .complete(tidepool_runtime::session::WorkbenchForkBoundary::Hosted(
+                original,
+            ))
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -546,6 +538,35 @@ struct EmbeddedDispatcher {
     store: Arc<Store>,
 }
 
+fn original_operation(
+    identity: &HostIdentity,
+    operation: &OperationId,
+) -> Result<exomonad_tool::OriginalOperation, String> {
+    match &operation.origin {
+        ConversationIdentity::Embedded {
+            run,
+            actor,
+            incarnation,
+        } if run == &identity.run
+            && actor == &identity.actor
+            && incarnation == &identity.incarnation => {}
+        _ => return Err("foreign embedded operation".into()),
+    }
+    let original = exomonad_tool::OriginalOperation {
+        origin: exomonad_tool::ConversationOrigin::Embedded {
+            run: identity.run.clone(),
+            actor: identity.actor.0.clone(),
+            incarnation: identity.incarnation.clone(),
+        },
+        request_id: operation.request.0.clone(),
+        call_id: operation.call.0.clone(),
+    };
+    if !original.is_complete() {
+        return Err("incomplete embedded operation".into());
+    }
+    Ok(original)
+}
+
 /// Host-owned durable half of a Haskell checkpoint. Registry release refuses
 /// new children; an admitted child keeps its captured attachment for install.
 pub(super) struct EmbeddedHostedCheckpoint {
@@ -569,7 +590,6 @@ struct EmbeddedCheckpointCapture {
     identity: HostIdentity,
     issuer: ActorRef,
     operation: OperationId,
-    thread_id: String,
 }
 
 impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
@@ -578,21 +598,9 @@ impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
         name: &str,
         boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
     ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError> {
-        let exact_origin = matches!(
-            &self.operation.origin,
-            ConversationIdentity::Embedded {
-                run,
-                actor,
-                incarnation,
-            } if run == &self.identity.run
-                && actor == &self.identity.actor
-                && incarnation == &self.identity.incarnation
-        );
-        if !exact_origin
-            || boundary.thread_id != self.thread_id
-            || boundary.call_id != self.operation.call.0
-            || name.is_empty()
-        {
+        let original = original_operation(&self.identity, &self.operation)
+            .map_err(|_| HostedCheckpointCaptureError::CaptureFailed)?;
+        if boundary.hosted() != Some(&original) || name.is_empty() {
             return Err(HostedCheckpointCaptureError::CaptureFailed);
         }
 
@@ -615,22 +623,12 @@ impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
 
 impl EmbeddedDispatcher {
     fn context(&self, operation: &OperationId) -> Result<ToolInvocationContext, ProviderError> {
-        match &operation.origin {
-            ConversationIdentity::Embedded {
-                run,
-                actor,
-                incarnation,
-            } if run == &self.identity.run
-                && actor == &self.identity.actor
-                && incarnation == &self.identity.incarnation => {}
-            _ => return Err(ProviderError::Tool("foreign embedded operation".into())),
-        }
+        let original =
+            original_operation(&self.identity, operation).map_err(ProviderError::Tool)?;
         Ok(ToolInvocationContext {
-            context_call_id: Some(operation.call.0.clone()),
-            thread_id: format!("{}:{}", self.identity.run, self.identity.actor.0),
-            turn_id: operation.request.0.clone(),
+            origin: exomonad_tool::ToolInvocationOrigin::Model(original),
             call_id: operation.call.0.clone(),
-            namespace: Some(format!("embedded:{}", self.identity.incarnation)),
+            namespace: None,
         })
     }
 
@@ -657,7 +655,6 @@ impl EmbeddedDispatcher {
                 identity: self.identity.clone(),
                 issuer: self.issuer,
                 operation: operation.clone(),
-                thread_id: invocation_context.thread_id.clone(),
             }) as Arc<dyn HostedCheckpointCapture>
         });
         self.snapshot
