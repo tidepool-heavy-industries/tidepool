@@ -9,7 +9,7 @@ module Exomonad.Contrib.Check.Cargo
   , FocusedResult (..), CheckExecution (..), SourceAssurance (..)
   , FailureEvidence (..), FocusedDiagnosis (..)
   , PreparationEvidence (..), startFocusedAfterWith
-  , startFocusedWith, startFocusedInWith, collectFocused, diagnoseFocused
+  , startFocusedWith, startFocusedInWith, startFocusedScopedInWith, collectFocused, diagnoseFocused
   , focusedPassed, focusedEvidenceComplete, focusedExecution, focusedSourceAssurance, focusedResultSummary
   ) where
 
@@ -117,12 +117,24 @@ startFocusedWith runner memory spec
 -- | Bind a focused run to an absolute checkout when a completion actor may
 -- live outside the caller's working directory.
 startFocusedInWith :: Member Commands effects => [Text] -> Text -> Cmd.Memory -> FocusedSpec -> Eff effects (Either FocusedSetupIssue FocusedRun)
-startFocusedInWith runner checkout memory spec
+startFocusedInWith = startFocusedInUsing Cmd.tryBackground
+
+-- | Start invocation-owned work in an exact checkout. Await the returned run
+-- before leaving the invocation; it is never detached to an actor lifetime.
+startFocusedScopedInWith :: Member Commands effects => [Text] -> Text -> Cmd.Memory -> FocusedSpec -> Eff effects (Either FocusedSetupIssue FocusedRun)
+startFocusedScopedInWith = startFocusedInUsing Cmd.tryStart
+
+startFocusedInUsing
+  :: Member Commands effects
+  => (Cmd.Command -> Eff effects (Either Cmd.CommandError Cmd.Job))
+  -> [Text] -> Text -> Cmd.Memory -> FocusedSpec
+  -> Eff effects (Either FocusedSetupIssue FocusedRun)
+startFocusedInUsing startCommand runner checkout memory spec
   | null runner = pure (Left EmptyRunner)
   | focusedExpected spec <= 0 = pure (Left (NonPositiveExpected (focusedExpected spec)))
   | not ("/" `Text.isPrefixOf` checkout) = pure (Left (NonAbsoluteCheckout checkout))
   | otherwise = fmap (either (Left . FocusedStartRefused) (Right . FocusedRun spec)) $
-      Cmd.tryBackground (Cmd.inDirectory checkout (focusedCommandAfter runner memory spec []))
+      startCommand (Cmd.inDirectory checkout (focusedCommandAfter runner memory spec []))
 
 -- Preparation and the check execute under one job's checkout authority. The
 -- argv is executed literally; a failed prerequisite never starts the runner.
