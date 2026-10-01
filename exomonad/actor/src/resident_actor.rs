@@ -261,6 +261,7 @@ struct ResidentEnvironment<H, O> {
 
 #[derive(Clone)]
 struct ResidentActorRecord {
+    root_startup: Option<Arc<Mutex<RootStartupState>>>,
     public_owner: ActorPublicOwnerPlane,
     recovery_claimed: bool,
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
@@ -279,6 +280,10 @@ struct ResidentActorRecord {
 enum ActorPublicOwnerPlane {
     Ephemeral(Arc<WorkbenchPublicOwner>),
     DurablePending(tidepool_runtime::session::RecoveryPublicOwner),
+    DurablePublishedUnconfirmed {
+        owner: tidepool_runtime::session::RecoveryPublicOwner,
+        detail: String,
+    },
     DurableReady(Arc<WorkbenchPublicOwner>),
 }
 
@@ -286,7 +291,7 @@ impl ActorPublicOwnerPlane {
     fn ready(&self) -> Option<&Arc<WorkbenchPublicOwner>> {
         match self {
             Self::Ephemeral(owner) | Self::DurableReady(owner) => Some(owner),
-            Self::DurablePending(_) => None,
+            Self::DurablePending(_) | Self::DurablePublishedUnconfirmed { .. } => None,
         }
     }
 }
@@ -632,6 +637,38 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             usage_pointers: self.usage_pointers.clone(),
             recovery: self.recovery.clone(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootStartupState {
+    Pending,
+    Released,
+    Activated,
+}
+
+/// Original, process-local release authority for a registered pending root.
+/// Keeping this receipt permits acknowledgment retries without rebuilding boot.
+pub struct RootStartupRelease {
+    actor: ActorRef,
+    placement: crate::ActorPlacement,
+    latch: Arc<Mutex<RootStartupState>>,
+    intent: crate::RootStartupIntent,
+}
+
+impl RootStartupRelease {
+    pub fn actor(&self) -> ActorRef {
+        self.actor
+    }
+}
+
+impl std::fmt::Debug for RootStartupRelease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RootStartupRelease")
+            .field("actor", &self.actor)
+            .field("placement", &self.placement)
+            .finish_non_exhaustive()
     }
 }
 
@@ -1053,11 +1090,13 @@ pub struct ResidentKernelBehavior<H, O> {
     descriptor: ActorDescriptor,
     environment: ResidentEnvironment<H, O>,
     boot: Option<ResidentBoot>,
+    root_startup: Option<(crate::RootStartupIntent, Arc<Mutex<RootStartupState>>)>,
     standing: ResidentStanding,
     shutdown_hook: Option<RootCustody>,
     checkpoint: Option<StateCheckpoint>,
     admitted_checkpoint: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
     child_scope_lease: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
+    pending_child_initialization: Option<child_initialization::PublishedChildInitialization>,
     pending_checkpoint: Option<StateCheckpoint>,
     active_input: Option<RetainedActorInput>,
     input_origin: ActorInputOrigin,
@@ -1766,11 +1805,13 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             descriptor,
             environment,
             boot: Some(boot),
+            root_startup: None,
             standing: ResidentStanding::Boot,
             shutdown_hook: None,
             checkpoint: None,
             admitted_checkpoint: None,
             child_scope_lease: None,
+            pending_child_initialization: None,
             pending_checkpoint: None,
             active_input: None,
             input_origin: ActorInputOrigin::ActorStartup,
@@ -1897,6 +1938,16 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             context = selected;
             Some(authority)
         };
+        if self
+            .root_startup
+            .as_ref()
+            .is_some_and(|(_, latch)| *latch.lock() != RootStartupState::Activated)
+        {
+            return Err(KernelInvocationFailure::Rejected {
+                actor,
+                detail: "root startup is pending durable release".into(),
+            });
+        }
         let public_owner = {
             let records = self.environment.actors.lock();
             let record = records
@@ -2793,6 +2844,7 @@ where
         self.checkpoint.take();
         self.admitted_checkpoint.take();
         self.child_scope_lease.take();
+        self.pending_child_initialization.take();
         self.pending_checkpoint.take();
         self.active_input.take();
         self.boot.take();
@@ -6148,21 +6200,31 @@ where
         kernel
             .install_session_context(context.clone())
             .map_err(|error| refuse(&error.to_string()))?;
-        if let Some(record) = self.environment.actors.lock().get_mut(&context.actor) {
+        let durable = if let Some(record) = self.environment.actors.lock().get_mut(&context.actor) {
             record.descriptor = self.descriptor.clone();
-            if matches!(record.public_owner, ActorPublicOwnerPlane::Ephemeral(_)) {
-                record.public_owner = ActorPublicOwnerPlane::Ephemeral(
-                    WorkbenchPublicOwner::issue(&context, &self.descriptor, None)
-                        .map_err(|error| refuse(&error.to_string()))?,
-                );
+            match &record.public_owner {
+                ActorPublicOwnerPlane::Ephemeral(_) => {
+                    record.public_owner = ActorPublicOwnerPlane::Ephemeral(
+                        WorkbenchPublicOwner::issue(&context, &self.descriptor, None)
+                            .map_err(|error| refuse(&error.to_string()))?,
+                    );
+                    None
+                }
+                ActorPublicOwnerPlane::DurablePending(owner) => Some(owner.clone()),
+                _ => {
+                    return Err(refuse(
+                        "child release requires its original pending public owner",
+                    ))
+                }
             }
         } else {
             return Err(refuse("released child has no registered allocation"));
-        }
+        };
         let frame = child_initialization::ChildInitializationFrame {
             context,
             boot,
             lexical,
+            durable,
             checkpoint: self.admitted_checkpoint.clone(),
         };
         Ok(crate::ActorAdvance::Park(crate::OwnedActorTask::new(
@@ -6203,6 +6265,287 @@ where
                 terminal,
             }));
         }
+        if let Some(owner) = frame.durable.clone() {
+            let runner = self.environment.runner.clone();
+            let retirement = kernel.retained_exit();
+            return Ok(crate::ActorAdvance::Park(crate::OwnedActorTask::new(
+                Box::pin(async move {
+                    let started = std::time::Instant::now();
+                    tracing::info!(target: "exomonad_actor::workbench_phase", actor = %frame.context.actor, phase = "child_durable_initialization_started", "actor phase");
+                    let result = runner
+                        .initialize_fork_child_public_owner(
+                            frame.context.clone(),
+                            owner,
+                            Arc::clone(&frame.lexical),
+                            retirement,
+                        )
+                        .await;
+                    tracing::info!(target: "exomonad_actor::workbench_phase", actor = %frame.context.actor, elapsed_ms = started.elapsed().as_millis(), phase = "child_durable_initialization_returned", "actor phase");
+                    crate::OwnedActorCompletion::advance(move |behavior: &mut Self, kernel| {
+                        behavior.advance_child_public_initialization(kernel, frame, result)
+                    })
+                }),
+            )));
+        }
+        self.begin_child_native_boot(frame)
+    }
+
+    fn validate_child_initialization_frame(
+        &self,
+        kernel: &KernelContext,
+        frame: &child_initialization::ChildInitializationFrame,
+    ) -> Result<(), KernelInvocationFailure> {
+        if self.context(kernel.identity()).placement != frame.context.placement
+            || frame.context.actor != kernel.identity()
+            || self
+                .child_scope_lease
+                .as_ref()
+                .is_none_or(|lease| !Arc::ptr_eq(lease, &frame.lexical))
+        {
+            return Err(KernelInvocationFailure::Failed {
+                actor: kernel.identity(),
+                detail: "child initialization no longer owns its original placement".into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn retain_published_child_initialization(
+        &mut self,
+        kernel: &KernelContext,
+        frame: child_initialization::ChildInitializationFrame,
+        detail: String,
+        confirmation_failure: Option<&str>,
+    ) -> Result<(), KernelInvocationFailure> {
+        self.validate_child_initialization_frame(kernel, &frame)?;
+        let owner = frame.durable.clone().ok_or_else(|| {
+            Self::invocation_failure(
+                kernel.identity(),
+                "published child initialization has no original durable owner",
+            )
+        })?;
+        let mut records = self.environment.actors.lock();
+        let record = records.get_mut(&frame.context.actor).ok_or_else(|| {
+            Self::invocation_failure(
+                kernel.identity(),
+                "published child allocation is no longer registered",
+            )
+        })?;
+        if record.descriptor.placement() != frame.context.placement
+            || !matches!(&record.public_owner,
+                ActorPublicOwnerPlane::DurablePending(actual)
+                | ActorPublicOwnerPlane::DurablePublishedUnconfirmed { owner: actual, .. }
+                if actual == &owner)
+        {
+            return Err(Self::invocation_failure(
+                kernel.identity(),
+                "published child owner changed during initialization",
+            ));
+        }
+        record.public_owner = ActorPublicOwnerPlane::DurablePublishedUnconfirmed {
+            owner,
+            detail: confirmation_failure.map_or_else(
+                || detail.clone(),
+                |failure| format!("{detail}; confirmation failed: {failure}"),
+            ),
+        };
+        self.pending_child_initialization =
+            Some(child_initialization::PublishedChildInitialization { frame, detail });
+        Ok(())
+    }
+
+    fn promote_child_public_owner(
+        &mut self,
+        kernel: &KernelContext,
+        frame: &child_initialization::ChildInitializationFrame,
+    ) -> Result<(), KernelInvocationFailure> {
+        self.validate_child_initialization_frame(kernel, frame)?;
+        let owner = frame.durable.clone().ok_or_else(|| {
+            Self::invocation_failure(
+                kernel.identity(),
+                "child durable readiness has no original durable owner",
+            )
+        })?;
+        let mut records = self.environment.actors.lock();
+        let record = records.get_mut(&frame.context.actor).ok_or_else(|| {
+            Self::invocation_failure(
+                kernel.identity(),
+                "child readiness allocation is no longer registered",
+            )
+        })?;
+        if record.terminal.is_some()
+            || record.descriptor.placement() != frame.context.placement
+            || !matches!(&record.public_owner,
+                ActorPublicOwnerPlane::DurablePending(actual)
+                | ActorPublicOwnerPlane::DurablePublishedUnconfirmed { owner: actual, .. }
+                if actual == &owner)
+        {
+            return Err(Self::invocation_failure(
+                kernel.identity(),
+                "child durable readiness requires its original pending owner",
+            ));
+        }
+        record.public_owner = ActorPublicOwnerPlane::DurableReady(
+            WorkbenchPublicOwner::issue(&frame.context, &record.descriptor, Some(owner))
+                .map_err(|error| Self::invocation_failure(kernel.identity(), error))?,
+        );
+        Ok(())
+    }
+
+    fn advance_child_public_initialization(
+        &mut self,
+        kernel: &KernelContext,
+        frame: child_initialization::ChildInitializationFrame,
+        result: Result<
+            tidepool_runtime::session::PublicManifestCommit,
+            ResidentActorWorkbenchError,
+        >,
+    ) -> Result<crate::ActorAdvance<Self, ()>, KernelInvocationFailure> {
+        self.validate_child_initialization_frame(kernel, &frame)?;
+        match result {
+            Ok(
+                tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed {
+                    detail,
+                },
+            ) => {
+                self.retain_published_child_initialization(kernel, frame, detail, None)?;
+                if let Some(terminal) = kernel.requested_shutdown() {
+                    return Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
+                        output: (),
+                        terminal,
+                    }));
+                }
+                let pending = self
+                    .pending_child_initialization
+                    .take()
+                    .expect("retained visible child initialization");
+                Ok(crate::ActorAdvance::Park(
+                    self.child_confirmation_task(kernel, pending),
+                ))
+            }
+            Ok(tidepool_runtime::session::PublicManifestCommit::Durable) => {
+                if let Some(terminal) = kernel.requested_shutdown() {
+                    self.boot = Some(frame.boot);
+                    return Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
+                        output: (),
+                        terminal,
+                    }));
+                }
+                self.promote_child_public_owner(kernel, &frame)?;
+                self.begin_child_native_boot(frame)
+            }
+            Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(terminal)) => {
+                self.boot = Some(frame.boot);
+                Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
+                    output: (),
+                    terminal,
+                }))
+            }
+            result => {
+                if let Some(terminal) = kernel.requested_shutdown() {
+                    self.boot = Some(frame.boot);
+                    return Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
+                        output: (),
+                        terminal,
+                    }));
+                }
+                let detail = match result {
+                    Ok(outcome) => {
+                        format!("child durable initialization was not published: {outcome:?}")
+                    }
+                    Err(error) => error.to_string(),
+                };
+                Err(Self::invocation_failure(kernel.identity(), detail))
+            }
+        }
+    }
+
+    fn child_confirmation_task(
+        &self,
+        kernel: &KernelContext,
+        pending: child_initialization::PublishedChildInitialization,
+    ) -> crate::OwnedActorTask<Self, ()> {
+        let runner = self.environment.runner.clone();
+        let retirement = kernel.retained_exit();
+        crate::OwnedActorTask::new(Box::pin(async move {
+            let owner = pending
+                .frame
+                .durable
+                .clone()
+                .expect("visible durable child retains original owner");
+            let started = std::time::Instant::now();
+            let mut attempts = 0;
+            let result = loop {
+                attempts += 1;
+                let result = tokio::select! {
+                    biased;
+                    terminal = retirement.wait_requested_shutdown() => Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(terminal)),
+                    result = tokio::time::timeout(std::time::Duration::from_secs(5),
+                        runner.confirm_durable_public_owner(pending.frame.context.clone(), owner.clone())) => {
+                        result.unwrap_or_else(|_| Err(ResidentActorWorkbenchError::ActorProtocol("child durability confirmation timed out".into())))
+                    },
+                };
+                if result.is_ok()
+                    || matches!(
+                        result,
+                        Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(_))
+                    )
+                    || attempts == 3
+                {
+                    break result;
+                }
+                tokio::select! {
+                    biased;
+                    terminal = retirement.wait_requested_shutdown() => break Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(terminal)),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(25 * attempts)) => {},
+                }
+            };
+            tracing::info!(target: "exomonad_actor::workbench_phase", actor = %pending.frame.context.actor, elapsed_ms = started.elapsed().as_millis(), phase = "child_durability_confirmation_returned", "actor phase");
+            crate::OwnedActorCompletion::advance(move |behavior: &mut Self, kernel| {
+                behavior.advance_child_confirmation(kernel, pending, result)
+            })
+        }))
+    }
+
+    fn advance_child_confirmation(
+        &mut self,
+        kernel: &KernelContext,
+        pending: child_initialization::PublishedChildInitialization,
+        result: Result<(), ResidentActorWorkbenchError>,
+    ) -> Result<crate::ActorAdvance<Self, ()>, KernelInvocationFailure> {
+        self.validate_child_initialization_frame(kernel, &pending.frame)?;
+        if let Some(terminal) = kernel.requested_shutdown() {
+            self.pending_child_initialization = Some(pending);
+            return Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
+                output: (),
+                terminal,
+            }));
+        }
+        match result {
+            Ok(()) => {
+                self.promote_child_public_owner(kernel, &pending.frame)?;
+                self.begin_child_native_boot(pending.frame)
+            }
+            Err(error) => {
+                self.retain_published_child_initialization(
+                    kernel,
+                    pending.frame,
+                    pending.detail,
+                    Some(&error.to_string()),
+                )?;
+                Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
+                    output: (),
+                    terminal: ActorTerminal { kind: ActorExitKind::Failed,
+                        summary: format!("child durability confirmation unavailable after bounded retries: {error}") },
+                }))
+            }
+        }
+    }
+
+    fn begin_child_native_boot(
+        &mut self,
+        frame: child_initialization::ChildInitializationFrame,
+    ) -> Result<crate::ActorAdvance<Self, ()>, KernelInvocationFailure> {
         // Native boot stabilization still uses its original serial driver.
         // Its workspace and entry are already captured; this cannot replay
         // release admission or select another public/captured context.
@@ -6213,6 +6556,7 @@ where
                         context,
                         boot,
                         lexical,
+                        durable: _,
                         checkpoint,
                     } = frame;
                     let result =
@@ -9470,13 +9814,22 @@ where
             };
             if let Some(recovery) = &self.environment.recovery {
                 recovery
-                    .admit(context.actor, &self.descriptor, &self.launch_worktrees)
+                    .admit_with_startup(
+                        context.actor,
+                        &self.descriptor,
+                        &self.launch_worktrees,
+                        self.root_startup.as_ref().map(|(intent, _)| intent.clone()),
+                    )
                     .map_err(Self::failure)?;
             }
             kernel.install_session_context(context.clone())?;
             self.environment.actors.lock().insert(
                 context.actor,
                 ResidentActorRecord {
+                    root_startup: self
+                        .root_startup
+                        .as_ref()
+                        .map(|(_, latch)| Arc::clone(latch)),
                     public_owner,
                     recovery_claimed: false,
                     workbench_executions: self.workbench_executions.clone(),
@@ -9490,6 +9843,10 @@ where
                     scheduler_root: kernel.supervisor_identity().is_none(),
                 },
             );
+            if self.root_startup.is_some() {
+                // The original boot stays resident and opaque until durable application binding.
+                return Ok(KernelStep::Continue(()));
+            }
             if self.descriptor.fork_boundary().is_some() {
                 let group = self
                     .descriptor
@@ -10355,6 +10712,71 @@ where
         })
     }
 
+    fn dispatch_resume(
+        &mut self,
+        kernel: &KernelContext,
+        kind: crate::kernel::KernelResume,
+    ) -> Result<crate::OwnedActorTask<Self, ()>, KernelBehaviorError> {
+        if kind == crate::kernel::KernelResume::ReleaseRootStartup {
+            let (_, latch) = self
+                .root_startup
+                .as_ref()
+                .ok_or_else(|| Self::failure("actor has no pending root startup"))?;
+            let mut state = latch.lock();
+            match *state {
+                RootStartupState::Pending => {
+                    return Err(Self::failure("root startup has not been durably released"))
+                }
+                RootStartupState::Activated => {
+                    return Ok(crate::OwnedActorTask::new(Box::pin(async {
+                        crate::OwnedActorCompletion::new(|_| Ok(KernelStep::Continue(())))
+                    })))
+                }
+                RootStartupState::Released => *state = RootStartupState::Activated,
+            }
+            drop(state);
+            let boot = self
+                .boot
+                .take()
+                .ok_or_else(|| Self::failure("original root boot was already consumed"))?;
+            let context = self.context(kernel.identity());
+            return Ok(crate::OwnedActorTask::serial(
+                move |mut behavior: Self, kernel| {
+                    Box::pin(async move {
+                        let result = behavior
+                            .initialize(&kernel, &context, boot)
+                            .await
+                            .map_err(|error| Self::invocation_failure(kernel.identity(), error));
+                        (behavior, crate::OwnedActorCompletion::new(move |_| result))
+                    })
+                },
+            ));
+        }
+        if kind == crate::kernel::KernelResume::ConfirmChildDurability {
+            let Some(pending) = self.pending_child_initialization.take() else {
+                // Repeated confirmation requests cannot become program resumes.
+                return Ok(crate::OwnedActorTask::new(Box::pin(async {
+                    crate::OwnedActorCompletion::new(|_| Ok(KernelStep::Continue(())))
+                })));
+            };
+            self.validate_child_initialization_frame(kernel, &pending.frame)
+                .map_err(Self::failure)?;
+            return Ok(self.child_confirmation_task(kernel, pending));
+        }
+        // Remaining program stabilization is still the original serial driver.
+        Ok(crate::OwnedActorTask::serial(
+            move |mut behavior: Self, kernel| {
+                Box::pin(async move {
+                    let result = behavior
+                        .resume(&kernel)
+                        .await
+                        .map_err(|error| Self::invocation_failure(kernel.identity(), error));
+                    (behavior, crate::OwnedActorCompletion::new(move |_| result))
+                })
+            },
+        ))
+    }
+
     fn resume<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
@@ -10902,6 +11324,50 @@ where
             .map(|context| context.placement.session)
     }
 
+    /// Queue one confirmation attempt for a visible child surface. Queue
+    /// acceptance is not provider readiness; attachment still requires the
+    /// original actor's durable-ready capsule.
+    pub fn request_child_durability_confirmation(
+        &self,
+        actor: ActorRef,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        let refuse = |detail: &str| ResidentActorWorkbenchError::ActorProtocol(detail.into());
+        let target = self
+            .directory
+            .resolve(actor)
+            .ok_or_else(|| refuse("child confirmation actor is unavailable"))?;
+        let context = self
+            .directory
+            .session_context(actor)
+            .ok_or_else(|| refuse("child confirmation has no installed placement"))?;
+        let records = self.environment.actors.lock();
+        let record = records
+            .get(&actor)
+            .ok_or_else(|| refuse("child confirmation has no registered allocation"))?;
+        if record.terminal.is_some()
+            || target.terminal().requested_shutdown().is_some()
+            || record.descriptor.placement() != context.placement
+            || record.descriptor.creator().is_none()
+        {
+            return Err(refuse(
+                "child confirmation requires its original live allocation",
+            ));
+        }
+        match &record.public_owner {
+            ActorPublicOwnerPlane::DurableReady(_) => return Ok(()),
+            ActorPublicOwnerPlane::DurablePublishedUnconfirmed { detail, .. } => {
+                tracing::debug!(actor = %actor, %detail, "child durability confirmation requested");
+            }
+            _ => return Err(refuse("child has no visible unconfirmed public surface")),
+        }
+        drop(records);
+        target
+            .admit_mailbox(KernelMessage::Resume {
+                kind: crate::kernel::KernelResume::ConfirmChildDurability,
+            })
+            .map_err(|error| refuse(&error.to_string()))
+    }
+
     /// Bind recovery evidence to an actually admitted canonical root. The
     /// durable journal revalidates this placement before certifying transfer.
     pub fn root_recovery_placement(
@@ -11056,6 +11522,16 @@ where
     ) -> Result<Arc<ActorProviderAdmission>, ResidentActorWorkbenchError> {
         let records = self.environment.actors.lock();
         Self::validate_provider_lineage(actor, &records)?;
+        if records.get(&actor).is_some_and(|record| {
+            record
+                .root_startup
+                .as_ref()
+                .is_some_and(|latch| *latch.lock() != RootStartupState::Activated)
+        }) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "root startup has not released provider attachment".into(),
+            ));
+        }
         let owner = records
             .get(&actor)
             .and_then(|record| record.public_owner.ready())
@@ -11083,6 +11559,20 @@ where
             )
         };
         let context = self.directory.session_context(actor).ok_or_else(refuse)?;
+        if self
+            .environment
+            .actors
+            .lock()
+            .get(&actor)
+            .is_some_and(|record| {
+                record
+                    .root_startup
+                    .as_ref()
+                    .is_some_and(|latch| *latch.lock() != RootStartupState::Activated)
+            })
+        {
+            return Err(refuse());
+        }
         if !admission.owner.matches_context(&context)
             || self
                 .directory
@@ -11645,6 +12135,131 @@ where
         }
         self.admit_prepared_root(descriptor, outcome, &admission, Default::default())
             .await
+    }
+
+    /// Register a durable root and retain its original boot without executing it.
+    /// The admission and exact startup intent are one fsynced journal row.
+    pub async fn admit_pending_root_with_identity(
+        &self,
+        descriptor: ActorDescriptor,
+        outcome: ResidentOutcome,
+        identity: ActorRef,
+        intent: crate::RootStartupIntent,
+    ) -> Result<
+        (
+            LocalActorRef,
+            ractor::concurrency::JoinHandle<()>,
+            RootStartupRelease,
+        ),
+        ractor::SpawnErr,
+    > {
+        let admission = self.environment.root_admission_closed.read().await;
+        let refuse =
+            |detail: &str| ractor::SpawnErr::StartupFailed(std::io::Error::other(detail).into());
+        if *admission || self.environment.recovery.is_none() {
+            return Err(refuse(
+                "pending root requires an open forest and durable recovery journal",
+            ));
+        }
+        if descriptor.placement().session != self.session
+            || descriptor.persistence_policy() != crate::ActorPersistencePolicy::Durable
+            || descriptor.actor_path().is_none()
+            || descriptor.creator().is_some()
+            || descriptor.supervisor_parent().is_some()
+            || descriptor.context_parent().is_some()
+            || descriptor.fork_boundary().is_some()
+        {
+            return Err(refuse(
+                "pending root requires its exact independent durable placement",
+            ));
+        }
+        let placement = descriptor.placement();
+        let latch = Arc::new(Mutex::new(RootStartupState::Pending));
+        let mut behavior =
+            ResidentKernelBehavior::prepared(descriptor, self.environment.clone(), outcome);
+        behavior.root_startup = Some((intent.clone(), Arc::clone(&latch)));
+        let (actor, task) = crate::local_actor::spawn_local_actor_in_directory_with_identity(
+            None,
+            behavior,
+            identity,
+            self.directory.clone(),
+        )
+        .await?;
+        Ok((
+            actor,
+            task,
+            RootStartupRelease {
+                actor: identity,
+                placement,
+                latch,
+                intent,
+            },
+        ))
+    }
+
+    /// Release only the original registered boot after durable manifest and
+    /// exact backend binding. Repeated acknowledgments never rerun initialization.
+    pub fn release_root_startup(
+        &self,
+        release: &RootStartupRelease,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        let refuse = |detail: &str| ResidentActorWorkbenchError::ActorProtocol(detail.into());
+        let placement = self.root_recovery_placement(release.actor)?;
+        if placement.placement() != release.placement {
+            return Err(refuse("root startup placement changed"));
+        }
+        let records = self.environment.actors.lock();
+        if records.get(&release.actor).is_none_or(|record| {
+            record.public_owner.ready().is_none()
+                || record
+                    .root_startup
+                    .as_ref()
+                    .is_none_or(|latch| !Arc::ptr_eq(latch, &release.latch))
+        }) {
+            return Err(refuse("root startup manifest durability is unconfirmed"));
+        }
+        drop(records);
+        let journal = self
+            .environment
+            .recovery
+            .as_ref()
+            .ok_or_else(|| refuse("root startup journal is absent"))?;
+        let durable = journal
+            .validated_records()
+            .map_err(|error| refuse(&error.to_string()))?;
+        let record = durable
+            .iter()
+            .find(|record| record.admission.actor == release.actor)
+            .ok_or_else(|| refuse("root startup durable admission is absent"))?;
+        if record.terminal.is_some()
+            || record.startup.as_ref() != Some(&release.intent)
+            || record
+                .application
+                .as_ref()
+                .and_then(|application| application.conversation.as_ref())
+                != Some(&release.intent.conversation)
+        {
+            return Err(refuse(
+                "root startup requires its exact durable ApplicationBound",
+            ));
+        }
+        let actor = self
+            .directory
+            .resolve(release.actor)
+            .ok_or_else(|| refuse("root startup actor is unavailable"))?;
+        let mut state = release.latch.lock();
+        if *state == RootStartupState::Pending {
+            *state = RootStartupState::Released;
+        }
+        if *state != RootStartupState::Activated {
+            actor
+                .address()
+                .send_message(crate::KernelMessage::Resume {
+                    kind: crate::kernel::KernelResume::ReleaseRootStartup,
+                })
+                .map_err(|error| refuse(&error.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Admit the run root with a durable logical identity selected by the

@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tidepool_repr::jsonl::{SyncPolicy, TailPolicy};
 
-// Typed bindings preserve prepared backend intent. V2 bound strings are
-// Codex evidence; v1 lacks the required durable creation marker and is refused.
-const VERSION: u32 = 3;
+// V4 atomically records admission and startup intent. Earlier versions cannot
+// prove that an unbound actor never initialized and are explicitly unsupported.
+const VERSION: u32 = 4;
 
 /// Issued by the Forest after checking its existing descriptor and directory.
 /// The process-local placement is deliberately absent from durable rows.
@@ -101,14 +101,18 @@ impl DurableRootSuccessorAdmission {
             .records
             .get(&self.successor.actor)
             .and_then(|record| record.application.as_ref());
-        Ok(
-            old.and_then(|app| app.conversation.as_ref()) == Some(predecessor)
-                && new.and_then(|app| app.intended_conversation.as_ref()) == Some(successor)
-                && matches!((predecessor, successor),
+        Ok(state
+            .records
+            .get(&self.successor.actor)
+            .and_then(|record| record.startup.as_ref())
+            .and_then(|startup| startup.store_predecessor.as_ref())
+            == Some(predecessor)
+            && old.is_some()
+            && new.and_then(|app| app.intended_conversation.as_ref()) == Some(successor)
+            && matches!((predecessor, successor),
                 (ApplicationConversation::Embedded {run: old_run, agent_path: old_path, ..},
                  ApplicationConversation::Embedded {run: new_run, agent_path: new_path, ..})
-                 if old_run == new_run && old_path == new_path),
-        )
+                 if old_run == new_run && old_path == new_path))
     }
     pub fn validate_successor(
         &self,
@@ -148,6 +152,17 @@ impl DurableRootSuccessorAdmission {
             self.source.as_deref(),
             &self.binding_path,
         )?;
+        let manifest = state
+            .records
+            .get(&self.successor.actor)
+            .and_then(|record| record.startup.as_ref())
+            .and_then(|startup| startup.manifest.as_ref())
+            .ok_or_else(|| {
+                std::io::Error::other("successor startup has no exact manifest revision pin")
+            })?;
+        if !manifest.validate(&run_root)? {
+            return Ok(false);
+        }
         let old = state
             .records
             .get(&self.predecessor)
@@ -215,9 +230,74 @@ pub struct DurableActorTerminal {
     pub summary: String,
 }
 
+/// Pins one exact observed public manifest revision. Runtime additionally
+/// validates the graph checksum, artifact closure and sealed bootstrap inventory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootStartupManifestPin {
+    pub path: PathBuf,
+    pub checksum: String,
+    pub high_water: u64,
+    pub content_blake3: String,
+}
+
+impl RootStartupManifestPin {
+    pub fn capture(path: &Path) -> std::io::Result<Self> {
+        let bytes = std::fs::read(path)?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+        Ok(Self {
+            path: path.canonicalize()?,
+            checksum: value
+                .get("checksum")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| std::io::Error::other("manifest checksum is absent"))?
+                .to_owned(),
+            high_water: value
+                .get("high_water")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| std::io::Error::other("manifest high water is absent"))?,
+            content_blake3: blake3::hash(&bytes).to_hex().to_string(),
+        })
+    }
+
+    fn validate(&self, run_root: &Path) -> std::io::Result<bool> {
+        if self.path.canonicalize()?.parent() != Some(run_root.canonicalize()?.as_path()) {
+            return Ok(false);
+        }
+        Ok(&Self::capture(&self.path)? == self)
+    }
+}
+
+/// Exact root activation intent, recorded in the same durable row as admission.
+/// Manifest and backend owners may differ after an interrupted transfer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootStartupIntent {
+    pub predecessor: Option<ActorRef>,
+    pub manifest_predecessor: Option<ActorRef>,
+    pub manifest: Option<RootStartupManifestPin>,
+    pub store_predecessor: Option<ApplicationConversation>,
+    pub binding_path: PathBuf,
+    pub accepted_source: Option<String>,
+    pub conversation: ApplicationConversation,
+}
+
+impl RootStartupIntent {
+    fn application(&self) -> DurableActorApplication {
+        DurableActorApplication {
+            binding_path: self.binding_path.clone(),
+            conversation: None,
+            intended_conversation: Some(self.conversation.clone()),
+            accepted_source: self.accepted_source.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DurableActorRecord {
     pub admission: DurableActorAdmission,
+    pub startup: Option<RootStartupIntent>,
     pub application: Option<DurableActorApplication>,
     pub terminal: Option<DurableActorTerminal>,
 }
@@ -265,6 +345,7 @@ enum EventKind {
     Created,
     Admitted {
         admission: Box<DurableActorAdmission>,
+        startup: Option<RootStartupIntent>,
     },
     ApplicationPrepared {
         actor: ActorRef,
@@ -352,17 +433,20 @@ impl ActorRecoveryJournal {
         };
         if !is_root(old)
             || !is_root(new)
-            || old.terminal.is_some()
             || new.terminal.is_some()
-            || predecessor.id != successor.actor.id
-            || predecessor.incarnation.0.checked_add(1) != Some(successor.actor.incarnation.0)
+            || new.startup.as_ref().is_none_or(|intent| {
+                intent.manifest_predecessor != Some(predecessor)
+                    || intent.predecessor.is_none_or(|previous| {
+                        !startup_chain_contains(&records, previous, predecessor)
+                    })
+            })
             || owner_for_admission(&new.admission).as_ref() != Some(successor.owner())
             || old.admission.actor_path != new.admission.actor_path
             || records.values().any(|record| {
-                is_root(record)
-                    && (record.admission.actor.id != predecessor.id && record.application.is_some()
-                        || record.admission.actor.id == predecessor.id
-                            && record.admission.actor.incarnation > successor.actor.incarnation)
+                record
+                    .startup
+                    .as_ref()
+                    .is_some_and(|intent| intent.predecessor == Some(successor.actor))
             })
         {
             return Err(std::io::Error::other(
@@ -376,8 +460,7 @@ impl ActorRecoveryJournal {
         let new_app = new.application.as_ref().ok_or_else(|| {
             std::io::Error::other("root successor has no durably prepared application")
         })?;
-        if old_app.conversation.is_none()
-            || old_app.accepted_source.as_deref() != expected_source
+        if old_app.accepted_source.as_deref() != expected_source
             || new_app.accepted_source.as_deref() != expected_source
             || old_app.binding_path != binding_path
             || new_app.binding_path != binding_path
@@ -498,11 +581,25 @@ impl ActorRecoveryJournal {
         descriptor: &ActorDescriptor,
         launch_worktrees: &[String],
     ) -> std::io::Result<()> {
+        self.admit_with_startup(actor, descriptor, launch_worktrees, None)
+    }
+
+    pub(crate) fn admit_with_startup(
+        &self,
+        actor: ActorRef,
+        descriptor: &ActorDescriptor,
+        launch_worktrees: &[String],
+        startup: Option<RootStartupIntent>,
+    ) -> std::io::Result<()> {
         let admission = DurableActorAdmission::capture(actor, descriptor, launch_worktrees);
         let mut state = self.state.lock();
         ensure_writable(&state)?;
         match state.records.get(&actor) {
-            Some(existing) if existing.admission == admission && existing.terminal.is_none() => {
+            Some(existing)
+                if existing.admission == admission
+                    && existing.startup == startup
+                    && existing.terminal.is_none() =>
+            {
                 return Ok(());
             }
             Some(_) => {
@@ -512,17 +609,20 @@ impl ActorRecoveryJournal {
             }
             None => {}
         }
+        validate_startup(&state.records, &admission, startup.as_ref())?;
         self.append(
             &mut state,
             EventKind::Admitted {
                 admission: Box::new(admission.clone()),
+                startup: startup.clone(),
             },
         )?;
         state.records.insert(
             actor,
             DurableActorRecord {
                 admission,
-                application: None,
+                application: startup.as_ref().map(RootStartupIntent::application),
+                startup,
                 terminal: None,
             },
         );
@@ -710,6 +810,149 @@ impl ActorRecoveryJournal {
     }
 }
 
+fn validate_startup(
+    records: &BTreeMap<ActorRef, DurableActorRecord>,
+    admission: &DurableActorAdmission,
+    startup: Option<&RootStartupIntent>,
+) -> std::io::Result<()> {
+    let Some(startup) = startup else {
+        return Ok(());
+    };
+    if startup.manifest_predecessor.is_some() != startup.manifest.is_some() {
+        return Err(std::io::Error::other(
+            "startup manifest predecessor and exact revision pin must be paired",
+        ));
+    }
+    if admission.role != "root"
+        || admission.creator.is_some()
+        || admission.supervisor_parent.is_some()
+        || admission.context_parent.is_some()
+        || admission.actor_path.is_none()
+    {
+        return Err(std::io::Error::other(
+            "startup intent requires a canonical independent root",
+        ));
+    }
+    validate_application_intent(admission, Some(&startup.conversation))?;
+    if let Some(previous) = startup.predecessor {
+        let prior = records
+            .get(&previous)
+            .ok_or_else(|| std::io::Error::other("startup predecessor is absent"))?;
+        if previous == admission.actor
+            || prior.admission.actor_path != admission.actor_path
+            || prior.admission.role != "root"
+            || prior.startup.is_none()
+            || records.values().any(|record| {
+                record
+                    .startup
+                    .as_ref()
+                    .is_some_and(|intent| intent.predecessor == Some(previous))
+            })
+        {
+            return Err(std::io::Error::other(
+                "startup predecessor is not the exact unsucceeded root",
+            ));
+        }
+        let prior_application = prior
+            .application
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("startup predecessor application is absent"))?;
+        if prior_application.binding_path != startup.binding_path
+            || prior_application.accepted_source != startup.accepted_source
+        {
+            return Err(std::io::Error::other(
+                "startup successor changed binding or source",
+            ));
+        }
+        for owner in startup.manifest_predecessor {
+            if !startup_chain_contains(records, previous, owner) {
+                return Err(std::io::Error::other(
+                    "manifest owner is outside the exact startup chain",
+                ));
+            }
+        }
+        if let Some(owner) = &startup.store_predecessor {
+            if !startup_chain_conversations(records, previous)
+                .iter()
+                .any(|candidate| *candidate == owner)
+            {
+                return Err(std::io::Error::other(
+                    "Store owner is outside the exact startup chain",
+                ));
+            }
+        }
+    } else if startup.manifest_predecessor.is_some()
+        || startup.store_predecessor.is_some()
+        || records.values().any(|record| record.startup.is_some())
+    {
+        return Err(std::io::Error::other(
+            "initial startup cannot replace existing startup evidence",
+        ));
+    }
+    Ok(())
+}
+
+fn startup_chain_contains(
+    records: &BTreeMap<ActorRef, DurableActorRecord>,
+    mut from: ActorRef,
+    target: ActorRef,
+) -> bool {
+    loop {
+        if from == target {
+            return true;
+        }
+        let Some(record) = records.get(&from) else {
+            return false;
+        };
+        // A bound root may have run effects: never walk past it.
+        if record
+            .application
+            .as_ref()
+            .is_some_and(|application| application.conversation.is_some())
+        {
+            return false;
+        }
+        let Some(previous) = record
+            .startup
+            .as_ref()
+            .and_then(|startup| startup.predecessor)
+        else {
+            return false;
+        };
+        from = previous;
+    }
+}
+
+fn startup_chain_conversations(
+    records: &BTreeMap<ActorRef, DurableActorRecord>,
+    mut from: ActorRef,
+) -> Vec<&ApplicationConversation> {
+    let mut result = Vec::new();
+    while let Some(record) = records.get(&from) {
+        if let Some(application) = &record.application {
+            if let Some(conversation) = application
+                .conversation
+                .as_ref()
+                .or(application.intended_conversation.as_ref())
+            {
+                result.push(conversation);
+            }
+            if application.conversation.is_some() {
+                break;
+            }
+        }
+        let Some(previous) = record
+            .startup
+            .as_ref()
+            .and_then(|startup| startup.predecessor)
+        else {
+            break;
+        };
+        from = previous;
+    }
+    result
+}
+
 fn validate_application_intent(
     admission: &DurableActorAdmission,
     intent: Option<&ApplicationConversation>,
@@ -816,15 +1059,17 @@ fn apply_event(
                 "actor lifecycle creation marker reached record replay",
             ));
         }
-        EventKind::Admitted { admission } => {
+        EventKind::Admitted { admission, startup } => {
             let admission = *admission;
             let actor = admission.actor;
+            validate_startup(records, &admission, startup.as_ref())?;
             if records
                 .insert(
                     actor,
                     DurableActorRecord {
                         admission,
-                        application: None,
+                        application: startup.as_ref().map(RootStartupIntent::application),
+                        startup,
                         terminal: None,
                     },
                 )
@@ -911,24 +1156,8 @@ fn apply_event(
 fn parse_row(line: &str) -> Result<Row, Box<dyn std::error::Error + Send + Sync>> {
     let value: serde_json::Value = serde_json::from_str(line)?;
     let found = tidepool_repr::version_ladder::found_version(&value);
-    let mut value = value;
-    match found {
-        2 => {
-            if value.get("intended_conversation").is_some() {
-                return Err("v2 application has unsupported typed intent".into());
-            }
-            if value.get("event").and_then(serde_json::Value::as_str) == Some("application_bound") {
-                let thread_id = value
-                    .get("conversation")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or("v2 binding must be a Codex thread string")?
-                    .to_owned();
-                value["conversation"] = serde_json::json!({"kind":"codex", "thread_id":thread_id});
-            }
-            value["version"] = serde_json::json!(VERSION);
-        }
-        VERSION => {}
-        _ => return Err("unsupported actor journal version; explicit migration required".into()),
+    if found != VERSION {
+        return Err("unsupported actor journal version; explicit migration required".into());
     }
     Ok(serde_json::from_value(value)?)
 }
@@ -998,20 +1227,15 @@ mod tests {
     }
 
     #[test]
-    fn v2_bound_strings_migrate_only_as_codex_and_v1_is_refused() {
-        let actor = serde_json::json!({"id":7,"incarnation":3});
-        let old = serde_json::json!({"version":2,"sequence":1,"event":"application_bound","actor":actor,"conversation":"thread-7"});
-        let row = parse_row(&old.to_string()).unwrap();
-        assert!(
-            matches!(row.event, EventKind::ApplicationBound {conversation:ApplicationConversation::Codex {thread_id}, ..} if thread_id == "thread-7")
-        );
-        let mut current = old.clone();
-        current["version"] = serde_json::json!(3);
-        assert!(parse_row(&current.to_string()).is_err());
-        current["version"] = serde_json::json!(1);
-        assert!(parse_row(&current.to_string()).is_err());
-        let malformed = serde_json::json!({"version":2,"sequence":1,"event":"application_bound","actor":actor,"conversation":{"kind":"embedded","run":"run","agent_path":"/root","incarnation":"3"}});
-        assert!(parse_row(&malformed.to_string()).is_err());
+    fn old_journal_versions_are_unsupported_and_remain_untouched() {
+        let directory = tempfile::tempdir().unwrap();
+        for version in [1, 2, 3] {
+            let path = directory.path().join(format!("v{version}.jsonl"));
+            let bytes = format!("{{\"version\":{version},\"sequence\":1,\"event\":\"created\"}}\n");
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(ActorRecoveryJournal::open_existing(&path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes());
+        }
     }
 
     #[test]
@@ -1220,41 +1444,116 @@ mod tests {
         drop(ActorRecoveryJournal::open(&initialized).unwrap());
         ActorRecoveryJournal::open_existing(&initialized).unwrap();
     }
+    fn startup_intent(
+        actor: ActorRef,
+        binding: &Path,
+        predecessor: Option<ActorRef>,
+        manifest_predecessor: Option<ActorRef>,
+        manifest: Option<RootStartupManifestPin>,
+        store_predecessor: Option<ApplicationConversation>,
+    ) -> RootStartupIntent {
+        RootStartupIntent {
+            predecessor,
+            manifest_predecessor,
+            manifest,
+            store_predecessor,
+            binding_path: binding.to_owned(),
+            accepted_source: Some("source".into()),
+            conversation: ApplicationConversation::Embedded {
+                run: "run".into(),
+                agent_path: "/root".into(),
+                incarnation: actor.incarnation.0.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn root_startup_admission_and_exact_intent_reopen_atomically() {
+        let run = tempfile::tempdir().unwrap();
+        let path = run.path().join("actors.jsonl");
+        let actor = ActorRef::first(ActorId(33));
+        let root = descriptor("root")
+            .with_effective_role(EffectiveRole::root())
+            .with_actor_path(tidepool_repr::ActorPath::parse("root").unwrap());
+        let intent = startup_intent(
+            actor,
+            &run.path().join("binding.json"),
+            None,
+            None,
+            None,
+            None,
+        );
+        let journal = ActorRecoveryJournal::open(&path).unwrap();
+        journal
+            .admit_with_startup(actor, &root, &[], Some(intent.clone()))
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+        drop(journal);
+        let journal = ActorRecoveryJournal::open_existing(&path).unwrap();
+        let record = &journal.records()[0];
+        assert_eq!(record.startup.as_ref(), Some(&intent));
+        assert_eq!(record.application.as_ref(), Some(&intent.application()));
+        assert!(record.application.as_ref().unwrap().conversation.is_none());
+        journal
+            .bind_application_conversation(actor, intent.conversation.clone())
+            .unwrap();
+        drop(journal);
+        assert_eq!(
+            ActorRecoveryJournal::open_existing(&path)
+                .unwrap()
+                .records()[0]
+                .application
+                .as_ref()
+                .unwrap()
+                .conversation
+                .as_ref(),
+            Some(&intent.conversation)
+        );
+    }
+
     #[test]
     fn root_successor_receipt_requires_latest_prepared_journal_and_owned_placement() {
         let run = tempfile::tempdir().unwrap();
         let journal = ActorRecoveryJournal::open(run.path().join("actors.jsonl")).unwrap();
         let binding = run.path().join("binding.json");
+        let manifest = run.path().join("root-declarations.json");
+        std::fs::write(
+            &manifest,
+            br#"{"checksum":"exact-revision","high_water":7}"#,
+        )
+        .unwrap();
         let path = tidepool_repr::ActorPath::parse("root/recovered").unwrap();
         let root = descriptor("root")
             .with_effective_role(EffectiveRole::root())
             .with_actor_path(path.clone());
-        let old = ActorRef {
-            id: ActorId(33),
-            incarnation: Incarnation(1),
-        };
+        let old = ActorRef::first(ActorId(33));
+        // Explicit chain authority is independent of numeric identity adjacency.
         let next = ActorRef {
-            id: old.id,
-            incarnation: Incarnation(2),
+            id: ActorId(89),
+            incarnation: Incarnation(14),
         };
         let placement = RootRecoveryPlacement::new(
             next,
-            tidepool_runtime::session::RecoveryPublicOwner::new(&path, 2).unwrap(),
+            tidepool_runtime::session::RecoveryPublicOwner::new(&path, 14).unwrap(),
             root.placement(),
         );
-        journal.admit(old, &root, &[]).unwrap();
+        let initial = startup_intent(old, &binding, None, None, None, None);
         journal
-            .prepare_application(old, binding.clone(), Some("source".into()))
+            .admit_with_startup(old, &root, &[], Some(initial.clone()))
             .unwrap();
         journal
-            .bind_application(old, "conversation".into())
+            .bind_application_conversation(old, initial.conversation.clone())
             .unwrap();
-        journal.admit(next, &root, &[]).unwrap();
-        assert!(journal
-            .certify_root_successor(old, placement.clone(), Some("source"), &binding)
-            .is_err());
+        let successor = startup_intent(
+            next,
+            &binding,
+            Some(old),
+            Some(old),
+            Some(RootStartupManifestPin::capture(&manifest).unwrap()),
+            Some(initial.conversation.clone()),
+        );
         journal
-            .prepare_application(next, binding.clone(), Some("source".into()))
+            .admit_with_startup(next, &root, &[], Some(successor))
             .unwrap();
         let proof = journal
             .certify_root_successor(old, placement.clone(), Some("source"), &binding)
@@ -1269,6 +1568,20 @@ mod tests {
                 ScopeId(1)
             )
             .unwrap());
+        assert!(proof
+            .validate_embedded_binding(
+                run.path(),
+                &initial.conversation,
+                &journal
+                    .records()
+                    .into_iter()
+                    .find(|record| record.admission.actor == next)
+                    .unwrap()
+                    .startup
+                    .unwrap()
+                    .conversation
+            )
+            .unwrap());
         assert!(!proof
             .validate_successor(
                 run.path(),
@@ -1278,10 +1591,9 @@ mod tests {
                 ScopeId(1)
             )
             .unwrap());
-        let foreign = tempfile::tempdir().unwrap();
         assert!(!proof
             .validate_successor(
-                foreign.path(),
+                tempfile::tempdir().unwrap().path(),
                 &old_owner,
                 placement.owner(),
                 SessionId(1),
@@ -1291,12 +1603,8 @@ mod tests {
         assert!(journal
             .certify_root_successor(old, placement.clone(), Some("different-source"), &binding)
             .is_err());
-        let newer = ActorRef {
-            id: old.id,
-            incarnation: Incarnation(3),
-        };
-        journal.admit(newer, &root, &[]).unwrap();
-        assert!(proof
+        std::fs::write(&manifest, br#"{"checksum":"changed","high_water":7}"#).unwrap();
+        assert!(!proof
             .validate_successor(
                 run.path(),
                 &old_owner,
@@ -1304,6 +1612,102 @@ mod tests {
                 SessionId(1),
                 ScopeId(1)
             )
+            .unwrap());
+    }
+
+    #[test]
+    fn root_startup_rollforward_is_linear_and_cannot_cross_a_bound_owner() {
+        let run = tempfile::tempdir().unwrap();
+        let journal = ActorRecoveryJournal::open(run.path().join("actors.jsonl")).unwrap();
+        let binding = run.path().join("binding.json");
+        let manifest = run.path().join("root-declarations.json");
+        std::fs::write(&manifest, br#"{"checksum":"revision","high_water":0}"#).unwrap();
+        let pin = RootStartupManifestPin::capture(&manifest).unwrap();
+        let root = descriptor("root")
+            .with_effective_role(EffectiveRole::root())
+            .with_actor_path(tidepool_repr::ActorPath::parse("root").unwrap());
+        let a = ActorRef::first(ActorId(1));
+        let b = ActorRef::first(ActorId(5));
+        let c = ActorRef::first(ActorId(9));
+        let d = ActorRef::first(ActorId(11));
+        let initial = startup_intent(a, &binding, None, None, None, None);
+        journal
+            .admit_with_startup(a, &root, &[], Some(initial.clone()))
+            .unwrap();
+        journal
+            .bind_application_conversation(a, initial.conversation.clone())
+            .unwrap();
+        let second = startup_intent(
+            b,
+            &binding,
+            Some(a),
+            Some(a),
+            Some(pin.clone()),
+            Some(initial.conversation.clone()),
+        );
+        journal
+            .admit_with_startup(b, &root, &[], Some(second.clone()))
+            .unwrap();
+        let third = startup_intent(
+            c,
+            &binding,
+            Some(b),
+            Some(a),
+            Some(pin.clone()),
+            Some(initial.conversation.clone()),
+        );
+        journal
+            .admit_with_startup(c, &root, &[], Some(third.clone()))
+            .unwrap();
+        assert!(journal
+            .admit_with_startup(
+                d,
+                &root,
+                &[],
+                Some(startup_intent(
+                    d,
+                    &binding,
+                    Some(b),
+                    Some(a),
+                    Some(pin.clone()),
+                    Some(initial.conversation.clone())
+                ))
+            )
             .is_err());
+        journal
+            .bind_application_conversation(c, third.conversation.clone())
+            .unwrap();
+        assert!(journal
+            .admit_with_startup(
+                d,
+                &root,
+                &[],
+                Some(startup_intent(
+                    d,
+                    &binding,
+                    Some(c),
+                    Some(a),
+                    Some(pin.clone()),
+                    Some(initial.conversation.clone())
+                ))
+            )
+            .is_err());
+        assert!(journal
+            .admit_with_startup(
+                d,
+                &root,
+                &[],
+                Some(startup_intent(
+                    d,
+                    &binding,
+                    Some(c),
+                    Some(c),
+                    Some(pin),
+                    Some(third.conversation)
+                ))
+            )
+            .is_ok());
+        drop(journal);
+        ActorRecoveryJournal::open_existing(run.path().join("actors.jsonl")).unwrap();
     }
 }
