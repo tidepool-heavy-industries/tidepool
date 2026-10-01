@@ -3236,11 +3236,13 @@ sessionVariant purpose scope path = do
                      [iface | (iface, _, _) <- scopeInterfaces admitted])
                    interfaces <- either (liftIO . ioError . userError) pure loaded
                    hydrated <- liftIO (hydrateExactScope hscMG interfaces)
-                   let selected =
+                   let verifiedOwners = Map.fromList
+                         [((exactUnit iface, exactModule iface), iface)
+                         | (iface, _) <- interfaces]
+                       selected =
                          [(iface, imports)
                          | (owner, imports) <- scopeLexical admitted
-                         , (iface, _, _) <- scopeInterfaces admitted
-                         , owner == (exactUnit iface, exactModule iface)]
+                         , Just iface <- [Map.lookup owner verifiedOwners]]
                    graph <- liftIO (installExactLexicalGraph modGraphRaw selected hydrated)
                    either (liftIO . ioError . userError) setSession graph
             -- Dependency order matters now that MULTIPLE modules (not just

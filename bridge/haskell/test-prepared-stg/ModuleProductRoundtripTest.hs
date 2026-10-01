@@ -209,6 +209,17 @@ verifyModuleProductInterfaceRoundtrip work = do
           "ModuleProductA" hi (concatMap (\byte ->
             let s = showHex byte "" in replicate (2 - length s) '0' ++ s)
             (BS.unpack digest)) []
+    -- Metadata refusal precedes every path read, including for duplicate
+    -- module names whose advertised units differ.
+    let unreadable = artifact { exactPath = error "preflight attempted an interface read" }
+        otherUnit = unreadable { exactUnit = "other-unit" }
+    duplicate <- liftIO $ readExactIfaceArtifacts fresh [unreadable, otherUnit]
+    unless (case duplicate of Left "duplicate exact interface owner" -> True; _ -> False) $
+      liftIO $ ioError (userError "same module name in distinct units was not refused before reading")
+    incomplete <- liftIO $ readExactIfaceArtifacts fresh
+      [unreadable { exactRequirements = [("other-unit", "ModuleProductA")] }]
+    unless (case incomplete of Left "incomplete exact interface dependency closure" -> True; _ -> False) $
+      liftIO $ ioError (userError "dependency closure ignored its exact unit or read before preflight")
     readResult <- liftIO $ readExactIfaceArtifacts fresh [artifact]
     loaded <- case readResult of
       Right [item] -> pure item
@@ -218,13 +229,38 @@ verifyModuleProductInterfaceRoundtrip work = do
       [artifact { exactPath = tamperedHi }]
     unless (case tamperedResult of Left _ -> True; Right _ -> False) $
       liftIO $ ioError (userError "tampered exact interface was admitted")
+    leafIface <- case Map.lookup (mkModuleName "ModuleProductB") (pprProductInterfaces result) of
+      Just value -> pure value
+      Nothing -> liftIO $ ioError (userError "missing leaf interface for ordered hydration")
+    let leafPath = work </> "ModuleProductB.exact.hi"
+    liftIO $ writeBinIface (targetProfile (hsc_dflags producer)) QuietBinIFace NormalCompression leafPath leafIface
+    leafHash <- liftIO $ SHA256.hash <$> BS.readFile leafPath
+    let leafArtifact = artifact
+          { exactModule = "ModuleProductB", exactPath = leafPath
+          , exactSha256 = hex (BS.unpack leafHash)
+          , exactRequirements = [(exactUnit artifact, exactModule artifact)] }
+    ordered <- liftIO $ readExactIfaceArtifacts fresh [leafArtifact, artifact]
+    interfaces <- case ordered of
+      Right values | map (exactModule . fst) values == ["ModuleProductB", "ModuleProductA"] -> pure values
+      Left reason -> liftIO $ ioError (userError reason)
+      _ -> liftIO $ ioError (userError "exact interface indexing reordered original inputs")
+    corruptMember <- liftIO $ readExactIfaceArtifacts fresh
+      [leafArtifact, artifact { exactPath = tamperedHi }]
+    unless (case corruptMember of Left _ -> True; Right _ -> False) $
+      liftIO $ ioError (userError "corrupt member of an exact graph was admitted")
+    unless (all (\owner -> case lookupHpt (hsc_HPT fresh) (mkModuleName owner) of
+        Nothing -> True; Just _ -> False) ["ModuleProductA", "ModuleProductB"]) $
+      liftIO $ ioError (userError "failed exact graph partially installed its interfaces")
     let restored = snd loaded
     unless (case mi_extra_decls restored of Nothing -> True; _ -> False) $
       liftIO $ ioError (userError "serialized home product retained defining Core")
-    hydrated <- liftIO $ hydrateExactScope fresh [loaded]
+    hydrated <- liftIO $ hydrateExactScope fresh interfaces
     let sourceGraph = mkModuleGraph
           [node | node@(ModuleNode _ summary) <- mgModSummaries' (hsc_mod_graph producer)
                 , moduleNameString (moduleName (ms_mod summary)) == "ModuleProductB"]
+    duplicateLexical <- liftIO $ installExactLexicalGraph sourceGraph [(artifact, []), (otherUnit, [])] hydrated
+    unless (case duplicateLexical of Left "duplicate virtual lexical owner" -> True; _ -> False) $
+      liftIO $ ioError (userError "virtual lexical module names were not unique across units")
     hidden <- liftIO $ installExactLexicalGraph sourceGraph [] hydrated
     unless (case hidden of Left _ -> True; Right _ -> False) $
       liftIO $ ioError (userError "implementation-only module became lexically importable")

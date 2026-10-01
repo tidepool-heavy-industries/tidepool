@@ -14,8 +14,6 @@ import Control.Monad (forM, forM_, unless)
 import Control.Exception
   ( IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO )
 import Data.Char (isHexDigit, toLower)
-import Data.Function (on)
-import Data.List (nubBy)
 import Data.Maybe (isJust)
 import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA256
@@ -90,15 +88,16 @@ freshExactState env = do
 readExactIfaceArtifacts
   :: HscEnv -> [ExactIfaceArtifact] -> IO (Either String [(ExactIfaceArtifact, ModIface)])
 readExactIfaceArtifacts env artifacts
-  | length (nubBy ((==) `on` exactModule) artifacts)
-      /= length artifacts = pure (Left "duplicate exact interface owner")
+  | Set.size moduleNames /= length artifacts = pure (Left "duplicate exact interface owner")
   | any (\artifact -> length (exactSha256 artifact) /= 64
       || not (all isHexDigit (exactSha256 artifact))) artifacts =
       pure (Left "invalid exact interface digest")
-  | any (\artifact -> any (`notElem` owners) (exactRequirements artifact)) artifacts =
+  | any (\artifact -> any (`Set.notMember` owners) (exactRequirements artifact)) artifacts =
       pure (Left "incomplete exact interface dependency closure")
   | otherwise = sequence <$> forM artifacts (readOne env)
-  where owners = [(exactUnit artifact, exactModule artifact) | artifact <- artifacts]
+  where
+    moduleNames = Set.fromList (map exactModule artifacts)
+    owners = Set.fromList [(exactUnit artifact, exactModule artifact) | artifact <- artifacts]
 
 readOne :: HscEnv -> ExactIfaceArtifact -> IO (Either String (ExactIfaceArtifact, ModIface))
 readOne env artifact = do
@@ -164,9 +163,18 @@ hydrateExactScope env loaded = do
   pure (withDetails details)
   where
     withDetails details = hscUpdateHPT_lazy (\hpt -> foldr
-      (\(index, (_, iface)) table -> addToHpt table (moduleName (mi_module iface))
-        (HomeModInfo iface (details !! index) emptyHomeModInfoLinkable))
-      hpt (zip [0..] loaded)) env
+      (\(iface, detail) table -> addToHpt table (moduleName (mi_module iface))
+        (HomeModInfo iface detail emptyHomeModInfoLinkable))
+      hpt (zipDetails loaded details)) env
+    -- The loaded interface spine is available before fixIO returns. Ordinary
+    -- zip would demand the recursive detail spine while building the HPT;
+    -- sharing a deferred head/tail split keeps the knot lazy and traversal linear.
+    zipDetails [] _ = []
+    zipDetails ((_, iface) : rest) remaining =
+      let ~(detail, tailDetails) = splitDetails remaining
+      in (iface, detail) : zipDetails rest tailDetails
+    splitDetails (detail : rest) = (detail, rest)
+    splitDetails [] = error "exact hydration detail arity mismatch"
 
 -- A lexical interface contributes its chosen instance/family environment to
 -- GHC's graph traversal. Implementation-only HMIs remain installed but never
@@ -176,8 +184,7 @@ installExactLexicalGraph
   :: ModuleGraph -> [(ExactIfaceArtifact, [(String, String)])] -> HscEnv
   -> IO (Either String HscEnv)
 installExactLexicalGraph sourceGraph lexical env
-  | length (nubBy ((==) `on` (exactModule . fst)) lexical)
-      /= length lexical = pure (Left "duplicate virtual lexical owner")
+  | Set.size moduleNames /= length lexical = pure (Left "duplicate virtual lexical owner")
   | any (\(_, deps) -> any (`Set.notMember` owners) deps) lexical =
       pure (Left "virtual lexical edge leaves admitted graph")
   | any (\node -> case node of
@@ -201,6 +208,7 @@ installExactLexicalGraph sourceGraph lexical env
           (ms_location (virtualSummary env artifact))
       pure (Right env { hsc_mod_graph = mkModuleGraph (sourceNodes ++ virtualNodes) })
   where
+    moduleNames = Set.fromList [exactModule artifact | (artifact, _) <- lexical]
     owners = Set.fromList
       [(exactUnit artifact, exactModule artifact) | (artifact, _) <- lexical]
     home = homeUnitId (hsc_home_unit env)
