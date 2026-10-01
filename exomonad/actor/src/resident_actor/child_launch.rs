@@ -268,6 +268,25 @@ where
     }
 }
 
+pub(super) fn matches_parent(
+    kernel: &KernelContext,
+    current: &ActorDescriptor,
+    original: &ActorDescriptor,
+    actor: ActorRef,
+) -> bool {
+    !(actor != kernel.identity()
+        || kernel.requested_shutdown().is_some()
+        || current.placement() != original.placement()
+        || current.actor_path() != original.actor_path()
+        || current.creator() != original.creator()
+        || current.supervisor_parent() != original.supervisor_parent()
+        || current.context_parent() != original.context_parent()
+        || current.profile() != original.profile()
+        || current.effective_role() != original.effective_role()
+        || current.persistence_policy() != original.persistence_policy()
+        || current.source_layer() != original.source_layer())
+}
+
 pub(super) fn apply_launch<H, O>(
     environment: &ResidentEnvironment<H, O>,
     kernel: &KernelContext,
@@ -286,18 +305,7 @@ where
     let original = &continuation.parent_descriptor;
     let failed_child = result.as_ref().ok().map(|started| started.actor.clone());
     let result = result.and_then(|started| {
-        if context.actor != kernel.identity()
-            || kernel.requested_shutdown().is_some()
-            || descriptor.placement() != original.placement()
-            || descriptor.actor_path() != original.actor_path()
-            || descriptor.creator() != original.creator()
-            || descriptor.supervisor_parent() != original.supervisor_parent()
-            || descriptor.context_parent() != original.context_parent()
-            || descriptor.profile() != original.profile()
-            || descriptor.effective_role() != original.effective_role()
-            || descriptor.persistence_policy() != original.persistence_policy()
-            || descriptor.source_layer() != original.source_layer()
-        {
+        if !matches_parent(kernel, descriptor, original, context.actor) {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "child launch parent admission changed during startup".into(),
             ));
