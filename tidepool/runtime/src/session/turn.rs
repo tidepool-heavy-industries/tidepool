@@ -2509,6 +2509,16 @@ fn map_notfound(e: SpawnError) -> CompileError {
     CompileError::Io(crate::extract_spawn_error(e.source))
 }
 
+/// Admit the configured deployment before any compiler offer, candidate read,
+/// build-product selection, or worker body execution can use this endpoint.
+fn bind_extract_cmd(
+    command: &ExtractCmd,
+) -> Result<tidepool_toolchain::toolchain::AdmittedCompilerEndpoint, CompileError> {
+    let endpoint = command.bind().map_err(map_notfound)?;
+    tidepool_toolchain::toolchain::AdmittedCompilerEndpoint::from_bound(endpoint)
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))
+}
+
 /// Parse `stderr` via [`timing::ExtractTiming::parse`] and re-emit each phase
 /// as a `<prefix>.<phase>` stage via [`timing::record_stage`].
 ///
@@ -2712,7 +2722,7 @@ pub fn compile_cell_program_admitted(
     for (identity, generation) in admission.admitted_retained_imports() {
         command.retained_generation(extract_identity(identity), *generation);
     }
-    let endpoint = command.bind().map_err(map_notfound)?;
+    let endpoint = bind_extract_cmd(&command)?;
     let specification = CheckedCellSpecification {
         admission_digest: admission.digest(),
         cell_source: req.cell_text.to_owned(),
@@ -2740,7 +2750,7 @@ pub fn compile_cell_program_admitted(
         .map(|path| path.to_path_buf())
         .collect::<Vec<_>>();
     let offer = ModuleCandidateOffer::select_cell_program(
-        endpoint.identity().producer_bytes(),
+        &endpoint,
         &include,
         scratch.path(),
         req.exact_context.clone(),
@@ -2761,7 +2771,7 @@ pub fn compile_cell_program_admitted(
     if let Some(manifest) = offer.manifest_path() {
         command.module_candidates(manifest);
     }
-    crate::paths::apply_build_products_dir(&mut command, &endpoint);
+    crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
     let run = endpoint.execute(&command).map_err(map_notfound)?;
     let report =
         crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
@@ -2828,7 +2838,7 @@ fn check_cell_impl(
             cmd.turn_template(tmpl.kind.wire_name(), &path);
         }
     }
-    let endpoint = cmd.bind().map_err(map_notfound)?;
+    let endpoint = bind_extract_cmd(&cmd)?;
     let include: Vec<_> = req.include.iter().map(|path| path.to_path_buf()).collect();
     let offer = if let Some(admission) = &admission {
         let context = req.exact_context.clone();
@@ -2886,7 +2896,7 @@ fn check_cell_impl(
     if let Some(manifest) = offer.manifest_path() {
         cmd.module_candidates(manifest);
     }
-    crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
+    crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
     let run = endpoint.execute(&cmd).map_err(map_notfound)?;
     let output = &run.output;
     timing::log_interface_counts(&output.stderr);
@@ -3555,7 +3565,7 @@ fn run_turn_with_pin(
         })
         .unwrap_or_default();
 
-    let endpoint = cmd.bind().map_err(map_notfound)?;
+    let endpoint = bind_extract_cmd(&cmd)?;
     let include: Vec<_> = req.include.iter().map(|path| path.to_path_buf()).collect();
     let offer = if let Some(admission) = &display {
         ModuleCandidateOffer::select_checked_display(
@@ -3605,7 +3615,7 @@ fn run_turn_with_pin(
     if let Some(manifest) = offer.manifest_path() {
         cmd.module_candidates(manifest);
     }
-    crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
+    crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
     let run = endpoint.execute(&cmd).map_err(map_notfound)?;
     timing::record_stage(
         timing::NO_NODE,
@@ -4557,8 +4567,8 @@ pub fn classify_block(items: &[&str]) -> Result<Vec<TurnClassification>, Compile
     }
     cmd.classify().classify_out(&out_path);
 
-    let endpoint = cmd.bind().map_err(map_notfound)?;
-    crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
+    let endpoint = bind_extract_cmd(&cmd)?;
+    crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
     let run = endpoint.execute(&cmd).map_err(map_notfound)?;
     let output = &run.output;
     // A failed classification still cost a real subprocess spawn — attribute
@@ -5337,6 +5347,63 @@ mod ambiguity_advice_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[serial_test::serial]
+    fn runtime_cell_refuses_unknown_or_mismatched_deployment_before_worker_body() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let frontend = directory.path().join("frontend");
+        let executed = directory.path().join("executed");
+        std::fs::write(
+            &frontend,
+            format!(
+                "#!/bin/sh\nprintf 'TPCID002{}{}'\nif IFS= read -r row; then touch '{}'; fi\n",
+                "a".repeat(32),
+                "b".repeat(32),
+                executed.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&frontend, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _frontend = TestEnvGuard::set("TIDEPOOL_EXTRACT", &frontend);
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let unknown = TestEnvGuard::unset("TIDEPOOL_COMPILER_DEPLOYMENT");
+        let request = || CellCheckRequest {
+            exact_context: None,
+            session_id: None,
+            cell_text: "let value = 42",
+            template: include_str!("fixtures/checked-fold-outcome-template.hs"),
+            include: &[],
+            session_root: directory.path(),
+            inject_modules: &[],
+            compile_generation: 0,
+            compile_view_evidence: "",
+        };
+        let error = check_cell(request()).unwrap_err().error;
+        assert!(matches!(error, CompileError::ExtractFailed(ref message)
+            if message.contains("no configured deployment authority")));
+        assert!(!executed.exists());
+        drop(unknown);
+        let manifest = directory.path().join("deployment.json");
+        let configuration = tidepool_toolchain::toolchain::CompilerDeploymentAuthority {
+            schema: 1,
+            producer_identity: [b'c'; 32],
+            consumed_worker_identity: [b'b'; 32],
+            frontend_path: frontend,
+            worker_path: directory.path().join("worker"),
+            ghc_libdir: directory.path().join("ghc"),
+        };
+        std::fs::write(&manifest, serde_json::to_vec(&configuration).unwrap()).unwrap();
+        let _configuration = TestEnvGuard::set("TIDEPOOL_COMPILER_DEPLOYMENT", manifest);
+        let error = check_cell(request()).unwrap_err().error;
+        assert!(matches!(error, CompileError::ExtractFailed(ref message)
+            if message.contains("bound producer differs from configured deployment")));
+        assert!(
+            !executed.exists(),
+            "deployment mismatch executed compiler work"
+        );
+    }
+
     #[test]
     fn cell_fold_outcome_separates_ineligibility_failure_and_malformed_protocol() {
         use super::*;
