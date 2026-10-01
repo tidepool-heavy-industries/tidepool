@@ -16,12 +16,11 @@ The minimal shape is a record with one `State`, one `Call`, and one `Event` over
 the settlements you want collected:
 
 ```haskell
-import GHC.Generics (Generic)
 data Results mode = Results
   { resultState :: mode :- State [Either ResponseFailure (ResponseResult (Outcome Candidate))]
   , arrived :: mode :- Event (Either ResponseFailure (ResponseResult (Outcome Candidate)))
   , resultCount :: mode :- Call () (R.Reply Int)
-  } deriving Generic
+  }
 let resultDefinition = coordinationActor "candidate-results" Results
       { resultState = []
       , arrived = R.on (R.settlement worker) (\result -> modify' (++ [result]))
