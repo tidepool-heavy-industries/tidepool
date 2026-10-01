@@ -20,8 +20,9 @@ import qualified Data.Set as Set
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import qualified Data.Text as T
 import Data.Word (Word64)
-import GHC.Driver.Env (HscEnv)
-import GHC.Unit.Module (Module, mkModule, mkModuleName)
+import GHC.Driver.Env (HscEnv, hsc_home_unit)
+import GHC.Unit.Module (Module, mkModule, mkModuleName, moduleUnit)
+import GHC.Unit.Home (isHomeUnit)
 import GHC.Unit.Module.ModIface (ModIface, mi_decls, mi_exports)
 import GHC.Unit.Module.Location (ml_hi_file)
 import GHC.Unit.Types (stringToUnit)
@@ -185,7 +186,7 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
                 | ((unit, name), options) <- Map.toList packages
                 , (path, sha) <- Set.toList options ]
           pure (Right (toStrictByteString (array
-            [encodeString "TPCERT", encodeWord 3
+            [encodeString "TPCERT", encodeWord 4
             , list id encodedModules, list id encodedTargets
             , list id encodedPackages, list encodePreEncoded globalBytes])))
 
@@ -232,8 +233,11 @@ encodeGlobalWitness
   -> IO (Either String Encoding)
 encodeGlobalWitness env packageRef binders homeModules identity rep signature evaluated generation = do
   selected <- case generation of
-    Just wanted -> pure (Right (array
-      [encodeString "retained", encodeIdentity identity, encodeWord64 wanted]))
+    Just wanted
+      | isHomeUnit (hsc_home_unit env) (moduleUnit (symbolOwner identity)) ->
+          pure (Right (array
+            [encodeString "retained", encodeIdentity identity, encodeWord64 wanted]))
+      | otherwise -> packageOwner env packageRef identity (Just wanted)
     Nothing -> case Map.lookup identity binders of
       Just (unit, name, version, ordinal) -> pure (Right (array
         [encodeString "source", encodeString unit, encodeString name
@@ -242,7 +246,7 @@ encodeGlobalWitness env packageRef binders homeModules identity rep signature ev
       Nothing
         | (symbolUnit identity, symbolModule identity) `Set.member` homeModules ->
             pure (Left "external home global has no certified source group")
-        | otherwise -> packageOwner env packageRef identity
+        | otherwise -> packageOwner env packageRef identity Nothing
   pure $ do
     owner <- selected
     Right (array
@@ -250,9 +254,13 @@ encodeGlobalWitness env packageRef binders homeModules identity rep signature ev
       , maybe encodeNull encodeSignature signature
       , encodeBool evaluated, owner ])
 
-packageOwner :: HscEnv -> IORef [PackageWitness] -> SymbolIdentity
+symbolOwner :: SymbolIdentity -> Module
+symbolOwner identity = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
+  (mkModuleName (T.unpack (symbolModule identity)))
+
+packageOwner :: HscEnv -> IORef [PackageWitness] -> SymbolIdentity -> Maybe Word64
   -> IO (Either String Encoding)
-packageOwner env packageRef identity = do
+packageOwner env packageRef identity generation = do
   selected <- resolvePackageGlobal env identity
   case selected of
     Left reason -> pure (Left reason)
@@ -260,9 +268,11 @@ packageOwner env packageRef identity = do
       let sha = T.pack (packageSha256 witness)
       modifyIORef' packageRef ((symbolUnit identity,
         symbolModule identity, packagePath witness, sha) :)
-      pure (Right (array
-        [encodeString "package", encodeString (symbolUnit identity)
-        , encodeString (symbolModule identity), encodeString sha, encodeIdentity identity]))
+      let fields = [encodeString (symbolUnit identity)
+            , encodeString (symbolModule identity), encodeString sha, encodeIdentity identity]
+      pure (Right (array (case generation of
+        Nothing -> encodeString "package" : fields
+        Just wanted -> encodeString "retained-package" : fields ++ [encodeWord64 wanted])))
 
 -- Recovery and certification share one canonical package owner. The Id comes
 -- from the exact interface's structural declaration, including implicit tops.

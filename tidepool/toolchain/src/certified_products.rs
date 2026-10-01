@@ -267,8 +267,20 @@ impl PendingCertifiedGroup {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CertificationFormat {
+    ProductReceipt,
+    HomeOwners,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CertificationError {
+    #[error("unsupported {format:?} version {found}; expected {expected}")]
+    UnsupportedVersion {
+        format: CertificationFormat,
+        found: u64,
+        expected: u64,
+    },
     #[error("malformed bounded compiler product receipt: {0}")]
     Receipt(&'static str),
     #[error("compiler product certificate disagrees with {0}")]
@@ -419,6 +431,18 @@ fn owner(value: &Value) -> CertResult<ReceiptImportOwner> {
                 generation: number(&row[2])?,
             })
         }
+        "retained-package" => {
+            if row.len() != 6 {
+                return Err(CertificationError::Receipt("retained package owner arity"));
+            }
+            Ok(ReceiptImportOwner::RetainedPackage {
+                unit: string(&row[1])?.to_owned(),
+                module: string(&row[2])?.to_owned(),
+                interface_digest: digest(&row[3])?,
+                binder: identity(&row[4])?,
+                generation: number(&row[5])?,
+            })
+        }
         "package" => {
             if row.len() != 5 {
                 return Err(CertificationError::Receipt("package owner arity"));
@@ -471,6 +495,18 @@ fn validate_global_witness(
             identity == &declaration.identity
                 && declaration.required_generation == Some(*generation)
         }
+        ReceiptImportOwner::RetainedPackage {
+            unit,
+            module,
+            binder,
+            generation,
+            ..
+        } => {
+            binder == &declaration.identity
+                && &binder.unit == unit
+                && &binder.module == module
+                && declaration.required_generation == Some(*generation)
+        }
         ReceiptImportOwner::Source { binder, .. } => {
             binder == &declaration.identity && declaration.required_generation.is_none()
         }
@@ -492,8 +528,8 @@ fn validate_global_witness(
     Ok(selected.owner.clone())
 }
 
-/// Decode the worker's bounded `TPCERT` tuple. Version 3 shares complete exact
-/// global rows through an immutable dictionary; version 2 retains inline rows.
+/// Decode the worker's bounded `TPCERT4` tuple with exact owner rows shared
+/// through an immutable dictionary. Older ownership formats are refused.
 /// Original groups and executable targets preserve their ordered witnesses.
 pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
     if bytes.len() > RECEIPT_LIMIT {
@@ -514,23 +550,23 @@ fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
         return Err(CertificationError::Receipt("receipt header"));
     }
     let version = number(&header[1])?;
-    let mut dictionary = match (version, header.len()) {
-        (2, 5) => None,
-        (3, 6) => Some(GlobalDictionary::decode(&header[5])?),
-        _ => return Err(CertificationError::Receipt("receipt header")),
-    };
+    if version != 4 {
+        return Err(CertificationError::UnsupportedVersion {
+            format: CertificationFormat::ProductReceipt,
+            found: version,
+            expected: 4,
+        });
+    }
+    if header.len() != 6 {
+        return Err(CertificationError::Receipt("receipt header"));
+    }
+    let mut dictionary = GlobalDictionary::decode(&header[5])?;
     let mut read_globals = |value: &Value| {
         let globals = array(value)?;
         if globals.len() > GLOBAL_LIMIT {
             return Err(CertificationError::Receipt("global count"));
         }
-        match dictionary.as_mut() {
-            Some(dictionary) => dictionary.resolve(globals),
-            None => globals
-                .iter()
-                .map(accepted_global)
-                .collect::<CertResult<_>>(),
-        }
+        dictionary.resolve(globals)
     };
     let modules = array(&header[2])?;
     if modules.len() > MODULE_LIMIT {
@@ -592,10 +628,7 @@ fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
             return Err(CertificationError::Receipt("duplicate target"));
         }
     }
-    if dictionary
-        .as_ref()
-        .is_some_and(|dictionary| dictionary.used.len() != dictionary.rows.len())
-    {
+    if dictionary.used.len() != dictionary.rows.len() {
         return Err(CertificationError::Receipt(
             "unreferenced global dictionary row",
         ));
@@ -903,24 +936,45 @@ fn resolve_receipt_owner_with_validation(
             identity,
             generation,
         }),
+        ReceiptImportOwner::RetainedPackage {
+            unit,
+            module,
+            binder,
+            generation,
+            interface_digest,
+        } => {
+            validate_package_owner(
+                &unit,
+                &module,
+                &binder,
+                &interface_digest,
+                sources,
+                packages,
+                validation,
+            )?;
+            Ok(PendingImportOwner::RetainedPackage {
+                unit,
+                module,
+                binder,
+                generation,
+                interface_digest,
+            })
+        }
         ReceiptImportOwner::Package {
             unit,
             module,
             binder,
             interface_digest,
         } => {
-            if sources.contains_module(&unit, &module) {
-                return Err(CertificationError::Mismatch(
-                    "home owner downgraded to package",
-                ));
-            }
-            let witness = packages
-                .get(&(unit.clone(), module.clone()))
-                .ok_or(CertificationError::Mismatch("package interface witness"))?;
-            if witness.sha256 != interface_digest || !witness.selected_path.is_absolute() {
-                return Err(CertificationError::Mismatch("package interface witness"));
-            }
-            verify_package_interface(validation, witness)?;
+            validate_package_owner(
+                &unit,
+                &module,
+                &binder,
+                &interface_digest,
+                sources,
+                packages,
+                validation,
+            )?;
             Ok(PendingImportOwner::Package {
                 unit,
                 module,
@@ -929,6 +983,32 @@ fn resolve_receipt_owner_with_validation(
             })
         }
     }
+}
+
+fn validate_package_owner(
+    unit: &str,
+    module: &str,
+    binder: &SymbolIdentity,
+    interface_digest: &[u8; 32],
+    sources: &SourceGroupMap,
+    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<()> {
+    if sources.contains_module(unit, module) {
+        return Err(CertificationError::Mismatch(
+            "home owner downgraded to package",
+        ));
+    }
+    if binder.unit != unit || binder.module != module || *interface_digest == [0; 32] {
+        return Err(CertificationError::Mismatch("package owner identity"));
+    }
+    let witness = packages
+        .get(&(unit.to_owned(), module.to_owned()))
+        .ok_or(CertificationError::Mismatch("package interface witness"))?;
+    if witness.sha256 != *interface_digest || !witness.selected_path.is_absolute() {
+        return Err(CertificationError::Mismatch("package interface witness"));
+    }
+    verify_package_interface(validation, witness)
 }
 
 #[cfg(test)]
@@ -1100,6 +1180,20 @@ fn value_import(owner: &ReceiptImportOwner) -> Value {
             value_identity(identity),
             Value::Integer((*generation).into()),
         ]),
+        ReceiptImportOwner::RetainedPackage {
+            unit,
+            module,
+            binder,
+            generation,
+            interface_digest,
+        } => value_array([
+            value_text("retained-package"),
+            value_text(unit),
+            value_text(module),
+            value_text(hex(interface_digest)),
+            value_identity(binder),
+            Value::Integer((*generation).into()),
+        ]),
         ReceiptImportOwner::Package {
             unit,
             module,
@@ -1126,7 +1220,7 @@ fn value_global(global: &AcceptedGlobal) -> Value {
 fn encode_home_witness(witness: &HomeCertification) -> CertResult<Vec<u8>> {
     let value = value_array([
         value_text("TPHOMEOWNERS"),
-        Value::Integer(1.into()),
+        Value::Integer(2.into()),
         value_home(&witness.owner),
         value_array(witness.groups.iter().map(|(ordinal, binders, globals)| {
             value_array([
@@ -1177,8 +1271,16 @@ fn decode_home_witness(bytes: &[u8]) -> CertResult<HomeCertification> {
         return Err(CertificationError::Receipt("trailing bytes"));
     }
     let row = sized(&value, 6)?;
-    if string(&row[0])? != "TPHOMEOWNERS" || number(&row[1])? != 1 {
-        return Err(CertificationError::Receipt("home witness version"));
+    if string(&row[0])? != "TPHOMEOWNERS" {
+        return Err(CertificationError::Receipt("home witness header"));
+    }
+    let version = number(&row[1])?;
+    if version != 2 {
+        return Err(CertificationError::UnsupportedVersion {
+            format: CertificationFormat::HomeOwners,
+            found: version,
+            expected: 2,
+        });
     }
     let owner = home_owner(&row[2])?;
     let groups = array(&row[3])?;
@@ -1295,6 +1397,13 @@ fn decode_home_witness(bytes: &[u8]) -> CertResult<HomeCertification> {
                     module,
                     interface_digest,
                     binder,
+                }
+                | ReceiptImportOwner::RetainedPackage {
+                    unit,
+                    module,
+                    interface_digest,
+                    binder,
+                    ..
                 } => {
                     let key = (unit.clone(), module.clone());
                     if packages.get(&key).map(|witness| witness.sha256) != Some(*interface_digest)
@@ -1358,21 +1467,25 @@ pub(crate) fn certified_home_requirements(
 /// Direct native requirements are distinct from typechecking closure. They
 /// retain the dependent and required original group ordinals, or exact live
 /// binding generation; graph reachability grants no native lease.
-pub(crate) fn certified_native_requirements(
-    bytes: &[u8],
-    owner: &CachedHomeOwner,
-) -> CertResult<
-    Vec<(
+pub(crate) struct CertifiedNativeRequirements {
+    pub artifact_edges: Vec<(
         crate::declaration_join::ExactModuleIdentity,
         crate::artifact_inventory::ArtifactDependency,
     )>,
-> {
+    pub retained_packages: Vec<crate::artifact_inventory::RetainedPackageDependency>,
+}
+
+pub(crate) fn certified_native_requirements(
+    bytes: &[u8],
+    owner: &CachedHomeOwner,
+) -> CertResult<CertifiedNativeRequirements> {
     use crate::artifact_inventory::ArtifactDependency;
     let witness = decode_home_witness(bytes)?;
     if &witness.owner != owner {
         return Err(CertificationError::Mismatch("native requirements owner"));
     }
     let mut requirements = Vec::new();
+    let mut retained_packages = Vec::new();
     for (dependent_ordinal, _, globals) in witness.groups {
         for global in globals {
             let (owner, dependency) = match global.owner {
@@ -1404,6 +1517,20 @@ pub(crate) fn certified_native_requirements(
                         record_parent: identity.record_parent,
                     },
                 ),
+                ReceiptImportOwner::RetainedPackage {
+                    binder,
+                    generation,
+                    interface_digest,
+                    ..
+                } => {
+                    retained_packages.push(crate::artifact_inventory::RetainedPackageDependency {
+                        dependent_ordinal,
+                        identity: binder,
+                        generation,
+                        interface_digest,
+                    });
+                    continue;
+                }
                 ReceiptImportOwner::Package { .. } => continue,
             };
             requirements.push((owner, dependency));
@@ -1411,7 +1538,12 @@ pub(crate) fn certified_native_requirements(
     }
     requirements.sort();
     requirements.dedup();
-    Ok(requirements)
+    retained_packages.sort();
+    retained_packages.dedup();
+    Ok(CertifiedNativeRequirements {
+        artifact_edges: requirements,
+        retained_packages,
+    })
 }
 
 fn verify_home_witness(bytes: &[u8], owner: &CachedHomeOwner) -> CertResult<HomeCertification> {
@@ -1502,6 +1634,26 @@ fn encode_home_certification_with_validation(
                     identity: identity.clone(),
                     generation: *generation,
                 },
+                PendingImportOwner::RetainedPackage {
+                    unit,
+                    module,
+                    binder,
+                    generation,
+                    interface_digest,
+                } => {
+                    let key = (unit.clone(), module.clone());
+                    let package = packages
+                        .get(&key)
+                        .ok_or(CertificationError::Mismatch("package interface witness"))?;
+                    witness.packages.insert(key, package.clone());
+                    ReceiptImportOwner::RetainedPackage {
+                        unit: unit.clone(),
+                        module: module.clone(),
+                        binder: binder.clone(),
+                        generation: *generation,
+                        interface_digest: *interface_digest,
+                    }
+                }
                 PendingImportOwner::Package {
                     unit,
                     module,
@@ -1682,7 +1834,9 @@ pub(crate) fn certify_recovery_products_with_validation(
         }
         for (group, (_, _, globals)) in product.groups.iter().zip(&witness.groups) {
             for (declaration, selected) in group.globals().iter().zip(globals) {
-                if let ReceiptImportOwner::Package { unit, module, .. } = &selected.owner {
+                if let ReceiptImportOwner::Package { unit, module, .. }
+                | ReceiptImportOwner::RetainedPackage { unit, module, .. } = &selected.owner
+                {
                     if scoped_owners.contains_key(&(unit.clone(), module.clone())) {
                         return Err(CertificationError::Mismatch(
                             "home owner downgraded to package",
@@ -1844,7 +1998,9 @@ fn certify_inherited_inventory_with_validation(
                 .iter()
                 .zip(globals)
                 .map(|(declaration, selected)| {
-                    if let ReceiptImportOwner::Package { unit, module, .. } = &selected.owner {
+                    if let ReceiptImportOwner::Package { unit, module, .. }
+                    | ReceiptImportOwner::RetainedPackage { unit, module, .. } = &selected.owner
+                    {
                         if homes.contains_key(&(unit.clone(), module.clone())) {
                             return Err(CertificationError::Mismatch(
                                 "home owner downgraded to package",
@@ -2813,7 +2969,8 @@ mod tests {
             .flat_map(|module| &module.groups)
             .flat_map(|group| &group.globals)
             .filter_map(|global| match &global.owner {
-                ReceiptImportOwner::Package { unit, module, .. } => Some((unit, module)),
+                ReceiptImportOwner::Package { unit, module, .. }
+                | ReceiptImportOwner::RetainedPackage { unit, module, .. } => Some((unit, module)),
                 _ => None,
             })
             .collect();
@@ -2972,6 +3129,9 @@ mod tests {
                 identity,
                 generation,
             } => (identity.clone(), Some(*generation)),
+            PendingImportOwner::RetainedPackage {
+                binder, generation, ..
+            } => (binder.clone(), Some(*generation)),
         };
         wire.globals.push(GlobalDecl {
             identity,
@@ -3109,7 +3269,9 @@ mod tests {
             },
         );
         let bytes = encode_home_certification(&owner, &[source_group], &BTreeMap::new()).unwrap();
-        let edges = certified_native_requirements(&bytes, &owner).unwrap();
+        let edges = certified_native_requirements(&bytes, &owner)
+            .unwrap()
+            .artifact_edges;
         assert_eq!(
             edges,
             vec![(
@@ -3133,7 +3295,7 @@ mod tests {
         );
         let bytes = encode_home_certification(&owner, &[retained_group], &BTreeMap::new()).unwrap();
         assert!(
-            matches!(&certified_native_requirements(&bytes,&owner).unwrap()[0].1,ArtifactDependency::NativeBinding{dependent_ordinal:7,generation:41,occurrence,..} if occurrence=="bound")
+            matches!(&certified_native_requirements(&bytes,&owner).unwrap().artifact_edges[0].1,ArtifactDependency::NativeBinding{dependent_ordinal:7,generation:41,occurrence,..} if occurrence=="bound")
         );
         assert!(certified_native_requirements(&bytes, &inherited_owner("Imposter")).is_err());
     }
@@ -3684,7 +3846,7 @@ mod tests {
     }
 
     #[test]
-    fn receipt_dictionary_preserves_legacy_facts_and_refuses_invalid_references() {
+    fn receipt_dictionary_preserves_full_facts_and_refuses_invalid_references() {
         let mut legacy = empty_legacy_receipt();
         let global = dictionary_test_global();
         let Value::Array(header) = &mut legacy else {
@@ -3697,9 +3859,17 @@ mod tests {
         let compact = dictionary_receipt(&legacy);
         let encoded = receipt_bytes(&compact);
         assert_eq!(
-            decode_receipt(&encoded).unwrap(),
-            decode_receipt(&receipt_bytes(&legacy)).unwrap()
+            decode_receipt(&encoded).unwrap().targets["target"],
+            vec![global.clone(), global]
         );
+        assert!(matches!(
+            decode_receipt(&receipt_bytes(&legacy)),
+            Err(CertificationError::UnsupportedVersion {
+                format: CertificationFormat::ProductReceipt,
+                found: 2,
+                expected: 4
+            })
+        ));
         let mut trailing = encoded;
         trailing.push(0);
         assert!(matches!(
@@ -3790,12 +3960,49 @@ mod tests {
         let legacy: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         let compact = dictionary_receipt(&legacy);
         let encoded = receipt_bytes(&compact);
-        let expected = decode_receipt_value(&legacy).unwrap();
         let admitted = decode_receipt(&encoded).unwrap();
+        let legacy_header = array(&legacy).unwrap();
         assert_eq!(
-            admitted, expected,
-            "compression changed ordered full owner/contract facts"
+            admitted.modules.len(),
+            array(&legacy_header[2]).unwrap().len()
         );
+        assert_eq!(
+            admitted.targets.len(),
+            array(&legacy_header[3]).unwrap().len()
+        );
+        for (module, raw) in admitted
+            .modules
+            .iter()
+            .zip(array(&legacy_header[2]).unwrap())
+        {
+            for (group, raw) in module
+                .groups
+                .iter()
+                .zip(array(&array(raw).unwrap()[8]).unwrap())
+            {
+                assert_eq!(
+                    group.globals,
+                    array(&array(raw).unwrap()[1])
+                        .unwrap()
+                        .iter()
+                        .map(accepted_global)
+                        .collect::<CertResult<Vec<_>>>()
+                        .unwrap()
+                );
+            }
+        }
+        for raw in array(&legacy_header[3]).unwrap() {
+            let raw = array(raw).unwrap();
+            assert_eq!(
+                admitted.targets[string(&raw[0]).unwrap()],
+                array(&raw[1])
+                    .unwrap()
+                    .iter()
+                    .map(accepted_global)
+                    .collect::<CertResult<Vec<_>>>()
+                    .unwrap()
+            );
+        }
         assert!(encoded.len() <= RECEIPT_LIMIT);
         eprintln!(
             "retained-product-receipt legacy_bytes={} dictionary_bytes={} modules={} global_references={}",
@@ -3894,7 +4101,7 @@ mod tests {
             };
             rewrite(&mut target[1]);
         }
-        header[1] = Value::Integer(3.into());
+        header[1] = Value::Integer(4.into());
         header.push(value_array(indexed.into_values().map(|(_, row)| row)));
         compact
     }
@@ -3930,6 +4137,7 @@ mod tests {
                 Value::Text(hex(&[5; 32])),
             ])]),
         ]);
+        let value = dictionary_receipt(&value);
         let mut encoded = Vec::new();
         ciborium::ser::into_writer(&value, &mut encoded).unwrap();
         assert_eq!(
@@ -4033,7 +4241,8 @@ mod tests {
         let selected_path = directory.path().join("Selected.hi");
         std::fs::write(&selected_path, b"selected interface").unwrap();
         let interface_digest = sha(b"selected interface");
-        let binder = testing::identity("base:Selected", "member");
+        let mut binder = testing::identity("Selected", "member");
+        binder.unit = "base".into();
         let import = ReceiptImportOwner::Package {
             unit: "base".into(),
             module: "Selected".into(),
@@ -4055,6 +4264,134 @@ mod tests {
         assert!(matches!(
             resolve_receipt_owner(import, &SourceGroupMap::new(), &packages),
             Err(CertificationError::StaleEvidence)
+        ));
+    }
+    #[test]
+    fn retained_package_preserves_generation_and_authenticated_interface_without_home_edge() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("Base.hi");
+        std::fs::write(&path, b"exact package interface").unwrap();
+        let digest = sha(b"exact package interface");
+        let mut binder = testing::identity("GHC.Internal.Base", "map");
+        binder.unit = "ghc-internal".into();
+        let package = PendingImportOwner::RetainedPackage {
+            unit: binder.unit.clone(),
+            module: binder.module.clone(),
+            binder: binder.clone(),
+            generation: 0,
+            interface_digest: digest,
+        };
+        let owner = inherited_owner("Records");
+        let group = inherited_group(&owner, package.clone());
+        let packages = BTreeMap::from([(
+            (binder.unit.clone(), binder.module.clone()),
+            PackageInterfaceWitness {
+                selected_path: path.clone(),
+                sha256: digest,
+            },
+        )]);
+        let bytes = encode_home_certification(&owner, &[group.clone()], &packages).unwrap();
+        let requirements = certified_native_requirements(&bytes, &owner).unwrap();
+        assert!(requirements.artifact_edges.is_empty());
+        assert_eq!(
+            requirements.retained_packages,
+            vec![crate::artifact_inventory::RetainedPackageDependency {
+                dependent_ordinal: group.group().original_ordinal(),
+                identity: binder.clone(),
+                generation: 0,
+                interface_digest: digest,
+            }]
+        );
+        let witness = decode_home_witness(&bytes).unwrap();
+        let selected = &witness.groups[0].2[0];
+        assert_eq!(
+            resolve_receipt_owner(selected.owner.clone(), &SourceGroupMap::new(), &packages)
+                .unwrap(),
+            package
+        );
+        assert_eq!(
+            certify_inherited_inventory(vec![inherited_parsed(&group, &packages)], &[]).unwrap(),
+            vec![group.clone()]
+        );
+        let encoded = value_import(&selected.owner);
+        assert_eq!(owner_from_test_value(&encoded), selected.owner);
+        let mut global = group.group().globals()[0].clone();
+        global.required_generation = None;
+        assert!(validate_global_witness(
+            &global,
+            group.group().definitions().signatures(),
+            selected
+        )
+        .is_err());
+        let mut forged = selected.owner.clone();
+        if let ReceiptImportOwner::RetainedPackage {
+            interface_digest, ..
+        } = &mut forged
+        {
+            *interface_digest = [9; 32];
+        }
+        assert!(resolve_receipt_owner(forged, &SourceGroupMap::new(), &packages).is_err());
+        let mut sources = SourceGroupMap::new();
+        let mut home = owner.clone();
+        home.unit = binder.unit.clone();
+        home.module = binder.module.clone();
+        sources.insert(
+            (
+                binder.unit.clone(),
+                binder.module.clone(),
+                1,
+                binder.clone(),
+            ),
+            (home, ProductOrigin::Fresh),
+        );
+        assert!(matches!(
+            resolve_receipt_owner(selected.owner.clone(), &sources, &packages),
+            Err(CertificationError::Mismatch(
+                "home owner downgraded to package"
+            ))
+        ));
+        std::fs::write(&path, b"changed package interface").unwrap();
+        assert!(matches!(
+            resolve_receipt_owner(selected.owner.clone(), &SourceGroupMap::new(), &packages),
+            Err(CertificationError::StaleEvidence)
+        ));
+    }
+
+    fn owner_from_test_value(value: &Value) -> ReceiptImportOwner {
+        owner(value).unwrap()
+    }
+
+    #[test]
+    fn certificate_versions_refuse_legacy_ownership_without_reinterpretation() {
+        for version in [1, 2, 3] {
+            let mut receipt = dictionary_receipt(&empty_legacy_receipt());
+            let Value::Array(rows) = &mut receipt else {
+                unreachable!()
+            };
+            rows[1] = Value::Integer(version.into());
+            assert!(matches!(
+                decode_receipt(&receipt_bytes(&receipt)),
+                Err(CertificationError::UnsupportedVersion {
+                    format: CertificationFormat::ProductReceipt,
+                    expected: 4,
+                    ..
+                })
+            ));
+        }
+        let owner = inherited_owner("Original");
+        let current = encode_home_certification(&owner, &[], &BTreeMap::new()).unwrap();
+        let mut value: Value = ciborium::de::from_reader(current.as_slice()).unwrap();
+        let Value::Array(rows) = &mut value else {
+            unreachable!()
+        };
+        rows[1] = Value::Integer(1.into());
+        assert!(matches!(
+            decode_home_witness(&receipt_bytes(&value)),
+            Err(CertificationError::UnsupportedVersion {
+                format: CertificationFormat::HomeOwners,
+                found: 1,
+                expected: 2
+            })
         ));
     }
 }

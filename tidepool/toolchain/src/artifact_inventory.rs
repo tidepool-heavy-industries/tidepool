@@ -189,6 +189,7 @@ pub(crate) struct ArtifactEntry {
     pub payload: ArtifactPayload,
     pub requirements: Vec<ExactModuleIdentity>,
     pub native_requirements: Vec<(ExactModuleIdentity, ArtifactDependency)>,
+    pub retained_packages: Vec<RetainedPackageDependency>,
 }
 
 impl ArtifactEntry {
@@ -221,7 +222,8 @@ impl ArtifactEntry {
             descriptor,
             payload: ArtifactPayload::Original(product),
             requirements,
-            native_requirements,
+            native_requirements: native_requirements.artifact_edges,
+            retained_packages: native_requirements.retained_packages,
         })
     }
     pub(crate) fn interface(
@@ -246,6 +248,7 @@ impl ArtifactEntry {
             payload: ArtifactPayload::Interface(interface, kind),
             requirements,
             native_requirements: Vec::new(),
+            retained_packages: Vec::new(),
         }
     }
 }
@@ -403,6 +406,8 @@ impl ArtifactInventory {
                 entry.requirements.dedup();
                 entry.native_requirements.sort();
                 entry.native_requirements.dedup();
+                entry.retained_packages.sort();
+                entry.retained_packages.dedup();
                 Arc::new(entry)
             })
             .collect();
@@ -680,6 +685,13 @@ impl ArtifactView {
         &self,
         roots: &[ArtifactId],
     ) -> Result<Vec<NativeBindingRequirement>, CompileError> {
+        Ok(self.native_requirements_from_roots(roots)?.bindings)
+    }
+
+    pub fn native_requirements_from_roots(
+        &self,
+        roots: &[ArtifactId],
+    ) -> Result<NativeRequirements, CompileError> {
         let state = self.0.inventory.0.lock().expect("inventory lock");
         let owned = closure(&state, self.roots().into_iter());
         if roots.iter().any(|id| !owned.contains(id)) {
@@ -688,11 +700,22 @@ impl ArtifactView {
         let mut pending = roots.iter().map(|id| (*id, None)).collect::<Vec<_>>();
         let mut seen = BTreeSet::new();
         let mut requirements = BTreeSet::new();
+        let mut packages = BTreeSet::new();
         while let Some((id, ordinal)) = pending.pop() {
             if !seen.insert((id, ordinal)) {
                 continue;
             }
             state.graph_visits.fetch_add(1, Ordering::Relaxed);
+            for package in &state.payloads[&id].retained_packages {
+                if ordinal.is_none_or(|selected| selected == package.dependent_ordinal) {
+                    packages.insert(NativePackageRequirement {
+                        artifact_id: id,
+                        identity: package.identity.clone(),
+                        generation: package.generation,
+                        interface_digest: package.interface_digest,
+                    });
+                }
+            }
             for edge in state.graph.edges(state.indices[&id]) {
                 let target = &state.graph[edge.target()];
                 match edge.weight() {
@@ -725,7 +748,10 @@ impl ArtifactView {
                 }
             }
         }
-        Ok(requirements.into_iter().collect())
+        Ok(NativeRequirements {
+            bindings: requirements.into_iter().collect(),
+            packages: packages.into_iter().collect(),
+        })
     }
 
     fn roots(&self) -> Vec<ArtifactId> {
@@ -1213,5 +1239,49 @@ mod tests {
         assert_eq!(av.dependencies(), bv.dependencies());
         let json = serde_json::to_string(&av.descriptors()).unwrap();
         assert!(!json.contains("NodeIndex"));
+    }
+    #[test]
+    fn native_package_obligations_follow_selected_groups_without_package_artifact_nodes() {
+        let inventory = ArtifactInventory::default();
+        let mut root = entry("Root", &[]);
+        root.native_requirements.push((
+            module("Helper"),
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 2,
+                required_ordinal: 7,
+            },
+        ));
+        let mut helper = entry("Helper", &[]);
+        let package = |ordinal, occurrence: &str| RetainedPackageDependency {
+            dependent_ordinal: ordinal,
+            identity: tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "ghc-internal".into(),
+                module: "GHC.Internal.Base".into(),
+                namespace: "value".into(),
+                occurrence: occurrence.into(),
+                record_parent: None,
+            },
+            generation: 0,
+            interface_digest: [4; 32],
+        };
+        helper.retained_packages = vec![package(7, "map"), package(8, "foldr")];
+        let root_id = root.descriptor.id;
+        let helper_id = helper.descriptor.id;
+        let view = inventory
+            .admit(&inventory.empty_view(), vec![root, helper])
+            .unwrap();
+        let requirements = view.native_requirements_from_roots(&[root_id]).unwrap();
+        assert!(requirements.bindings.is_empty());
+        assert_eq!(requirements.packages.len(), 1);
+        assert_eq!(requirements.packages[0].artifact_id, helper_id);
+        assert_eq!(requirements.packages[0].identity.occurrence, "map");
+        assert_eq!(
+            view.native_requirements_from_roots(&[helper_id])
+                .unwrap()
+                .packages
+                .len(),
+            2
+        );
+        assert_eq!(inventory.metrics().nodes, 2);
     }
 }

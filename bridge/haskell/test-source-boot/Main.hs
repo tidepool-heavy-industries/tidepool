@@ -2,6 +2,9 @@ module Main (main) where
 
 import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
+import Codec.CBOR.Read (deserialiseFromBytes)
+import Codec.CBOR.Term (Term(..), decodeTerm)
+import Data.ByteString.Lazy qualified as BSL
 import Control.Exception (SomeException, bracket, finally, try)
 import Control.Monad (forM, unless)
 import GHC.Clock (getMonotonicTimeNSec)
@@ -29,6 +32,8 @@ import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 import System.IO (hClose, hPutStrLn, openTempFile, stderr)
 import System.Process (readProcessWithExitCode)
+import Tidepool.CertifiedProducts (encodeCertifiedProducts)
+import Tidepool.ExecutionSchema
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencyImport(..)
   , DependencyResolution(..), dependencySourceSha256, sourceEvidence, selectedHomeRequirements )
@@ -97,6 +102,7 @@ selectedHomeInstanceEdges = withScratch $ \work -> do
       producer = prHscEnv (pprPipelineResult cold)
       consumers = [node | node@(ModuleNode _ summary) <- mgModSummaries' (hsc_mod_graph producer)
         , ms_mod_name summary == mkModuleName "InstanceConsumer"]
+  verifyRetainedPackageWitness producer evidence
   lexical <- forM ["InstanceOwner", "InstanceRelay"] $ \name -> do
     requirements <- either fail pure (selectedHomeRequirements evidence "main" name)
     pure (ExactIfaceArtifact "main" name (work </> name ++ ".hi") "" requirements, requirements)
@@ -118,6 +124,37 @@ selectedHomeInstanceEdges = withScratch $ \work -> do
         pure ()
       _ -> liftIO (fail "instance graph lacks one source consumer")
   putStrLn "selected home instance edges: transitive instance, package exclusion and owner mismatch passed"
+
+verifyRetainedPackageWitness :: HscEnv -> DependencyEvidence -> IO ()
+verifyRetainedPackageWitness producer evidence = do
+  let package = SymbolIdentity "ghc-internal" "GHC.Internal.Base" "value" "map" Nothing
+      home = SymbolIdentity "main" "InstanceConsumer" "value" "result" Nothing
+      global identity generation = GlobalDecl identity LiftedRefRep Nothing False (Just generation)
+      program globals = WireProgram
+        { programEnvelope = ProgramEnvelope schemaVersion "test" "matched" executionAbiVersion
+            (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" [])
+        , programSignatures = [], programGlobals = globals, programConstructors = []
+        , programOperations = [], programBindings = [], programEntry = ValueId 0
+        , programTypes = [], programSites = [], programVerbSites = [], programJsonLayout = Nothing }
+      encode globals = encodeCertifiedProducts producer [] Nothing []
+        [("target", program globals)] evidence "" ""
+  bytes <- encode [global package 0, global home 7] >>= either fail pure
+  term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
+  owners <- case term of
+    TList [TString "TPCERT", TInt 4, _, _, _, TList rows] ->
+      forM rows $ \case
+        TList [_, _, _, _, owner] -> pure owner
+        _ -> fail "certified global row lacks exact owner"
+    _ -> fail "retained package producer used another ownership format"
+  unless (any (\case
+      TList [TString "retained-package", TString "ghc-internal", TString "GHC.Internal.Base", TString packageHash, _, TInt 0] -> T.length packageHash == 64
+      _ -> False) owners
+      && any (\case TList [TString "retained", _, TInt 7] -> True; _ -> False) owners) $
+    fail "positive package evidence lost its lease or confused a retained home owner"
+  encode [global (package { symbolModule = "Missing.Package.Owner" }) 0] >>= \case
+    Left _ -> pure ()
+    Right _ -> fail "retained package owner without loaded interface evidence was accepted"
+  putStrLn "retained package witnesses: authenticated map/gen0, home/gen7 and missing package refusal passed"
 
 -- The fixed two-module SOURCE SCC is surrounded by ordinary candidate
 -- products. A separate case makes Independent1 a real ordinary+boot input;
