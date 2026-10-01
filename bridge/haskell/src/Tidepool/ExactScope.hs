@@ -40,6 +40,7 @@ import Tidepool.DependencyEvidence
 data ExactScope = ExactScope
   { scopeManifestPath :: FilePath
   , scopeRequestSha256 :: String
+  , scopeProducerSha256 :: String
   , scopeSemanticSha256 :: String
   , scopeInterfaces :: [(ExactIfaceArtifact, FilePath, String)]
   , scopeLexical :: [((String, String), [(String, String)])]
@@ -238,9 +239,10 @@ decodeScope = do
   magic <- string
   version <- string
   unless (magic == "TPEXACTSCOPE"
-      && ((version == "1" && count == 6) || (version == "3" && count == 7)))
+      && ((version == "2" && count == 7) || (version == "4" && count == 8)))
     (fail "unsupported exact scope")
   semantic <- digestField
+  producer <- digestField
   interfaces <- bounded 4096 $ do
     array 7
     unit <- nonempty
@@ -288,7 +290,7 @@ decodeScope = do
           (exactUnit iface, exactModule iface) == (originalUnit originalProduct, originalModule originalProduct)
           && exactSha256 iface == originalIfaceSha256 originalProduct) interfaces) products)
     (fail "incomplete or conflicting exact owner closure")
-  (checked, checkedItem, checkedDisplay, includes) <- if version == "1" then pure (Nothing,Nothing,Nothing,Nothing) else do
+  (checked, checkedItem, checkedDisplay, includes) <- if version == "2" then pure (Nothing,Nothing,Nothing,Nothing) else do
     authCount <- decodeListLen
     purpose <- string
     case purpose of
@@ -386,7 +388,7 @@ decodeScope = do
         paths <- includePaths
         pure (Nothing,Nothing,Just admission,Just paths)
       _ -> fail "unsupported exact compile purpose"
-  pure (ExactScope "" "" semantic interfaces lexical products checked checkedItem checkedDisplay includes)
+  pure (ExactScope "" "" producer semantic interfaces lexical products checked checkedItem checkedDisplay includes)
   where
     includePaths = bounded 4096 $ do
       path <- absolute

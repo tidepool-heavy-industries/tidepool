@@ -1853,8 +1853,8 @@ pub(crate) fn certify_products(
                     let version = if let Some(admission) = exact {
                         let mut digest = Sha256::new();
                         for field in [
-                            b"tidepool-exact-source-home-v1".as_slice(),
-                            endpoint_identity,
+                            b"tidepool-exact-source-home-v2".as_slice(),
+                            Sha256::digest(endpoint_identity).as_slice(),
                             admission.request.semantic_sha256.as_slice(),
                             key.0.as_bytes(),
                             key.1.as_bytes(),
