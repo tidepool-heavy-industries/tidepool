@@ -530,6 +530,23 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
     for child in &children {
         assert_captured_reader(child).await;
     }
+    workspaces
+        .reject
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    workspaces.release.add_permits(1);
+    let reused = include_str!("captured_reader_reuse.hs").replace("CHECKPOINT_TOKEN", &token);
+    assert_committed(&run_cell(parent.clone(), reused).await);
+    loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(240), deployments.recv())
+            .await
+            .expect("a fresh reader uses the same published capture after parent cell failure")
+            .expect("deployment stream");
+        if let LocalResidentDeployment::PolicyInstalled(installation) = event {
+            assert_captured_reader(&installation).await;
+            children.push(installation);
+            break;
+        }
+    }
     let retired = forest
         .environment
         .fork_groups
@@ -560,6 +577,17 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         })
         .await
         .expect("first reader shutdown");
+    assert!(result.cleanup.is_confirmed(), "{:?}", result.cleanup);
+    assert_captured_reader(&children[0]).await;
+    let second = children.remove(0);
+    let result = second
+        .actor
+        .shutdown_with_cleanup(ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "second captured reader done".into(),
+        })
+        .await
+        .expect("second reader shutdown");
     assert!(result.cleanup.is_confirmed(), "{:?}", result.cleanup);
     assert_captured_reader(&children[0]).await;
     let final_reader = children.remove(0);
