@@ -196,6 +196,11 @@ impl ValidatedInputPackages {
             if !evidence.modules.iter().any(|module| {
                 (module.unit.as_str(), module.module.as_str())
                     == (owner.0.as_str(), owner.1.as_str())
+                    && !module.boot
+                    && module.imports.iter().any(|edge| {
+                        edge.selected.is_none()
+                            && package_import_matches(edge, &imported.0, &imported.1)
+                    })
             }) {
                 return Err(CompileInputError::OwnerCoverage);
             }
@@ -210,8 +215,28 @@ impl ValidatedInputPackages {
             let owners = proof_row(&header[3], 2)?[1]
                 .as_array()
                 .ok_or(CompileInputError::Malformed)?;
-            let first = owners.first().ok_or(CompileInputError::Malformed)?;
-            let owner = proof_owner(first)?;
+            if owners.is_empty() || owners.len() > 4096 {
+                return Err(CompileInputError::Malformed);
+            }
+            let mut selected = std::collections::BTreeSet::new();
+            for owner in owners {
+                if !selected.insert(proof_owner(owner)?) {
+                    return Err(CompileInputError::OwnerCoverage);
+                }
+            }
+            let expected: std::collections::BTreeSet<_> = evidence
+                .modules
+                .iter()
+                .filter(|module| module.boot)
+                .map(|module| (module.unit.clone(), module.module.clone()))
+                .collect();
+            if selected != expected {
+                return Err(CompileInputError::OwnerCoverage);
+            }
+            let owner = selected
+                .into_iter()
+                .next()
+                .ok_or(CompileInputError::Malformed)?;
             return Err(CompileInputError::UnsupportedBoot {
                 unit: owner.0,
                 module: owner.1,
@@ -233,10 +258,7 @@ impl ValidatedInputPackages {
         let mut expected = BTreeMap::new();
         for module in &evidence.modules {
             if module.boot {
-                return Err(CompileInputError::UnsupportedBoot {
-                    unit: module.unit.clone(),
-                    module: module.module.clone(),
-                });
+                return Err(CompileInputError::OwnerCoverage);
             }
             if expected
                 .insert((module.unit.clone(), module.module.clone()), module)
@@ -272,16 +294,9 @@ impl ValidatedInputPackages {
                 .iter()
                 .filter(|imported| imported.selected.is_none())
             {
-                let matches = roots.keys().any(|(unit, name)| {
-                    name == &imported.module
-                        && match &imported.qualifier {
-                            crate::cache::ImportQualifier::Unqualified => true,
-                            crate::cache::ImportQualifier::ThisUnit(required)
-                            | crate::cache::ImportQualifier::OtherUnit(required) => {
-                                unit == required
-                            }
-                        }
-                });
+                let matches = roots
+                    .keys()
+                    .any(|(unit, name)| package_import_matches(imported, unit, name));
                 if !matches {
                     return Err(CompileInputError::MissingPackageImport {
                         unit: owner.0.clone(),
@@ -313,6 +328,15 @@ impl ValidatedInputPackages {
             direct: direct.into_iter().collect(),
         })
     }
+}
+
+fn package_import_matches(import: &ModuleImportEvidence, unit: &str, module: &str) -> bool {
+    module == import.module
+        && match &import.qualifier {
+            crate::cache::ImportQualifier::Unqualified => true,
+            crate::cache::ImportQualifier::ThisUnit(required)
+            | crate::cache::ImportQualifier::OtherUnit(required) => unit == required,
+        }
 }
 
 fn proof_row(
@@ -906,8 +930,8 @@ mod tests {
             Value::Text("unsupported-wired".into()),
             owner.clone(),
             Value::Array(vec![
-                Value::Text("compiler-unit".into()),
-                Value::Text("CompilerPrimitive".into()),
+                Value::Text("package".into()),
+                Value::Text("Facade".into()),
             ]),
         ]);
         let path = root.path().join("compiler-inputs.cbor");
@@ -926,8 +950,17 @@ mod tests {
             Value::Array(vec![owner]),
         ]);
         std::fs::write(&path, packet_bytes(&value)).unwrap();
+        assert!(matches!(
+            ValidatedInputPackages::read_supported(&path, &raw, &evidence),
+            Err(CompileInputError::OwnerCoverage)
+        ));
+        let mut boot = evidence.clone();
+        boot.modules[0].boot = true;
+        let boot_raw = serde_json::to_vec(&boot).unwrap();
+        value.as_array_mut().unwrap()[2] = Value::Text(format!("{:x}", Sha256::digest(&boot_raw)));
+        std::fs::write(&path, packet_bytes(&value)).unwrap();
         assert!(
-            ValidatedInputPackages::read_supported(&path, &raw, &evidence)
+            ValidatedInputPackages::read_supported(&path, &boot_raw, &boot)
                 .unwrap()
                 .is_none()
         );
