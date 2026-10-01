@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, Arc};
 
 use tidepool_codegen::binding_table::{
     BindingEntry, BindingScopeWitness, BindingTable, BindingTipId, SourceLeaseKey,
@@ -103,6 +103,8 @@ pub struct PersistentSession {
     /// `Some` when idle/suspended, and moved out onto the eval thread for a
     /// turn's duration (stowed-XOR-running).
     machine: Option<PreparedEngine>,
+    /// Cancellation selected by the current invocation, including bootstrap.
+    invocation_cancel: Option<Arc<AtomicBool>>,
     /// Names native instance IDs within the exact machine lifetime, including
     /// while the engine is temporarily moved into a machine lease.
     machine_incarnation: Option<tidepool_repr::SessionId>,
@@ -232,6 +234,7 @@ impl PersistentSession {
         PersistentSession {
             admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new()),
             machine: None,
+            invocation_cancel: None,
             machine_incarnation: None,
             recovery_initialization: None,
             image_registry: None,
@@ -633,6 +636,7 @@ impl PersistentSession {
             .as_mut()
             .or(self.machine.as_mut())
             .expect("certified machine exists or was constructed");
+        engine.set_invocation_cancel(self.invocation_cancel.clone());
         let mut staged = engine.install_certified_turn(
             target,
             target_owners,
@@ -835,6 +839,16 @@ impl PersistentSession {
         registry
     }
 
+    pub(crate) fn replace_invocation_cancel(
+        &mut self,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Option<Arc<AtomicBool>> {
+        if let Some(engine) = self.machine.as_mut() {
+            engine.set_invocation_cancel(cancel.clone());
+        }
+        std::mem::replace(&mut self.invocation_cancel, cancel)
+    }
+
     /// The prepared engine, once the first prepared turn has installed it.
     pub(crate) fn prepared(&self) -> Option<&PreparedEngine> {
         self.machine.as_ref()
@@ -991,11 +1005,12 @@ impl PersistentSession {
     ) -> Result<tidepool_codegen::prepared_program::ProgramId, PreparedRuntimeError> {
         match self.machine.as_mut() {
             None => {
-                let (engine, program) = PreparedEngine::bootstrap_shared(
+                let (mut engine, program) = PreparedEngine::bootstrap_shared(
                     prepared,
                     self.nursery_size,
                     self.image_registry.clone(),
                 )?;
+                engine.set_invocation_cancel(self.invocation_cancel.clone());
                 self.machine = Some(engine);
                 self.ensure_machine_incarnation();
                 Ok(program)

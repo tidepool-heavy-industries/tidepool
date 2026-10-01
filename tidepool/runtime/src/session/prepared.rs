@@ -7,7 +7,7 @@
 //! disposition, and retained-program reuse cross this boundary in that order.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, Arc};
 
 use tidepool_bridge::{BridgeError, HaskellValue, HaskellVisitor};
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
@@ -3568,7 +3568,7 @@ impl PreparedEngine {
                 detail: "the program declares no Tidepool.Internal.Resume.Settled constructors",
             });
         }
-        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+        if self.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let batch = self
@@ -3736,7 +3736,7 @@ impl PreparedEngine {
         let program = self
             .hosting_program(f)
             .ok_or(PreparedRuntimeError::NoHostingProgram)?;
-        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+        if self.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let entry = self.apply_entry_of(program)?;
@@ -3773,7 +3773,7 @@ impl PreparedEngine {
         let program = self
             .hosting_program(f)
             .ok_or(PreparedRuntimeError::NoHostingProgram)?;
-        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+        if self.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let entry = self.apply_value_of(program)?;
@@ -4142,7 +4142,7 @@ impl PreparedEngine {
         let (realm, _) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownContinuation(id),
         ))?;
-        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+        if self.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let (continuation, evidence) = self
@@ -4263,7 +4263,7 @@ impl PreparedEngine {
                 detail: "the framed constructor's declared field count does not match the supplied prefix plus the borrowed handle field",
             });
         }
-        if machine.realm_cancel_handle(realm).is_cancelled() {
+        if machine.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let mut builder = machine
@@ -4299,7 +4299,7 @@ impl PreparedEngine {
         if self.machine.handle_realm(answer) != Some(realm) {
             return Err(PreparedRuntimeError::CrossRealmArgument { realm });
         }
-        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+        if self.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let (continuation, evidence) = self
@@ -4325,7 +4325,7 @@ impl PreparedEngine {
         if evidence.site == UNSITED {
             return self.resume_unsited_with_nullary(id, realm, response, table);
         }
-        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+        if self.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let site = evidence.site;
@@ -4372,7 +4372,7 @@ impl PreparedEngine {
     ) -> Result<PreparedResumed, PreparedRuntimeError> {
         let host_id =
             nullary_constructor_of(response, table).ok_or(PreparedRuntimeError::UnsitedAnswer)?;
-        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+        if self.cancellation_requested(realm) {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let mut builder = self
@@ -4604,6 +4604,14 @@ impl PreparedEngine {
     /// Close a runtime resource scope: `(frames, handles_released)`.
     pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
         self.machine.close_realm(realm)
+    }
+
+    pub(crate) fn cancellation_requested(&mut self, realm: RealmId) -> bool {
+        self.machine.cancellation_requested(realm)
+    }
+
+    pub(crate) fn set_invocation_cancel(&mut self, cancel: Option<Arc<AtomicBool>>) {
+        self.machine.set_invocation_cancel(cancel);
     }
 
     pub fn cancel_handle(&mut self, realm: RealmId) -> CancelHandle {
@@ -7569,6 +7577,71 @@ pub(super) mod tests {
         assert!(engine.release(text));
         assert_eq!(engine.handle_count(), initial_handles);
         assert_eq!(engine.persistent_roots_count(), initial_roots);
+    }
+
+    #[test]
+    fn cancelled_invocation_keeps_parked_resume_and_same_realm_sibling_usable() {
+        let (mut engine, program) = PreparedEngine::bootstrap(json_mount_program()).unwrap();
+        let realm = RealmId::fresh();
+        let mut parked = Vec::new();
+        for _ in 0..2 {
+            let mut builder = engine.machine.managed_builder().unwrap();
+            let root = builder.constructor(DataConId(105), &[]).unwrap();
+            let continuation = builder.finish(realm, root).unwrap();
+            parked.push(
+                engine
+                    .machine
+                    .park(
+                        continuation,
+                        realm,
+                        None,
+                        ParkRequest {
+                            principal: PrincipalId::SYSTEM,
+                            effect_policy: EffectRunPolicy::SuspendAll,
+                            live_payload: LivePayloadPolicy::None,
+                            evidence: PreparedFrameEvidence {
+                                owner: program,
+                                site: 7,
+                                runner: program,
+                                resume_entry: ValueId(1),
+                                continuation_rep: RuntimeRep::LiftedRef,
+                            },
+                        },
+                    )
+                    .unwrap(),
+            );
+        }
+        let table = json_mount_table();
+        let response = serde_json::json!({"answer": 42});
+        let handles = engine.handle_count();
+        let roots = engine.persistent_roots_count();
+        engine.set_invocation_cancel(Some(Arc::new(AtomicBool::new(true))));
+        assert!(matches!(
+            engine.resume_with_structural_answer(parked[0], &response, &table),
+            Err(PreparedRuntimeError::Cancelled)
+        ));
+        assert_eq!(engine.parked_count(), 2);
+        assert_eq!(engine.handle_count(), handles);
+        assert_eq!(engine.persistent_roots_count(), roots);
+        assert!(!engine.cancel_handle(realm).is_cancelled());
+
+        engine.set_invocation_cancel(Some(Arc::new(AtomicBool::new(false))));
+        let resumed = engine
+            .resume_with_structural_answer(parked[1], &response, &table)
+            .unwrap();
+        let PreparedSettlement::Done { value } = resumed.settlement else {
+            panic!("fixture resume returns Done");
+        };
+        engine.release(value);
+        assert_eq!(engine.parked_count(), 1);
+        engine.cancel_handle(realm).cancel();
+        assert!(matches!(
+            engine.resume_with_structural_answer(parked[0], &response, &table),
+            Err(PreparedRuntimeError::Cancelled)
+        ));
+        assert_eq!(engine.parked_count(), 1);
+        assert_eq!(engine.close_realm(realm), (1, 0));
+        assert_eq!(engine.parked_count(), 0);
     }
 
     #[test]

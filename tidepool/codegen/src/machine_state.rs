@@ -287,6 +287,7 @@ impl TemporaryRoots {
 /// rely on — see e.g. `set_first_cause`'s `try_borrow_mut` defense below.
 pub struct MachineState {
     cancel_flag: RefCell<Option<Arc<AtomicBool>>>,
+    invocation_cancel: RefCell<Option<Arc<AtomicBool>>>,
     #[cfg(test)]
     prepared_test_failure: RefCell<Option<PreparedTestFailure>>,
     stack_map_registry: RefCell<Vec<*const StackMapRegistry>>,
@@ -454,6 +455,7 @@ impl MachineState {
     pub fn new() -> Self {
         Self {
             cancel_flag: RefCell::new(None),
+            invocation_cancel: RefCell::new(None),
             #[cfg(test)]
             prepared_test_failure: RefCell::new(None),
             stack_map_registry: RefCell::new(Vec::new()),
@@ -629,11 +631,23 @@ impl MachineState {
         self.cancel_flag.borrow_mut().take();
     }
 
+    pub(crate) fn set_invocation_cancel(&self, flag: Option<Arc<AtomicBool>>) {
+        *self.invocation_cancel.borrow_mut() = flag;
+    }
+
+    pub(crate) fn invocation_cancel_requested(&self) -> bool {
+        self.invocation_cancel
+            .borrow()
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+    }
+
     pub(crate) fn cancel_requested(&self) -> bool {
         self.cancel_flag
             .borrow()
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Relaxed))
+            || self.invocation_cancel_requested()
     }
 
     /// Every prepared poll records on this invocation. No TLS lookup is
