@@ -1076,24 +1076,83 @@ impl ResidentToolEndpoint for ResidentToolPolicy {
 pub(crate) fn install_local_resident_tools(
     actor: crate::LocalActorRef,
     awaiting: &ResidentToolAwait,
-) -> ResidentToolPolicy {
-    ResidentToolPolicy {
-        tools: awaiting
-            .declarations
-            .iter()
-            .cloned()
-            .map(HostedTool::from)
-            .collect::<Vec<_>>()
-            .into(),
+) -> Result<ResidentToolPolicy, exomonad_tool::ToolDeclarationError> {
+    let tools = project_local_resident_tools(&awaiting.declarations)?;
+    Ok(ResidentToolPolicy {
+        tools: tools.into(),
         instructions: (!awaiting.synopsis.is_empty()).then(|| awaiting.synopsis.clone()),
         client: ResidentToolClient::local(actor),
-    }
+    })
+}
+
+fn project_local_resident_tools(
+    declarations: &[exomonad_tool::ToolDeclaration],
+) -> Result<Vec<HostedTool>, exomonad_tool::ToolDeclarationError> {
+    declarations
+        .iter()
+        .cloned()
+        .map(HostedTool::try_from_declaration)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tidepool_runtime::session::{WorkbenchResponse, WorkbenchRunStatus};
+
+    fn declaration(
+        name: &str,
+        kind: exomonad_tool::ToolKind,
+        input_schema: serde_json::Value,
+    ) -> exomonad_tool::ToolDeclaration {
+        exomonad_tool::ToolDeclaration {
+            name: name.into(),
+            description: format!("{name} tool"),
+            input_schema,
+            output_schema: None,
+            kind,
+        }
+    }
+
+    #[test]
+    fn local_resident_install_rejects_non_object_functions_and_keeps_valid_inputs() {
+        let invalid = declaration(
+            "ping",
+            exomonad_tool::ToolKind::Call,
+            serde_json::json!({"type": "null"}),
+        );
+        assert!(matches!(
+            project_local_resident_tools(&[invalid]),
+            Err(exomonad_tool::ToolDeclarationError::FunctionInputMustBeObject { name })
+                if name == "ping"
+        ));
+        assert!(
+            project_local_resident_tools(&[declaration(
+                "empty",
+                exomonad_tool::ToolKind::Call,
+                serde_json::json!({}),
+            )])
+            .is_err()
+        );
+
+        let valid = declaration(
+            "lookup",
+            exomonad_tool::ToolKind::Call,
+            serde_json::json!({"type": "object", "properties": {}}),
+        );
+        let raw = declaration(
+            "bash",
+            exomonad_tool::ToolKind::Raw,
+            serde_json::json!({"type": "string"}),
+        );
+        let tools = project_local_resident_tools(&[valid, raw]).unwrap();
+        assert!(matches!(tools[0], HostedTool::Function(_)));
+        assert!(matches!(tools[1], HostedTool::Custom(_)));
+        assert!(tools[0].accepts(&exomonad_tool::ToolArguments::Structured(
+            serde_json::json!({})
+        )));
+        assert!(tools[1].accepts(&exomonad_tool::ToolArguments::Raw("pwd".into())));
+    }
 
     struct LegacyEndpoint {
         dispatches: Arc<std::sync::atomic::AtomicUsize>,

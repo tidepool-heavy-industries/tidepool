@@ -46,7 +46,49 @@ impl From<ToolDeclaration> for HostedTool {
     }
 }
 
+/// A declaration that cannot be represented by the model-facing hosted
+/// invocation contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolDeclarationError {
+    FunctionInputMustBeObject { name: String },
+}
+
+impl std::fmt::Display for ToolDeclarationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FunctionInputMustBeObject { name } => write!(
+                formatter,
+                "function tool {name:?} must declare an object input schema"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ToolDeclarationError {}
+
 impl HostedTool {
+    /// Convert one typed declaration to its model-facing representation.
+    ///
+    /// Function transports return structured JSON objects. Require the
+    /// declaration to describe object arguments explicitly. Raw tools keep
+    /// their existing text contract.
+    pub fn try_from_declaration(
+        declaration: ToolDeclaration,
+    ) -> Result<Self, ToolDeclarationError> {
+        if declaration.kind != ToolKind::Raw
+            && declaration
+                .input_schema
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                != Some("object")
+        {
+            return Err(ToolDeclarationError::FunctionInputMustBeObject {
+                name: declaration.name,
+            });
+        }
+        Ok(declaration.into())
+    }
+
     #[must_use]
     pub fn name(&self) -> &str {
         match self {
@@ -223,6 +265,52 @@ pub enum ToolKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn declaration(kind: ToolKind, input_schema: serde_json::Value) -> ToolDeclaration {
+        ToolDeclaration {
+            name: "probe".into(),
+            description: "Probe a model-facing tool surface".into(),
+            input_schema,
+            output_schema: None,
+            kind,
+        }
+    }
+
+    #[test]
+    fn hosted_function_declarations_require_object_input_schemas() {
+        for input_schema in [
+            serde_json::json!({}),
+            serde_json::json!({"type": "null"}),
+            serde_json::json!({"type": "string"}),
+            serde_json::json!({"type": "array", "items": {"type": "string"}}),
+        ] {
+            assert_eq!(
+                HostedTool::try_from_declaration(declaration(ToolKind::Call, input_schema)),
+                Err(ToolDeclarationError::FunctionInputMustBeObject {
+                    name: "probe".into(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn hosted_declarations_keep_object_functions_and_raw_text_inputs() {
+        let object = HostedTool::try_from_declaration(declaration(
+            ToolKind::Update,
+            serde_json::json!({"type": "object", "properties": {}}),
+        ))
+        .expect("object function declaration");
+        assert!(matches!(object, HostedTool::Function(_)));
+        assert!(object.accepts(&ToolArguments::Structured(serde_json::json!({}))));
+
+        let raw = HostedTool::try_from_declaration(declaration(
+            ToolKind::Raw,
+            serde_json::json!({"type": "string"}),
+        ))
+        .expect("raw text declaration");
+        assert!(matches!(raw, HostedTool::Custom(_)));
+        assert!(raw.accepts(&ToolArguments::Raw("literal".into())));
+    }
 
     #[test]
     fn wire_shape_uses_the_model_facing_schema_name() {
