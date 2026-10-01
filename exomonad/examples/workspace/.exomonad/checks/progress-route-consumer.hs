@@ -1,3 +1,3 @@
 {-# LANGUAGE QuasiQuotes #-}
 let consumerLabel = [label|consumer|]
-consumer <- unfold (batch campaignLabelValue wave) (child (coding @Text projectHead (assignment consumerLabel ([] :: Attention))))
+consumer <- unfoldDeferred (batch campaignLabelValue wave) (child (withLifetime ActorOwned $ coding @Text projectHead (assignment consumerLabel ([] :: Attention))))

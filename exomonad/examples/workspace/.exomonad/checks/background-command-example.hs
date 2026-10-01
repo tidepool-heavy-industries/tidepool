@@ -1,13 +1,10 @@
 -- Stage: imports
 import qualified Tidepool.Command as Cmd
 import Project.BackgroundCommandExample
--- Stage: start
+-- Stage: await
 job <- Cmd.start (Cmd.withMemory (Cmd.MiB 64) (Cmd.argv ["sh", "-c", "printf passed"]))
--- Stage: watch
-watcher <- startCommandWatcher job
+commandEvidence <- awaitCommandEvidence job
 -- Stage: compact-query
-readCommandProjection watcher
+completionProjection job commandEvidence
 -- Stage: full-evidence
-readCommandEvidence watcher
--- Stage: cleanup
-finishCommandWatcher watcher
+commandEvidence

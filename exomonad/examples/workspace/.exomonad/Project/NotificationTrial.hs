@@ -53,7 +53,7 @@ notificationEpisode policy render state index
             WorkChanged _ delta -> Text.intercalate "; "
               (map candidateFacts (addedEvidence delta ++ map checkpointCandidate (addedReviewed delta)))
             _ -> "none"
-        , "Explicitly incorporated candidates: " <> Text.intercalate "; "
+        , "Explicitly acknowledged candidates: " <> Text.intercalate "; "
             [name <> "@" <> candidateFacts candidate
             | (name, candidate) <- handledWork state]
         , "Unresolved questions: " <> Text.intercalate "; "
@@ -68,5 +68,5 @@ notificationEpisode policy render state index
 -- A repeated OID can carry changed check claims or remaining gates.
 candidateFacts :: Candidate -> Text
 candidateFacts candidate = renderGitOid (candidateCommit candidate)
-  <> " reported checks: " <> Text.pack (show (checkedCommands candidate))
+  <> " reported checks: " <> Text.pack (show (reportedChecks candidate))
   <> " remaining gates: " <> Text.pack (show (remainingGates candidate))

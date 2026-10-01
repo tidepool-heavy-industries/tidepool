@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -12,17 +13,18 @@
 -- Project policy for live waves. The kernel owns ordered delivery and lifetime;
 -- this actor retains engineering evidence and chooses which changes need judgment.
 module Project.Routing
-  ( WorkActor (workSnapshot, workNotification, incorporatedWork), WorkState (..), WorkSource (..), WorkStatus (..)
-  , WorkEvent (..), WorkDelta (..), workChange, Notice (..), WorkSink (..)
+  ( WorkActor (workSnapshot, workNotification, acknowledgeWork), WorkState (..), WorkSource (..), WorkStatus (..)
+  , WorkEvent (..), WorkDelta (..), workChange, Notice (..), WorkSink (..), WorkDelivery (..), ObserverAdmission (..), noWorkDelivery, observeWork
   , WorkNoticePolicy (..), WorkPolicyReceipt (..), setWorkNoticePolicy
   , followWork, workDefinition, readWork, finishWork, keepWork, outstandingEvidence, outstandingReviewed
   , notifyWork, workNoticeMessage, workMessage, workQuestionsMessage, withCheckpoints
   , ReviewReadiness (..), reviewReadiness, reviewReadyMessage, notifyReviewReady
-  , WorkBranch, WorkBatch (..), workChild, unfoldWork, unfoldWorkWith, finishWorkBatch
+  , WorkBatchPlan, BatchFailure (..), RoutedBatch (..), WorkBatch (..)
+  , projectWorkChildWith, projectWorkChild, workChild, unfoldWorkBatch, unfoldWork, unfoldWorkWith, finishWorkBatch, finishRoutedBatch
   ) where
 
 import Control.Monad.Freer (Eff, Member)
-import Data.List (nub, sort, (\\))
+import Data.List (nub, (\\))
 import GHC.Generics (Generic)
 import qualified Tidepool.Actor.Record as R
 import Data.Text (Text)
@@ -33,65 +35,159 @@ import Tidepool.Worktree (renderGitOid)
 import Tidepool.Effects.Core (Actor)
 import Project.Types
 import Project.Actors (CoordinationEffects, coordinationActor)
-import Project.Work (candidateAtSubmission, sameQuestion)
+import Project.Work (sameQuestion)
 
--- A batch describes only the children admitted now. Later batches are ordinary
--- subsequent notebook calls, and results need not be code candidates.
-data WorkBranch effects value = WorkBranch Text
-  (Unfold effects (Text, Response value, Progress WorkProgress))
+-- Applicative admission retains the original handle product. Only the event
+-- projection changes a result's value; execution and worktree receipts survive.
+data WorkBatchPlan effects event handles = WorkBatchPlan [Text]
+  (Unfold effects (handles, WorkSources event))
+
+data WorkSources value = WorkSources
+  { progressEvents :: R.EventSource (Text, ProgressState WorkProgress)
+  , resultEvents :: R.EventSource (Text, Either ResponseFailure (ResponseResult value))
+  }
+
+instance Semigroup (WorkSources value) where
+  WorkSources lp lr <> WorkSources rp rr = WorkSources (lp <> rp) (lr <> rr)
+
+instance Monoid (WorkSources value) where
+  mempty = WorkSources mempty mempty
+
+instance Functor (WorkBatchPlan effects event) where
+  fmap f (WorkBatchPlan names admission) = WorkBatchPlan names
+    (fmap (\(handles, sources) -> (f handles, sources)) admission)
+
+instance Applicative (WorkBatchPlan effects event) where
+  pure handles = WorkBatchPlan [] (pure (handles, mempty))
+  WorkBatchPlan ln left <*> WorkBatchPlan rn right = WorkBatchPlan (ln ++ rn)
+    ((\(f, ls) (x, rs) -> (f x, ls <> rs)) <$> left <*> right)
+
+data BatchFailure = EmptyWorkBatch | EmptyWorkName | DuplicateWorkName Text
+  | WorkAdmissionRefused UnfoldError
+  deriving (Show, Eq)
+
+validateBatch :: [Text] -> Either BatchFailure ()
+validateBatch [] = Left EmptyWorkBatch
+validateBatch names
+  | any (Text.null . Text.strip) names = Left EmptyWorkName
+  | otherwise = go [] names
+  where
+    go _ [] = Right ()
+    go seen (name : rest)
+      | name `elem` seen = Left (DuplicateWorkName name)
+      | otherwise = go (name : seen) rest
+
+data RoutedBatch handles event = RoutedBatch
+  { routedMembers :: handles
+  , routedCollector :: ActorHandle (WorkActor event)
+  }
 
 data WorkBatch value = WorkBatch
   { batchMembers :: [(Text, Response value, Progress WorkProgress)]
   , batchRouter :: ActorHandle (WorkActor value)
   }
 
--- Prepared admission needs the caller's concrete result type.
+{-# INLINE projectWorkChildWith #-}
+projectWorkChildWith
+  :: forall progress value event child input parent.
+     (KnownEffects child, Subset child parent)
+  => Text -> (progress -> WorkProgress) -> (value -> event)
+  -> Branch child input value
+  -> WorkBatchPlan parent event (Text, Response value, Progress progress)
+projectWorkChildWith name projectProgress projectResult branch = WorkBatchPlan [name] $
+  (\(response, progress) ->
+    ((name, response, progress), WorkSources
+      (fmap ((,) name . mapProgress projectProgress) (R.progress progress))
+      (fmap ((,) name . fmap (mapResult projectResult)) (R.settlement response))))
+    <$> childWithProgress @progress @value (withReport Silent branch)
+  where
+    mapProgress f observation = case observation of
+      ProgressPending -> ProgressPending
+      ProgressUpdate cursor value -> ProgressUpdate cursor (f value)
+      ProgressClosed -> ProgressClosed
+      ProgressRejected failure -> ProgressRejected failure
+    mapResult f receipt = ResponseResult (f (responseValue receipt))
+      (responseExecution receipt) (responseWorktree receipt)
+
+{-# INLINE projectWorkChild #-}
+projectWorkChild
+  :: (KnownEffects child, Subset child parent)
+  => Text -> (value -> event) -> Branch child input value
+  -> WorkBatchPlan parent event (Text, Response value, Progress WorkProgress)
+projectWorkChild name = projectWorkChildWith name id
+
 {-# INLINE workChild #-}
 workChild
-  :: forall value child input parent. (KnownEffects child, Subset child parent)
-  => Text -> Branch child input value -> WorkBranch parent value
-workChild name branch = WorkBranch name $
-  (\(response, progress) -> (name, response, progress))
-    <$> childWithProgress @WorkProgress @value (withReport Silent branch)
+  :: (KnownEffects child, Subset child parent)
+  => Text -> Branch child input value
+  -> WorkBatchPlan parent value (Text, Response value, Progress WorkProgress)
+workChild name = projectWorkChild name id
 
--- Validate names before admitting children. The caller remains the requester;
--- the collector observes outcomes without acquiring active-update authority.
+unfoldWorkBatch
+  :: (Member Forks effects, Member Replies effects, Member AgentInspection effects,
+      Member Actor effects)
+  => ForkGroupPath -> WorkBatchPlan effects event handles -> WorkSink event
+  -> Eff effects (Either BatchFailure (RoutedBatch handles event))
+unfoldWorkBatch group plan sink = fmap (fmap fst)
+  (admitWorkBatch group plan (\_ -> pure (sink, ())))
+
+admitWorkBatch
+  :: (Member Forks effects, Member Replies effects, Member AgentInspection effects,
+      Member Actor effects)
+  => ForkGroupPath -> WorkBatchPlan effects event handles
+  -> (handles -> Eff effects (WorkSink event, extra))
+  -> Eff effects (Either BatchFailure (RoutedBatch handles event, extra))
+admitWorkBatch group (WorkBatchPlan names admission) configure = case validateBatch names of
+  Left issue -> pure (Left issue)
+  Right () -> do
+    admitted <- attemptUnfold group admission
+    case admitted of
+      Left issue -> pure (Left (WorkAdmissionRefused issue))
+      Right (members, sources) -> do
+        (sink, extra) <- configure members
+        router <- R.start (sourceDefinition names sources sink)
+        pure (Right (RoutedBatch members router, extra))
+
 unfoldWork
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects,
       Member Actor effects)
-  => ForkGroupPath -> [WorkBranch effects value] -> WorkSink value
-  -> Eff effects (WorkBatch value)
-unfoldWork group branches sink = fst <$> unfoldWorkWith group branches (\_ -> pure (sink, ()))
+  => ForkGroupPath
+  -> [WorkBatchPlan effects value (Text, Response value, Progress WorkProgress)]
+  -> WorkSink value -> Eff effects (Either BatchFailure (WorkBatch value))
+unfoldWork group branches sink = fmap (fmap fst)
+  (unfoldWorkWith group branches (\_ -> pure (sink, ())))
 
--- Configure routing from the original admitted handles before attaching the
--- collector. Authored compositions use this seam without readmitting children.
 unfoldWorkWith
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects,
       Member Actor effects)
-  => ForkGroupPath -> [WorkBranch effects value]
+  => ForkGroupPath
+  -> [WorkBatchPlan effects value (Text, Response value, Progress WorkProgress)]
   -> ([(Text, Response value, Progress WorkProgress)] -> Eff effects (WorkSink value, extra))
-  -> Eff effects (WorkBatch value, extra)
-unfoldWorkWith group branches configure
-  | null branches = error "unfoldWork: empty batch"
-  | length names /= length (nub names) = error "unfoldWork: duplicate child name"
-  | any (Text.null . Text.strip) names = error "unfoldWork: empty child name"
-  | otherwise = do
-      members <- unfold group (sequenceA [branch | WorkBranch _ branch <- branches])
-      (sink, extra) <- configure members
-      router <- followWork members sink
-      pure (WorkBatch members router, extra)
-  where names = [name | WorkBranch name _ <- branches]
+  -> Eff effects (Either BatchFailure (WorkBatch value, extra))
+unfoldWorkWith group branches configure = fmap
+  (fmap (\(RoutedBatch members router, extra) -> (WorkBatch members router, extra)))
+  (admitWorkBatch group (sequenceA branches) configure)
 
 -- Closing the collector is distinct from retiring children. Refuse while any
 -- original request lacks a terminal observation, leaving its route intact.
 finishWorkBatch
   :: Member Actor effects => WorkBatch value
   -> Eff effects (Either [Text] (Actor.ActorExit (WorkState value)))
-finishWorkBatch batch = do
-  state <- readWork (batchRouter batch)
+finishWorkBatch = finishCollector . batchRouter
+
+finishRoutedBatch
+  :: Member Actor effects => RoutedBatch handles value
+  -> Eff effects (Either [Text] (Actor.ActorExit (WorkState value)))
+finishRoutedBatch = finishCollector . routedCollector
+
+finishCollector
+  :: Member Actor effects => ActorHandle (WorkActor value)
+  -> Eff effects (Either [Text] (Actor.ActorExit (WorkState value)))
+finishCollector router = do
+  state <- readWork router
   case [sourceName source | source <- collectedWork state,
         Nothing <- [sourceResult source]] of
-    [] -> Right <$> finishWork (batchRouter batch)
+    [] -> Right <$> finishWork router
     pending -> pure (Left pending)
 
 -- Closure keeps unanswered questions. The terminal response is independent of
@@ -158,6 +254,7 @@ data WorkState value = WorkState
   , workHistory :: [WorkEvent value]
   , handledWork :: [(Text, Candidate)]
   , workNoticePolicy :: WorkNoticePolicy
+  , workObserverAdmissions :: [ObserverAdmission]
   }
 
 -- Binding a snapshot should not print whole tasks or accumulated receipts.
@@ -175,29 +272,56 @@ data WorkActor value mode = WorkActor
   { workState :: mode :- State (WorkState value)
   , workSnapshot :: mode :- Call () (R.Reply (WorkState value))
   , workNotification :: mode :- Call NotificationReceipt (R.Reply (Either NotificationError NotificationState))
-  , incorporatedWork :: mode :- Call (Text, [Candidate]) NoReply
+  , acknowledgeWork :: mode :- Call (Text, [Candidate]) NoReply
   , workPolicy :: mode :- Call WorkNoticePolicy (R.Reply WorkPolicyReceipt)
   , workUpdates :: mode :- Event (Text, ProgressState WorkProgress)
   , workResults :: mode :- Event (Text, Either ResponseFailure (ResponseResult value))
   } deriving Generic
 
 type WorkEffects value = CoordinationEffects (WorkActor value)
--- Keep callback internals behind a named value. Notebook type pins can retain
--- WorkSink without exposing State or the collector's private effect list.
+-- A primary authored policy has ordinary actor failure semantics. Optional
+-- observer admission is separate and cannot throw on a refused mailbox.
+data WorkDelivery = WorkDelivery
+  { primaryWorkNotice :: Maybe (Either NotificationError NotificationReceipt)
+  , observerWorkAdmissions :: [(Text, Either Text ())]
+  }
+
+data ObserverAdmission = ObserverAdmission
+  { observerEvent :: Int
+  , observerName :: Text
+  , observerAdmission :: Either Text ()
+  } deriving (Show, Eq)
+
+noWorkDelivery :: WorkDelivery
+noWorkDelivery = WorkDelivery Nothing []
+
 newtype WorkSink value = WorkSink
-  { runWorkSink :: WorkEvent value
-      -> Handler (WorkState value) (WorkEffects value)
-           (Maybe (Either NotificationError NotificationReceipt))
+  { runWorkSink :: forall effects.
+      (Member Actor effects, Member Replies effects, Member Notifications effects)
+      => WorkNoticePolicy -> WorkEvent value -> Eff effects WorkDelivery
   }
 
 keepWork :: WorkSink value
-keepWork = WorkSink (const (pure Nothing))
+keepWork = WorkSink (\_ _ -> pure noWorkDelivery)
+
+observeWork
+  :: Text -> R.Send event -> (WorkEvent value -> Maybe event)
+  -> WorkSink value -> WorkSink value
+observeWork name endpoint project (WorkSink sink) = WorkSink $ \policy event -> do
+  delivered <- sink policy event
+  case project event of
+    Nothing -> pure delivered
+    Just projected -> do
+      admitted <- R.trySend endpoint projected
+      pure delivered { observerWorkAdmissions = observerWorkAdmissions delivered ++ [(name, admitted)] }
 
 followWork
   :: Member Actor effects
   => [(Text, Response value, Progress WorkProgress)] -> WorkSink value
-  -> Eff effects (ActorHandle (WorkActor value))
-followWork inputs sink = R.start (workDefinition inputs sink)
+  -> Eff effects (Either BatchFailure (ActorHandle (WorkActor value)))
+followWork inputs sink = case workDefinition inputs sink of
+  Left issue -> pure (Left issue)
+  Right spec -> Right <$> R.start spec
 
 readWork :: Member Actor effects => ActorHandle (WorkActor value) -> Eff effects (WorkState value)
 readWork router = R.call (workSnapshot (R.client router)) ()
@@ -214,14 +338,22 @@ finishWork = R.finish
 
 workDefinition
   :: forall value. [(Text, Response value, Progress WorkProgress)] -> WorkSink value
+  -> Either BatchFailure (ActorSpec (WorkActor value) (WorkEffects value))
+workDefinition inputs sink = do
+  let names = [name | (name, _, _) <- inputs]
+  validateBatch names
+  pure (sourceDefinition names (WorkSources
+    (mconcat [fmap ((,) name) (R.progress updates) | (name, _, updates) <- inputs])
+    (mconcat [fmap ((,) name) (R.settlement response) | (name, response, _) <- inputs])) sink)
+
+sourceDefinition
+  :: forall value. [Text] -> WorkSources value -> WorkSink value
   -> ActorSpec (WorkActor value) (WorkEffects value)
-workDefinition inputs (WorkSink sink)
-  | length names /= length (nub names) = error "work source names must be unique"
-  | otherwise = coordinationActor "work" WorkActor
-      { workState = WorkState [WorkSource name (WorkProgress [] []) Nothing WorkOpen Nothing | name <- names] [] [] [] QuestionsAndResults
+sourceDefinition names sources (WorkSink sink) = coordinationActor "work" WorkActor
+      { workState = WorkState [WorkSource name (WorkProgress [] []) Nothing WorkOpen Nothing | name <- names] [] [] [] QuestionsAndResults []
       , workSnapshot = \() -> R.get
       , workNotification = pollNotification
-      , incorporatedWork = \(name, candidates) -> R.modify' (\state -> state
+      , acknowledgeWork = \(name, candidates) -> R.modify' (\state -> state
           { handledWork = nub (handledWork state ++ [(name, candidate) | candidate <- candidates]) })
       , workPolicy = \policy -> do
           state <- R.get
@@ -231,11 +363,10 @@ workDefinition inputs (WorkSink sink)
             R.put (state { workNoticePolicy = policy
               , workHistory = workHistory state ++ [WorkPolicyChanged before policy] })
             pure (WorkPolicyReceipt (Just index) before policy)
-      , workUpdates = R.on (mconcat [fmap ((,) name) (R.progress updates) | (name, _, updates) <- inputs]) update
-      , workResults = R.on (mconcat [fmap ((,) name) (R.settlement response) | (name, response, _) <- inputs]) settled
+      , workUpdates = R.on (progressEvents sources) update
+      , workResults = R.on (resultEvents sources) settled
       }
   where
-    names = [name | (name, _, _) <- inputs]
     update (name, observation) = do
       state <- R.get
       case observation of
@@ -243,10 +374,7 @@ workDefinition inputs (WorkSink sink)
         ProgressUpdate cursor progress -> do
           let current = findSource name state
               previous = sourceProgress current
-              next = foldl (flip withReviewedCheckpoint)
-                (WorkProgress (nub (workEvidence previous ++ workEvidence progress))
-                  (nub (sort (workQuestions progress))))
-                (workReviewed previous ++ workReviewed progress)
+              next = mergeWorkProgress previous progress
           R.put (putSource (current { sourceProgress = next, sourceCursor = Just cursor }) state)
           publish (workChange name cursor previous next)
         ProgressClosed -> ended name WorkClosed
@@ -263,10 +391,12 @@ workDefinition inputs (WorkSink sink)
       state <- R.get
       let index = length (workHistory state)
       R.put (state { workHistory = workHistory state ++ [event] })
-      sent <- sink event
-      R.modify' (\current -> current { workNotices = case sent of
+      sent <- sink (workNoticePolicy state) event
+      R.modify' (\current -> current { workNotices = case primaryWorkNotice sent of
         Nothing -> workNotices current
-        Just receipt -> workNotices current ++ [Notice index receipt] })
+        Just receipt -> workNotices current ++ [Notice index receipt]
+        , workObserverAdmissions = workObserverAdmissions current ++
+            [ObserverAdmission index name receipt | (name, receipt) <- observerWorkAdmissions sent] })
 
 outstandingEvidence :: WorkState value -> WorkSource value -> [Candidate]
 outstandingEvidence state source =
@@ -299,11 +429,12 @@ putSource source state = state { collectedWork =
 -- Use another projection when partial evidence unlocks a known consumer. The
 -- default wakes only for question deltas, source failure and terminal results.
 notifyWork :: AgentRef -> (WorkEvent value -> Maybe Text) -> WorkSink value
-notifyWork owner render = WorkSink $ \event -> do
-  policy <- R.gets workNoticePolicy
+notifyWork owner render = WorkSink $ \policy event -> do
   case workNoticeMessage policy render event of
-    Nothing -> pure Nothing
-    Just message -> Just <$> sendMessage owner message
+    Nothing -> pure noWorkDelivery
+    Just message -> do
+      receipt <- sendMessage owner message
+      pure (WorkDelivery (Just receipt) [])
 
 workNoticeMessage
   :: WorkNoticePolicy -> (WorkEvent value -> Maybe Text) -> WorkEvent value -> Maybe Text
