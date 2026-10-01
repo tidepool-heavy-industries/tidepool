@@ -222,7 +222,7 @@ where
                                     child,
                                     session: descriptor.placement().session,
                                     scope: descriptor.placement().lexical_scope,
-                                    lexical: None,
+                                    lexical: Arc::new(OnceLock::new()),
                                 })
                                 .collect(),
                             unused_scopes: Vec::new(),
@@ -472,14 +472,21 @@ where
                 .map(|record| record.descriptor.clone());
             if let (Some(admitted), Some(target)) = (admitted, kernel.resolve(child)) {
                 if target.terminal().get().is_none() {
-                    let lexical = match prepared_lexical {
-                        Some(lexical) => lexical,
+                    let lexical = match prepared_lexical.get() {
+                        Some(lexical) => Arc::clone(lexical),
                         None => match environment
                             .runner
                             .retain_fork_release_scope(session, scope)
                             .await
                         {
-                            Ok(lexical) => lexical,
+                            Ok(lexical) => {
+                                prepared_lexical.set(lexical).ok();
+                                Arc::clone(
+                                    prepared_lexical
+                                        .get()
+                                        .expect("release retains first lexical grant"),
+                                )
+                            }
                             Err(error) => {
                                 return Err(ResidentKernelBehavior::<H, O>::failure(error))
                             }

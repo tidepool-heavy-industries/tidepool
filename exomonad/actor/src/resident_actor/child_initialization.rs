@@ -81,6 +81,76 @@ fn install_workspace(
         .map_err(|error| crate::ResidentActorWorkbenchError::ActorProtocol(error.to_string()))
 }
 
+/// One child boot accepts one committed allocation and exact lexical grant.
+/// Repeated delivery of that same custody cannot start another native boot.
+#[derive(Default)]
+pub(super) enum ForkChildReleaseState {
+    #[default]
+    Pending,
+    Released {
+        child: ActorRef,
+        admitted: ActorDescriptor,
+        publication_boundary: Option<WorkbenchForkBoundary>,
+        authority: Arc<crate::lineage::CommittedForkGroups>,
+    },
+}
+
+impl ForkChildReleaseState {
+    pub(super) fn released(release: &ForkChildRelease) -> Self {
+        Self::Released {
+            child: release.child,
+            admitted: release.admitted.clone(),
+            publication_boundary: release.publication_boundary.clone(),
+            authority: Arc::clone(&release.authority),
+        }
+    }
+
+    pub(super) fn matches_replay(
+        &self,
+        release: &ForkChildRelease,
+        actor: ActorRef,
+        descriptor: &ActorDescriptor,
+        lexical: Option<&Arc<RuntimeLexicalScopeLease>>,
+    ) -> bool {
+        let Self::Released {
+            child,
+            admitted,
+            publication_boundary,
+            authority,
+        } = self
+        else {
+            return false;
+        };
+        let Some(lexical) = lexical else {
+            return false;
+        };
+        *child == actor
+            && release.child == actor
+            && Arc::ptr_eq(authority, &release.authority)
+            && publication_boundary == &release.publication_boundary
+            && same_allocation(admitted, &release.admitted)
+            && same_allocation(admitted, descriptor)
+            && descriptor.placement().lexical_scope == lexical.scope()
+            && Arc::ptr_eq(lexical, &release.lexical)
+    }
+}
+
+fn same_allocation(original: &ActorDescriptor, current: &ActorDescriptor) -> bool {
+    original.placement().session == current.placement().session
+        && original.placement().resource_scope == current.placement().resource_scope
+        && original.actor_path() == current.actor_path()
+        && original.creator() == current.creator()
+        && original.supervisor_parent() == current.supervisor_parent()
+        && original.fork_group() == current.fork_group()
+        && original.fork_boundary() == current.fork_boundary()
+        && original.context_parent() == current.context_parent()
+        && original.checkpoint_token() == current.checkpoint_token()
+        && original.profile() == current.profile()
+        && original.effective_role() == current.effective_role()
+        && original.persistence_policy() == current.persistence_policy()
+        && original.source_layer() == current.source_layer()
+}
+
 /// One non-cloneable release of an already admitted child. The original
 /// allocation and committed group authority travel with the runtime-owned
 /// lexical share; a scope identifier alone cannot release a resident child.
@@ -125,15 +195,9 @@ impl ForkChildRelease {
 
     pub(super) fn matches(&self, actor: ActorRef, descriptor: &ActorDescriptor) -> bool {
         actor == self.child
-            && descriptor.placement() == self.admitted.placement()
-            && descriptor.actor_path() == self.admitted.actor_path()
+            && descriptor.placement().lexical_scope == self.admitted.placement().lexical_scope
             && descriptor.creator() == Some(self.authority.owner())
-            && descriptor.fork_group() == self.admitted.fork_group()
-            && descriptor.fork_boundary() == self.admitted.fork_boundary()
-            && descriptor.context_parent() == self.admitted.context_parent()
-            && descriptor.checkpoint_token() == self.admitted.checkpoint_token()
-            && descriptor.persistence_policy() == self.admitted.persistence_policy()
-            && descriptor.source_layer() == self.admitted.source_layer()
+            && same_allocation(&self.admitted, descriptor)
     }
 
     pub(super) fn into_lexical(self) -> Arc<RuntimeLexicalScopeLease> {
@@ -374,6 +438,86 @@ mod tests {
         ));
         // A refusal does not consume the original admitted selection.
         assert!(release.matches(actor, &descriptor));
+    }
+
+    #[test]
+    fn released_child_accepts_only_exact_original_authority_and_lexical_replay() {
+        let actor = ActorRef::first(ActorId(7));
+        let (release, descriptor, mut session) = scheduler_fixture(actor);
+        let state = ForkChildReleaseState::released(&release);
+        let adopted = descriptor
+            .clone()
+            .with_lexical_scope(release.lexical.scope());
+        assert!(!ForkChildReleaseState::Pending.matches_replay(
+            &release,
+            actor,
+            &adopted,
+            Some(&release.lexical),
+        ));
+        assert!(state.matches_replay(&release, actor, &adopted, Some(&release.lexical)));
+        let exact = ForkChildRelease::issue(
+            actor,
+            adopted.clone(),
+            release.publication_boundary.clone(),
+            Arc::clone(&release.authority),
+            Arc::clone(&release.lexical),
+        )
+        .unwrap();
+        assert!(state.matches_replay(&exact, actor, &adopted, Some(&release.lexical)));
+        let changed_boundary = ForkChildRelease::issue(
+            actor,
+            descriptor.clone(),
+            Some(WorkbenchForkBoundary::Route {
+                actor_id: 1,
+                incarnation: 1,
+                watch_id: 1,
+            }),
+            Arc::clone(&release.authority),
+            Arc::clone(&release.lexical),
+        )
+        .unwrap();
+        assert!(!state.matches_replay(&changed_boundary, actor, &adopted, Some(&release.lexical)));
+        assert!(!state.matches_replay(
+            &release,
+            actor,
+            &adopted.clone().with_lexical_scope(ScopeId(999)),
+            Some(&release.lexical),
+        ));
+
+        let (foreign, _, _foreign_session) = scheduler_fixture(actor);
+        let changed_authority = ForkChildRelease::issue(
+            actor,
+            descriptor.clone(),
+            release.publication_boundary.clone(),
+            Arc::clone(&foreign.authority),
+            Arc::clone(&release.lexical),
+        )
+        .unwrap();
+        assert!(!state.matches_replay(&changed_authority, actor, &adopted, Some(&release.lexical)));
+        assert!(!state.matches_replay(
+            &release,
+            ActorRef::first(ActorId(8)),
+            &adopted,
+            Some(&release.lexical)
+        ));
+        assert!(!state.matches_replay(
+            &release,
+            actor,
+            &adopted.clone().with_source_layer(vec!["/changed".into()]),
+            Some(&release.lexical),
+        ));
+        let alternate = session
+            .retain_lexical_scope(descriptor.placement().lexical_scope)
+            .unwrap();
+        let changed_lexical = ForkChildRelease::issue(
+            actor,
+            descriptor,
+            release.publication_boundary.clone(),
+            Arc::clone(&release.authority),
+            alternate,
+        )
+        .unwrap();
+        assert!(!state.matches_replay(&changed_lexical, actor, &adopted, Some(&release.lexical)));
     }
 
     #[test]
