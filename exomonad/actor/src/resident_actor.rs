@@ -11689,6 +11689,27 @@ where
             .await
     }
 
+    /// Admit an initial durable root with the directory's original reserved identity.
+    pub async fn admit_pending_root<F>(
+        &self,
+        descriptor: ActorDescriptor,
+        outcome: ResidentOutcome,
+        intent: F,
+    ) -> Result<
+        (
+            LocalActorRef,
+            ractor::concurrency::JoinHandle<()>,
+            RootStartupRelease,
+        ),
+        ractor::SpawnErr,
+    >
+    where
+        F: FnOnce(ActorRef) -> crate::RootStartupIntent + Send,
+    {
+        self.admit_pending_root_inner(descriptor, outcome, None, intent)
+            .await
+    }
+
     /// Register a durable root and retain its original boot without executing it.
     /// The admission and exact startup intent are one fsynced journal row.
     pub async fn admit_pending_root_with_identity(
@@ -11705,6 +11726,27 @@ where
         ),
         ractor::SpawnErr,
     > {
+        self.admit_pending_root_inner(descriptor, outcome, Some(identity), move |_| intent)
+            .await
+    }
+
+    async fn admit_pending_root_inner<F>(
+        &self,
+        descriptor: ActorDescriptor,
+        outcome: ResidentOutcome,
+        identity: Option<ActorRef>,
+        intent: F,
+    ) -> Result<
+        (
+            LocalActorRef,
+            ractor::concurrency::JoinHandle<()>,
+            RootStartupRelease,
+        ),
+        ractor::SpawnErr,
+    >
+    where
+        F: FnOnce(ActorRef) -> crate::RootStartupIntent + Send,
+    {
         let admission = self.environment.root_admission_closed.read().await;
         let refuse =
             |detail: &str| ractor::SpawnErr::StartupFailed(std::io::Error::other(detail).into());
@@ -11727,16 +11769,36 @@ where
         }
         let placement = descriptor.placement();
         let latch = Arc::new(Mutex::new(RootStartupState::Pending));
-        let mut behavior =
-            ResidentKernelBehavior::prepared(descriptor, self.environment.clone(), outcome);
-        behavior.root_startup = Some((intent.clone(), Arc::clone(&latch)));
-        let (actor, task) = crate::local_actor::spawn_local_actor_in_directory_with_identity(
-            None,
-            behavior,
-            identity,
-            self.directory.clone(),
-        )
-        .await?;
+        let mut original_intent = None;
+        let build = |identity| {
+            let intent = intent(identity);
+            original_intent = Some(intent.clone());
+            let mut behavior =
+                ResidentKernelBehavior::prepared(descriptor, self.environment.clone(), outcome);
+            behavior.root_startup = Some((intent, Arc::clone(&latch)));
+            behavior
+        };
+        let (actor, task) = match identity {
+            Some(identity) => {
+                crate::local_actor::spawn_local_actor_in_directory_with_identity(
+                    None,
+                    build(identity),
+                    identity,
+                    self.directory.clone(),
+                )
+                .await?
+            }
+            None => {
+                crate::local_actor::spawn_local_actor_in_directory_with_factory(
+                    None,
+                    self.incarnation,
+                    self.directory.clone(),
+                    build,
+                )
+                .await?
+            }
+        };
+        let identity = actor.identity();
         Ok((
             actor,
             task,
@@ -11744,7 +11806,8 @@ where
                 actor: identity,
                 placement,
                 latch,
-                intent,
+                intent: original_intent
+                    .expect("reserved actor admission constructed startup intent"),
             },
         ))
     }
