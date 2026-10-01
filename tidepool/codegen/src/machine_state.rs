@@ -2234,7 +2234,7 @@ impl MachineState {
         other: &Arc<crate::prepared_program::static_bytes::PinnedBytes>,
     ) {
         let mut pool = self.interned_bytes.borrow_mut();
-        if Arc::ptr_eq(&pool, other) {
+        if Arc::ptr_eq(&pool, other) || pool.contains_allocations(other) {
             return;
         }
         // Copy the lookup tables only while an outstanding compile still

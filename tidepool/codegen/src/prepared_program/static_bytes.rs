@@ -81,6 +81,16 @@ impl PinnedBytes {
         self.tables.by_value.get(logical)
     }
 
+    /// Exact-address admission preflight; content equality cannot prove that
+    /// this pool owns the allocation embedded by another image.
+    pub(crate) fn contains_allocations(&self, other: &Self) -> bool {
+        other
+            .tables
+            .by_address
+            .keys()
+            .all(|address| self.tables.by_address.contains_key(address))
+    }
+
     /// The nearest allocation preceding `address`; callers check its bounds.
     fn address_entry(&self, address: usize) -> Option<(usize, &PinnedLiteral)> {
         self.tables
@@ -463,6 +473,47 @@ mod tests {
             pool.logical_suffix(second.as_ptr() as usize + 2),
             Some(&b"ared"[..])
         );
+    }
+
+    #[test]
+    fn shared_pool_noop_admission_keeps_snapshot_without_copying_tables() {
+        let storage = storage_for(b"kept");
+        let manifest = Arc::new(PinnedBytes::new(BTreeMap::from([(
+            b"kept".to_vec(),
+            Arc::clone(&storage),
+        )])));
+        let machine = crate::machine_state::MachineState::new();
+        machine.absorb_interned_bytes(&manifest);
+        let snapshot = machine.interned_bytes();
+
+        machine.absorb_interned_bytes(&Arc::new(PinnedBytes::empty()));
+        assert!(
+            Arc::ptr_eq(&snapshot, &machine.interned_bytes()),
+            "an empty image must not replace a shared pool"
+        );
+        machine.absorb_interned_bytes(&manifest);
+        assert!(
+            Arc::ptr_eq(&snapshot, &machine.interned_bytes()),
+            "already-admitted exact allocations must not copy lookup tables"
+        );
+
+        let distinct = storage_for(b"kept");
+        let address = distinct.as_ptr() as usize;
+        assert_ne!(address, storage.as_ptr() as usize);
+        let duplicate_content = Arc::new(PinnedBytes::new(BTreeMap::from([(
+            b"kept".to_vec(),
+            distinct,
+        )])));
+        machine.absorb_interned_bytes(&duplicate_content);
+        let admitted = machine.interned_bytes();
+        assert!(!Arc::ptr_eq(&snapshot, &admitted));
+        assert_eq!(
+            snapshot.read_range(address, 4),
+            None,
+            "a held compile snapshot remains immutable"
+        );
+        assert_eq!(admitted.read_range(address, 4), Some(&b"kept"[..]));
+        assert!(Arc::ptr_eq(admitted.get(b"kept").unwrap(), &storage));
     }
     use std::collections::HashSet;
     use tidepool_heap::external_storage::ExternalStorageValidationError;
