@@ -8,11 +8,11 @@
 //! JIT/session state and must not be visible to `tidepool-toolchain`, which
 //! this crate depends on, not the reverse.
 
-use crate::session::SessionError;
 use crate::session::prepared::PreparedFailureStage;
+use crate::session::SessionError;
 use crate::{CompileError, RuntimeError};
 
-pub use tidepool_toolchain::failclass::{FailureClass, FailureEnvelope, Phase, classify_compile};
+pub use tidepool_toolchain::failclass::{classify_compile, FailureClass, FailureEnvelope, Phase};
 
 /// Dispatch [`classify_compile`] over the unified [`RuntimeError`]: a JIT error
 /// is a run-phase runtime failure, while a prepared error keeps the stage
@@ -76,7 +76,7 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         }
         // The declaration source is valid; its durable recovery artifact is
         // missing, corrupt, or incompatible with this runtime.
-        SessionError::RecoveryManifest { .. } => {
+        SessionError::RecoveryManifest { .. } | SessionError::RecoveryFormatRefused { .. } => {
             FailureEnvelope::new(FailureClass::Infra, Phase::Run, err.to_string())
         }
         // Visibility has committed. The typed error retains the declaration

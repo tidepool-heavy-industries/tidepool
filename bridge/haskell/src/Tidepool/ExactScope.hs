@@ -3,6 +3,7 @@
 module Tidepool.ExactScope
   ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..)
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..)
+  , PlannedCellAdmission(..), PlannedCellSlot(..)
   , readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation
   ) where
@@ -39,6 +40,7 @@ import Tidepool.DependencyEvidence
 data ExactScope = ExactScope
   { scopeManifestPath :: FilePath
   , scopeRequestSha256 :: String
+  , scopeProducerSha256 :: String
   , scopeSemanticSha256 :: String
   , scopeInterfaces :: [(ExactIfaceArtifact, FilePath, String)]
   , scopeLexical :: [((String, String), [(String, String)])]
@@ -76,6 +78,19 @@ data CheckedCellAdmission = CheckedCellAdmission
   , checkedInjectedModules :: [String]
   , checkedReservedModules :: [String]
   , checkedValueInterfaces :: [ExactIfaceArtifact]
+  , checkedPlannedCell :: Maybe PlannedCellAdmission
+  } deriving (Eq, Show)
+
+data PlannedCellSlot = PlannedPrologue Word64 | PlannedDeclaration Word64
+  | PlannedBind Word64 | PlannedExpression Word64 Word64 String
+  deriving (Eq, Show)
+
+data PlannedCellAdmission = PlannedCellAdmission
+  { plannedParserDigest :: String
+  , plannedParserPath :: FilePath
+  , plannedParserSha256 :: String
+  , plannedReservationDigest :: String
+  , plannedSlots :: [PlannedCellSlot]
   } deriving (Eq, Show)
 
 data CheckedItemAdmission = CheckedItemAdmission
@@ -224,9 +239,10 @@ decodeScope = do
   magic <- string
   version <- string
   unless (magic == "TPEXACTSCOPE"
-      && ((version == "1" && count == 6) || (version == "3" && count == 7)))
+      && ((version == "2" && count == 7) || (version == "4" && count == 8)))
     (fail "unsupported exact scope")
   semantic <- digestField
+  producer <- digestField
   interfaces <- bounded 4096 $ do
     array 7
     unit <- nonempty
@@ -274,7 +290,7 @@ decodeScope = do
           (exactUnit iface, exactModule iface) == (originalUnit originalProduct, originalModule originalProduct)
           && exactSha256 iface == originalIfaceSha256 originalProduct) interfaces) products)
     (fail "incomplete or conflicting exact owner closure")
-  (checked, checkedItem, checkedDisplay, includes) <- if version == "1" then pure (Nothing,Nothing,Nothing,Nothing) else do
+  (checked, checkedItem, checkedDisplay, includes) <- if version == "2" then pure (Nothing,Nothing,Nothing,Nothing) else do
     authCount <- decodeListLen
     purpose <- string
     case purpose of
@@ -282,10 +298,28 @@ decodeScope = do
         unless (authCount == 9) (fail "invalid cell-check admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
           <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
-          <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces
+          <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces <*> pure Nothing
         validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         unique "checked injected modules" (checkedInjectedModules admission)
         unique "checked reserved modules" (checkedReservedModules admission)
+        paths <- includePaths
+        pure (Just admission,Nothing,Nothing,Just paths)
+      "cell-program1" -> do
+        unless (authCount == 14) (fail "invalid compiled cell admission")
+        admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
+          <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
+          <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces
+          <*> (Just <$> (PlannedCellAdmission <$> digestField <*> absolute <*> digestField <*> digestField
+            <*> bounded 10000 (do
+              slotFields <- decodeListLen
+              kind <- nonempty
+              case (kind,slotFields) of
+                ("prologue",2) -> PlannedPrologue <$> decodeWord64
+                ("decl",2) -> PlannedDeclaration <$> decodeWord64
+                ("bind",2) -> PlannedBind <$> decodeWord64
+                ("expr",4) -> PlannedExpression <$> decodeWord64 <*> decodeWord64 <*> nonempty
+                _ -> fail "invalid compiled cell reservation")))
+        validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         paths <- includePaths
         pure (Just admission,Nothing,Nothing,Just paths)
       "checked-item2" -> do
@@ -354,7 +388,7 @@ decodeScope = do
         paths <- includePaths
         pure (Nothing,Nothing,Just admission,Just paths)
       _ -> fail "unsupported exact compile purpose"
-  pure (ExactScope "" "" semantic interfaces lexical products checked checkedItem checkedDisplay includes)
+  pure (ExactScope "" "" producer semantic interfaces lexical products checked checkedItem checkedDisplay includes)
   where
     includePaths = bounded 4096 $ do
       path <- absolute

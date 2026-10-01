@@ -42,6 +42,7 @@ data RequestField
   | Classify
   | ClassifyOut FilePath
   | Cell
+  | CellPlan
   | CellTemplate FilePath
   | CellOut FilePath
   | TurnPin String
@@ -97,6 +98,7 @@ data WorkerRequest = WorkerRequest
   , requestClassify :: Bool
   , requestClassifyOut :: Maybe FilePath
   , requestCell :: Bool
+  , requestCellPlan :: Bool
   , requestCellTemplate :: Maybe FilePath
   , requestCellOut :: Maybe FilePath
   , requestTurnPin :: Maybe String
@@ -142,6 +144,7 @@ emptyWorkerRequest = WorkerRequest
   , requestClassify = False
   , requestClassifyOut = Nothing
   , requestCell = False
+  , requestCellPlan = False
   , requestCellTemplate = Nothing
   , requestCellOut = Nothing
   , requestTurnPin = Nothing
@@ -219,6 +222,7 @@ requestFromFields = foldl apply emptyWorkerRequest
       Classify -> request { requestClassify = True }
       ClassifyOut path -> request { requestClassifyOut = Just path }
       Cell -> request { requestCell = True }
+      CellPlan -> request { requestCellPlan = True }
       CellTemplate path -> request { requestCellTemplate = Just path }
       CellOut path -> request { requestCellOut = Just path }
       TurnPin pin -> request { requestTurnPin = Just pin }
@@ -344,6 +348,7 @@ encodeField field = case field of
   InspectBrowse value -> taggedText 29 value
   InspectBrowseExpanded value -> taggedText 30 value
   Cell -> BS.singleton 31
+  CellPlan -> BS.singleton 51
   CellTemplate value -> taggedText 32 value
   CellOut value -> taggedText 33 value
   TurnPin value -> taggedText 34 value
@@ -452,6 +457,7 @@ pField bytes = do
     29 -> mapParser InspectBrowse pText rest
     30 -> mapParser InspectBrowseExpanded pText rest
     31 -> Right (Cell, rest)
+    51 -> Right (CellPlan, rest)
     32 -> mapParser CellTemplate pText rest
     33 -> mapParser CellOut pText rest
     34 -> mapParser TurnPin pText rest

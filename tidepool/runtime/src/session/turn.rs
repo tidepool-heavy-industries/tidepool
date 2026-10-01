@@ -1839,7 +1839,7 @@ pub struct CompiledTurn {
 
 #[derive(Clone, Debug, Default)]
 pub struct TurnCertification {
-    pub groups: Vec<PendingCertifiedGroup>,
+    pub groups: Arc<[PendingCertifiedGroup]>,
     pub target_owners: Vec<PendingImportOwner>,
     pub package_interfaces:
         tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces,
@@ -1897,7 +1897,7 @@ impl TurnCertification {
         if !display.matches_target(target)
             || generation != display.generation()
             || generation != admission.generation().0
-            || display.admission_digest() != admission.digest()
+            || !admission.matches_compiled_display(display)
             || !Arc::ptr_eq(display.capture(), admission.execution())
         {
             return Err(CompileError::ExtractFailed(
@@ -2509,6 +2509,16 @@ fn map_notfound(e: SpawnError) -> CompileError {
     CompileError::Io(crate::extract_spawn_error(e.source))
 }
 
+/// Admit the configured deployment before any compiler offer, candidate read,
+/// build-product selection, or worker body execution can use this endpoint.
+fn bind_extract_cmd(
+    command: &ExtractCmd,
+) -> Result<tidepool_toolchain::toolchain::AdmittedCompilerEndpoint, CompileError> {
+    let endpoint = command.bind().map_err(map_notfound)?;
+    tidepool_toolchain::toolchain::AdmittedCompilerEndpoint::from_bound(endpoint)
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))
+}
+
 /// Parse `stderr` via [`timing::ExtractTiming::parse`] and re-emit each phase
 /// as a `<prefix>.<phase>` stage via [`timing::record_stage`].
 ///
@@ -2587,6 +2597,48 @@ pub fn check_cell_admitted(
     templates: &[TurnTemplate],
     fold: Option<CellFoldTurn<'_>>,
 ) -> Result<(CellCheck, Option<TurnResult>), CellCheckFailure> {
+    validate_cell_admitted_request(&req, &admission)?;
+    if admission.plan_reservation().is_some() {
+        return Err(CompileError::ExtractFailed(
+            "planned cells require complete program compilation".into(),
+        )
+        .into());
+    }
+    let view = admission.view();
+    if admission.reserved_generations().len() > 1 {
+        return Err(CompileError::ExtractFailed(
+            "checked cells support one initial reserved declaration group".into(),
+        )
+        .into());
+    }
+    if fold
+        .as_ref()
+        .is_some_and(|fold| fold.gen != view.next_value_generation().0)
+    {
+        return Err(CompileError::ExtractFailed(
+            "checked fold has another runtime generation".into(),
+        )
+        .into());
+    }
+    if fold.as_ref().is_some_and(|fold| {
+        fold.templates.len() != templates.len()
+            || fold
+                .templates
+                .iter()
+                .zip(templates)
+                .any(|(a, b)| a.kind != b.kind || a.source != b.source)
+    }) {
+        return Err(
+            CompileError::ExtractFailed("checked fold has another compiler recipe".into()).into(),
+        );
+    }
+    check_cell_impl(req, fold, Some(admission), Some(templates))
+}
+
+fn validate_cell_admitted_request(
+    req: &CellCheckRequest<'_>,
+    admission: &super::RuntimeCellAdmission,
+) -> Result<(), CellCheckFailure> {
     let view = admission.view();
     if admission.private_execution().is_none() {
         return Err(CompileError::ExtractFailed(
@@ -2620,34 +2672,123 @@ pub fn check_cell_admitted(
         )
         .into());
     }
-    if admission.reserved_generations().len() > 1 {
+    Ok(())
+}
+
+/// Prepare every authored item and display before the caller can execute the
+/// first native effect. The compiler owns and seals the complete immutable
+/// program, including original declaration and Val interface identities.
+pub fn compile_cell_program_admitted(
+    req: CellCheckRequest<'_>,
+    admission: Arc<super::RuntimeCellAdmission>,
+    templates: &[TurnTemplate],
+) -> Result<
+    (
+        CellCheck,
+        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    ),
+    CellCheckFailure,
+> {
+    validate_cell_admitted_request(&req, &admission)?;
+    let planned = admission.plan_reservation().ok_or_else(|| {
+        CompileError::ExtractFailed(
+            "complete cell compilation requires its parser reservation".into(),
+        )
+    })?;
+    let scratch = TempDir::new()?;
+    let cell_path = scratch.path().join("cell.txt");
+    let template_path = scratch.path().join("CellCheckTemplate.hs");
+    let output_path = scratch.path().join("cell.cbor");
+    std::fs::write(&cell_path, req.cell_text)?;
+    std::fs::write(&template_path, req.template)?;
+    let mut command = extract_cmd()?;
+    command
+        .input(&cell_path)
+        .cell()
+        .cell_template(&template_path)
+        .cell_out(&output_path)
+        .output_dir(scratch.path())
+        .includes(req.include)
+        .session_root(req.session_root)
+        .inject_vals(req.inject_modules);
+    if let Some(session) = req.session_id {
+        command.session_incarnation(session.0.to_string());
+    }
+    for (index, template) in templates.iter().enumerate() {
+        let path = scratch.path().join(format!("checked-template-{index}.hs"));
+        std::fs::write(&path, &template.source)?;
+        command.turn_template(template.kind.wire_name(), &path);
+    }
+    for (identity, generation) in admission.admitted_retained_imports() {
+        command.retained_generation(extract_identity(identity), *generation);
+    }
+    let endpoint = bind_extract_cmd(&command)?;
+    let specification = CheckedCellSpecification {
+        admission_digest: admission.digest(),
+        cell_source: req.cell_text.to_owned(),
+        template_source: req.template.to_owned(),
+        turn_templates: templates
+            .iter()
+            .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+            .collect(),
+        injected_modules: req.inject_modules.to_vec(),
+        reserved_declaration_modules: admission
+            .reserved_generations()
+            .iter()
+            .map(|generation| tidepool_repr::SessionModule::lib(*generation).module_name())
+            .collect(),
+    };
+    if specification.specification_digest() != admission.specification_digest() {
         return Err(CompileError::ExtractFailed(
-            "checked cells support one initial reserved declaration group".into(),
+            "cell compiler recipe differs from its runtime reservation".into(),
         )
         .into());
     }
-    if fold
-        .as_ref()
-        .is_some_and(|fold| fold.gen != view.next_value_generation().0)
-    {
-        return Err(CompileError::ExtractFailed(
-            "checked fold has another runtime generation".into(),
-        )
-        .into());
+    let include = req
+        .include
+        .iter()
+        .map(|path| path.to_path_buf())
+        .collect::<Vec<_>>();
+    let offer = ModuleCandidateOffer::select_cell_program(
+        &endpoint,
+        &include,
+        scratch.path(),
+        req.exact_context.clone(),
+        specification,
+        admission
+            .interfaces()
+            .iter()
+            .map(|interface| (interface.module(), interface.bytes_owned().clone()))
+            .collect(),
+        planned.compiler_specification(),
+    )?;
+    if let Some(root) = offer.checked_value_root() {
+        command.session_root(root);
     }
-    if fold.as_ref().is_some_and(|fold| {
-        fold.templates.len() != templates.len()
-            || fold
-                .templates
-                .iter()
-                .zip(templates)
-                .any(|(a, b)| a.kind != b.kind || a.source != b.source)
-    }) {
-        return Err(
-            CompileError::ExtractFailed("checked fold has another compiler recipe".into()).into(),
-        );
+    if let Some(manifest) = offer.exact_scope_path() {
+        command.session_artifacts(manifest);
     }
-    check_cell_impl(req, fold, Some(admission), Some(templates))
+    if let Some(manifest) = offer.manifest_path() {
+        command.module_candidates(manifest);
+    }
+    crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
+    let run = endpoint.execute(&command).map_err(map_notfound)?;
+    let report =
+        crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
+            .map_err(|error| offer.retain_failure(scratch.path(), &run.output.stderr, error))?;
+    let program = offer
+        .admit_cell_program(scratch.path())
+        .map_err(|error| offer.retain_failure(scratch.path(), &run.output.stderr, error))?;
+    let mut checked = decode_cell_out(
+        program.checked_cell().observations(),
+        req.cell_text,
+        req.compile_generation,
+        req.compile_view_evidence,
+    )?;
+    checked.warnings = report.diagnostics;
+    checked.authority = Some(program.checked_cell().clone());
+    checked.admission = Some(admission);
+    Ok((checked, program))
 }
 
 fn check_cell_impl(
@@ -2697,7 +2838,7 @@ fn check_cell_impl(
             cmd.turn_template(tmpl.kind.wire_name(), &path);
         }
     }
-    let endpoint = cmd.bind().map_err(map_notfound)?;
+    let endpoint = bind_extract_cmd(&cmd)?;
     let include: Vec<_> = req.include.iter().map(|path| path.to_path_buf()).collect();
     let offer = if let Some(admission) = &admission {
         let context = req.exact_context.clone();
@@ -2755,7 +2896,7 @@ fn check_cell_impl(
     if let Some(manifest) = offer.manifest_path() {
         cmd.module_candidates(manifest);
     }
-    crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
+    crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
     let run = endpoint.execute(&cmd).map_err(map_notfound)?;
     let output = &run.output;
     timing::log_interface_counts(&output.stderr);
@@ -2914,6 +3055,172 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
     run_turn_with_pin(req, None, false, None, None)
 }
 
+/// Select the precompiled native item from the complete immutable program.
+/// Runtime admission still owns the ordered cursor and exact live native leases.
+pub fn consume_cell_program_item(
+    admission: Arc<super::RuntimeCheckedItemAdmission>,
+) -> Result<TurnResult, TurnFailure> {
+    let program = admission.prefix().cell_program().ok_or_else(|| {
+        CompileError::ExtractFailed("item admission has no complete cell program".into())
+    })?;
+    let item = program
+        .items()
+        .get(admission.item().index())
+        .ok_or_else(|| {
+            CompileError::ExtractFailed("item is outside its complete cell program".into())
+        })?;
+    let execution = item.native().ok_or_else(|| {
+        CompileError::ExtractFailed("complete cell item has no native products".into())
+    })?;
+    if item.checked_item() != admission.item() || execution.generation() != admission.generation().0
+    {
+        return Err(CompileError::ExtractFailed(
+            "prepared item differs from its original reservation".into(),
+        )
+        .into());
+    }
+    let mut result = decode_cell_program_turn(item, false)?;
+    let certification = match &mut result {
+        TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
+            compiled.certification.as_mut()
+        }
+        TurnResult::Decl(_) => None,
+    }
+    .ok_or_else(|| {
+        CompileError::ExtractFailed("prepared native item lacks certified products".into())
+    })?;
+    certification.checked_prefix = Some(admission.prefix().clone());
+    execution.validate_runtime_admission(admission.digest(), program.admission_digest())?;
+    Ok(result)
+}
+
+/// Select the prepared generic display for an actually completed capture.
+/// Budget and seen-job inputs enter the native runner through runtime admission.
+pub fn consume_cell_program_display(
+    admission: Arc<super::RuntimeCheckedDisplayAdmission>,
+) -> Result<TurnResult, TurnFailure> {
+    let program = admission.prefix().cell_program().ok_or_else(|| {
+        CompileError::ExtractFailed("display admission has no complete cell program".into())
+    })?;
+    let item = program
+        .items()
+        .get(admission.execution().item().index())
+        .ok_or_else(|| {
+            CompileError::ExtractFailed("capture is outside its complete cell program".into())
+        })?;
+    let proof = item.display().ok_or_else(|| {
+        CompileError::ExtractFailed("complete cell capture has no prepared display".into())
+    })?;
+    if !admission.matches_compiled_display(proof)
+        || !Arc::ptr_eq(proof.capture(), admission.execution())
+        || proof.generation() != admission.generation().0
+    {
+        return Err(CompileError::ExtractFailed(
+            "prepared display differs from its completed capture".into(),
+        )
+        .into());
+    }
+    let mut result = decode_cell_program_turn(item, true)?;
+    let TurnResult::Bind {
+        compiled, bound, ..
+    } = &mut result
+    else {
+        return Err(CompileError::ExtractFailed(
+            "prepared display is not its binding bundle".into(),
+        )
+        .into());
+    };
+    let certification = compiled.certification.as_mut().ok_or_else(|| {
+        CompileError::ExtractFailed("prepared display lacks certified products".into())
+    })?;
+    certification.checked_display_admission = Some(admission.clone());
+    certification.validate_checked_display(&compiled.prepared, admission.generation().0, bound)?;
+    Ok(result)
+}
+
+fn decode_cell_program_turn(
+    item: &tidepool_toolchain::checked_cell::CellProgramItem,
+    display: bool,
+) -> Result<TurnResult, CompileError> {
+    let (turn_bytes, metadata_bytes, products, prepared) = if display {
+        (
+            item.display_turn_bytes(),
+            item.display_metadata_bytes(),
+            item.display_products(),
+            item.display().map(|proof| proof.target_owned()),
+        )
+    } else {
+        (
+            item.native_turn_bytes(),
+            item.native_metadata_bytes(),
+            item.native_products(),
+            item.native().map(|proof| proof.target_owned()),
+        )
+    };
+    let missing =
+        || CompileError::ExtractFailed("complete cell lacks its sealed output observations".into());
+    let turn = decode_turn_out(turn_bytes.ok_or_else(missing)?)?;
+    let (table, warnings) = read_metadata(metadata_bytes.ok_or_else(missing)?)?;
+    let products = products.ok_or_else(missing)?;
+    let prepared = prepared.ok_or_else(missing)?;
+    let certification = TurnCertification {
+        groups: products.certified_groups.clone(),
+        target_owners: products.pending_imports.clone(),
+        package_interfaces: products.package_interfaces.clone(),
+        recovery_products: products.recovery_products.clone(),
+        checked_item: (!display).then(|| item.checked_item().clone()),
+        checked_execution: (!display)
+            .then(|| item.native().expect("native products preflighted").clone()),
+        checked_prefix: None,
+        checked_display: display.then(|| {
+            item.display()
+                .expect("display products preflighted")
+                .clone()
+        }),
+        checked_display_admission: None,
+    };
+    certification.validate_checked_table(&table)?;
+    match turn {
+        DecodedTurnOut::Bind {
+            binders,
+            variant,
+            bound,
+            asks,
+            wrapped_source,
+        } => Ok(TurnResult::Bind {
+            binders,
+            variant,
+            bound,
+            wrapped_source,
+            compiled: CompiledTurn {
+                table,
+                warnings,
+                asks,
+                prepared,
+                certification: Some(certification),
+            },
+        }),
+        DecodedTurnOut::Expr {
+            variant,
+            asks,
+            wrapped_source,
+        } if !display => Ok(TurnResult::Expr {
+            variant,
+            wrapped_source,
+            compiled: CompiledTurn {
+                table,
+                warnings,
+                asks,
+                prepared,
+                certification: Some(certification),
+            },
+        }),
+        _ => Err(CompileError::ExtractFailed(
+            "complete native cell output has another item kind".into(),
+        )),
+    }
+}
+
 /// Compile only the next item of a runtime-owned completed prefix. Body,
 /// verdict, annotation Names and wrapper recipes come from its same check.
 pub fn run_checked_item(
@@ -2949,6 +3256,9 @@ pub fn run_checked_item(
         )
         .into());
     }
+    if prefix.cell_program().is_some() {
+        return consume_cell_program_item(item_admission);
+    }
     run_turn_with_pin(req, None, false, Some(item_admission), None)
 }
 
@@ -2959,6 +3269,9 @@ pub fn run_checked_display(
     admission: Arc<super::RuntimeCheckedDisplayAdmission>,
     include: &[&Path],
 ) -> Result<TurnResult, TurnFailure> {
+    if admission.prefix().cell_program().is_some() {
+        return consume_cell_program_display(admission);
+    }
     let snapshot = admission.snapshot();
     let view = snapshot.view();
     let templates = admission
@@ -3252,7 +3565,7 @@ fn run_turn_with_pin(
         })
         .unwrap_or_default();
 
-    let endpoint = cmd.bind().map_err(map_notfound)?;
+    let endpoint = bind_extract_cmd(&cmd)?;
     let include: Vec<_> = req.include.iter().map(|path| path.to_path_buf()).collect();
     let offer = if let Some(admission) = &display {
         ModuleCandidateOffer::select_checked_display(
@@ -3302,7 +3615,7 @@ fn run_turn_with_pin(
     if let Some(manifest) = offer.manifest_path() {
         cmd.module_candidates(manifest);
     }
-    crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
+    crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
     let run = endpoint.execute(&cmd).map_err(map_notfound)?;
     timing::record_stage(
         timing::NO_NODE,
@@ -4254,8 +4567,8 @@ pub fn classify_block(items: &[&str]) -> Result<Vec<TurnClassification>, Compile
     }
     cmd.classify().classify_out(&out_path);
 
-    let endpoint = cmd.bind().map_err(map_notfound)?;
-    crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
+    let endpoint = bind_extract_cmd(&cmd)?;
+    crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
     let run = endpoint.execute(&cmd).map_err(map_notfound)?;
     let output = &run.output;
     // A failed classification still cost a real subprocess spawn — attribute
@@ -5035,6 +5348,63 @@ mod ambiguity_advice_tests {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[serial_test::serial]
+    fn runtime_cell_refuses_unknown_or_mismatched_deployment_before_worker_body() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let frontend = directory.path().join("frontend");
+        let executed = directory.path().join("executed");
+        std::fs::write(
+            &frontend,
+            format!(
+                "#!/bin/sh\nprintf 'TPCID002{}{}'\nif IFS= read -r row; then touch '{}'; fi\n",
+                "a".repeat(32),
+                "b".repeat(32),
+                executed.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&frontend, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _frontend = TestEnvGuard::set("TIDEPOOL_EXTRACT", &frontend);
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let unknown = TestEnvGuard::unset("TIDEPOOL_COMPILER_DEPLOYMENT");
+        let request = || CellCheckRequest {
+            exact_context: None,
+            session_id: None,
+            cell_text: "let value = 42",
+            template: include_str!("fixtures/checked-fold-outcome-template.hs"),
+            include: &[],
+            session_root: directory.path(),
+            inject_modules: &[],
+            compile_generation: 0,
+            compile_view_evidence: "",
+        };
+        let error = check_cell(request()).unwrap_err().error;
+        assert!(matches!(error, CompileError::ExtractFailed(ref message)
+            if message.contains("no configured deployment authority")));
+        assert!(!executed.exists());
+        drop(unknown);
+        let manifest = directory.path().join("deployment.json");
+        let configuration = tidepool_toolchain::toolchain::CompilerDeploymentAuthority {
+            schema: 1,
+            producer_identity: [b'c'; 32],
+            consumed_worker_identity: [b'b'; 32],
+            frontend_path: frontend,
+            worker_path: directory.path().join("worker"),
+            ghc_libdir: directory.path().join("ghc"),
+        };
+        std::fs::write(&manifest, serde_json::to_vec(&configuration).unwrap()).unwrap();
+        let _configuration = TestEnvGuard::set("TIDEPOOL_COMPILER_DEPLOYMENT", manifest);
+        let error = check_cell(request()).unwrap_err().error;
+        assert!(matches!(error, CompileError::ExtractFailed(ref message)
+            if message.contains("bound producer differs from configured deployment")));
+        assert!(
+            !executed.exists(),
+            "deployment mismatch executed compiler work"
+        );
+    }
+
+    #[test]
     fn cell_fold_outcome_separates_ineligibility_failure_and_malformed_protocol() {
         use super::*;
         fn encoded(tag: &str, detail: CborValue, cause: CborValue) -> Vec<u8> {
@@ -5492,7 +5862,8 @@ mod tests {
         assert!(state
             .begin_checked_prefix(admission.clone(), alternate)
             .is_err());
-        let (_legitimate_artifacts, legitimate) = compile_public_checked_offer(&admission, specification);
+        let (_legitimate_artifacts, legitimate) =
+            compile_public_checked_offer(&admission, specification);
         assert_eq!(
             legitimate.specification_digest(),
             admission.specification_digest()
@@ -7023,11 +7394,51 @@ mod tests {
         }
     }
 
+    /// The compiled-cell inference fixtures are acceptance gates. Require the
+    /// matched frontend and worker explicitly so an unconfigured run cannot
+    /// report their early return as a passing test.
+    fn required_cell_test_paths(
+        frontend: Option<std::ffi::OsString>,
+        worker: Option<std::ffi::OsString>,
+    ) -> (std::ffi::OsString, std::ffi::OsString) {
+        let frontend = frontend
+            .expect("TIDEPOOL_CELL_TEST_EXTRACT is required for compiled-cell fixture tests");
+        let worker =
+            worker.expect("TIDEPOOL_EXTRACT_WORKER is required for compiled-cell fixture tests");
+        use tidepool_toolchain::toolchain::{probe_extract_binary, ExtractBinaryRole};
+
+        let frontend_role = probe_extract_binary(std::path::Path::new(&frontend));
+        assert_eq!(
+            frontend_role,
+            ExtractBinaryRole::Frontend,
+            "TIDEPOOL_CELL_TEST_EXTRACT must name the Tidepool frontend"
+        );
+        let worker_role = probe_extract_binary(std::path::Path::new(&worker));
+        assert_eq!(
+            worker_role,
+            ExtractBinaryRole::Worker,
+            "TIDEPOOL_EXTRACT_WORKER must name the matched Haskell compiler worker"
+        );
+        (frontend, worker)
+    }
+
+    fn required_cell_test_worker() -> std::ffi::OsString {
+        required_cell_test_paths(
+            std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT"),
+            std::env::var_os("TIDEPOOL_EXTRACT_WORKER"),
+        )
+        .0
+    }
+
+    #[test]
+    #[should_panic(expected = "TIDEPOOL_EXTRACT_WORKER is required")]
+    fn compiled_cell_fixture_rejects_a_missing_worker() {
+        let _ = required_cell_test_paths(Some("frontend".into()), None);
+    }
+
     #[test]
     fn whole_cell_check_harvests_downstream_fixed_local_type() {
-        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
-            return;
-        };
+        let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();
@@ -7146,9 +7557,7 @@ mod tests {
 
     #[test]
     fn whole_cell_check_harvests_same_cell_nominal_type() {
-        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
-            return;
-        };
+        let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();
@@ -7265,9 +7674,7 @@ mod tests {
 
     #[test]
     fn checked_handler_pin_carries_qualified_type_imports() {
-        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
-            return;
-        };
+        let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();
@@ -7451,9 +7858,7 @@ mod tests {
 
     #[test]
     fn whole_cell_check_reports_missing_record_fields_without_rejecting_declaration() {
-        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
-            return;
-        };
+        let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();
@@ -7541,9 +7946,7 @@ mod tests {
     /// failure participates in either decision.
     #[test]
     fn checked_expression_plans_cover_all_execution_and_presentation_quadrants() {
-        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
-            return;
-        };
+        let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();
@@ -7646,9 +8049,7 @@ mod tests {
     /// workbench effect row during the one whole-cell typecheck.
     #[test]
     fn a_final_pure_cell_is_accepted_as_effectful() {
-        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
-            return;
-        };
+        let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();
@@ -7702,9 +8103,7 @@ mod tests {
     /// retry involved.
     #[test]
     fn a_genuinely_pure_final_expression_still_takes_the_pure_path() {
-        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
-            return;
-        };
+        let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();

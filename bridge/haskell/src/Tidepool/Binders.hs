@@ -34,6 +34,7 @@ module Tidepool.Binders
   , CellDisplayTarget(..)
   , CellGenericDeclaration(..)
   , installCellDisplayDeclarations
+  , cellInferenceSegments
   , omitCellGenericDeclarations
   , omitCellDisplayDeclarations
   , declarationSourceWithTemplate
@@ -43,6 +44,7 @@ module Tidepool.Binders
   , CellAnalysisSourceItem(..)
   , analyzeCellWithFlags
   , analyzeCell
+  , analyzeOrderedCell
   , renderCellCheckSource
   , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
   , CheckedBinderPin(..)
@@ -256,6 +258,7 @@ data CellSplitError
   | CellPrologueFailure CellSourceSpan String
   | CellHeaderFailure String
   | CellDanglingOperatorFailure CellSourceSpan String
+  | CellUnsupportedLocalFixity CellSourceSpan
   deriving (Eq, Show)
 
 renderCellSplitError :: CellSplitError -> String
@@ -267,6 +270,9 @@ renderCellSplitError (CellDanglingOperatorFailure sourceSpan operatorText) =
   "<cell>:" ++ show (cellEndLine sourceSpan) ++ ":" ++ show (cellEndColumn sourceSpan)
     ++ ": cell ends with a dangling operator `" ++ operatorText
     ++ "`: remove it or supply its right operand"
+renderCellSplitError (CellUnsupportedLocalFixity sourceSpan) =
+  "<cell>:" ++ show (cellStartLine sourceSpan) ++ ":" ++ show (cellStartColumn sourceSpan)
+    ++ ": local fixity cannot cross prepared item boundaries; put the operator and its fixity in an authored declaration group"
 renderCellSplitError (CellHeaderFailure message) =
   "cell check template header: " ++ message
 
@@ -322,9 +328,63 @@ installCellDisplayDeclarations generated plan = plan
   where
     replaceDeclaration item
       | sbKind (cellAnalysisVerdict item) == KDecl = item
-          { cellAnalysisSource = cellPlanDeclarationBase plan
-              ++ concatMap genericDeclarationSource (cellPlanGenericDeclarations plan) ++ generated }
+          { cellAnalysisSource = declarationItemSource item plan ++ generated }
       | otherwise = item
+
+    declarationItemSource item current =
+      let sourceItems = cellAnalysisSourceItems item
+          ownDeclarations = case
+            [ authored | authored <- cellPlanItems current
+                       , sbKind (cellAnalysisVerdict authored) == KDecl ] of
+            [_] -> cellPlanDeclarationBase current
+            _ -> concat
+              [ cellAnalysisSource authored
+              | authored <- cellPlanItems current
+              , sbKind (cellAnalysisVerdict authored) == KDecl
+              , any (`elem` sourceItems) (cellAnalysisSourceItems authored)
+              ]
+          ownTypes = [name | EType name _ <- sbDeclItems (cellAnalysisVerdict item)]
+          ownGeneric = concatMap genericDeclarationSource
+            (filter ((`elem` ownTypes) . genericDeclarationTarget) (cellPlanGenericDeclarations current))
+       in ownDeclarations ++ ownGeneric
+
+-- | Preserve source order while separating each declaration run from each
+-- executable run. Executable runs stay together so their statements receive
+-- ordinary whole-do inference in one check.
+cellInferenceSegments :: CellSourcePlan -> [CellSourcePlan]
+cellInferenceSegments plan = map makeSegment (runs (cellPlanItems plan))
+  where
+    runs [] = []
+    runs (item : rest) =
+      let declarationRun = sbKind (cellAnalysisVerdict item) == KDecl
+          (same, remaining) = span ((== declarationRun) . isDeclaration) rest
+       in (declarationRun, item : same) : runs remaining
+    isDeclaration = (== KDecl) . sbKind . cellAnalysisVerdict
+
+    makeSegment (declarations, items) =
+      let declarationItems = if declarations then items else []
+          ownTypes = nub
+            [ name
+            | item <- declarationItems
+            , EType name _ <- sbDeclItems (cellAnalysisVerdict item)
+            ]
+          ownSource = concatMap cellAnalysisSource declarationItems
+          ownGeneric = filter ((`elem` ownTypes) . genericDeclarationTarget)
+            (cellPlanGenericDeclarations plan)
+          ownTargets = filter ((`elem` ownTypes) . displayTargetName)
+            (cellPlanDisplayTargets plan)
+          generatedSource = concatMap genericDeclarationSource ownGeneric
+          opaqueDisplays = concatMap (opaqueDisplayInstance (cellPlanDisplayAlias plan)) ownTargets
+          segmentedItems = if declarations
+            then map (\item -> item { cellAnalysisSource = ownSource ++ generatedSource ++ opaqueDisplays }) items
+            else items
+       in plan
+          { cellPlanItems = segmentedItems
+          , cellPlanDisplayTargets = ownTargets
+          , cellPlanGenericDeclarations = ownGeneric
+          , cellPlanDeclarationBase = ownSource
+          , cellPlanDisplayDeclarations = opaqueDisplays
+          }
 
 omitCellGenericDeclarations :: [String] -> CellSourcePlan -> CellSourcePlan
 omitCellGenericDeclarations targets plan =
@@ -382,7 +442,11 @@ cellEffectiveFlags initial template source = do
                   || any (isPrefixOf "-pgmF" . unLoc) (templateOptions ++ sourceOptions)
                   then pure (Left (CellPrologueFailure optionSpan
                     "CPP and custom preprocessors are unsupported in notebook cells"))
-                  else pure (Right effective)
+                  else if any (\flag -> gopt flag effective)
+                    [Opt_DeferTypeErrors, Opt_DeferTypedHoles, Opt_DeferOutOfScopeVariables]
+                    then pure (Left (CellPrologueFailure optionSpan
+                      "notebook cells must reject type errors, typed holes, and missing names before execution"))
+                    else pure (Right effective)
 
 collectPrologue
   :: DynFlags
@@ -510,7 +574,11 @@ analyzeCellWithFlags
   -> String
   -> String
   -> IO (Either CellSplitError CellSourcePlan)
-analyzeCellWithFlags dflags template source = do
+analyzeCellWithFlags = analyzeCellWithGrouping False
+
+analyzeCellWithGrouping
+  :: Bool -> DynFlags -> String -> String -> IO (Either CellSplitError CellSourcePlan)
+analyzeCellWithGrouping ordered dflags template source = do
   flags <- cellEffectiveFlags dflags template source
   pure $ do
     effective <- flags
@@ -544,7 +612,8 @@ analyzeCellWithFlags dflags template source = do
           , cellPlanGenericDeclarations = generated
           , cellPlanDisplayDeclarations = ""
           }
-    pure (installCellDisplayDeclarations (concatMap (opaqueDisplayInstance displayAlias) targets) plan)
+    pure (if ordered then plan
+      else installCellDisplayDeclarations (concatMap (opaqueDisplayInstance displayAlias) targets) plan)
   where
     freshAlias candidate authoredSource
       | candidate `isInfixOf` authoredSource = freshAlias (candidate ++ "X") authoredSource
@@ -559,7 +628,9 @@ analyzeCellWithFlags dflags template source = do
     -- KDecl) are spliced without an enclosing section and are not at risk.
     classify effective ordinal item =
       let verdict = classifyWithFlagsExact effective (cellSourceText item)
-       in case (sbKind verdict, cellSourceDanglingOperator item) of
+       in if ordered && sbKind verdict /= KDecl && statementHasLocalFixity effective (cellSourceText item)
+            then Left (CellUnsupportedLocalFixity (cellSourceSpan item))
+            else case (sbKind verdict, cellSourceDanglingOperator item) of
             (KExpr, Just operatorText) ->
               Left (CellDanglingOperatorFailure (cellSourceSpan item) operatorText)
             _ -> Right CellAnalysisItem
@@ -576,9 +647,18 @@ analyzeCellWithFlags dflags template source = do
               , cellAnalysisPrologueOnly = False
               }
     groupDeclarations headerItems classified generated =
-      case partition isDeclaration classified of
-        ([], executable) | null headerItems -> executable
-        (declarations, executable) -> declarationGroup headerItems declarations generated : executable
+      if ordered
+        then (if null headerItems then [] else [declarationGroup headerItems [] ""])
+          ++ orderedRuns classified
+        else case partition isDeclaration classified of
+          ([], executable) | null headerItems -> executable
+          (declarations, executable) -> declarationGroup headerItems declarations generated : executable
+    orderedRuns [] = []
+    orderedRuns remaining@(item : rest)
+      | isDeclaration item =
+          let (declarations, tailItems) = span isDeclaration remaining
+           in declarationGroup [] declarations "" : orderedRuns tailItems
+      | otherwise = item : orderedRuns rest
     isDeclaration =
       (== KDecl) . sbKind . cellAnalysisVerdict
     declarationGroup headerItems declarations generated =
@@ -695,10 +775,17 @@ eligibleConstructor constructor = case unLoc constructor of
 
 analyzeCell :: String -> String -> IO (Either CellSplitError CellSourcePlan)
 analyzeCell template source = do
+  analyzeCellUsing False template source
+
+analyzeOrderedCell :: String -> String -> IO (Either CellSplitError CellSourcePlan)
+analyzeOrderedCell = analyzeCellUsing True
+
+analyzeCellUsing :: Bool -> String -> String -> IO (Either CellSplitError CellSourcePlan)
+analyzeCellUsing ordered template source = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
-    liftIO (analyzeCellWithFlags dflags template source)
+    liftIO (analyzeCellWithGrouping ordered dflags template source)
 
 -- | Extract the same located header for a declaration turn without
 -- reclassifying the already-checked declaration body.
@@ -1003,6 +1090,20 @@ classifyWithFlagsExact dflags src = classifyTurn declRes stmtRes modRes
     declRes = unP parseDeclaration (initParserState popts buf loc)
     stmtRes = unP parseStatement   (initParserState popts buf loc)
     modRes  = unP GHC.Parser.parseModule (initParserState popts buf loc)
+
+-- A local fixity affects later statements in a do segment but is not part of
+-- the type-only Val interface. Refuse it before whole-cell admission rather
+-- than reparse a later prepared item with a different associativity.
+statementHasLocalFixity :: DynFlags -> String -> Bool
+statementHasLocalFixity flags source = case lexTokenStream (initParserOpts flags)
+    (stringToStringBuffer source) (mkRealSrcLoc (mkFastString "<turn>") 1 1) of
+  POk _ tokens -> any (fixityToken . unLoc) tokens
+  PFailed _ -> False
+  where
+    fixityToken ITinfix = True
+    fixityToken ITinfixl = True
+    fixityToken ITinfixr = True
+    fixityToken _ = False
 
 -- | Boot a GHC session and classify one turn's source. A SUBSTEP, not a whole
 -- timed unit: it emits no phases of its own — a phase's owner has to be whatever knows it

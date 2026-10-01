@@ -22,7 +22,9 @@ pub use crate::declaration_context::{
 
 mod recovery;
 pub use recovery::{
-    certify_recovered_declaration_tip, RecoveredDeclarationTip, RecoveryDeclarationSelection,
+    certify_recovered_declaration_tip, certify_recovered_declaration_tip_with_inventory,
+    certify_recovered_declaration_tip_with_value_interfaces, RecoveredDeclarationTip,
+    RecoveryDeclarationSelection,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -156,8 +158,7 @@ fn validate_instance_inventory(inventory: &InstanceInventory) -> Result<(), Comp
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CertifiedAuthoredDeclaration {
     product: CertifiedRecoveryProduct,
-    /// Every owned home dependency inspected with the declaration, including G.
-    recovery_products: Vec<CertifiedRecoveryProduct>,
+    artifacts: crate::artifact_inventory::ArtifactView,
     lexical_exports: Vec<DeclarationExport>,
     introduced_exports: Vec<DeclarationExport>,
     instances: InstanceInventory,
@@ -165,8 +166,6 @@ pub struct CertifiedAuthoredDeclaration {
     source_sha256: [u8; 32],
     /// SHA-256 of the bound compiler producer identity used for these bytes.
     toolchain_identity_sha256: [u8; 32],
-    pub(crate) interfaces: Vec<ExactInterfaceOwner>,
-    pub(crate) joined_interfaces: Vec<crate::recovery_artifacts::CertifiedJoinedInterface>,
     original_imports: Vec<ExactInterfaceOwner>,
 }
 
@@ -174,8 +173,20 @@ impl CertifiedAuthoredDeclaration {
     pub fn product(&self) -> &CertifiedRecoveryProduct {
         &self.product
     }
-    pub fn recovery_products(&self) -> &[CertifiedRecoveryProduct] {
-        &self.recovery_products
+    pub fn recovery_products(&self) -> Vec<CertifiedRecoveryProduct> {
+        self.artifacts
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                crate::artifact_inventory::ArtifactPayload::Original(product) => {
+                    Some(product.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+    pub fn artifact_view(&self) -> &crate::artifact_inventory::ArtifactView {
+        &self.artifacts
     }
     pub fn lexical_exports(&self) -> &[DeclarationExport] {
         &self.lexical_exports
@@ -424,18 +435,23 @@ fn certify_authored_declaration_inner(
                 })
                 .collect(),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let artifacts = crate::declaration_context::certified_artifact_view(
+        toolchain_identity_sha256,
+        &products,
+        &interfaces,
+        &joined_interfaces,
+        context.as_deref(),
+    )?;
     Ok(CertifiedAuthoredDeclaration {
         product: selected.clone(),
-        recovery_products: products,
+        artifacts,
         lexical_exports: inventory.exports,
         introduced_exports,
         instances: inventory.instances,
         family_closure,
         source_sha256,
         toolchain_identity_sha256,
-        interfaces,
-        joined_interfaces,
         original_imports,
     })
 }
@@ -540,6 +556,13 @@ pub struct MaterializedDeclarationJoin {
     pub join: crate::recovery_artifacts::RecoveryJoinRef,
     pub products: Vec<crate::recovery_artifacts::RecoveryArtifactRef>,
     pub anchors: Vec<crate::recovery_artifacts::RecoveryJoinRef>,
+    pub value_interfaces: Vec<crate::recovery_artifacts::RecoveryValueInterfaceRef>,
+    pub artifact_descriptors: Vec<crate::artifact_inventory::ArtifactDescriptor>,
+    pub artifact_dependencies: Vec<(
+        crate::artifact_inventory::ArtifactId,
+        crate::artifact_inventory::ArtifactId,
+        crate::artifact_inventory::ArtifactDependency,
+    )>,
 }
 
 impl AcceptedJoin {
@@ -573,7 +596,7 @@ impl AcceptedJoin {
     pub fn package_imports_bytes(&self) -> &[u8] {
         self.interface.package_imports_bytes()
     }
-    pub fn recovery_products(&self) -> &[CertifiedRecoveryProduct] {
+    pub fn recovery_products(&self) -> Vec<CertifiedRecoveryProduct> {
         self.context.recovery_products()
     }
     pub fn toolchain_identity_sha256(&self) -> [u8; 32] {
@@ -592,7 +615,7 @@ impl AcceptedJoin {
         let products = crate::recovery_artifacts::materialize_certified_products(
             root,
             self.toolchain_identity_sha256(),
-            self.recovery_products(),
+            &self.recovery_products(),
         )?;
         let anchors = self
             .context
@@ -600,11 +623,33 @@ impl AcceptedJoin {
             .iter()
             .map(|join| join.materialize(root))
             .collect::<Result<Vec<_>, _>>()?;
+        let value_interfaces = self
+            .context
+            .value_interfaces()
+            .iter()
+            .map(|value| value.materialize(root))
+            .collect::<Result<Vec<_>, _>>()?;
         let join = self.interface.materialize(root)?;
+        let mut artifact_descriptors = self.context.artifact_view().descriptors();
+        let descriptor = crate::artifact_inventory::ArtifactDescriptor::from_recovery_join(&join);
+        let mut artifact_dependencies = self.context.artifact_view().dependencies();
+        artifact_dependencies.extend(artifact_descriptors.iter().map(|entry| {
+            (
+                descriptor.id,
+                entry.id,
+                crate::artifact_inventory::ArtifactDependency::Interface,
+            )
+        }));
+        artifact_dependencies.sort();
+        artifact_dependencies.dedup();
+        artifact_descriptors.push(descriptor);
         Ok(MaterializedDeclarationJoin {
             join,
             products,
             anchors,
+            value_interfaces,
+            artifact_descriptors,
+            artifact_dependencies,
         })
     }
 }
@@ -1215,6 +1260,8 @@ fn execute_declaration_operation(
     let endpoint = command
         .bind()
         .map_err(|error| CompileError::Io(crate::extract_spawn_error(error.source)))?;
+    crate::toolchain::admit_bound_endpoint(&endpoint)
+        .map_err(|error| contract(error.to_string()))?;
     let producer: [u8; 32] = Sha256::digest(endpoint.identity().producer_bytes()).into();
     if expected_producer.is_some_and(|expected| expected != producer) {
         return Err(contract(
@@ -1485,7 +1532,7 @@ mod authored_tests {
         )
         .unwrap();
         for module in [first, second] {
-            assert!(result.recovery_products.iter().any(|product| {
+            assert!(result.recovery_products().iter().any(|product| {
                 product.owner().module == module.module_name() && product.source_sha256().is_some()
             }));
         }
@@ -1510,7 +1557,7 @@ mod authored_tests {
         let references = crate::recovery_artifacts::materialize_certified_products(
             durable.path(),
             result.toolchain_identity_sha256,
-            &result.recovery_products,
+            &result.recovery_products(),
         )
         .unwrap();
         for module in [first, second] {
@@ -1722,7 +1769,7 @@ mod authored_tests {
         for original in extended.recovery_products() {
             let retained = next_context
                 .recovery_products()
-                .iter()
+                .into_iter()
                 .find(|product| product.owner() == original.owner())
                 .unwrap();
             assert_eq!(retained.product_bytes(), original.product_bytes());

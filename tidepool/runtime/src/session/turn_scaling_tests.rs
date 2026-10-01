@@ -1,13 +1,14 @@
-//! Real checked-prefix measurements. Each row reports owning counters; compiler
+//! Complete compiled-cell measurements. Each row reports owning counters; compiler
 //! interface I/O remains in the independent `TIDEPOOL_TIMING=1` worker trace.
 
 use super::*;
 use crate::session::{
     resident_cell_check_template, resident_workbench_templates, CertifiedDeclarationPublication,
     ExecutionPublication, ModuleEnv, OutputSink, PersistentSession, PublicManifestCommit,
-    PublicationDecision, ResidentSession, SessionLib, SessionRunContext, SourceImports,
+    PublicationDecision, RecoveryPublicOwner, RecoveryRunAuthority, ResidentSession, SessionLib,
+    SessionRunContext, SourceImports,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tidepool_codegen::{prepared_program::ImageRegistry, scope::ScopeId};
 use tidepool_repr::SessionId;
 use tidepool_testing::effect_surface::TestEffectSurface;
@@ -28,6 +29,64 @@ impl OutputSink for QuietOutput {
 
 type ScaleSession = ResidentSession<frunk::HNil, QuietOutput>;
 
+/// Choose the existing publication owner; durable measurements never use the
+/// ephemeral publication shortcut.
+enum ScalePublication {
+    Ephemeral,
+    Durable {
+        owner: RecoveryPublicOwner,
+        manifest: PathBuf,
+    },
+}
+
+/// Hold the reference workspace's real exclusive file lock for the session.
+struct ScaleRunOwner {
+    root: PathBuf,
+    _lock: std::fs::File,
+}
+impl RecoveryRunAuthority for ScaleRunOwner {
+    fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+        Ok(root.canonicalize()? == self.root)
+    }
+}
+fn scale_run_owner(root: &Path) -> Arc<ScaleRunOwner> {
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("performance-run-owner.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    Arc::new(ScaleRunOwner {
+        root: root.canonicalize().unwrap(),
+        _lock: lock,
+    })
+}
+
+fn scale_workspace(durable: bool) -> (PathBuf, Option<tempfile::TempDir>) {
+    let root = if durable {
+        let parent = PathBuf::from(
+            std::env::var_os("TIDEPOOL_PERFORMANCE_WORKSPACE_ROOT")
+                .expect("durable evidence requires an explicit retained workspace parent"),
+        );
+        assert!(parent.is_absolute());
+        tempfile::Builder::new()
+            .prefix("durable-workspace-")
+            .tempdir_in(parent)
+            .unwrap()
+    } else {
+        tempfile::tempdir().unwrap()
+    };
+    let path = root.path().to_path_buf();
+    if durable {
+        eprintln!("durable-workspace retained={}", root.keep().display());
+        (path, None)
+    } else {
+        (path, Some(root))
+    }
+}
+
 fn counters(resident: &ScaleSession, images: &ImageRegistry) -> serde_json::Value {
     let residency = resident.residency().unwrap_or_default();
     let (functions, code_bytes) = resident.codegen_totals().unwrap_or_default();
@@ -44,14 +103,14 @@ fn counters(resident: &ScaleSession, images: &ImageRegistry) -> serde_json::Valu
     })
 }
 
-fn measured<T>(
+fn measured_duration<T>(
     resident: &mut ScaleSession,
     images: &ImageRegistry,
     scenario: (usize, usize),
     phase: &str,
     item: Option<usize>,
     action: impl FnOnce(&mut ScaleSession) -> T,
-) -> T {
+) -> (T, u128) {
     let before = counters(resident, images);
     let started = Instant::now();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(resident)));
@@ -66,9 +125,20 @@ fn measured<T>(
         })
     );
     match result {
-        Ok(value) => value,
+        Ok(value) => (value, elapsed_ns),
         Err(panic) => std::panic::resume_unwind(panic),
     }
+}
+
+fn measured<T>(
+    resident: &mut ScaleSession,
+    images: &ImageRegistry,
+    scenario: (usize, usize),
+    phase: &str,
+    item: Option<usize>,
+    action: impl FnOnce(&mut ScaleSession) -> T,
+) -> T {
+    measured_duration(resident, images, scenario, phase, item, action).0
 }
 
 fn execute_cell(
@@ -81,7 +151,43 @@ fn execute_cell(
     source: &str,
     declarations: usize,
     expected_display: Option<&str>,
-) {
+    publication_target: &ScalePublication,
+) -> Duration {
+    execute_cell_with_authority_checks(
+        resident,
+        public,
+        effects,
+        images,
+        scenario,
+        label,
+        source,
+        declarations,
+        expected_display,
+        publication_target,
+        AuthorityChecks::Configured,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum AuthorityChecks {
+    Configured,
+    RefusalBranches,
+}
+
+fn execute_cell_with_authority_checks(
+    resident: &mut ScaleSession,
+    public: ScopeId,
+    effects: &TestEffectSurface,
+    images: &ImageRegistry,
+    scenario: (usize, usize),
+    label: &str,
+    source: &str,
+    declarations: usize,
+    expected_display: Option<&str>,
+    publication_target: &ScalePublication,
+    authority_checks: AuthorityChecks,
+) -> Duration {
+    let cell_started = Instant::now();
     let execution = Arc::new(resident.begin_private_execution(public).unwrap());
     let view = execution.view();
     let imports = view.turn_imports(&SourceImports::new());
@@ -99,10 +205,35 @@ fn execute_cell(
         reserved_declaration_modules: Vec::new(),
     };
     let admitted_include = view.include_paths(effects.include_paths());
+    let plan = measured(
+        resident,
+        images,
+        scenario,
+        &format!("{label}.parse"),
+        None,
+        |_| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                Arc::new(specification.clone()),
+                &admitted_include,
+            )
+            .unwrap()
+        },
+    );
+    assert_eq!(
+        plan.items()
+            .iter()
+            .filter(|item| matches!(
+                item.kind(),
+                tidepool_toolchain::cell_plan::ParsedCellPlanKind::Prologue
+                    | tidepool_toolchain::cell_plan::ParsedCellPlanKind::Declaration
+            ))
+            .count(),
+        declarations
+    );
     let admission = resident
-        .admit_cell_for_execution(
+        .admit_planned_cell_for_execution(
             execution.clone(),
-            declarations,
+            plan,
             Arc::new(specification.clone()),
             specification.specification_digest(),
             [1; 32],
@@ -113,35 +244,61 @@ fn execute_cell(
     let include = view.include_paths(effects.include_paths());
     let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let injected = view.injected_module_names();
-    let (checked, fold) = measured(
+    let compile_cell = || {
+        compile_cell_program_admitted(
+            CellCheckRequest {
+                exact_context: view.exact_declaration_context().cloned(),
+                session_id: Some(view.session()),
+                cell_text: source,
+                template: &template,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                compile_generation: admission.initial_value_generation().0,
+                compile_view_evidence: "",
+            },
+            admission.clone(),
+            &templates,
+        )
+    };
+    if matches!(authority_checks, AuthorityChecks::RefusalBranches) {
+        struct RestoreDeployment(std::ffi::OsString);
+        impl Drop for RestoreDeployment {
+            fn drop(&mut self) {
+                std::env::set_var("TIDEPOOL_COMPILER_DEPLOYMENT", &self.0);
+            }
+        }
+        let configured = std::env::var_os("TIDEPOOL_COMPILER_DEPLOYMENT")
+            .expect("vertical test requires configured deployment");
+        let guard = RestoreDeployment(configured.clone());
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        std::env::remove_var("TIDEPOOL_COMPILER_DEPLOYMENT");
+        assert!(
+            compile_cell().is_err(),
+            "unconfigured planned compile must refuse admission"
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+        let mut mismatch: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(configured).unwrap()).unwrap();
+        let producer = mismatch["producer_identity"].as_array_mut().unwrap();
+        producer[0] = serde_json::json!(producer[0].as_u64().unwrap() ^ 1);
+        let wrong = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(wrong.path(), serde_json::to_vec(&mismatch).unwrap()).unwrap();
+        std::env::set_var("TIDEPOOL_COMPILER_DEPLOYMENT", wrong.path());
+        assert!(
+            compile_cell().is_err(),
+            "wrong producer planned compile must refuse admission"
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+        drop(guard);
+    }
+    let (checked, program) = measured(
         resident,
         images,
         scenario,
-        &format!("{label}.check"),
+        &format!("{label}.compile_cell"),
         None,
-        |_| {
-            check_cell_admitted(
-                CellCheckRequest {
-                    exact_context: view.exact_declaration_context().cloned(),
-                    session_id: Some(view.session()),
-                    cell_text: source,
-                    template: &template,
-                    include: &include,
-                    session_root: view.session_root(),
-                    inject_modules: &injected,
-                    compile_generation: admission.initial_value_generation().0,
-                    compile_view_evidence: "",
-                },
-                admission.clone(),
-                &templates,
-                None,
-            )
-            .unwrap()
-        },
-    );
-    assert!(
-        fold.is_none(),
-        "this fixture measures separate check and native compile"
+        |_| compile_cell().unwrap(),
     );
     assert!(!checked.items.is_empty());
     eprintln!(
@@ -155,8 +312,10 @@ fn execute_cell(
         })
     );
     let prefix = resident
-        .begin_checked_prefix(admission, checked.checked_item(0).unwrap())
-        .unwrap();
+        .begin_cell_program(admission, program)
+        .unwrap()
+        .expect("nonempty compiled cell has an ordered prefix");
+    let submissions_before_effects = tidepool_extract_cmd::extract_spawn_count();
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
@@ -181,38 +340,15 @@ fn execute_cell(
                 },
             );
         } else {
-            let snapshot = reservation.snapshot();
-            let view = snapshot.view();
-            let include = view.include_paths(effects.include_paths());
-            let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-            let injected = snapshot.compiler_prefix().injected_modules();
             let TurnResult::Bind {
                 bound, compiled, ..
             } = measured(
                 resident,
                 images,
                 scenario,
-                &format!("{label}.compile"),
+                &format!("{label}.native_materialize"),
                 Some(index),
-                |_| {
-                    run_checked_item(
-                        TurnRequest {
-                            exact_context: view.exact_declaration_context().cloned(),
-                            session_id: Some(view.session()),
-                            turn_text: item.source(),
-                            templates: &templates,
-                            include: &include,
-                            session_root: view.session_root(),
-                            inject_modules: &injected,
-                            gen: reservation.generation().0,
-                            verdict: Some(checked.items[index].verdict.clone()),
-                            target: None,
-                            retained_imports: &[],
-                        },
-                        reservation.clone(),
-                    )
-                    .unwrap()
-                },
+                |_| consume_cell_program_item(reservation.clone()).unwrap(),
             )
             else {
                 panic!("checked native item did not return its binding recipe")
@@ -297,9 +433,9 @@ fn execute_cell(
                     resident,
                     images,
                     scenario,
-                    &format!("{label}.display_compile"),
+                    &format!("{label}.display_materialize"),
                     Some(index),
-                    |_| run_checked_display(display.clone(), &include).unwrap(),
+                    |_| consume_cell_program_display(display.clone()).unwrap(),
                 )
                 else {
                     panic!("checked display did not return its binding recipe")
@@ -334,6 +470,10 @@ fn execute_cell(
             }
         }
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(), submissions_before_effects,
+            "native execution and display must consume the immutable cell without compiler requests"
+        );
     }
     assert_eq!(rendered_count, usize::from(expected_display.is_some()));
     let work = checked.checked_item(0).unwrap().input_work();
@@ -358,38 +498,64 @@ fn execute_cell(
         None,
         |resident| resident.freeze_private_execution(&execution).unwrap(),
     );
-    let publication = resident
-        .restage_ephemeral_execution_publication(intent)
-        .unwrap();
-    let ticket = measured(
+    let publication = match publication_target {
+        ScalePublication::Ephemeral => resident.restage_ephemeral_execution_publication(intent),
+        ScalePublication::Durable { owner, .. } => {
+            resident.restage_execution_publication(owner.clone(), intent)
+        }
+    }
+    .unwrap();
+    let (ticket, certification_ns, stage_ns) = match publication {
+        ExecutionPublication::Bindings(base) => {
+            let (ticket, stage_ns) = measured_duration(
+                resident,
+                images,
+                scenario,
+                &format!("{label}.metadata_stage_file_sync"),
+                None,
+                |_| base.stage().unwrap(),
+            );
+            (ticket, None, stage_ns)
+        }
+        ExecutionPublication::Declarations(base) => {
+            let (certified, certification_ns) = measured_duration(
+                resident,
+                images,
+                scenario,
+                &format!("{label}.declaration_certification"),
+                None,
+                |_| base.certify().unwrap(),
+            );
+            let CertifiedDeclarationPublication::Accepted(accepted) = certified else {
+                panic!("actual original declaration/prefix publication was rejected")
+            };
+            let (ticket, stage_ns) = measured_duration(
+                resident,
+                images,
+                scenario,
+                &format!("{label}.metadata_stage_file_sync"),
+                None,
+                |_| accepted.stage().unwrap(),
+            );
+            (ticket, Some(certification_ns), stage_ns)
+        }
+    };
+    let (_, publication_ns) = measured_duration(
         resident,
         images,
         scenario,
-        &format!("{label}.certify_stage"),
-        None,
-        |_| match publication {
-            ExecutionPublication::Bindings(base) => base.stage().unwrap(),
-            ExecutionPublication::Declarations(base) => {
-                let CertifiedDeclarationPublication::Accepted(accepted) = base.certify().unwrap()
-                else {
-                    panic!("actual original declaration/prefix publication was rejected")
-                };
-                accepted.stage().unwrap()
-            }
-        },
-    );
-    measured(
-        resident,
-        images,
-        scenario,
-        &format!("{label}.publish"),
+        &format!("{label}.publication_rename_directory_sync"),
         None,
         |resident| {
+            let result = resident
+                .publish_staged_public_manifest(ticket, &PublicationDecision::new())
+                .unwrap();
             assert_eq!(
-                resident
-                    .publish_staged_public_manifest(ticket, &PublicationDecision::new())
-                    .unwrap(),
-                PublicManifestCommit::Ephemeral
+                result,
+                match publication_target {
+                    ScalePublication::Ephemeral => PublicManifestCommit::Ephemeral,
+                    ScalePublication::Durable { .. } => PublicManifestCommit::Durable,
+                }
             );
         },
     );
@@ -401,27 +567,109 @@ fn execute_cell(
         private_winners,
         "publication must preserve the actual native winners"
     );
+    // Retained snapshots and diagnostic reads do not belong to cell latency.
+    let elapsed = cell_started.elapsed();
+    if let ScalePublication::Durable { manifest, .. } = publication_target {
+        let bytes = std::fs::read(manifest).unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let snapshot = manifest.with_file_name(format!("declarations-{label}.json"));
+        std::fs::write(&snapshot, &bytes).unwrap();
+        eprintln!(
+            "durable-performance {}",
+            serde_json::json!({
+                "schema": 1, "composition": "durable-publication", "cell": label,
+                "prefix": scenario.0, "baseline": scenario.1, "completed": true,
+                "elapsed_ns": elapsed.as_nanos(), "certification_ns": certification_ns,
+                "metadata_stage_file_sync_ns": stage_ns,
+                "publication_rename_directory_sync_ns": publication_ns,
+                "manifest_path": snapshot, "manifest_bytes": bytes.len(),
+                "manifest_blake3": blake3::hash(&bytes).to_hex().to_string(),
+                "manifest_checksum": document.get("checksum"),
+                "public_schema": document.get("public_schema"),
+                "checksum_encode_bytes": null, "artifact_hash_bytes": null,
+                "manifest_write_bytes": null, "whole_graph_copies": null,
+            })
+        );
+    }
+    let inventory = resident.compile_view_in(public).and_then(|view| {
+        view.exact_declaration_context()
+            .map(|context| context.artifact_view().inventory().metrics())
+    });
+    eprintln!(
+        "protected-scale {}",
+        serde_json::json!({
+            "schema": 1, "prefix": scenario.0, "baseline": scenario.1,
+            "phase": format!("{label}.artifact_inventory"), "inventory": inventory,
+        })
+    );
+    elapsed
 }
 
-fn growing_prefix(prefix: usize, baseline: usize) {
+fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool) {
     tidepool_testing::eval_harness::require_extract();
-    assert_eq!(
-        std::env::var("TIDEPOOL_EXTRACT_NO_DAEMON").as_deref(),
-        Ok("1"),
-        "the measurement must use isolated compiler submissions"
-    );
-    let root = tempfile::tempdir().unwrap();
+    let no_daemon = std::env::var("TIDEPOOL_EXTRACT_NO_DAEMON");
+    if durable {
+        assert_ne!(
+            no_daemon.as_deref(),
+            Ok("1"),
+            "durable scaling requires the resident compiler"
+        );
+        let socket = PathBuf::from(
+            std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
+                .expect("resident scaling socket"),
+        );
+        tidepool_extract_cmd::preflight_compiler_daemon(&socket).unwrap();
+    } else {
+        assert_eq!(
+            no_daemon.as_deref(),
+            Ok("1"),
+            "the historical comparison uses isolated compiler submissions"
+        );
+    }
+    let (root_path, root_guard) = scale_workspace(durable);
     let effects = TestEffectSurface::minimal(&[]).unwrap();
     let images = Arc::new(ImageRegistry::new());
-    let lib = SessionLib::open(SessionId(999), root.path(), ModuleEnv::standalone_default())
+    let mut lib = SessionLib::open(SessionId(999), &root_path, ModuleEnv::standalone_default())
         .unwrap()
         .with_validation_include(effects.include_paths().to_vec());
+    let publication = if durable {
+        let manifest = root_path.join("declarations.json");
+        lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path))
+            .unwrap();
+        ScalePublication::Durable {
+            owner: RecoveryPublicOwner::new(
+                &tidepool_repr::ActorPath::parse("root/performance").unwrap(),
+                1,
+            )
+            .unwrap(),
+            manifest,
+        }
+    } else {
+        ScalePublication::Ephemeral
+    };
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     let scenario = (prefix, baseline);
+    if let ScalePublication::Durable { owner, .. } = &publication {
+        measured(
+            &mut resident,
+            &images,
+            scenario,
+            "durable_initialization",
+            None,
+            |resident| {
+                assert_eq!(
+                    resident
+                        .initialize_durable_public_scope(owner.clone(), public)
+                        .unwrap(),
+                    PublicManifestCommit::Durable
+                );
+            },
+        );
+    }
     execute_cell(
         &mut resident,
         public,
@@ -432,6 +680,7 @@ fn growing_prefix(prefix: usize, baseline: usize) {
         include_str!("fixtures/protected-scale-foundation.hs"),
         1,
         None,
+        &publication,
     );
     let original = resident
         .compile_view_in(public)
@@ -470,6 +719,7 @@ fn growing_prefix(prefix: usize, baseline: usize) {
             &source,
             0,
             None,
+            &publication,
         );
     }
     let mut source = String::new();
@@ -504,6 +754,7 @@ fn growing_prefix(prefix: usize, baseline: usize) {
         &source,
         0,
         Some(&prefix.to_string()),
+        &publication,
     );
     let visible = resident.binding_names_in(public);
     assert_eq!(
@@ -531,6 +782,24 @@ fn growing_prefix(prefix: usize, baseline: usize) {
             "the compiled original product changed during settlement"
         );
     }
+    drop(resident);
+    drop(root_guard);
+}
+
+fn growing_prefix(prefix: usize, baseline: usize) {
+    growing_prefix_with_publication(prefix, baseline, false);
+}
+
+#[test]
+#[ignore = "resident durable scaling attribution; run after the two-cell baseline"]
+fn resident_durable_growing_prefix_10_baseline_0() {
+    growing_prefix_with_publication(10, 0, true);
+}
+
+#[test]
+#[ignore = "resident durable scaling attribution; run after the two-cell baseline"]
+fn resident_durable_growing_prefix_10_baseline_100() {
+    growing_prefix_with_publication(10, 100, true);
 }
 
 #[test]
@@ -560,4 +829,177 @@ fn protected_growing_prefix_10_baseline_100() {
 #[test]
 fn protected_growing_prefix_100_baseline_100() {
     growing_prefix(100, 100);
+}
+
+/// Compiler/native attribution only; the packaged Engine/Store gate is separate.
+fn resident_display_cells(count: usize, durable: bool) {
+    tidepool_testing::eval_harness::require_extract();
+    assert_ne!(
+        std::env::var("TIDEPOOL_EXTRACT_NO_DAEMON").as_deref(),
+        Ok("1")
+    );
+    let socket = PathBuf::from(
+        std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
+            .expect("resident measurement requires its owned compiler socket"),
+    );
+    let identity = tidepool_extract_cmd::preflight_compiler_daemon(&socket)
+        .expect("resident measurement cannot use direct fallback");
+    let (root_path, root_guard) = scale_workspace(durable);
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let mut lib = SessionLib::open(SessionId(1000), &root_path, ModuleEnv::standalone_default())
+        .unwrap()
+        .with_validation_include(effects.include_paths().to_vec());
+    let publication = if durable {
+        let manifest = root_path.join("declarations.json");
+        lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path))
+            .unwrap();
+        ScalePublication::Durable {
+            owner: RecoveryPublicOwner::new(
+                &tidepool_repr::ActorPath::parse("root/performance").unwrap(),
+                1,
+            )
+            .unwrap(),
+            manifest,
+        }
+    } else {
+        ScalePublication::Ephemeral
+    };
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    if let ScalePublication::Durable { owner, .. } = &publication {
+        measured(
+            &mut resident,
+            &images,
+            (0, 0),
+            "durable_initialization",
+            None,
+            |resident| {
+                assert_eq!(
+                    resident
+                        .initialize_durable_public_scope(owner.clone(), public)
+                        .unwrap(),
+                    PublicManifestCommit::Durable
+                );
+            },
+        );
+        execute_cell(
+            &mut resident,
+            public,
+            &effects,
+            &images,
+            (0, 0),
+            "foundation",
+            include_str!("fixtures/protected-scale-foundation.hs"),
+            1,
+            None,
+            &publication,
+        );
+    }
+    // Record warm-up separately. Daemon request traces decide whether every
+    // measured cell actually reused a warm worker, including a second slot.
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "warmup",
+        "(42 :: Int)",
+        0,
+        Some("42"),
+        &publication,
+    );
+    for index in 0..count {
+        let source = format!(
+            "({index} + {} :: Int)",
+            42_i64 - i64::try_from(index).unwrap()
+        );
+        assert_eq!(
+            tidepool_extract_cmd::preflight_compiler_daemon(&socket).unwrap(),
+            identity
+        );
+        let elapsed = execute_cell(
+            &mut resident,
+            public,
+            &effects,
+            &images,
+            (0, 0),
+            &format!("resident_cell_{index}"),
+            &source,
+            0,
+            Some("42"),
+            &publication,
+        );
+        assert_eq!(
+            tidepool_extract_cmd::preflight_compiler_daemon(&socket).unwrap(),
+            identity
+        );
+        eprintln!(
+            "resident-performance {}",
+            serde_json::json!({
+                "schema": 1, "composition": "private-session", "kind": "warm_cell",
+                "index": index, "elapsed_ns": elapsed.as_nanos(),
+                "completed": true, "displayed": true, "workload": "integer-addition",
+                "source_blake3": blake3::hash(source.as_bytes()).to_hex().to_string(),
+                "endpoint": identity.to_hex(), "producer": identity.producer_hex(),
+            })
+        );
+    }
+    drop(resident);
+    drop(root_guard);
+}
+
+#[test]
+#[ignore = "requires an admitted real resident compiler and 50 compiled display cells"]
+fn resident_warm_display_cells_50() {
+    resident_display_cells(50, false);
+}
+
+#[test]
+#[ignore = "requires an admitted real resident compiler for a bounded baseline"]
+fn resident_display_cells_2_baseline() {
+    resident_display_cells(2, false);
+}
+
+#[test]
+#[ignore = "requires an admitted real resident compiler and retains its durable workspace"]
+fn resident_durable_display_cells_2_baseline() {
+    resident_display_cells(2, true);
+}
+
+#[test]
+fn complete_cell_consumes_item_and_display_without_compiler_requests() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let lib = SessionLib::open(
+        SessionId(1001),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    execute_cell_with_authority_checks(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "complete_cell",
+        include_str!("fixtures/compiled-cell-simple.hs"),
+        0,
+        Some("42"),
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::RefusalBranches,
+    );
 }

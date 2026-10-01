@@ -778,14 +778,15 @@ struct ResidentMachineAccess<H, O> {
     /// a session id eligible for `ResidentActorRunner::retire_child_session`
     /// at all.
     child_sessions: Arc<std::sync::Mutex<std::collections::HashSet<tidepool_repr::SessionId>>>,
-    /// Dedicated child sessions whose actor has already retired but whose
-    /// machine still held at least one live value handle the last time
-    /// anyone checked — `retire_child_session`'s doc comment has the full
-    /// invariant. Retried opportunistically the next time that session is
-    /// checked out for any reason ([`Self::with_host_machine`]'s
-    /// settlement), never by this map being polled on its own.
-    pending_child_teardown:
-        Arc<std::sync::Mutex<std::collections::HashMap<tidepool_repr::SessionId, String>>>,
+    /// Dedicated child sessions whose actor has retired but whose machine
+    /// still held at least one live value handle. Each entry owns the one
+    /// cleanup worker and its custody-drop signal until checkout settlement
+    /// removes the entry.
+    pending_child_teardown: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<tidepool_repr::SessionId, Arc<PendingChildTeardown>>,
+        >,
+    >,
     // The `compile_blocking` span omits `include_roots` from every line (the
     // full search path is long and rarely changes turn to turn); this tracks
     // the last-logged roots per session so a diagnostic reader still sees
@@ -799,6 +800,29 @@ struct ResidentMachineAccess<H, O> {
     /// source-layer revision, so an edited layer is never served through a
     /// carrier compiled against its stale imports.
     carriers: HostCarrierCache,
+}
+
+/// One detached cleanup owner for a retired dedicated child session. The
+/// worker handle remains here so tests can prove the actual task finished,
+/// rather than treating session removal alone as sufficient evidence.
+struct PendingChildTeardown {
+    wake: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    initial_checkout_complete: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    worker: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl PendingChildTeardown {
+    fn new() -> Self {
+        Self {
+            wake: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            initial_checkout_complete: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            worker: std::sync::Mutex::new(None),
+        }
+    }
 }
 
 struct CancelCompilerTransactionOnDrop(Option<tidepool_runtime::CompilerTransactionCancellation>);
@@ -846,6 +870,50 @@ impl<H, O> ResidentMachineAccess<H, O> {
             logged_include_roots: std::sync::Mutex::new(std::collections::HashMap::new()),
             carriers: Arc::clone(&self.carriers),
         }
+    }
+
+    fn owns_pending_child_teardown(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        owner: &Arc<PendingChildTeardown>,
+    ) -> bool {
+        self.pending_child_teardown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, owner))
+    }
+
+    /// Complete terminal child cleanup under the same membership/owner lock
+    /// order as retirement admission. An older worker cannot erase a different
+    /// pending owner; terminal checkout settlement may complete the current one.
+    fn finish_child_session_teardown(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        expected_owner: Option<&Arc<PendingChildTeardown>>,
+    ) -> bool {
+        let (removed_child, owner) = {
+            let mut children = self
+                .child_sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut pending = self
+                .pending_child_teardown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if expected_owner.is_some_and(|owner| {
+                !pending
+                    .get(&session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, owner))
+            }) {
+                return false;
+            }
+            (children.remove(&session_id), pending.remove(&session_id))
+        };
+        if let Some(owner) = &owner {
+            owner.wake.notify_one();
+        }
+        removed_child || owner.is_some()
     }
 }
 
@@ -1368,7 +1436,6 @@ struct ProtectedObservation {
     prefix: Arc<tidepool_runtime::session::RuntimeCheckedPrefix>,
     execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
     binder: BoundBinder,
-    include: Vec<PathBuf>,
 }
 
 fn protected_observation(
@@ -1404,20 +1471,10 @@ fn protected_observation(
             "checked observation capture name differs".into(),
         ));
     }
-    let specification = prefix
-        .admission()
-        .specification()
-        .downcast_ref::<WorkbenchCompilationSpec>()
-        .ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "checked observation lacks its owning workbench specification".into(),
-            )
-        })?;
     Ok(Some(ProtectedObservation {
         prefix: prefix.clone(),
         execution: execution.clone(),
         binder: binder.clone(),
-        include: specification.include.clone(),
     }))
 }
 
@@ -2578,8 +2635,9 @@ impl<H, O> ResidentActorRunner<H, O> {
     /// (b), (a)'s check happens under the SAME checkout the settlement
     /// below marks pending for, so a caller who finds custody still
     /// outstanding logs it once here and the deferred release completes
-    /// the next time anything checks this session out for any reason — see
-    /// [`Self::with_host_machine`]'s settlement. This call itself never
+    /// when that session's custody owner signals a later root release. One
+    /// waiter for this pending session then checks the existing checkout
+    /// settlement path. This call itself never
     /// waits for that: it performs one checkout, one check, and returns
     /// either way, so an actor's retirement is never blocked on whoever
     /// still needs this machine's output.
@@ -2592,39 +2650,121 @@ impl<H, O> ResidentActorRunner<H, O> {
         H: DispatchEffect<O> + Send + 'static,
         O: OutputSink + Sync + 'static,
     {
-        if session_retained
-            || !self
+        if session_retained {
+            return Ok(());
+        }
+        // The map entry is also the cleanup task owner. Only the call that
+        // creates it starts a task; concurrent retirements share that task
+        // and cannot replace the session's notifier with another waiter.
+        let (owner, start_worker) = {
+            // Keep membership and pending-owner admission in one lock order.
+            // Checkout settlement removes both under this same pair, so a
+            // caller that raced a completed teardown cannot reinsert stale
+            // pending state after the machine is gone.
+            let children = self
                 .access
                 .child_sessions
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains(&session_id)
-        {
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !children.contains(&session_id) {
+                return Ok(());
+            }
+            let mut pending = self
+                .access
+                .pending_child_teardown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match pending.entry(session_id) {
+                std::collections::hash_map::Entry::Occupied(entry) => {
+                    (Arc::clone(entry.get()), false)
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let owner = Arc::new(PendingChildTeardown::new());
+                    entry.insert(Arc::clone(&owner));
+                    (owner, true)
+                }
+            }
+        };
+        if !start_worker {
             return Ok(());
         }
-        // Marked pending BEFORE the checkout, not after a separate read: the
-        // checkout's own settlement (`Self::with_host_machine`) is the ONLY
-        // place a dedicated child session is ever removed from the
-        // registry, so this reuses that one atomic decision (made while
-        // still holding the exclusive checkout) instead of a second,
-        // separately-racing read-then-remove after releasing it.
-        self.access
-            .pending_child_teardown
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                session_id,
-                "actor retired; checking for outstanding custody".to_string(),
-            );
-        self.access
-            .with_host_machine("child-teardown", session_id, None, |session, _| {
-                Ok(session.outstanding_custody())
-            })
-            .await?;
-        // `with_host_machine`'s settlement already either removed the
-        // session (nothing outstanding) or left it idle and logged the
-        // deferral (still outstanding) — nothing further to do here either
-        // way.
+
+        // Start the owner before the first await. Cancellation of this caller
+        // may stop its initial-check response, but cannot strand the pending
+        // session after the blocking checkout settles.
+        let (start_worker_tx, start_worker_rx) = tokio::sync::oneshot::channel();
+        let (initial_check_tx, initial_check_rx) = tokio::sync::oneshot::channel();
+        let access = self.access.sharing();
+        let worker_owner = Arc::clone(&owner);
+        let worker = tokio::spawn(async move {
+            let _ = start_worker_rx.await;
+            let session_wake = Arc::clone(&worker_owner.wake);
+            let initial = access
+                .with_host_machine("child-teardown", session_id, None, move |session, _| {
+                    session.set_custody_cleanup_notifier(Arc::new(move || {
+                        session_wake.notify_one();
+                    }));
+                    Ok(session.outstanding_custody())
+                })
+                .await;
+            match initial {
+                Ok(_) => {
+                    #[cfg(test)]
+                    worker_owner
+                        .initial_checkout_complete
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    let _ = initial_check_tx.send(Ok(()));
+                }
+                Err(error) => {
+                    let still_owned = access.owns_pending_child_teardown(session_id, &worker_owner);
+                    if still_owned {
+                        access.finish_child_session_teardown(session_id, Some(&worker_owner));
+                    }
+                    let result = if still_owned { Err(error) } else { Ok(()) };
+                    let _ = initial_check_tx.send(result);
+                    return;
+                }
+            }
+
+            while access.owns_pending_child_teardown(session_id, &worker_owner) {
+                worker_owner.wake.notified().await;
+                if !access.owns_pending_child_teardown(session_id, &worker_owner) {
+                    break;
+                }
+                if let Err(error) = access
+                    .with_host_machine(
+                        "child-teardown-custody-release",
+                        session_id,
+                        None,
+                        |_, _| Ok(()),
+                    )
+                    .await
+                {
+                    tracing::debug!(session = ?session_id, %error,
+                        "deferred child-session cleanup could not check out its machine");
+                    access.finish_child_session_teardown(session_id, Some(&worker_owner));
+                    break;
+                }
+            }
+        });
+        #[cfg(test)]
+        {
+            *owner
+                .worker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
+        }
+        #[cfg(not(test))]
+        drop(worker);
+        let _ = start_worker_tx.send(());
+
+        initial_check_rx.await.map_err(|_| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "child-session cleanup worker stopped before its initial checkout".to_string(),
+            )
+        })??;
+        // This is idempotent when several actors retire from one session: the
+        // single owner continues until checkout settlement removes its entry.
         Ok(())
     }
 
@@ -2641,16 +2781,7 @@ impl<H, O> ResidentActorRunner<H, O> {
     /// resolution on any error after their own `provision_child_session`
     /// call succeeds.
     pub(crate) fn discard_child_session(&self, session_id: tidepool_repr::SessionId) {
-        self.access
-            .child_sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&session_id);
-        self.access
-            .pending_child_teardown
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&session_id);
+        self.access.finish_child_session_teardown(session_id, None);
         if self
             .access
             .machines
@@ -3066,7 +3197,17 @@ where
             }
             (None, None) => self.machines.checkout_queued(session_id, request).await,
         }
-        .map_err(ResidentActorWorkbenchError::Checkout)?;
+        .map_err(|error| {
+            if matches!(
+                error,
+                tidepool_runtime::session::registry::CheckoutError::Unknown(_)
+                    | tidepool_runtime::session::registry::CheckoutError::Retired { .. }
+                    | tidepool_runtime::session::registry::CheckoutError::Terminal { .. }
+            ) {
+                self.finish_child_session_teardown(session_id, None);
+            }
+            ResidentActorWorkbenchError::Checkout(error)
+        })?;
         // Every cell holds the run's resident machine exclusively, so the
         // wait for it is a primary per-cell cost. `info`, not `debug`: this
         // needs to reach the run's INFO log, not just the detailed trace.
@@ -3085,8 +3226,7 @@ where
         }
         let source = self.source.clone();
         let machines = Arc::clone(&self.machines);
-        let pending_child_teardown = Arc::clone(&self.pending_child_teardown);
-        let child_sessions = Arc::clone(&self.child_sessions);
+        let child_cleanup = self.sharing();
 
         let task = spawn_blocking_in_span(move || {
             // The blocking task owns the machine and its linear checkout
@@ -3113,6 +3253,7 @@ where
                                 .to_string(),
                         };
                         machines.settle_retire(receipt, reason);
+                        child_cleanup.finish_child_session_teardown(session_id, None);
                         tracing::info!(actor = %actor, session = ?session_id,
                             held_ms = held_since.elapsed().as_millis(),
                             "resident machine checkout released (retired)");
@@ -3120,28 +3261,20 @@ where
                     }
 
                     // A dedicated child session whose actor already retired
-                    // (`ResidentActorRunner::retire_child_session` found it
-                    // still holding live custody and deferred) gets a fresh
-                    // look on every later checkout of it for any reason —
-                    // the opportunistic retry `retire_child_session`'s own
-                    // doc comment promises. Once nothing is left, the
-                    // machine is removed outright instead of settling back
-                    // to idle.
-                    let still_pending_teardown = pending_child_teardown
+                    // gets another look on every checkout, including the
+                    // cleanup owner's custody-release retry. Once nothing is
+                    // left, the machine is removed outright instead of
+                    // settling back to idle.
+                    let pending_owner = child_cleanup
+                        .pending_child_teardown
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .contains_key(&session_id);
-                    if still_pending_teardown {
+                        .get(&session_id)
+                        .cloned();
+                    if let Some(owner) = pending_owner {
                         let outstanding = session.outstanding_custody();
                         if outstanding == 0 {
-                            pending_child_teardown
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .remove(&session_id);
-                            child_sessions
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .remove(&session_id);
+                            child_cleanup.finish_child_session_teardown(session_id, Some(&owner));
                             machines.settle_retire(
                                 receipt,
                                 "actor retired, deferred custody now released",
@@ -3178,6 +3311,7 @@ where
                         receipt,
                         format!("machine became unavailable: a resident turn panicked ({message})"),
                     );
+                    child_cleanup.finish_child_session_teardown(session_id, None);
                     tracing::info!(actor = %actor, session = ?session_id,
                         held_ms = held_since.elapsed().as_millis(),
                         "resident machine checkout released (panic)");
@@ -4200,8 +4334,8 @@ where
             .await
     }
 
-    /// One exact cell recipe retains its source/tool and input owners while
-    /// its items compile lazily against the successfully completed prefix.
+    /// Retain the admitted source and input owners while one compiler
+    /// transaction prepares all items before native execution becomes possible.
     async fn prepare_admitted_cell(
         &self,
         context: crate::ActorSessionContext,
@@ -4217,6 +4351,7 @@ where
                 "checked cell preparation requires its admitted private context and source revision".into(),
             ));
         }
+        let admission_execution = execution.clone();
         let snapshot_source = self.access.source.clone();
         let type_modules = self.type_modules.clone();
         let response = self.response.clone();
@@ -4225,7 +4360,7 @@ where
             .as_ref()
             .map(|guard| guard.mounted_input().clone());
         let snapshot_cell_source = cell_source.clone();
-        let (specification, admission) = self
+        let specification = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
                 let (source, snapshot) = snapshot_cell_split_owned(
@@ -4273,7 +4408,7 @@ where
                         })
                         .collect(),
                     injected_modules: prepared.injected,
-                    reserved_declaration_modules: vec![snapshot.candidate_module.module_name()],
+                    reserved_declaration_modules: Vec::new(),
                 };
                 let specification = Arc::new(WorkbenchCompilationSpec {
                     _authority: authority.clone(),
@@ -4282,32 +4417,47 @@ where
                     templates,
                     include: prepared.include,
                     evidence,
-                    retained: snapshot.retained,
                     declaration_imports: snapshot.view.workbench_imports(),
                 });
-                // The parser owns whether there is a declaration group. Reserve
-                // one exact original identity without classifying authored text.
-                let admission = session
-                    .admit_cell_for_execution(
-                        execution.admission.clone(),
-                        1,
-                        specification.clone(),
-                        specification.cell.specification_digest(),
-                        authority.authority_digest(),
-                        specification.include.clone(),
-                    )
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })?;
-                Ok((specification, admission))
+                Ok(specification)
             })
             .await?;
         let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
+        let parser_specification = specification.clone();
+        let parser_cancellation = cancellation.clone();
+        let plan = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+            tidepool_runtime::with_compiler_transaction_cancellable(parser_cancellation, || {
+                tidepool_toolchain::artifacts::parse_cell_plan(
+                    Arc::new(parser_specification.cell.clone()),
+                    &parser_specification.include,
+                )
+                .map_err(ResidentActorWorkbenchError::Compile)
+            })
+        }))
+        .await
+        .map_err(ResidentActorWorkbenchError::Join)??;
+        let reservation_specification = specification.clone();
+        let admission = self
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                session
+                    .admit_planned_cell_for_execution(
+                        admission_execution.admission.clone(),
+                        plan,
+                        reservation_specification.clone(),
+                        reservation_specification.cell.specification_digest(),
+                        reservation_specification._authority.authority_digest(),
+                        reservation_specification.include.clone(),
+                    )
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await?;
         let check_specification = specification.clone();
         let check_admission = admission.clone();
-        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "checked_cell_compile_started", "workbench phase");
-        let (checked, folded) =
+        let (checked, program) =
             crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 tidepool_runtime::with_compiler_transaction_cancellable(cancellation, || {
                     let include = check_specification
@@ -4316,7 +4466,7 @@ where
                         .map(PathBuf::as_path)
                         .collect::<Vec<_>>();
                     let view = check_admission.view();
-                    tidepool_runtime::session::turn::check_cell_admitted(
+                    tidepool_runtime::session::turn::compile_cell_program_admitted(
                         CellCheckRequest {
                             exact_context: view.exact_declaration_context().cloned(),
                             session_id: Some(view.session()),
@@ -4330,11 +4480,6 @@ where
                         },
                         check_admission.clone(),
                         &check_specification.templates,
-                        Some(tidepool_runtime::session::CellFoldTurn {
-                            templates: &check_specification.templates,
-                            gen: check_admission.initial_value_generation().0,
-                            retained_imports: &check_specification.retained,
-                        }),
                     )
                     .map_err(|failure| {
                         cell_check_error(failure, &check_specification.cell.cell_source)
@@ -4343,73 +4488,35 @@ where
             }))
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
-        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "checked_cell_compile_completed", "workbench phase");
         cancel_on_drop.0 = None;
-        let item_caps = (0..checked.items.len())
-            .map(|index| checked.checked_item(index))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ResidentActorWorkbenchError::Compile)?;
-        let first = item_caps.first().cloned();
-        let prefix = if let Some(first) = first {
-            let prefix_admission = admission.clone();
-            tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "checked_prefix_admit_started", "workbench phase");
-            let prefix = Some(
-                self.access
-                    .with_machine(context.clone(), move |session, _, _| {
-                        session
-                            .begin_checked_prefix(prefix_admission, first)
-                            .map_err(|error| {
-                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                            })
+        let item_capabilities = program
+            .items()
+            .iter()
+            .map(|item| item.checked_item().clone())
+            .collect::<Vec<_>>();
+        let prefix = self
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                session
+                    .begin_cell_program(admission, program)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })
-                    .await?,
-            );
-            tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "checked_prefix_admit_completed", "workbench phase");
-            prefix
-        } else {
-            None
-        };
-        let mut items = item_caps
+            })
+            .await?;
+        let items = item_capabilities
             .into_iter()
-            .zip(&checked.items)
-            .map(|(item, observation)| PreparedCellItem {
+            .map(|item| PreparedCellItem {
                 ready: PreparedCellStep::Checked {
                     specification: specification.clone(),
-                    prefix: prefix.as_ref().expect("nonempty cell has a prefix").clone(),
+                    prefix: prefix
+                        .as_ref()
+                        .expect("nonempty complete cell has a prefix")
+                        .clone(),
                     item,
-                    verdict: observation.verdict.clone(),
                 },
             })
             .collect::<Vec<_>>();
-        if let Some(mut folded) = folded {
-            if checked.items.len() != 1 || checked.items[0].verdict.kind != TurnKind::Bind {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "checked fold is not one bind item".into(),
-                ));
-            }
-            let prefix = prefix.expect("fold has a checked prefix");
-            let item = checked
-                .checked_item(0)
-                .map_err(ResidentActorWorkbenchError::Compile)?;
-            let reservation = self
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    session.admit_checked_item(prefix, item).map_err(|error| {
-                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })
-                })
-                .await?;
-            checked
-                .attach_fold_prefix(&mut folded, reservation)
-                .map_err(ResidentActorWorkbenchError::Compile)?;
-            items[0].ready = PreparedCellStep::Executable(Box::new(ReadyBlock {
-                result: folded,
-                generation: admission.initial_value_generation(),
-                declaration_source: checked.items[0].source.clone(),
-                declaration_imports: specification.declaration_imports.clone(),
-                observation: None,
-            }));
-        }
         let bindings = self
             .access
             .with_machine(context, move |session, context, _| {
@@ -4733,7 +4840,6 @@ where
             specification,
             prefix,
             item,
-            verdict,
         } = &prepared.ready
         {
             let item = item.clone();
@@ -4770,26 +4876,7 @@ where
                 });
             }
             let specification = specification.clone();
-            let compile_specification = specification.clone();
-            let compile_block = block.clone();
-            let verdict = verdict.clone();
-            let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
-            let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
-            tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_item_compile_started", "workbench phase");
-            let ready = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                tidepool_runtime::with_compiler_transaction_cancellable(cancellation, || {
-                    compile_admitted_cell_item(
-                        &compile_specification,
-                        reservation,
-                        verdict,
-                        &compile_block,
-                    )
-                })
-            }))
-            .await
-            .map_err(ResidentActorWorkbenchError::Join)??;
-            tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_item_compile_completed", "workbench phase");
-            cancel_on_drop.0 = None;
+            let ready = consume_admitted_cell_item(&specification, reservation, &block)?;
             let ready = match ready {
                 CompiledBlock::Ready(ready) => *ready,
                 CompiledBlock::Rejected(diagnostic) => {
@@ -5722,7 +5809,7 @@ async fn render_checked_observation_off_checkout<H, O>(
     access: &ResidentMachineAccess<H, O>,
     context: &crate::ActorSessionContext,
     request: &ObservationRender,
-    cancellation: &tidepool_runtime::CompilerTransactionCancellation,
+    _cancellation: &tidepool_runtime::CompilerTransactionCancellation,
 ) -> Result<String, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -5731,7 +5818,6 @@ where
     let protected = request.protected.clone().ok_or_else(|| {
         ResidentActorWorkbenchError::ActorProtocol("protected display has no capture".into())
     })?;
-    let include = protected.include.clone();
     let budget = request.budget;
     let presented = request.presented.clone();
     tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_admit_started", "workbench phase");
@@ -5751,23 +5837,10 @@ where
         })
         .await?;
     tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_admit_completed", "workbench phase");
-    let compile_admission = admission.clone();
-    let compile_cancellation = cancellation.clone();
-    tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_compile_started", "workbench phase");
-    let result = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-        tidepool_runtime::with_compiler_transaction_cancellable(compile_cancellation, || {
-            let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-            tidepool_runtime::session::turn::run_checked_display(compile_admission, &include)
-                .map_err(|failure| {
-                    ResidentActorWorkbenchError::CompileInfrastructure(
-                        classify_compile(&failure.error).message,
-                    )
-                })
-        })
-    }))
-    .await
-    .map_err(ResidentActorWorkbenchError::Join)??;
-    tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_display_compile_completed", "workbench phase");
+    let result = tidepool_runtime::session::turn::consume_cell_program_display(admission.clone())
+        .map_err(|failure| {
+        ResidentActorWorkbenchError::CompileInfrastructure(classify_compile(&failure.error).message)
+    })?;
     let TurnResult::Bind {
         bound, compiled, ..
     } = result
@@ -7442,23 +7515,6 @@ where
             .await
     }
 
-    /// Drain an execution's exact private lexical owner after failure,
-    /// cancellation, or a completed publication. Detached scope retirement
-    /// releases its binding and source-instance shares even if the actor that
-    /// started the execution can no longer run a normal finalizer.
-    pub(crate) async fn retire_private_execution(
-        &self,
-        context: crate::ActorSessionContext,
-        private_scope: tidepool_codegen::scope::ScopeId,
-    ) -> Result<(), ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session.retire_scope(private_scope);
-                Ok(())
-            })
-            .await
-    }
-
     pub(crate) async fn public_visibility_snapshot(
         &self,
         context: crate::ActorSessionContext,
@@ -7477,6 +7533,7 @@ where
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn capture_context_scope(
         &self,
         context: crate::ActorSessionContext,
@@ -10273,7 +10330,6 @@ struct WorkbenchCompilationSpec {
     templates: Vec<tidepool_runtime::session::TurnTemplate>,
     include: Vec<PathBuf>,
     evidence: String,
-    retained: Vec<(SymbolIdentity, u64)>,
     declaration_imports: SourceImports,
 }
 
@@ -10282,7 +10338,6 @@ enum PreparedCellStep {
         specification: Arc<WorkbenchCompilationSpec>,
         prefix: Arc<tidepool_runtime::session::RuntimeCheckedPrefix>,
         item: tidepool_toolchain::checked_cell::ExactCheckedItem,
-        verdict: TurnClassification,
     },
     Executable(Box<ReadyBlock>),
     Declaration {
@@ -10438,50 +10493,31 @@ where
     ))
 }
 
-fn compile_admitted_cell_item(
+fn consume_admitted_cell_item(
     specification: &WorkbenchCompilationSpec,
     reservation: Arc<tidepool_runtime::session::RuntimeCheckedItemAdmission>,
-    verdict: TurnClassification,
     block: &ParsedBlock,
 ) -> Result<CompiledBlock, ResidentActorWorkbenchError> {
-    let include = specification
-        .include
-        .iter()
-        .map(PathBuf::as_path)
-        .collect::<Vec<_>>();
-    let view = reservation.snapshot().view();
-    let injected = reservation.snapshot().compiler_prefix().injected_modules();
-    let result = match tidepool_runtime::session::turn::run_checked_item(
-        TurnRequest {
-            exact_context: view.exact_declaration_context().cloned(),
-            session_id: Some(view.session()),
-            turn_text: reservation.item().source(),
-            templates: &specification.templates,
-            include: &include,
-            session_root: view.session_root(),
-            inject_modules: &injected,
-            gen: reservation.generation().0,
-            verdict: Some(verdict),
-            target: None,
-            retained_imports: &specification.retained,
-        },
-        reservation.clone(),
-    ) {
-        Ok(result) => result,
-        Err(failure) if classify_compile(&failure.error).class == FailureClass::UserHaskell => {
-            return Ok(CompiledBlock::Rejected(render_turn_compile_rejection(
-                &failure.error,
-                failure.attempted_source.as_deref(),
-                &block.source,
-                &format!("<cell item {}>", block.ordinal),
-            )));
-        }
-        Err(failure) => {
-            return Err(ResidentActorWorkbenchError::CompileInfrastructure(
-                tidepool_runtime::session::render_cell_compile_error(&failure.error, &block.source),
-            ))
-        }
-    };
+    let result =
+        match tidepool_runtime::session::turn::consume_cell_program_item(reservation.clone()) {
+            Ok(result) => result,
+            Err(failure) if classify_compile(&failure.error).class == FailureClass::UserHaskell => {
+                return Ok(CompiledBlock::Rejected(render_turn_compile_rejection(
+                    &failure.error,
+                    failure.attempted_source.as_deref(),
+                    &block.source,
+                    &format!("<cell item {}>", block.ordinal),
+                )));
+            }
+            Err(failure) => {
+                return Err(ResidentActorWorkbenchError::CompileInfrastructure(
+                    tidepool_runtime::session::render_cell_compile_error(
+                        &failure.error,
+                        &block.source,
+                    ),
+                ))
+            }
+        };
     let observation = reservation
         .observation_name()
         .map(|name| {
@@ -12083,31 +12119,24 @@ where
             let Some(report) = session.declaration_recovery_report() else {
                 return Ok(Ok("declaration recovery is not configured".into()));
             };
-            let warning = session
-                .recovery_manifest_warning()
-                .map(|warning| format!("; manifest_warning={warning}"))
-                .unwrap_or_default();
             let mut lines = vec![format!(
-                "declaration recovery: source_session={:?}; successor_session={}; replayed={}; lost={}{}",
+                "declaration recovery: source_session={}; successor_session={}; restored={}; unavailable_bindings={}; durability_unconfirmed={}",
                 report.source_session,
                 report.successor_session,
-                report.replayed.len(),
-                report.lost.len(),
-                warning,
+                report.restored.len(),
+                report.unavailable_bindings.len(),
+                report.durability_unconfirmed,
             )];
-            lines.extend(report.replayed.iter().map(|item| {
+            lines.extend(report.restored.iter().map(|item| {
                 format!(
-                    "replayed session {} generation {} -> {} source_hash={}",
-                    item.origin_session,
-                    item.source_generation,
-                    item.successor_generation,
-                    item.source_hash
+                    "restored generation {} module {}",
+                    item.generation, item.module
                 )
             }));
-            lines.extend(report.lost.iter().map(|item| {
+            lines.extend(report.unavailable_bindings.iter().map(|item| {
                 format!(
-                    "lost session {} generation {} source_hash={} reason={}",
-                    item.origin_session, item.source_generation, item.source_hash, item.reason
+                    "unavailable binding {} session {} variable {}",
+                    item.name, item.session, item.variable
                 )
             }));
             Ok(Ok(lines.join("\n")))
@@ -15031,28 +15060,12 @@ mod request_tests {
         assert!(error.contains("no child-session factory"));
     }
 
-    /// A dedicated child session whose actor has retired, but for which a
-    /// `RootCustody` is still held OUTSIDE the session (standing in for a
-    /// reply/retained progress value not yet exported off it — parcel 6's
-    /// territory, not reconstructed here), is not torn down: the release
-    /// defers. `value_handle_count` would never reach zero here even once
-    /// released (it also counts the session's own private bindings), which
-    /// is exactly why `retire_child_session`/`with_host_machine`'s
-    /// settlement check `ResidentSession::outstanding_custody` instead —
-    /// this test is the regression pin for that distinction. Once the held
-    /// token drops, the NEXT checkout of the session (a second
-    /// `retire_child_session` call, exactly as `with_host_machine`'s own
-    /// settlement retries it for any other reason a session gets checked
-    /// out) completes the teardown and the session is gone from the
-    /// registry. Exercises `ResidentActorRunner::retire_child_session`
-    /// directly (`child_sessions` membership is normally recorded by
-    /// `provision_child_session`; set here by hand since this test only
-    /// needs a dedicated session to already exist, not the full
-    /// parcel-crossing launch path that builds one) with
-    /// `other_actor_still_on_session: false` throughout (no directory
-    /// entries at all in this fixture).
-    #[tokio::test]
-    async fn retiring_a_child_session_defers_then_completes_once_custody_clears() {
+    fn child_session_with_outstanding_custody() -> (
+        ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
+        tidepool_repr::SessionId,
+        RootCustody,
+    ) {
         let (machines, context, source, _root) = actor_registry_fixture();
         let child_id = tidepool_repr::SessionId(context.placement.session.0.wrapping_add(11));
         let (mut child_session, _child_root) = bare_session_at(child_id);
@@ -15110,7 +15123,210 @@ mod request_tests {
             .lock()
             .unwrap()
             .insert(child_id);
+        (runner, machines, child_id, custody)
+    }
 
+    fn child_session_with_binding_lease() -> (
+        ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
+        tidepool_repr::SessionId,
+        tidepool_runtime::session::resident::BindingLease,
+        tempfile::TempDir,
+    ) {
+        let (machines, runner, context, root) = child_admission_fixture();
+        let id = context.placement.session;
+        runner.access.child_sessions.lock().unwrap().insert(id);
+        let (mut session, receipt) = machines.checkout_run(id).unwrap().into_parts();
+        let lease = session.lease_bindings(&[]);
+        machines.settle_suspended(receipt, session, Vec::new());
+        (runner, machines, id, lease, root)
+    }
+
+    async fn assert_child_cleanup_finished(
+        runner: &ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        id: tidepool_repr::SessionId,
+        owner: &Arc<PendingChildTeardown>,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while runner.access.machines.kind(id).is_some()
+                || !owner
+                    .worker
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal cleanup worker finishes");
+        assert!(!runner.access.child_sessions.lock().unwrap().contains(&id));
+        assert!(!runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn reaper_release_final_binding_lease_wakes_and_finishes_cleanup() {
+        let (runner, machines, id, lease, _root) = child_session_with_binding_lease();
+        runner.retire_child_session(id, false).await.unwrap();
+        assert!(
+            machines.kind(id).is_some(),
+            "preparation lease retains the machine"
+        );
+        let owner = runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .clone();
+        std::thread::spawn(move || drop(lease)).join().unwrap();
+        assert_child_cleanup_finished(&runner, id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn reaper_release_terminal_external_checkout_clears_membership_and_finishes_worker() {
+        let (runner, machines, id, lease, _root) = child_session_with_binding_lease();
+        runner.retire_child_session(id, false).await.unwrap();
+        let owner = runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .clone();
+        assert!(machines.remove(id, "external terminal owner").is_some());
+        let result = runner
+            .access
+            .with_host_machine(
+                "observe-terminal-child",
+                id,
+                None,
+                |_, _| -> Result<(), ResidentActorWorkbenchError> {
+                    panic!("terminal child cannot enter")
+                },
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ResidentActorWorkbenchError::Checkout(
+                CheckoutError::Retired { .. }
+            ))
+        ));
+        assert_child_cleanup_finished(&runner, id, &owner).await;
+        runner.retire_child_session(id, false).await.unwrap();
+        assert!(!runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .contains_key(&id));
+        drop(lease);
+    }
+
+    #[tokio::test]
+    async fn reaper_release_panicked_checkout_clears_membership_and_finishes_worker() {
+        let (runner, _machines, id, lease, _root) = child_session_with_binding_lease();
+        runner.retire_child_session(id, false).await.unwrap();
+        let owner = runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .clone();
+        let result = runner
+            .access
+            .with_host_machine(
+                "panic-terminal-child",
+                id,
+                None,
+                |_, _| -> Result<(), ResidentActorWorkbenchError> {
+                    panic!("injected terminal checkout panic")
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(ResidentActorWorkbenchError::Join(_))));
+        assert_child_cleanup_finished(&runner, id, &owner).await;
+        drop(lease);
+    }
+
+    #[tokio::test]
+    async fn reaper_release_unknown_initial_checkout_clears_membership_and_finishes_worker() {
+        let (_machines, runner, context, _root) = child_admission_fixture();
+        let id = tidepool_repr::SessionId(context.placement.session.0 + 1);
+        runner.access.child_sessions.lock().unwrap().insert(id);
+        let retirement = runner.retire_child_session(id, false);
+        tokio::pin!(retirement);
+        assert!(matches!(
+            futures_util::poll!(retirement.as_mut()),
+            std::task::Poll::Pending
+        ));
+        let owner = runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .clone();
+        retirement.await.unwrap();
+        assert_child_cleanup_finished(&runner, id, &owner).await;
+        runner.retire_child_session(id, false).await.unwrap();
+        assert!(!runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn reaper_release_terminal_cleanup_preserves_different_worker_owner() {
+        let (runner, _machines, id, lease, _root) = child_session_with_binding_lease();
+        let owner = Arc::new(PendingChildTeardown::new());
+        runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .insert(id, owner.clone());
+        let stale = Arc::new(PendingChildTeardown::new());
+        assert!(!runner
+            .access
+            .finish_child_session_teardown(id, Some(&stale)));
+        assert!(runner.access.child_sessions.lock().unwrap().contains(&id));
+        assert!(runner.access.owns_pending_child_teardown(id, &owner));
+        assert!(runner
+            .access
+            .finish_child_session_teardown(id, Some(&owner)));
+        assert!(!runner.access.child_sessions.lock().unwrap().contains(&id));
+        assert!(!runner
+            .access
+            .pending_child_teardown
+            .lock()
+            .unwrap()
+            .contains_key(&id));
+        drop(lease);
+    }
+
+    /// A dedicated child session whose actor has retired, but for which a
+    /// `RootCustody` is still held outside the session is not torn down. The
+    /// count must use outstanding custody rather than `value_handle_count`,
+    /// which includes the session's own private bindings. Once the held token
+    /// drops, its single cleanup owner checks out the session and tears it
+    /// down; the test waits for both registry removal and worker completion.
+    #[tokio::test]
+    async fn retiring_a_child_session_defers_then_completes_once_custody_clears() {
+        let (runner, machines, child_id, custody) = child_session_with_outstanding_custody();
         runner
             .retire_child_session(child_id, false)
             .await
@@ -15128,19 +15344,164 @@ mod request_tests {
                 .contains_key(&child_id),
             "the deferral must be recorded"
         );
+        let owner = Arc::clone(
+            runner
+                .access
+                .pending_child_teardown
+                .lock()
+                .unwrap()
+                .get(&child_id)
+                .expect("pending cleanup owner"),
+        );
 
-        // Release the custody itself — the only thing outstanding.
+        // Release the custody itself — the only thing outstanding. The
+        // session owner signals cleanup, so this test makes no explicit
+        // checkout after the reader drops.
         drop(custody);
-
-        runner
-            .retire_child_session(child_id, false)
-            .await
-            .expect("retirement recheck itself does not fail");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while machines.kind(child_id).is_some()
+                || !owner
+                    .worker
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the cleanup worker checks released custody and completes");
         assert_eq!(
             machines.kind(child_id),
             None,
             "the deferred release completes once custody clears"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_child_retirements_share_one_cleanup_owner() {
+        let (runner, machines, child_id, custody) = child_session_with_outstanding_custody();
+        let (first, second) = tokio::join!(
+            runner.retire_child_session(child_id, false),
+            runner.retire_child_session(child_id, false),
+        );
+        first.expect("first retirement check");
+        second.expect("concurrent retirement shares the existing cleanup owner");
+        assert!(machines.kind(child_id).is_some(), "custody defers teardown");
+
+        let owner = Arc::clone(
+            runner
+                .access
+                .pending_child_teardown
+                .lock()
+                .unwrap()
+                .get(&child_id)
+                .expect("pending cleanup owner"),
+        );
+        drop(custody);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while machines.kind(child_id).is_some()
+                || !owner
+                    .worker
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the single cleanup owner finishes after the last reader drops");
+    }
+
+    #[tokio::test]
+    async fn canceled_child_retirement_keeps_the_cleanup_owner_until_last_reader_drops() {
+        let (runner, machines, child_id, custody) = child_session_with_outstanding_custody();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let blocker_access = runner.access.sharing();
+        let blocker_entered = Arc::clone(&entered);
+        let blocker_release = Arc::clone(&release);
+        let blocker = tokio::spawn(async move {
+            blocker_access
+                .with_host_machine("hold-child-session", child_id, None, move |_, _| {
+                    blocker_entered.notify_one();
+                    let (lock, changed) = &*blocker_release;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = changed.wait(released).unwrap();
+                    }
+                    Ok(())
+                })
+                .await
+        });
+        entered.notified().await;
+
+        let inspection_access = runner.access.sharing();
+        let retirement =
+            tokio::spawn(async move { runner.retire_child_session(child_id, false).await });
+        let owner = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(owner) = inspection_access
+                    .pending_child_teardown
+                    .lock()
+                    .unwrap()
+                    .get(&child_id)
+                    .cloned()
+                {
+                    break owner;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retirement installed its cleanup owner before waiting for checkout");
+        retirement.abort();
+        let _ = retirement.await;
+
+        {
+            let (lock, changed) = &*release;
+            *lock.lock().unwrap() = true;
+            changed.notify_all();
+        }
+        blocker
+            .await
+            .expect("blocking checkout task")
+            .expect("blocking checkout settles");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !owner
+                .initial_checkout_complete
+                .load(std::sync::atomic::Ordering::Acquire)
+                || !inspection_access
+                    .pending_child_teardown
+                    .lock()
+                    .unwrap()
+                    .contains_key(&child_id)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached cleanup checked once while custody remained outstanding");
+        drop(custody);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while machines.kind(child_id).is_some()
+                || !owner
+                    .worker
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the detached cleanup owner completes after caller cancellation and final drop");
     }
 
     /// Like [`actor_registry_fixture`], but mints a second, isolated lexical

@@ -7,7 +7,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 
@@ -358,7 +359,7 @@ impl Default for SessionRunContext {
 #[derive(Debug)]
 pub struct RootCustody {
     handle: Option<ValueHandle>,
-    cleanup: Arc<CustodyCleanup>,
+    cleanup: CustodyLease,
     provenance: Arc<ProgramProvenance>,
     /// `true` when this token ALIASES a handle another owner (a live
     /// binding, at present -- see [`ResidentSession::prepared_binding_handle`])
@@ -384,7 +385,7 @@ impl RootCustody {
     ) -> Self {
         RootCustody {
             handle: Some(handle),
-            cleanup,
+            cleanup: CustodyLease::new(cleanup),
             provenance,
             shared: false,
         }
@@ -400,7 +401,7 @@ impl RootCustody {
     ) -> Self {
         RootCustody {
             handle: Some(handle),
-            cleanup,
+            cleanup: CustodyLease::new(cleanup),
             provenance,
             shared: true,
         }
@@ -417,7 +418,7 @@ impl RootCustody {
         };
         CustodyTransfer {
             handle,
-            cleanup: Arc::clone(&self.cleanup),
+            cleanup: self.cleanup.clone(),
             provenance: Arc::clone(&self.provenance),
             committed: false,
             shared: self.shared,
@@ -443,7 +444,7 @@ impl Drop for RootCustody {
 #[derive(Debug)]
 pub struct BindingLease {
     retained: Vec<SessionVarId>,
-    cleanup: Arc<CustodyCleanup>,
+    cleanup: CustodyLease,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -477,10 +478,46 @@ impl Drop for BindingLease {
     }
 }
 
-#[derive(Debug, Default)]
+/// Counts external ownership independently of temporary Arc references. Drop
+/// implementations enqueue their cleanup first; this field then releases the
+/// count before waking the owner, including shared/committed transfers.
+#[derive(Debug)]
+struct CustodyLease(Arc<CustodyCleanup>);
+
+impl CustodyLease {
+    fn new(cleanup: Arc<CustodyCleanup>) -> Self {
+        cleanup.external_leases.fetch_add(1, Ordering::Relaxed);
+        Self(cleanup)
+    }
+}
+
+impl Clone for CustodyLease {
+    fn clone(&self) -> Self {
+        Self::new(Arc::clone(&self.0))
+    }
+}
+
+impl std::ops::Deref for CustodyLease {
+    type Target = CustodyCleanup;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for CustodyLease {
+    fn drop(&mut self) {
+        let previous = self.external_leases.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "external custody accounting underflow");
+        self.notify_cleanup();
+    }
+}
+
+#[derive(Default)]
 struct CustodyCleanup {
     abandoned: Mutex<Vec<ValueHandle>>,
     binding_leases: Mutex<Vec<Vec<SessionVarId>>>,
+    notify: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    external_leases: AtomicUsize,
 }
 
 impl CustodyCleanup {
@@ -488,14 +525,35 @@ impl CustodyCleanup {
         self.abandoned.lock().push(handle);
     }
 
+    fn notify_cleanup(&self) {
+        let notify = self.notify.lock().clone();
+        if let Some(notify) = notify {
+            notify();
+        }
+    }
+
+    fn set_notifier(&self, notify: Arc<dyn Fn() + Send + Sync>) {
+        *self.notify.lock() = Some(notify);
+    }
+
     fn take_all(&self) -> Vec<ValueHandle> {
         std::mem::take(&mut *self.abandoned.lock())
     }
 }
 
+impl std::fmt::Debug for CustodyCleanup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustodyCleanup")
+            .field("abandoned", &self.abandoned.lock().len())
+            .field("binding_leases", &self.binding_leases.lock().len())
+            .field("has_notifier", &self.notify.lock().is_some())
+            .finish()
+    }
+}
+
 struct CustodyTransfer {
     handle: ValueHandle,
-    cleanup: Arc<CustodyCleanup>,
+    cleanup: CustodyLease,
     provenance: Arc<ProgramProvenance>,
     committed: bool,
     /// Carried from the source [`RootCustody`] — see that type's `shared`
@@ -514,13 +572,13 @@ impl CustodyTransfer {
         if self.shared {
             RootCustody::shared(
                 self.handle,
-                Arc::clone(&self.cleanup),
+                Arc::clone(&self.cleanup.0),
                 Arc::clone(&self.provenance),
             )
         } else {
             RootCustody::new(
                 self.handle,
-                Arc::clone(&self.cleanup),
+                Arc::clone(&self.cleanup.0),
                 Arc::clone(&self.provenance),
             )
         }
@@ -1157,7 +1215,7 @@ fn checked_display_plan(
         .checked_display_admission()
         .is_none_or(|owned| !Arc::ptr_eq(owned, &admission))
         || certification.checked_execution().is_some()
-        || proof.admission_digest() != admission.digest()
+        || !admission.matches_compiled_display(proof)
         || proof.generation() != generation.0
         || generation != admission.generation()
         || !Arc::ptr_eq(proof.capture(), admission.execution())
@@ -1305,6 +1363,19 @@ impl PendingDisplayInstall {
 }
 
 /// A display bundle's three binders come from one compiler value module.
+fn checked_display_input(
+    checked: Option<&CheckedDisplayPlan>,
+) -> Result<Option<(i64, Vec<String>)>, ResidentError> {
+    let Some(plan) = checked.filter(|plan| plan.admission.prefix().cell_program().is_some()) else {
+        return Ok(None);
+    };
+    let budget =
+        i64::try_from(plan.admission.budget()).map_err(|_| PreparedRuntimeError::HostMount {
+            detail: "display budget exceeds the worker Int range".into(),
+        })?;
+    Ok(Some((budget, plan.admission.presented().to_vec())))
+}
+
 fn check_display_bundle_binders(
     page: &BoundBinder,
     metadata: &BoundBinder,
@@ -2309,6 +2380,34 @@ where
         self.state.begin_checked_prefix(admission, first_item)
     }
 
+    pub fn begin_cell_program(
+        &self,
+        admission: Arc<super::RuntimeCellAdmission>,
+        program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    ) -> Result<Option<Arc<super::RuntimeCheckedPrefix>>, SessionError> {
+        self.state.begin_cell_program(admission, program)
+    }
+
+    pub fn admit_planned_cell_for_execution(
+        &mut self,
+        execution: Arc<super::PrivateExecutionAdmission>,
+        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
+        specification: Arc<dyn std::any::Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.admit_planned_cell_for_execution(
+            execution,
+            plan,
+            specification,
+            specification_digest,
+            authority_digest,
+            include_paths,
+        )
+    }
+
     pub fn admit_cell_for_execution(
         &mut self,
         execution: Arc<super::PrivateExecutionAdmission>,
@@ -2656,7 +2755,7 @@ where
             .collect();
         BindingLease {
             retained,
-            cleanup: Arc::clone(&self.custody_cleanup),
+            cleanup: CustodyLease::new(Arc::clone(&self.custody_cleanup)),
         }
     }
 
@@ -2716,7 +2815,7 @@ where
         if !self.state.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope).into());
         }
-        if !Arc::ptr_eq(&lease.cleanup, &self.custody_cleanup) {
+        if !Arc::ptr_eq(&lease.cleanup.0, &self.custody_cleanup) {
             return Err(BindingAliasError::ForeignLease.into());
         }
         if !lease.retained.contains(&source) {
@@ -4257,19 +4356,10 @@ where
             })
     }
 
-    /// Source-only declaration recovery facts for this machine incarnation.
-    /// Live values and handles are intentionally absent because they cannot
-    /// survive machine replacement.
+    /// Exact restored declaration tips and unavailable prior-machine bindings.
     #[must_use]
-    pub fn declaration_recovery_report(&self) -> Option<&super::DeclarationRecoveryReport> {
+    pub fn declaration_recovery_report(&self) -> Option<super::DeclarationRecoveryReport> {
         self.state.lib().declaration_recovery_report()
-    }
-
-    /// A manifest publication failure that happened after a successful
-    /// declaration commit, if durability has not recovered since.
-    #[must_use]
-    pub fn recovery_manifest_warning(&self) -> Option<&str> {
-        self.state.lib().recovery_manifest_warning()
     }
 
     /// How many names `scope`'s OWN frame binds (accounting class 3, per
@@ -5087,6 +5177,7 @@ where
                 page,
                 alias,
                 generation,
+                checked_display_input(checked.as_ref())?,
             )
         })();
         if let Some(plan) = checked {
@@ -5295,6 +5386,7 @@ where
                 page,
                 alias,
                 generation,
+                checked_display_input(checked.as_ref())?,
             )
             .map(Some)
         })();
@@ -5320,6 +5412,7 @@ where
         page: &BoundBinder,
         alias: &BoundBinder,
         generation: Generation,
+        presentation: Option<(i64, Vec<String>)>,
     ) -> Result<ResidentDisplayBundle, ResidentError> {
         let realm = self.run_context.resource_scope;
         let lexical_scope = self.run_context.lexical_scope;
@@ -5330,17 +5423,29 @@ where
         };
         let run_exec_started = std::time::Instant::now();
         let ran = self.on_eval_thread(move |engine, table, handlers, captured| {
-            Ok(settle_prepared(
+            let argument = match presentation
+                .as_ref()
+                .map(|input| engine.build_host_value(realm, input, table))
+                .transpose()
+            {
+                Ok(argument) => argument,
+                Err(error) => return Ok(Err(error)),
+            };
+            let outcome = settle_prepared(
                 engine,
                 program,
                 realm,
-                None,
+                argument,
                 SettlePlan::Display(page.tier),
                 park,
                 table,
                 handlers,
                 captured,
-            ))
+            );
+            if let Some(argument) = argument {
+                engine.release(argument);
+            }
+            Ok(outcome)
         });
         timing::record_stage(
             timing::NO_NODE,
@@ -5591,7 +5696,7 @@ where
         run_table: Option<&DataConTable>,
     ) -> Result<ResidentOutcome, ResidentError> {
         self.settle_dropped_custody();
-        if !Arc::ptr_eq(&entry.cleanup, &self.custody_cleanup) {
+        if !Arc::ptr_eq(&entry.cleanup.0, &self.custody_cleanup) {
             return Err(ResidentError::ForeignCustody);
         }
         let provenance = Arc::clone(&entry.provenance);
@@ -5621,8 +5726,8 @@ where
         run_table: Option<&DataConTable>,
     ) -> Result<ResidentOutcome, ResidentError> {
         self.settle_dropped_custody();
-        if !Arc::ptr_eq(&function.cleanup, &self.custody_cleanup)
-            || !Arc::ptr_eq(&argument.cleanup, &self.custody_cleanup)
+        if !Arc::ptr_eq(&function.cleanup.0, &self.custody_cleanup)
+            || !Arc::ptr_eq(&argument.cleanup.0, &self.custody_cleanup)
         {
             return Err(ResidentError::ForeignCustody);
         }
@@ -5661,7 +5766,7 @@ where
         custody: &RootCustody,
         char_budget: usize,
     ) -> Option<String> {
-        if !Arc::ptr_eq(&custody.cleanup, &self.custody_cleanup) {
+        if !Arc::ptr_eq(&custody.cleanup.0, &self.custody_cleanup) {
             return None;
         }
         let handle = custody.handle?;
@@ -6022,25 +6127,21 @@ where
         count + binding_count
     }
 
-    /// How many [`RootCustody`] tokens for THIS session are alive right now,
-    /// OUTSIDE the session itself — every one holds its own `Arc::clone` of
-    /// `self.custody_cleanup`, so `Arc::strong_count` less the one the
-    /// session holds for itself is exactly that count. Settles dropped
-    /// custody first ([`Self::settle_dropped_custody`]), so a token whose
-    /// owner already dropped it — queued for release, not yet drained —
-    /// does not count as outstanding.
-    ///
-    /// `BindingLease` and the transient `CustodyTransfer` also clone this
-    /// `Arc`, so in principle they inflate this count too — but neither
-    /// lives past the synchronous call that built it (`CustodyTransfer`
-    /// commits or drops within `into_transfer`'s one caller;
-    /// `BindingLease`'s own doc comment: reclaimed "on the next session
-    /// entry or at teardown", never held across a turn boundary), so
-    /// neither can be alive at a call site like actor retirement, which
-    /// only ever runs between turns.
+    /// Install the signal an owning lifecycle manager uses to resume cleanup
+    /// after a root is dropped while this session is checked in. The callback
+    /// is invoked after cleanup has been queued and the external lease count
+    /// released, with no session or cleanup lock held.
+    pub fn set_custody_cleanup_notifier(&mut self, notify: Arc<dyn Fn() + Send + Sync>) {
+        self.custody_cleanup.set_notifier(notify);
+    }
+
+    /// External rooted values, binding leases, and in-flight transfers still
+    /// retaining this session. A dropped lease queues cleanup and releases its
+    /// count before waking the lifecycle owner, so notification never reports
+    /// the final releasing token as an outstanding reader.
     pub fn outstanding_custody(&mut self) -> usize {
         self.settle_dropped_custody();
-        Arc::strong_count(&self.custody_cleanup).saturating_sub(1)
+        self.custody_cleanup.external_leases.load(Ordering::Acquire)
     }
 
     /// Classify a projected parked outcome into a [`ResidentOutcome`]:
@@ -6331,6 +6432,112 @@ where
         if let Some(observer) = &self.continuation_observer {
             observer(ResidentContinuationEvent::Retired(hole.to_owned()));
         }
+    }
+}
+
+#[cfg(test)]
+mod custody_release_tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct EmptyOutput;
+    impl OutputSink for EmptyOutput {
+        fn drain(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn snapshot(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+    type TestSession = ResidentSession<frunk::HNil, EmptyOutput>;
+
+    #[test]
+    fn final_external_lease_is_released_before_its_cleanup_notification() {
+        for mode in 0..6 {
+            let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+            let cleanup = Arc::clone(&session.custody_cleanup);
+            let provenance = Arc::new(ProgramProvenance::default());
+            let action: Box<dyn FnOnce() + Send> = match mode {
+                0 => {
+                    let token = RootCustody::new(ValueHandle(1), cleanup.clone(), provenance);
+                    Box::new(move || drop(token))
+                }
+                1 => {
+                    let token = RootCustody::shared(ValueHandle(1), cleanup.clone(), provenance);
+                    Box::new(move || drop(token))
+                }
+                2..=4 => {
+                    let token = if mode == 4 {
+                        RootCustody::shared(ValueHandle(1), cleanup.clone(), provenance)
+                    } else {
+                        RootCustody::new(ValueHandle(1), cleanup.clone(), provenance)
+                    };
+                    let transfer = token.into_transfer();
+                    if mode == 3 {
+                        Box::new(move || transfer.commit())
+                    } else {
+                        Box::new(move || drop(transfer))
+                    }
+                }
+                _ => {
+                    let token = session.lease_bindings(&[]);
+                    Box::new(move || drop(token))
+                }
+            };
+            drop(cleanup);
+            assert_eq!(session.outstanding_custody(), 1);
+            let (notification, observing) = std::sync::mpsc::sync_channel(0);
+            let (checked, after_check) = std::sync::mpsc::sync_channel(0);
+            let after_check = Mutex::new(after_check);
+            session.set_custody_cleanup_notifier(Arc::new(move || {
+                notification.send(()).unwrap();
+                after_check
+                    .lock()
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap();
+            }));
+            let dropping = std::thread::spawn(action);
+            // Force cleanup's observer to run while the releasing token's
+            // destructor is blocked inside its notification callback.
+            observing
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            let outstanding = session.outstanding_custody();
+            let queued_roots = session.custody_cleanup.abandoned.lock().len();
+            let queued_bindings = session.custody_cleanup.binding_leases.lock().len();
+            checked.send(()).unwrap();
+            dropping.join().unwrap();
+            assert_eq!(outstanding, 0, "release mode {mode}");
+            assert_eq!(
+                queued_roots, 0,
+                "notification permits draining queued roots"
+            );
+            assert_eq!(
+                queued_bindings, 0,
+                "notification permits draining binding leases"
+            );
+        }
+    }
+
+    #[test]
+    fn transfer_and_shared_readers_keep_exact_lease_counts_until_final_release() {
+        let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let cleanup = Arc::clone(&session.custody_cleanup);
+        let token = RootCustody::new(ValueHandle(1), cleanup.clone(), Arc::default());
+        let shared = RootCustody::shared(ValueHandle(1), cleanup.clone(), Arc::default());
+        drop(cleanup);
+        assert_eq!(session.outstanding_custody(), 2);
+        let token = token.into_transfer().into_custody();
+        assert_eq!(session.outstanding_custody(), 2);
+        drop(shared);
+        assert_eq!(session.outstanding_custody(), 1);
+        assert!(session.custody_cleanup.abandoned.lock().is_empty());
+        drop(token);
+        assert_eq!(
+            session.custody_cleanup.abandoned.lock().as_slice(),
+            &[ValueHandle(1)]
+        );
+        assert_eq!(session.outstanding_custody(), 0);
     }
 }
 

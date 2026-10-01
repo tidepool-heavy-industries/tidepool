@@ -47,7 +47,9 @@ pub use request::{
 /// directly bound extractor's (see [`ExtractCmd::bind_direct`]).
 pub fn preflight_compiler_daemon(socket: &Path) -> std::io::Result<CompilerIdentity> {
     daemon::preflight(socket)
-        .map(|binding| CompilerIdentity::daemon(binding.producer, binding.epoch))
+        .map(|binding| {
+            CompilerIdentity::daemon(binding.producer, binding.consumed_worker, binding.epoch)
+        })
         .map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::ConnectionRefused,
@@ -527,6 +529,13 @@ impl ExtractCmd {
         self
     }
 
+    /// Parse an ordered cell plan without checking types or compiling products.
+    /// Its bounded receipt is written to the request's `cell_out` path.
+    pub fn cell_plan(&mut self) -> &mut Self {
+        self.request.cell_plan();
+        self
+    }
+
     /// Runtime-authored module template containing the two cell placeholders.
     pub fn cell_template(&mut self, path: &Path) -> &mut Self {
         self.request.cell_template(path);
@@ -974,7 +983,7 @@ mod tests {
         // from that launched producer rather than a separate path scan.
         std::fs::write(
             &real,
-            b"#!/bin/sh\nprintf TPCID001\nhead -c 32 /dev/zero\ncat >/dev/null\n",
+            b"#!/bin/sh\nprintf TPCID002\nhead -c 64 /dev/zero\ncat >/dev/null\n",
         )
         .unwrap();
         let old_path = std::env::var_os("PATH");
@@ -1018,7 +1027,7 @@ mod tests {
         let fake = dir.join("fake-extract");
         std::fs::write(
             &fake,
-            b"#!/bin/sh\nprintf TPCID001\nhead -c 32 /dev/zero\ncat >/dev/null\nprintf '\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000'\n",
+            b"#!/bin/sh\nprintf TPCID002\nhead -c 64 /dev/zero\ncat >/dev/null\nprintf '\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000'\n",
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1064,7 +1073,7 @@ mod tests {
         let fake_bin = dir.join("fake-extract");
         std::fs::write(
             &fake_bin,
-            b"#!/bin/sh\nprintf TPCID001\nhead -c 32 /dev/zero\ncat >/dev/null\nprintf '\\000\\000\\000\\000\\015\\000\\000\\000fallback-ran\\012\\000\\000\\000\\000'\n",
+            b"#!/bin/sh\nprintf TPCID002\nhead -c 64 /dev/zero\ncat >/dev/null\nprintf '\\000\\000\\000\\000\\015\\000\\000\\000fallback-ran\\012\\000\\000\\000\\000'\n",
         )
         .unwrap();
         std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();

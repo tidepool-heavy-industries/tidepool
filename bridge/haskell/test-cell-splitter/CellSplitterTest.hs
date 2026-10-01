@@ -14,6 +14,9 @@ import GHC
 import GHC.Builtin.Types (intTy)
 import GHC.Types.Name.Occurrence (mkVarOcc)
 import GHC.Driver.Session (parseDynamicFilePragma)
+import GHC.Driver.Env (hsc_HPT)
+import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
+import GHC.Unit.Module.ModIface (mi_iface_hash)
 import GHC.Parser.Header (getOptions)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Data.StringBuffer (stringToStringBuffer)
@@ -21,9 +24,12 @@ import GHC.Types.SourceError (SourceError)
 import Tidepool.Agent.Assignment.Internal (NameError (..), renderNameError)
 import Tidepool.Binders
 import Tidepool.TurnSource (spliceTemplate)
+import Tidepool.SessionArtifacts (mkBoundBinders)
 import Tidepool.DiagJson (Diag (..), diagsFromSourceError)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
+import GHC.Utils.Outputable (ppr, showSDocUnsafe)
+import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transformProgramDeclarationImports)
 import Tidepool.GhcPipeline
 import Tidepool.ExtractRequest
   ( InspectionRequest(..), RequestField(..), WorkerRequest(..)
@@ -45,7 +51,14 @@ import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 
 main :: IO ()
-main = do
+main = getArgs >>= \case
+  ["--ordered-segments"] -> orderedInferenceSegments >> putStrLn "ordered inference segments: 1 passed"
+  ["--program-originals"] -> programOriginalImportsCompilation >> putStrLn "program original imports: 1 passed"
+  ["--function-value-iface"] -> functionValueInterfaceCompilation >> putStrLn "function value interface: 1 passed"
+  _ -> runAllTests
+
+runAllTests :: IO ()
+runAllTests = do
   certificationRequestValidation
   libdir <- getLibdir
   runGhc (Just libdir) $ do
@@ -64,6 +77,7 @@ main = do
       noStandaloneDerivingLeavesCellUntouched flags
       danglingOperatorCells flags
       multilineLetPlacement flags
+  orderedInferenceSegments
   interfaceMeasurementDiagnostics
   multilineLetCompilation
   renderNameErrorTeachesGroupPaths
@@ -80,6 +94,126 @@ main = do
     ["--memo-lifecycle"] -> memoLifecycleCompilation
     ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
     _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --pin-imports, --path-insensitive-witness, --memo-lifecycle, or --structural-display EFFECTS_INCLUDE"
+
+functionValueInterfaceCompilation :: IO ()
+functionValueInterfaceCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let path = root </> "FunctionValueProducer.hs"
+  writeFile path "module FunctionValueProducer where\n__result :: IO (() -> Int)\n__result = pure (\\() -> (42 :: Int))\n"
+  prepared <- runPipelineSelected PreparedStg path [root]
+  bound <- mkBoundBinders ["captured"] 1 root (pprPipelineResult prepared)
+  case bound of
+    [binder] | bbTier binder == RetainOpaque -> pure ()
+    _ -> fail "function-returning native producer did not retain its thin Val interface"
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path,handle) <- openTempFile parent "tidepool-function-value-iface"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+programOriginalImportsCompilation :: IO ()
+programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let originalDirectory = root </> "Tidepool" </> "Session" </> "Lib"
+      first = originalDirectory </> "G1.hs"
+      second = originalDirectory </> "G2.hs"
+      shadow = originalDirectory </> "G3.hs"
+      target = root </> "ProgramOriginalConsumer.hs"
+  createDirectoryIfMissing True originalDirectory
+  writeFile first "module Tidepool.Session.Lib.G1 (a,T(..)) where\ndata T = Old\na :: Int\na = 1\n__result = (0 :: Int)\n"
+  writeFile second "module Tidepool.Session.Lib.G2 (b) where\nb :: Int\nb = 2\n__result = (0 :: Int)\n"
+  writeFile shadow "module Tidepool.Session.Lib.G3 (a,T(..)) where\ndata T = New\na :: Bool\na = True\n__result = (0 :: Int)\n"
+  let source body = unlines
+        [ "module ProgramOriginalConsumer where"
+        , "import Tidepool.Session.Lib.G1"
+        , "import Tidepool.Session.Lib.G2"
+        , "import Tidepool.Session.Lib.G3"
+        , "__result :: (Bool,Int)"
+        , "__result = " ++ body
+        ]
+  writeFile target (source "(Tidepool.Session.Lib.G3.a,Tidepool.Session.Lib.G1.a + Tidepool.Session.Lib.G2.b)")
+  withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
+    checked <- runRequest $ \compiler -> compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+    let environment = crHscEnv checked
+    inventories <- mapM (\owner -> do
+      original <- maybe (fail "original Lib interface is absent") pure (lookupHpt (hsc_HPT environment) (mkModuleName owner))
+      hydratePlannedDeclarationInventory ("main",owner)
+        (show (mi_iface_hash (mi_final_exts (hm_iface original)))) environment >>= either fail pure)
+      ["Tidepool.Session.Lib.G1","Tidepool.Session.Lib.G2","Tidepool.Session.Lib.G3"]
+    writeFile target (source "(a,Tidepool.Session.Lib.G1.a + b)")
+    libdir <- getLibdir
+    transformed <- runGhc (Just libdir) $ do
+      setSession environment
+      targetSpec <- guessTarget target Nothing Nothing
+      setTargets [targetSpec]
+      _ <- depanal [] False
+      summary <- getModSummary (mkModuleName "ProgramOriginalConsumer")
+      parsed <- parseModule summary
+      liftIO (transformProgramDeclarationImports inventories Nothing environment parsed)
+    let rendered = "{-# LANGUAGE PatternSynonyms #-}\n" ++ showSDocUnsafe (ppr (pm_parsed_source transformed))
+    writeFile target (rendered ++ "\n__legacy = Tidepool.Session.Lib.G1.Old\n")
+    _ <- runRequest $ \compiler -> compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+    writeFile target (rendered ++ "\n__legacy = Old\n")
+    rejected <- try (runRequest $ \compiler -> compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing)
+      :: IO (Either SomeException CheckedEnvironmentResult)
+    case rejected of
+      Left _ -> pure ()
+      Right _ -> fail "replacing a declaration head retained its old child unqualified"
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path,handle) <- openTempFile parent "tidepool-program-originals"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+orderedInferenceSegments :: IO ()
+orderedInferenceSegments = do
+  forM_ ["-fdefer-type-errors", "-fdefer-typed-holes", "-fdefer-out-of-scope-variables"] $ \option -> do
+    deferred <- analyzeOrderedCell template ("{-# OPTIONS_GHC " ++ option ++ " #-}\npure missingName")
+    case deferred of
+      Left CellPrologueFailure {} -> pure ()
+      _ -> fail ("ordered program accepted deferred errors: " ++ option)
+  rejected <- analyzeOrderedCell template "let { infixr 5 minus; minus = (-) :: Int -> Int -> Int }\n10 `minus` 3 `minus` 1"
+  case rejected of
+    Left CellUnsupportedLocalFixity {} -> pure ()
+    _ -> fail ("ordered program accepted a local fixity absent from future Val evidence: " ++ show rejected)
+  plan <- analyzeOrderedCell template source >>= either (fail . renderCellSplitError) pure
+  let segments = cellInferenceSegments plan
+      kinds = map (map (sbKind . cellAnalysisVerdict) . cellPlanItems) segments
+      ordinals = map (map cellAnalysisSourceOrdinal . concatMap cellAnalysisSourceItems . cellPlanItems) segments
+  assertEqual "ordered declaration and executable runs" [[KBind], [KDecl], [KBind, KBind], [KDecl], [KExpr]] kinds
+  assertEqual "ordered segments retain source ordinals" [[0], [1], [2, 3], [4], [5]] ordinals
+  case segments of
+    [_, firstDeclaration, _, secondDeclaration, _] -> do
+      assertEqual "first declaration owns its generated Generic" ["First"]
+        (map genericDeclarationTarget (cellPlanGenericDeclarations firstDeclaration))
+      assertEqual "second declaration owns its generated Generic" ["Second"]
+        (map genericDeclarationTarget (cellPlanGenericDeclarations secondDeclaration))
+      let firstSource = concatMap cellAnalysisSource (cellPlanItems firstDeclaration)
+          secondSource = concatMap cellAnalysisSource (cellPlanItems secondDeclaration)
+      assertEqual "first declaration excludes later source" False ("Second" `isInfixOf` firstSource)
+      assertEqual "second declaration excludes earlier source" False ("First" `isInfixOf` secondSource)
+    _ -> fail "unexpected ordered segment count"
+  where
+    source = unlines
+      [ "first <- pure (0 :: Int)"
+      , "data First = First"
+      , "middle <- pure first"
+      , "middleAgain <- pure middle"
+      , "data Second = Second"
+      , "middleAgain"
+      ]
+    template = unlines
+      [ "{-# LANGUAGE DeriveGeneric, StandaloneDeriving #-}"
+      , "{{CELL_PRAGMAS}}"
+      , "module CellCheck where"
+      , "{{CELL_IMPORTS}}"
+      , "{{CELL_DECLS}}"
+      , "__tidepool_cell_check = do { {{CELL_BODY}} } :: Maybe ()"
+      ]
 
 certificationRequestValidation :: IO ()
 certificationRequestValidation = do

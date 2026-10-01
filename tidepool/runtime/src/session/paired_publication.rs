@@ -1117,19 +1117,41 @@ impl AcceptedDeclarationPublication {
                         .into_iter()
                         .map(recovery::RecoveryArtifactClosure::Join),
                 )
+                .chain(
+                    materialized
+                        .value_interfaces
+                        .into_iter()
+                        .map(recovery::RecoveryArtifactClosure::ValueInterface),
+                )
                 .chain(std::iter::once(recovery::RecoveryArtifactClosure::Join(
                     materialized.join,
                 )))
                 .collect::<Vec<_>>();
             let artifact_refs = artifacts
                 .iter()
-                .map(recovery::RecoveryArtifactClosure::key)
+                .map(recovery::RecoveryArtifactClosure::artifact_id)
                 .collect();
-            let live_dependencies = implementation_refs
+            let native_owners = receipt
+                .exports()
                 .iter()
-                .filter_map(|id| graph.nodes.iter().find(|node| node.id == *id))
-                .flat_map(|node| node.live_dependencies.clone())
+                .flat_map(|export| std::iter::once(&export.head).chain(export.children.iter()))
+                .map(|identity| ExactModuleIdentity {
+                    unit: identity.unit.clone(),
+                    module: identity.module.clone(),
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            let native_roots = context
+                .artifact_view()
+                .descriptors()
+                .into_iter()
+                .filter(|descriptor| {
+                    descriptor.kind
+                        == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
+                        && native_owners.contains(&descriptor.owner)
+                })
+                .map(|descriptor| descriptor.id)
                 .collect::<Vec<_>>();
+            let live_dependencies = super::certified_native_dependencies(&context, &native_roots)?;
             let mut workbench_imports = base
                 .current_public
                 .as_ref()
@@ -1166,11 +1188,20 @@ impl AcceptedDeclarationPublication {
                 if !graph
                     .artifacts
                     .iter()
-                    .any(|existing| existing.key() == artifact.key())
+                    .any(|existing| existing.artifact_id() == artifact.artifact_id())
                 {
                     graph.artifacts.push(artifact);
                 }
             }
+            graph
+                .artifact_dependencies
+                .extend(materialized.artifact_dependencies.into_iter().map(
+                    |(source, target, dependency)| recovery::RecoveryArtifactDependency {
+                        source,
+                        target,
+                        dependency,
+                    },
+                ));
             if let Some(surface) = graph
                 .public_surfaces
                 .iter_mut()

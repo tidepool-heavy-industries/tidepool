@@ -4509,6 +4509,40 @@ cargo.rust_library(
 )
 
 http_archive(
+    name = "fixedbitset-0.5.7.crate",
+    sha256 = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99",
+    strip_prefix = "fixedbitset-0.5.7",
+    urls = ["https://static.crates.io/crates/fixedbitset/0.5.7/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "fixedbitset-0.5",
+    srcs = [":fixedbitset-0.5.7.crate"],
+    crate = "fixedbitset",
+    crate_root = "fixedbitset-0.5.7.crate/src/lib.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "fixedbitset",
+        "CARGO_CRATE_NAME": "fixedbitset",
+        "CARGO_MANIFEST_DIR": "fixedbitset-0.5.7.crate",
+        "CARGO_PKG_AUTHORS": "bluss",
+        "CARGO_PKG_DESCRIPTION": "FixedBitSet is a simple bitset collection",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "fixedbitset",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/petgraph/fixedbitset",
+        "CARGO_PKG_RUST_VERSION": "1.56",
+        "CARGO_PKG_VERSION": "0.5.7",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "5",
+        "CARGO_PKG_VERSION_PATCH": "7",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    visibility = [],
+)
+
+http_archive(
     name = "flate2-1.1.9.crate",
     sha256 = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c",
     strip_prefix = "flate2-1.1.9",
@@ -5849,7 +5883,10 @@ cargo.rust_library(
         "CARGO_PKG_VERSION_PATCH": "5",
         "CARGO_PKG_VERSION_PRE": "",
     },
-    features = ["default-hasher"],
+    features = [
+        "default-hasher",
+        "inline-more",
+    ],
     visibility = [],
     deps = [":foldhash-0.1"],
 )
@@ -8613,6 +8650,58 @@ cargo.rust_library(
         "std",
     ],
     visibility = [],
+)
+
+alias(
+    name = "petgraph",
+    actual = ":petgraph-0.8",
+    visibility = ["PUBLIC"],
+)
+
+http_archive(
+    name = "petgraph-0.8.3.crate",
+    sha256 = "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455",
+    strip_prefix = "petgraph-0.8.3",
+    urls = ["https://static.crates.io/crates/petgraph/0.8.3/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "petgraph-0.8",
+    srcs = [":petgraph-0.8.3.crate"],
+    crate = "petgraph",
+    crate_root = "petgraph-0.8.3.crate/src/lib.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "petgraph",
+        "CARGO_CRATE_NAME": "petgraph",
+        "CARGO_MANIFEST_DIR": "petgraph-0.8.3.crate",
+        "CARGO_PKG_AUTHORS": "bluss:mitchmindtree",
+        "CARGO_PKG_DESCRIPTION": "Graph data structure library. Provides graph types and graph algorithms.",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "petgraph",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/petgraph/petgraph",
+        "CARGO_PKG_RUST_VERSION": "1.64",
+        "CARGO_PKG_VERSION": "0.8.3",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "8",
+        "CARGO_PKG_VERSION_PATCH": "3",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = [
+        "default",
+        "graphmap",
+        "matrix_graph",
+        "stable_graph",
+        "std",
+    ],
+    visibility = [],
+    deps = [
+        ":fixedbitset-0.5",
+        ":hashbrown-0.15",
+        ":indexmap-2",
+    ],
 )
 
 http_archive(

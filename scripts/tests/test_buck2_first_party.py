@@ -486,7 +486,13 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             checked = runtime.split(f'name = "{name}",', 1)[1].split("\n)\n", 1)[0]
             self.assertIn("expected_count = 1", checked)
             self.assertIn("haskell_worker = True", checked)
+            self.assertIn('"TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)"', checked)
             self.assertIn('"TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib"', checked)
+        fixture = runtime.split('name = "runtime_compiled_cell_fixture_test",', 1)[1].split("\n)\n", 1)[0]
+        self.assertIn("expected_count = 8", fixture)
+        self.assertIn('"TIDEPOOL_CELL_TEST_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)"', fixture)
+        self.assertIn('"TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)"', fixture)
+        self.assertIn('"//build/package:compiler_deployment"', fixture)
         derive, _ = self.groups("tidepool/bridge-derive")
         self.assertIn("proc_macro = True", derive)
 

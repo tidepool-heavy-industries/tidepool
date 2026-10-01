@@ -77,6 +77,7 @@ pub struct RuntimeCellAdmission {
     view_digest: [u8; 32],
     visibility: PublicVisibilitySnapshot,
     reserved_generations: Vec<Generation>,
+    planned: Option<Arc<super::RuntimeCellPlanReservation>>,
     initial_value_generation: Generation,
     native_shares: Vec<SourceLeaseKey>,
     native_imports: Arc<AdmittedNativeImports>,
@@ -408,6 +409,7 @@ impl CheckedInterfaces {
 pub struct RuntimeCheckedPrefix {
     admission: Arc<RuntimeCellAdmission>,
     first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
+    program: Option<Arc<tidepool_toolchain::checked_cell::CellProgram>>,
     state: parking_lot::Mutex<RuntimeCheckedState>,
 }
 
@@ -457,6 +459,22 @@ pub struct RuntimeCheckedDisplayAdmission {
 }
 
 impl RuntimeCheckedDisplayAdmission {
+    pub(crate) fn matches_compiled_display(
+        &self,
+        proof: &Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>,
+    ) -> bool {
+        match self.prefix.cell_program() {
+            Some(program) => {
+                proof.admission_digest() == program.admission_digest()
+                    && program
+                        .items()
+                        .get(self.execution.item().index())
+                        .and_then(|item| item.display())
+                        .is_some_and(|prepared| Arc::ptr_eq(prepared, proof))
+            }
+            None => proof.admission_digest() == self.digest,
+        }
+    }
     pub fn prefix(&self) -> &Arc<RuntimeCheckedPrefix> {
         &self.prefix
     }
@@ -565,6 +583,9 @@ impl RuntimeCheckedPrefixSnapshot {
 }
 
 impl RuntimeCheckedPrefix {
+    pub fn cell_program(&self) -> Option<&Arc<tidepool_toolchain::checked_cell::CellProgram>> {
+        self.program.as_ref()
+    }
     pub fn admission(&self) -> &Arc<RuntimeCellAdmission> {
         &self.admission
     }
@@ -586,6 +607,13 @@ impl RuntimeCheckedPrefix {
             || state.reservation.as_ref().is_none_or(|reservation| {
                 reservation.item != *execution.item()
                     || reservation.generation.0 != execution.generation()
+            })
+            || self.program.as_ref().is_some_and(|program| {
+                program
+                    .items()
+                    .get(execution.item().index())
+                    .and_then(|item| item.native())
+                    .is_none_or(|native| !Arc::ptr_eq(native, &execution))
             })
             || execution.item().admission_digest() != self.admission.digest()
             || session.public_visibility_snapshot_in(scope).as_ref()
@@ -701,7 +729,7 @@ impl CheckedDisplayPlan {
             || state.in_flight.is_some()
             || state.display_in_flight.is_some()
             || state.reservation.is_some()
-            || self.proof.admission_digest() != self.admission.digest()
+            || !self.admission.matches_compiled_display(&self.proof)
             || self.proof.generation() != self.admission.generation().0
             || !Arc::ptr_eq(self.proof.capture(), self.admission.execution())
             || session.public_visibility_snapshot_in(scope).as_ref()
@@ -1118,6 +1146,9 @@ impl RuntimeCellAdmission {
     pub fn reserved_generations(&self) -> &[Generation] {
         &self.reserved_generations
     }
+    pub fn plan_reservation(&self) -> Option<&Arc<super::RuntimeCellPlanReservation>> {
+        self.planned.as_ref()
+    }
     pub fn initial_value_generation(&self) -> Generation {
         self.initial_value_generation
     }
@@ -1216,8 +1247,27 @@ impl PersistentSession {
         )])?;
         let snapshot = state.snapshot.clone();
         drop(state);
-        let generation = self.val_gen().next();
-        self.set_val_gen(generation);
+        let generation = match &prefix.admission.planned {
+            Some(planned) => {
+                let row = planned
+                    .items()
+                    .get(execution.item().index())
+                    .ok_or(SessionError::StaleStagedDeclaration)?;
+                if row.kind() != super::RuntimePlannedCellItemKind::Expression
+                    || row.value_generation() != Some(Generation(execution.generation()))
+                    || row.observation_name() != execution.observation_name()
+                {
+                    return Err(SessionError::StaleStagedDeclaration);
+                }
+                row.display_generation()
+                    .ok_or(SessionError::StaleStagedDeclaration)?
+            }
+            None => {
+                let generation = self.val_gen().next();
+                self.set_val_gen(generation);
+                generation
+            }
+        };
         let retained_scope = self.retain_lexical_scope(scope)?;
         let mut digest = blake3::Hasher::new();
         let mut frame = |bytes: &[u8]| {
@@ -1260,6 +1310,12 @@ impl PersistentSession {
         let scope = prefix.admission.visibility.scope;
         if !prefix.admission.belongs_to(self)
             || !item.same_cell(&prefix.first_item)
+            || prefix.program.as_ref().is_some_and(|program| {
+                program
+                    .items()
+                    .get(item.index())
+                    .is_none_or(|prepared| prepared.checked_item() != &item)
+            })
             || item.index() != state.snapshot.compiler_prefix.next_item()
             || state.in_flight.is_some()
             || state.display_in_flight.is_some()
@@ -1270,33 +1326,66 @@ impl PersistentSession {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        let generation = if item.index() == 0 {
-            prefix.admission.initial_value_generation
-        } else {
-            let generation = self.val_gen().next();
-            self.set_val_gen(generation);
-            generation
-        };
         let snapshot = state.snapshot.clone();
-        let observation_name = (item.kind()
-            == tidepool_toolchain::checked_cell::CheckedItemKind::Expression)
-            .then(|| {
-                let mut name = format!("observation{}", generation.0);
-                let visible = self.bindings().iter_current_in(self.scope_tree(), scope);
-                let declaration_names = self
-                    .lib()
-                    .log
-                    .current_items_at(snapshot.visibility.declaration_tip)
-                    .into_iter()
-                    .flat_map(|(item, _)| item.value_names().map(str::to_owned).collect::<Vec<_>>())
-                    .collect::<std::collections::BTreeSet<_>>();
-                while visible.iter().any(|(existing, _)| existing.0 == name)
-                    || declaration_names.contains(&name)
-                {
-                    name.push('_');
+        let planned_row = prefix
+            .admission
+            .planned
+            .as_ref()
+            .map(|planned| {
+                planned
+                    .items()
+                    .get(item.index())
+                    .ok_or(SessionError::StaleStagedDeclaration)
+            })
+            .transpose()?;
+        let generation = match planned_row {
+            Some(row) => {
+                use super::RuntimePlannedCellItemKind as Kind;
+                use tidepool_toolchain::checked_cell::CheckedItemKind as CheckedKind;
+                if !matches!(
+                    (row.kind(), item.kind()),
+                    (Kind::Prologue | Kind::Declaration, CheckedKind::Declaration)
+                        | (Kind::Bind, CheckedKind::Bind)
+                        | (Kind::Expression, CheckedKind::Expression)
+                ) {
+                    return Err(SessionError::StaleStagedDeclaration);
                 }
-                name
-            });
+                row.value_generation()
+                    .or_else(|| row.declaration_generation())
+                    .ok_or(SessionError::StaleStagedDeclaration)?
+            }
+            None if item.index() == 0 => prefix.admission.initial_value_generation,
+            None => {
+                let generation = self.val_gen().next();
+                self.set_val_gen(generation);
+                generation
+            }
+        };
+        let observation_name = if let Some(row) = planned_row {
+            row.observation_name().map(str::to_owned)
+        } else {
+            (item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Expression).then(
+                || {
+                    let mut name = format!("observation{}", generation.0);
+                    let visible = self.bindings().iter_current_in(self.scope_tree(), scope);
+                    let declaration_names = self
+                        .lib()
+                        .log
+                        .current_items_at(snapshot.visibility.declaration_tip)
+                        .into_iter()
+                        .flat_map(|(item, _)| {
+                            item.value_names().map(str::to_owned).collect::<Vec<_>>()
+                        })
+                        .collect::<std::collections::BTreeSet<_>>();
+                    while visible.iter().any(|(existing, _)| existing.0 == name)
+                        || declaration_names.contains(&name)
+                    {
+                        name.push('_');
+                    }
+                    name
+                },
+            )
+        };
         let mut digest = blake3::Hasher::new();
         digest.update(b"TidepoolRuntimeCheckedItem1");
         digest.update(&snapshot.digest());
@@ -1357,11 +1446,18 @@ impl PersistentSession {
         let original_source = item
             .planned_declaration_source()
             .ok_or(SessionError::StaleStagedDeclaration)?;
-        let generation = *prefix
-            .admission
-            .reserved_generations
-            .first()
-            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let generation = match &prefix.admission.planned {
+            Some(planned) => planned
+                .items()
+                .get(item.index())
+                .and_then(|row| row.declaration_generation())
+                .ok_or(SessionError::StaleStagedDeclaration)?,
+            None => *prefix
+                .admission
+                .reserved_generations
+                .first()
+                .ok_or(SessionError::StaleStagedDeclaration)?,
+        };
         let module = tidepool_repr::SessionModule::lib(generation);
         if certificate.product().owner().unit != "main"
             || certificate.product().owner().module != module.module_name()
@@ -1389,7 +1485,7 @@ impl PersistentSession {
             items: observation.verdict.items.clone(),
         };
         let external = state.snapshot.view.persistent_imports().clone();
-        let (external_imports, import_modules, visible_values) =
+        let (external_imports, _, visible_values) =
             self.declaration_staging_context_in(scope, &receipt, &external)?;
         let base_tip = self.lib().scope_tip(scope);
         let turn = super::render::DeclTurn {
@@ -1424,14 +1520,6 @@ impl PersistentSession {
             base_generation: generation,
             base_tip,
             turn,
-            import_modules,
-            inject_modules: state
-                .snapshot
-                .view
-                .reachable_values()
-                .iter()
-                .map(|module| module.module_name())
-                .collect(),
             visible_values,
             rendered: super::render::RenderedModule {
                 module,
@@ -1514,6 +1602,64 @@ impl PersistentSession {
         admission: Arc<RuntimeCellAdmission>,
         first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
     ) -> Result<Arc<RuntimeCheckedPrefix>, SessionError> {
+        if admission.planned.is_some() {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        self.begin_checked_prefix_inner(admission, first_item, None)
+    }
+
+    pub fn begin_cell_program(
+        &self,
+        admission: Arc<RuntimeCellAdmission>,
+        program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    ) -> Result<Option<Arc<RuntimeCheckedPrefix>>, SessionError> {
+        let planned = admission
+            .plan_reservation()
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        if program.admission_digest() != admission.digest()
+            || !Arc::ptr_eq(program.parsed_plan(), planned.plan())
+            || program.slots() != planned.compiler_specification().slots.as_slice()
+            || program.items().len() != planned.items().len()
+            || program
+                .items()
+                .iter()
+                .enumerate()
+                .any(|(index, item)| item.checked_item().index() != index)
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let Some(first) = program.items().first() else {
+            if !admission.belongs_to(self)
+                || self
+                    .public_visibility_snapshot_in(admission.visibility.scope)
+                    .as_ref()
+                    != Some(&admission.visibility)
+                || self.compile_view_digest_in(admission.visibility.scope)
+                    != Some(admission.view_digest)
+            {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+            admission
+                .prefix_started
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .map_err(|_| SessionError::StaleStagedDeclaration)?;
+            return Ok(None);
+        };
+        self.begin_checked_prefix_inner(admission, first.checked_item().clone(), Some(program))
+            .map(Some)
+    }
+
+    fn begin_checked_prefix_inner(
+        &self,
+        admission: Arc<RuntimeCellAdmission>,
+        first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
+        program: Option<Arc<tidepool_toolchain::checked_cell::CellProgram>>,
+    ) -> Result<Arc<RuntimeCheckedPrefix>, SessionError> {
         if !admission.belongs_to(self)
             || first_item.admission_digest() != admission.digest()
             || first_item.specification_digest() != admission.specification_digest()
@@ -1579,6 +1725,7 @@ impl PersistentSession {
         Ok(Arc::new(RuntimeCheckedPrefix {
             admission,
             first_item,
+            program,
             state: parking_lot::Mutex::new(RuntimeCheckedState {
                 snapshot,
                 in_flight: None,
@@ -1721,11 +1868,57 @@ impl PersistentSession {
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        self.admit_cell_with_plan(
+            scope,
+            declaration_count,
+            specification,
+            specification_digest,
+            authority_digest,
+            include_paths,
+            None,
+            None,
+        )
+    }
+
+    fn admit_cell_with_plan(
+        &mut self,
+        scope: ScopeId,
+        declaration_count: usize,
+        specification: Arc<dyn Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
+        plan: Option<Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>>,
+        private_execution: Option<Arc<PrivateExecutionAdmission>>,
+    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.reap_admission_leases();
         let view = self
             .compile_view_in(scope)
             .ok_or(SessionError::DeadScope(scope))?
             .with_scoped_injection();
+        if let Some(plan) = &plan {
+            if plan.specification_digest() != specification_digest
+                || plan.include_paths().len() != include_paths.len()
+                || !plan
+                    .include_paths()
+                    .iter()
+                    .zip(&include_paths)
+                    .all(|(a, b)| a.as_os_str() == b.as_os_str())
+                || plan.injected_modules()
+                    != view
+                        .injected_values()
+                        .iter()
+                        .map(|module| module.module_name())
+                        .collect::<Vec<_>>()
+                || plan
+                    .items()
+                    .iter()
+                    .enumerate()
+                    .any(|(index, item)| item.index() != index)
+            {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+        }
         let view_digest = self
             .compile_view_digest_in(scope)
             .ok_or(SessionError::DeadScope(scope))?;
@@ -1755,17 +1948,134 @@ impl PersistentSession {
                 })
             })
             .collect::<Result<Vec<_>, SessionError>>()?;
-        let mut reserved_generations = Vec::with_capacity(declaration_count);
-        for _ in 0..declaration_count {
-            let generation = if self.lib().durable_graph.is_some() {
-                self.lib_mut().reserve_declaration_generation_durable()?
-            } else {
-                self.lib_mut().log.reserve()
-            };
-            reserved_generations.push(generation);
+        let native_count = match &plan {
+            Some(plan) => plan.items().iter().try_fold(0u64, |count, item| {
+                use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
+                count.checked_add(match item.kind() {
+                    Kind::Prologue | Kind::Declaration => 0,
+                    Kind::Bind => 1,
+                    Kind::Expression => 2,
+                })
+            }),
+            None => Some(1),
+        }
+        .ok_or(SessionError::StaleStagedDeclaration)?;
+        let last_value_generation = Generation(
+            self.val_gen()
+                .0
+                .checked_add(native_count)
+                .ok_or(SessionError::StaleStagedDeclaration)?,
+        );
+        last_value_generation
+            .0
+            .checked_add(1)
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let count_u64 =
+            u64::try_from(declaration_count).map_err(|_| SessionError::StaleStagedDeclaration)?;
+        self.lib()
+            .log
+            .generation()
+            .0
+            .checked_add(count_u64)
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        self.lib()
+            .log
+            .publication_revision()
+            .and_then(|revision| revision.checked_add(count_u64))
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let mut reserved_generations = Vec::new();
+        reserved_generations
+            .try_reserve_exact(declaration_count)
+            .map_err(|_| SessionError::StaleStagedDeclaration)?;
+        let mut planned_items = Vec::new();
+        if let Some(plan) = &plan {
+            planned_items
+                .try_reserve_exact(plan.items().len())
+                .map_err(|_| SessionError::StaleStagedDeclaration)?;
+        }
+        let retained_scope = self.retain_lexical_scope(scope)?;
+        if self.lib().durable_graph.is_some() {
+            reserved_generations = self
+                .lib_mut()
+                .reserve_declaration_generations_durable(declaration_count)?;
+        } else {
+            for _ in 0..declaration_count {
+                reserved_generations.push(self.lib_mut().log.reserve());
+            }
         }
         let initial_value_generation = view.next_value_generation();
-        self.set_val_gen(initial_value_generation);
+        self.set_val_gen(last_value_generation);
+        let planned = plan.map(|plan| {
+            use super::planned_cell::{
+                RuntimeCellPlanReservation, RuntimePlannedCellItem, RuntimePlannedCellSlot as Slot,
+            };
+            use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
+            let mut declarations = reserved_generations.iter().copied();
+            let mut next_value = initial_value_generation.0;
+            let mut names = self
+                .bindings()
+                .iter_current_in(self.scope_tree(), scope)
+                .into_iter()
+                .map(|(name, _)| name.0.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            names.extend(
+                plan.items()
+                    .iter()
+                    .flat_map(|item| item.binders().iter().cloned()),
+            );
+            names.extend(
+                self.lib()
+                    .log
+                    .current_items_at(visibility.declaration_tip)
+                    .into_iter()
+                    .flat_map(|(item, _)| {
+                        item.value_names().map(str::to_owned).collect::<Vec<_>>()
+                    }),
+            );
+            for item in plan.items() {
+                let slot = match item.kind() {
+                    Kind::Prologue => Slot::Prologue {
+                        declaration: declarations
+                            .next()
+                            .expect("parser declaration count preflighted"),
+                    },
+                    Kind::Declaration => Slot::Declaration {
+                        declaration: declarations
+                            .next()
+                            .expect("parser declaration count preflighted"),
+                    },
+                    Kind::Bind => {
+                        let value = Generation(next_value);
+                        next_value += 1;
+                        Slot::Bind { value }
+                    }
+                    Kind::Expression => {
+                        let capture = Generation(next_value);
+                        let display = Generation(next_value + 1);
+                        next_value += 2;
+                        let mut observation_name = format!("observation{}", capture.0);
+                        while names.contains(&observation_name) {
+                            observation_name.push('_');
+                        }
+                        names.insert(observation_name.clone());
+                        Slot::Expression {
+                            capture,
+                            display,
+                            observation_name,
+                        }
+                    }
+                };
+                planned_items.push(RuntimePlannedCellItem {
+                    index: item.index(),
+                    slot,
+                });
+            }
+            Arc::new(RuntimeCellPlanReservation {
+                plan,
+                items: planned_items,
+                digest: [0; 32],
+            })
+        });
         let mut digest = blake3::Hasher::new();
         let mut frame = |bytes: &[u8]| {
             digest.update(&(bytes.len() as u64).to_le_bytes());
@@ -1804,6 +2114,35 @@ impl PersistentSession {
         for generation in &reserved_generations {
             frame(&generation.0.to_le_bytes());
         }
+        if let Some(planned) = &planned {
+            frame(b"TidepoolRuntimeOrderedCell1");
+            frame(&planned.plan_digest());
+            frame(&planned.producer_sha256());
+            for item in planned.items() {
+                frame(&(item.index() as u64).to_le_bytes());
+                frame(&[item.kind() as u8]);
+                for generation in [
+                    item.declaration_generation(),
+                    item.value_generation(),
+                    item.display_generation(),
+                ] {
+                    match generation {
+                        Some(generation) => {
+                            frame(&[1]);
+                            frame(&generation.0.to_le_bytes());
+                        }
+                        None => frame(&[0]),
+                    }
+                }
+                match item.observation_name() {
+                    Some(name) => {
+                        frame(&[1]);
+                        frame(name.as_bytes());
+                    }
+                    None => frame(&[0]),
+                }
+            }
+        }
         for interface in &interfaces {
             frame(interface.module.module_name().as_bytes());
             frame(&interface.bytes);
@@ -1820,17 +2159,23 @@ impl PersistentSession {
             }
         }
         let digest = *digest.finalize().as_bytes();
-        let retained_scope = self.retain_lexical_scope(scope)?;
+        let planned = planned.map(|mut planned| {
+            Arc::get_mut(&mut planned)
+                .expect("fresh ordered reservation has one owner")
+                .digest = digest;
+            planned
+        });
         Ok(Arc::new(RuntimeCellAdmission {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
-            private_execution: None,
+            private_execution,
             _retained_scope: retained_scope,
             prefix_started: std::sync::atomic::AtomicBool::new(false),
             view,
             view_digest,
             visibility,
             reserved_generations,
+            planned,
             initial_value_generation,
             native_shares,
             native_imports,
@@ -2013,6 +2358,38 @@ impl PersistentSession {
             .expect("fresh runtime admission has one owner")
             .private_execution = Some(execution);
         Ok(admission)
+    }
+
+    /// Reserve every ordered source item under the original private admission.
+    /// The parser capability supplies kinds and order; callers cannot guess a
+    /// declaration count or assign generations. Authoritative checking must
+    /// subsequently bind this exact reservation before prefix creation.
+    pub fn admit_planned_cell_for_execution(
+        &mut self,
+        execution: Arc<PrivateExecutionAdmission>,
+        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
+        specification: Arc<dyn Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
+    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        self.compile_view_for_execution(&execution)?;
+        use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
+        let declaration_count = plan
+            .items()
+            .iter()
+            .filter(|item| matches!(item.kind(), Kind::Prologue | Kind::Declaration))
+            .count();
+        self.admit_cell_with_plan(
+            execution.private_scope(),
+            declaration_count,
+            specification,
+            specification_digest,
+            authority_digest,
+            include_paths,
+            Some(plan),
+            Some(execution),
+        )
     }
 
     /// Capture the current private environment before freezing its recipe.

@@ -237,6 +237,18 @@ resolve_tidepool_extract() {
     echo "error: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is not a runnable tidepool-extract (no 'Usage:' banner)" >&2
     exit 1
   fi
+  if [ -z "${TIDEPOOL_COMPILER_DEPLOYMENT:-}" ]; then
+    TIDEPOOL_COMPILER_DEPLOYMENT="$PWD/target/compiler-deployment.json"
+    mkdir -p "${TIDEPOOL_COMPILER_DEPLOYMENT%/*}"
+    if ! "$TIDEPOOL_EXTRACT" --compiler-deployment-manifest "$TIDEPOOL_COMPILER_DEPLOYMENT"; then
+      echo "error: could not write configured compiler deployment manifest: $TIDEPOOL_COMPILER_DEPLOYMENT" >&2
+      return 1
+    fi
+    export TIDEPOOL_COMPILER_DEPLOYMENT
+  elif [[ "$TIDEPOOL_COMPILER_DEPLOYMENT" != /* || ! -r "$TIDEPOOL_COMPILER_DEPLOYMENT" || ! -s "$TIDEPOOL_COMPILER_DEPLOYMENT" ]]; then
+    echo "error: TIDEPOOL_COMPILER_DEPLOYMENT='$TIDEPOOL_COMPILER_DEPLOYMENT' must be an absolute path to a readable nonempty manifest" >&2
+    return 1
+  fi
   echo "TIDEPOOL_EXTRACT=${TIDEPOOL_EXTRACT}"
 }
 
@@ -251,8 +263,8 @@ validate_tidepool_extract_endpoint() (
   timeout --kill-after=5 30 "$TIDEPOOL_EXTRACT" --compiler-endpoint-v1 \
     </dev/null >"$probe_dir/identity" 2>"$probe_dir/stderr" || probe_status=$?
   endpoint_magic="$(od -An -tx1 -N8 "$probe_dir/identity" | tr -d '[:space:]')"
-  if [[ "$probe_status" = 124 || "$probe_status" = 137 || "$endpoint_magic" != "5450434944303031" ]] \
-    || [[ "$(wc -c <"$probe_dir/identity")" -lt 40 ]]; then
+  if [[ "$probe_status" = 124 || "$probe_status" = 137 || "$endpoint_magic" != "5450434944303032" ]] \
+    || [[ "$(wc -c <"$probe_dir/identity")" -lt 72 ]]; then
     cat "$probe_dir/stderr" >&2
     echo "error: extractor could not bind a direct compiler endpoint; check TIDEPOOL_EXTRACT and TIDEPOOL_EXTRACT_WORKER" >&2
     return 1
@@ -312,6 +324,10 @@ finalize_battery_artifacts() {
   local compiler_log="${daemon_log%/*}/compiler.log"
   if [[ -n "$daemon_log" && -f "$compiler_log" ]]; then
     cp "$compiler_log" "$BATTERY_ARTIFACT_DIR/compiler.log"
+  fi
+  local compiler_trace="${compiler_log%.log}.jsonl"
+  if [[ -n "$daemon_log" && -f "$compiler_trace" ]]; then
+    cp "$compiler_trace" "$BATTERY_ARTIFACT_DIR/compiler.jsonl"
   fi
   scripts/toolchain-doctor.sh >"$BATTERY_ARTIFACT_DIR/toolchain-doctor.log" 2>&1 || true
   if [[ "$status" -eq 0 && "$BATTERY_DAEMON_START_FAILED" = 0 ]]; then
@@ -633,8 +649,9 @@ _persistent_daemon_dir() {
 # tidepool-extract has no standalone "print producer identity" flag; the
 # cheapest existing path is --compiler-endpoint-v1
 # (tidepool/extract-cmd/src/frontend.rs serve_bound_endpoint), which writes
-# an 8-byte magic plus the 32-byte PreparedWorker::producer_identity() hash
-# to stdout and then blocks reading a transaction prefix from stdin. Piping
+# an 8-byte magic, the 32-byte PreparedWorker::producer_identity() hash, and
+# the 32-byte selected-worker identity to stdout before reading a transaction
+# prefix from stdin. Piping
 # /dev/null in makes that read hit EOF immediately, so the process exits
 # right after writing the identity bytes and never spawns a GHC worker
 # process. This is the same probe validate_tidepool_extract_endpoint above
@@ -650,8 +667,8 @@ _current_producer_hex() {
     </dev/null >"$probe" 2>/dev/null || status=$?
   local magic
   magic="$(od -An -tx1 -N8 "$probe" | tr -d '[:space:]')"
-  if [[ "$status" = 124 || "$status" = 137 || "$magic" != "5450434944303031" ]] \
-    || [[ "$(wc -c <"$probe")" -lt 40 ]]; then
+  if [[ "$status" = 124 || "$status" = 137 || "$magic" != "5450434944303032" ]] \
+    || [[ "$(wc -c <"$probe")" -lt 72 ]]; then
     rm -f "$probe"
     return 1
   fi

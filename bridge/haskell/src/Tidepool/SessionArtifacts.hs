@@ -4,6 +4,21 @@ module Tidepool.SessionArtifacts
   ) where
 
 import Control.Monad (forM_)
+import Control.Monad (forM)
+import Data.List (nub)
+import qualified Data.ByteString as BS
+import qualified Data.Text as T
+import Codec.CBOR.Encoding (encodeListLen, encodeString)
+import Codec.CBOR.Write (toStrictByteString)
+import GHC.Core.Type (tyConsOfType)
+import GHC.Builtin.Names (gHC_PRIM)
+import GHC.Core.TyCon (tyConName)
+import GHC.Types.Unique.Set (nonDetEltsUniqSet)
+import GHC.Types.Name (nameModule_maybe)
+import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
+import GHC.Unit.Types (unitString)
+import GHC.Unit.Home (homeUnitAsUnit)
+import GHC.Driver.Env (hsc_home_unit)
 import GHC.Types.Name.Occurrence (mkVarOcc)
 import Data.Word (Word64)
 import System.IO (hPutStrLn, stderr)
@@ -19,6 +34,11 @@ import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..)
   , mkThinSessionIface, parseSessionModule, sessionBinderName
   , sessionModuleString, writeSessionIface )
+import Tidepool.Session (sessionHiPath)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.PackageWitness (encodePackageImports, packageImportRoot)
+import qualified Crypto.Hash.SHA256 as SHA256
+import Numeric (showHex)
 import Tidepool.TypePolicy (rootNominalHeadOfType, stabilizeEffectRows)
 
 -- | Describe and publish the values materialized by one session bind. The
@@ -56,6 +76,24 @@ mkBoundBinders bindNames generation root result = do
       binders = [binder | (binder, _, _) <- built]
   iface <- mkThinSessionIface hsc sessionModule [(occ, ty) | (_, occ, ty) <- built]
   writeSessionIface hsc root sessionModule iface
+  let path = sessionHiPath root sessionModule
+      owners = nub [owner | ty <- persistedTypes
+        , constructor <- nonDetEltsUniqSet (tyConsOfType ty)
+        , Just owner <- [nameModule_maybe (tyConName constructor)]]
+      home = homeUnitAsUnit (hsc_home_unit hsc)
+      requirements = [(unitString (moduleUnit owner), moduleNameString (moduleName owner))
+        | owner <- owners, moduleUnit owner == home]
+  roots <- forM [owner | owner <- owners, moduleUnit owner /= home, owner /= gHC_PRIM] $ \owner ->
+    packageImportRoot hsc owner >>= either fail pure
+  bytes <- BS.readFile path
+  let digest = concatMap (\byte -> let rendered = showHex byte "" in
+        replicate (2 - length rendered) '0' ++ rendered) (BS.unpack (SHA256.hash bytes))
+      artifact = ExactIfaceArtifact (unitString home) (sessionModuleString sessionModule) path digest requirements
+      text = encodeString . T.pack
+  BS.writeFile (path ++ ".packages") (encodePackageImports artifact roots)
+  BS.writeFile (path ++ ".requirements") (toStrictByteString
+    (encodeListLen (fromIntegral (length requirements))
+      <> foldMap (\(unit,owner) -> encodeListLen 2 <> text unit <> text owner) requirements))
   forM_ binders $ \(BoundBinder name varId moduleName tier displayType rootHead hostAuthority) ->
     hPutStrLn stderr $ "  Wrote session iface: " ++ moduleName ++ " (" ++ name
       ++ " :: " ++ displayType ++ ", " ++ show tier ++ ", root " ++ show rootHead

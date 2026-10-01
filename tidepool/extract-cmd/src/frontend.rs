@@ -1,8 +1,9 @@
 use std::ffi::{OsStr, OsString};
+use std::fmt::Write as FmtWrite;
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
 use crate::request::{PRINT_WORKER_REQUEST_FLAG, WORKER_REQUEST_FLAG};
@@ -42,6 +43,18 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
         .is_some_and(|arg| arg == crate::endpoint::BOUND_ENDPOINT_FLAG)
     {
         return serve_bound_endpoint();
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--compiler-deployment-manifest")
+    {
+        let [_, path] = args.as_slice() else {
+            return Err(FrontendError::Usage(
+                "--compiler-deployment-manifest requires exactly one output path".to_owned(),
+            ));
+        };
+        write_compiler_deployment_manifest(Path::new(path))?;
+        return Ok(0);
     }
     if args.first().is_some_and(|arg| arg == "--connect") {
         return connect(&args[1..]);
@@ -155,7 +168,7 @@ pub(crate) struct PreparedWorker {
 
 impl PreparedWorker {
     pub(crate) fn prepare() -> Result<Self, FrontendError> {
-        let selection = worker_bin()?;
+        let selection = std::fs::canonicalize(worker_bin()?).map_err(FrontendError::Io)?;
         let mut file = File::open(&selection).map_err(FrontendError::Io)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(FrontendError::Io)?;
@@ -210,6 +223,30 @@ impl PreparedWorker {
         ))
     }
 
+    pub(crate) fn consumed_worker_identity(&self) -> [u8; 32] {
+        *blake3::hash(&self.bytes).as_bytes()
+    }
+
+    fn deployment_manifest(&self) -> Result<String, FrontendError> {
+        let frontend_bytes = std::fs::read("/proc/self/exe").map_err(FrontendError::Io)?;
+        let frontend_path = std::env::current_exe()
+            .and_then(|path| std::fs::canonicalize(path))
+            .map_err(FrontendError::Io)?;
+        let producer_identity = crate::endpoint::producer_identity(
+            &frontend_bytes,
+            self.selection.as_os_str(),
+            &self.bytes,
+            &self.ghc_libdir,
+        );
+        let frontend_path = json_path(&frontend_path)?;
+        let worker_path = json_path(&self.selection)?;
+        let ghc_libdir = json_os_str(&self.ghc_libdir)?;
+        Ok(format!(
+            "{{\n  \"schema\": 1,\n  \"producer_identity\": {producer_identity:?},\n  \"consumed_worker_identity\": {:?},\n  \"frontend_path\": {frontend_path},\n  \"worker_path\": {worker_path},\n  \"ghc_libdir\": {ghc_libdir}\n}}\n",
+            self.consumed_worker_identity()
+        ))
+    }
+
     pub(crate) fn command(&self) -> Command {
         // The opened descriptor pins the selected inode. `execve` resolves
         // this path before applying close-on-exec, so an atomic replacement of
@@ -241,6 +278,74 @@ impl PreparedWorker {
             ghc_libdir: "unused".into(),
         })
     }
+}
+
+fn write_compiler_deployment_manifest(path: &Path) -> Result<(), FrontendError> {
+    let prepared = PreparedWorker::prepare()?;
+    let frontend_path = std::env::current_exe()
+        .and_then(|path| std::fs::canonicalize(path))
+        .map_err(FrontendError::Io)?;
+    if same_file_path(path, &frontend_path) || same_file_path(path, &prepared.selection) {
+        return Err(FrontendError::Usage(
+            "deployment manifest path must not replace the configured frontend or worker"
+                .to_owned(),
+        ));
+    }
+    let contents = prepared.deployment_manifest()?;
+    atomic_write_manifest(path, contents.as_bytes()).map_err(FrontendError::Io)
+}
+
+fn same_file_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    left.exists()
+        && right.exists()
+        && std::fs::canonicalize(left).ok() == std::fs::canonicalize(right).ok()
+}
+
+fn json_path(path: &Path) -> Result<String, FrontendError> {
+    let text = path.to_str().ok_or_else(|| {
+        FrontendError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "compiler deployment paths must be UTF-8",
+        ))
+    })?;
+    Ok(json_string(text))
+}
+
+fn json_os_str(path: &OsStr) -> Result<String, FrontendError> {
+    let text = path.to_str().ok_or_else(|| {
+        FrontendError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "compiler deployment paths must be UTF-8",
+        ))
+    })?;
+    Ok(json_string(text))
+}
+
+fn json_string(text: &str) -> String {
+    let mut output = String::with_capacity(text.len() + 2);
+    output.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            character if character.is_control() => {
+                let _ = write!(output, "\\u{:04x}", character as u32);
+            }
+            character => output.push(character),
+        }
+    }
+    output.push('"');
+    output
+}
+
+fn atomic_write_manifest(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    tidepool_atomic_write::write_durable(path, bytes).map_err(Into::into)
 }
 
 fn prepare_worker() -> Result<PreparedWorker, FrontendError> {
@@ -281,7 +386,9 @@ fn resolve_ghc_libdir() -> Result<OsString, FrontendError> {
 fn serve_bound_endpoint() -> Result<u8, FrontendError> {
     let prepared = prepare_worker()?;
     let identity = prepared.producer_identity()?;
-    crate::endpoint::write_identity(io::stdout().lock(), &identity).map_err(FrontendError::Io)?;
+    let consumed_worker = prepared.consumed_worker_identity();
+    crate::endpoint::write_identity(io::stdout().lock(), &identity, &consumed_worker)
+        .map_err(FrontendError::Io)?;
     let mut stdin = io::stdin().lock();
     let mut prefix = [0u8; 8];
     stdin.read_exact(&mut prefix).map_err(FrontendError::Io)?;
@@ -729,6 +836,48 @@ fn main() {{
 
         let prepared = PreparedWorker::prepare().unwrap();
         let old_identity = prepared.producer_identity().unwrap();
+        let old_worker_identity = prepared.consumed_worker_identity();
+        let manifest_path = dir.join("compiler-deployment.json");
+        write_compiler_deployment_manifest(&manifest_path).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["schema"], 1);
+        assert_eq!(
+            manifest["producer_identity"],
+            serde_json::to_value(old_identity).unwrap()
+        );
+        assert_eq!(
+            manifest["consumed_worker_identity"],
+            serde_json::to_value(old_worker_identity).unwrap()
+        );
+        assert_eq!(
+            manifest["frontend_path"],
+            std::fs::canonicalize(std::env::current_exe().unwrap())
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
+        assert_eq!(manifest["worker_path"], worker.to_string_lossy().as_ref());
+        assert_eq!(manifest["ghc_libdir"], "/ghc/lib-a");
+
+        let alias = dir.join("worker-alias");
+        std::os::unix::fs::symlink(&worker, &alias).unwrap();
+        let mut relative_alias: PathBuf = std::env::current_dir()
+            .unwrap()
+            .ancestors()
+            .skip(1)
+            .map(|_| "..")
+            .collect();
+        relative_alias.push(alias.strip_prefix("/").unwrap());
+        std::env::set_var(WORKER_ENV, relative_alias);
+        let aliased = PreparedWorker::prepare().unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        assert_eq!(aliased.selection(), prepared.selection());
+        assert_eq!(aliased.producer_identity().unwrap(), old_identity);
+        let aliased_manifest: serde_json::Value =
+            serde_json::from_str(&aliased.deployment_manifest().unwrap()).unwrap();
+        assert_eq!(aliased_manifest["worker_path"], manifest["worker_path"]);
+        std::env::set_var(WORKER_ENV, &worker);
 
         compile_fake_worker(&dir.join("replacement.rs"), &replacement, "new-worker");
         std::fs::rename(&replacement, &worker).unwrap();
@@ -736,6 +885,11 @@ fn main() {{
             prepared.producer_identity().unwrap(),
             old_identity,
             "a boot-bound worker must retain immutable identity after path replacement"
+        );
+        assert_eq!(
+            prepared.consumed_worker_identity(),
+            old_worker_identity,
+            "a boot-bound worker must retain its exact consumed digest after path replacement"
         );
 
         let output = prepared
@@ -746,11 +900,13 @@ fn main() {{
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("old-worker"));
 
-        let new_identity = PreparedWorker::prepare()
-            .unwrap()
-            .producer_identity()
-            .unwrap();
+        let replacement_worker = PreparedWorker::prepare().unwrap();
+        let new_identity = replacement_worker.producer_identity().unwrap();
         assert_ne!(old_identity, new_identity);
+        assert_ne!(
+            old_worker_identity,
+            replacement_worker.consumed_worker_identity()
+        );
 
         std::env::set_var("TIDEPOOL_GHC_LIBDIR", "/ghc/lib-b");
         let ghc_identity = PreparedWorker::prepare()

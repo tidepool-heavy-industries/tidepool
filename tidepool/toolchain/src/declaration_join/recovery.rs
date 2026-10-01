@@ -55,12 +55,66 @@ pub fn certify_recovered_declaration_tip(
     selection: RecoveryDeclarationSelection,
     includes: &[PathBuf],
 ) -> Result<RecoveredDeclarationTip, CompileError> {
-    let context = Arc::new(ExactDeclarationContext::capture_recovery(
+    certify_recovered_declaration_tip_with_value_interfaces(
         recovery_root,
         products,
         joins,
-        selection.lexical,
+        &[],
+        selection,
+        includes,
+    )
+}
+
+pub fn certify_recovered_declaration_tip_with_value_interfaces(
+    recovery_root: &Path,
+    products: &[crate::recovery_artifacts::RecoveryArtifactRef],
+    joins: &[crate::recovery_artifacts::RecoveryJoinRef],
+    values: &[crate::recovery_artifacts::RecoveryValueInterfaceRef],
+    mut selection: RecoveryDeclarationSelection,
+    includes: &[PathBuf],
+) -> Result<RecoveredDeclarationTip, CompileError> {
+    let context = Arc::new(
+        ExactDeclarationContext::capture_recovery_with_value_interfaces(
+            recovery_root,
+            products,
+            joins,
+            values,
+            std::mem::take(&mut selection.lexical),
+        )?,
+    );
+    certify_tip_in_context(context, selection, includes)
+}
+
+pub fn certify_recovered_declaration_tip_with_inventory(
+    recovery_root: &Path,
+    products: &[crate::recovery_artifacts::RecoveryArtifactRef],
+    joins: &[crate::recovery_artifacts::RecoveryJoinRef],
+    values: &[crate::recovery_artifacts::RecoveryValueInterfaceRef],
+    descriptors: &[crate::artifact_inventory::ArtifactDescriptor],
+    dependencies: &[(
+        crate::artifact_inventory::ArtifactId,
+        crate::artifact_inventory::ArtifactId,
+        crate::artifact_inventory::ArtifactDependency,
+    )],
+    mut selection: RecoveryDeclarationSelection,
+    includes: &[PathBuf],
+) -> Result<RecoveredDeclarationTip, CompileError> {
+    let context = Arc::new(ExactDeclarationContext::capture_recovery_with_inventory(
+        recovery_root,
+        products,
+        joins,
+        values,
+        descriptors,
+        dependencies,
+        std::mem::take(&mut selection.lexical),
     )?);
+    certify_tip_in_context(context, selection, includes)
+}
+fn certify_tip_in_context(
+    context: Arc<ExactDeclarationContext>,
+    selection: RecoveryDeclarationSelection,
+    includes: &[PathBuf],
+) -> Result<RecoveredDeclarationTip, CompileError> {
     if context.toolchain_identity_sha256() == [0; 32]
         || !context
             .lexical_graph()

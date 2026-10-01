@@ -162,6 +162,22 @@ Unknown profile names fail during target analysis. The setting can also be
 stored in a local Buck config, but the exact command should be retained with
 performance evidence so the action profile is clear.
 
+The matched runtime bundle includes `share/exomonad/compiler-deployment.json`,
+generated from that bundle's frontend, worker, and pinned GHC library directory
+before any compiler endpoint is observed. The Nix `exomonad` package points
+`TIDEPOOL_COMPILER_DEPLOYMENT` at the same manifest packaged with
+`tidepool-extract`. Local `just` workflows generate
+`target/compiler-deployment.json` from the selected frontend/worker pair and
+export its absolute path; an explicit `TIDEPOOL_COMPILER_DEPLOYMENT` must name
+an absolute path to a readable nonempty manifest and is left intact. Runtime
+admission then checks configured producer and worker digests before binding,
+with endpoint identity retained as a separate observation. The producer
+identity binds the selected worker path, so Buck tests consume the canonical
+`matched_runtime_bundle` output path. If that bundle is copied elsewhere, its
+manifest must be regenerated there from the copied frontend, worker, and same
+GHC library directory before use; the Buck bundle does not promise path-free
+relocation.
+
 `buck-out` must be a bind mount of a per-checkout directory on `/srv/build`; a
 symlink is not supported. Check `findmnt --mountpoint "$PWD/buck-out"` before
 any Buck invocation. Do not run Buck metadata queries or builds from an

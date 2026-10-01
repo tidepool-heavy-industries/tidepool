@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
@@ -206,13 +207,14 @@ pub(crate) fn inherited_package_witnesses_with_validation(
 
 /// A group whose retained globals still need an exact live binding or native
 /// export owner. Runtime resolves those through its binding table or owning
-/// machine's export ledger before constructing `CertifiedGroup`.
+/// machine's export ledger before constructing `CertifiedGroup`. Immutable
+/// decoded payloads are shared when request contexts append native groups.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingCertifiedGroup {
     origin: ProductOrigin,
     owner: CachedHomeOwner,
-    group: ProjectedGroup,
-    imports: Vec<PendingImportOwner>,
+    group: Arc<ProjectedGroup>,
+    imports: Arc<[PendingImportOwner]>,
 }
 
 pub(crate) struct CertifiedProducts {
@@ -237,7 +239,11 @@ impl PendingCertifiedGroup {
     }
 
     pub fn into_parts(self) -> (CachedHomeOwner, ProjectedGroup, Vec<PendingImportOwner>) {
-        (self.owner, self.group, self.imports)
+        (
+            self.owner,
+            Arc::unwrap_or_clone(self.group),
+            self.imports.to_vec(),
+        )
     }
 }
 
@@ -1329,6 +1335,65 @@ pub(crate) fn certified_home_requirements(
         .collect())
 }
 
+/// Direct native requirements are distinct from typechecking closure. They
+/// retain the dependent and required original group ordinals, or exact live
+/// binding generation; graph reachability grants no native lease.
+pub(crate) fn certified_native_requirements(
+    bytes: &[u8],
+    owner: &CachedHomeOwner,
+) -> CertResult<
+    Vec<(
+        crate::declaration_join::ExactModuleIdentity,
+        crate::artifact_inventory::ArtifactDependency,
+    )>,
+> {
+    use crate::artifact_inventory::ArtifactDependency;
+    let witness = decode_home_witness(bytes)?;
+    if &witness.owner != owner {
+        return Err(CertificationError::Mismatch("native requirements owner"));
+    }
+    let mut requirements = Vec::new();
+    for (dependent_ordinal, _, globals) in witness.groups {
+        for global in globals {
+            let (owner, dependency) = match global.owner {
+                ReceiptImportOwner::Source {
+                    unit,
+                    module,
+                    original_ordinal,
+                    ..
+                } => (
+                    crate::declaration_join::ExactModuleIdentity { unit, module },
+                    ArtifactDependency::NativeGroup {
+                        dependent_ordinal,
+                        required_ordinal: original_ordinal,
+                    },
+                ),
+                ReceiptImportOwner::Retained {
+                    identity,
+                    generation,
+                } => (
+                    crate::declaration_join::ExactModuleIdentity {
+                        unit: identity.unit,
+                        module: identity.module,
+                    },
+                    ArtifactDependency::NativeBinding {
+                        dependent_ordinal,
+                        generation,
+                        namespace: identity.namespace,
+                        occurrence: identity.occurrence,
+                        record_parent: identity.record_parent,
+                    },
+                ),
+                ReceiptImportOwner::Package { .. } => continue,
+            };
+            requirements.push((owner, dependency));
+        }
+    }
+    requirements.sort();
+    requirements.dedup();
+    Ok(requirements)
+}
+
 fn verify_home_witness(bytes: &[u8], owner: &CachedHomeOwner) -> CertResult<HomeCertification> {
     verify_home_witness_with_validation(bytes, owner, &mut PackageInterfaceValidation::default())
 }
@@ -1387,7 +1452,7 @@ fn encode_home_certification_with_validation(
             ));
         }
         let mut globals = Vec::new();
-        for (declaration, selected) in group.group.globals().iter().zip(&group.imports) {
+        for (declaration, selected) in group.group.globals().iter().zip(group.imports.iter()) {
             let selected = match selected {
                 PendingImportOwner::Source {
                     owner,
@@ -1680,8 +1745,8 @@ fn certify_inherited_inventory_with_validation(
             result.push(PendingCertifiedGroup {
                 origin: ProductOrigin::Cached,
                 owner: witness.owner.clone(),
-                group,
-                imports,
+                group: Arc::new(group),
+                imports: imports.into(),
             });
         }
     }
@@ -1794,8 +1859,8 @@ pub(crate) fn certify_products(
                     let version = if let Some(admission) = exact {
                         let mut digest = Sha256::new();
                         for field in [
-                            b"tidepool-exact-source-home-v1".as_slice(),
-                            endpoint_identity,
+                            b"tidepool-exact-source-home-v2".as_slice(),
+                            Sha256::digest(endpoint_identity).as_slice(),
                             admission.request.semantic_sha256.as_slice(),
                             key.0.as_bytes(),
                             key.1.as_bytes(),
@@ -2014,12 +2079,12 @@ pub(crate) fn certify_products(
                         &mut validation,
                     )
                 })
-                .collect::<CertResult<_>>()?;
+                .collect::<CertResult<Vec<_>>>()?;
             Ok(PendingCertifiedGroup {
                 origin,
                 owner,
-                group,
-                imports,
+                group: Arc::new(group),
+                imports: imports.into(),
             })
         })
         .collect::<CertResult<_>>()?;
@@ -2436,9 +2501,27 @@ mod tests {
         PendingCertifiedGroup {
             owner: owner.clone(),
             origin: ProductOrigin::Cached,
-            group: testing::projected_group(wire, 7).unwrap(),
-            imports: vec![import],
+            group: Arc::new(testing::projected_group(wire, 7).unwrap()),
+            imports: vec![import].into(),
         }
+    }
+
+    #[test]
+    fn certified_group_clones_share_decoded_payload_and_import_inventory() {
+        let group = inherited_group(
+            &inherited_owner("Home"),
+            PendingImportOwner::Retained {
+                identity: testing::identity("Val", "x"),
+                generation: 7,
+            },
+        );
+        let copy = group.clone();
+        assert!(Arc::ptr_eq(&group.group, &copy.group));
+        assert!(Arc::ptr_eq(&group.imports, &copy.imports));
+        let (owner, decoded, imports) = copy.into_parts();
+        assert_eq!(owner, *group.owner());
+        assert_eq!(&decoded, group.group());
+        assert_eq!(imports, group.imports());
     }
 
     fn inherited_parsed(
@@ -2452,10 +2535,53 @@ mod tests {
                 unit: group.owner.unit.clone(),
                 module: group.owner.module.clone(),
                 interface: vec![0x42],
-                groups: vec![group.group.clone()],
+                groups: vec![group.group.as_ref().clone()],
             },
             decode_home_witness(&bytes).unwrap(),
         )
+    }
+
+    #[test]
+    fn artifact_native_edges_preserve_original_group_and_binding_generations() {
+        use crate::artifact_inventory::ArtifactDependency;
+        let owner = inherited_owner("Consumer");
+        let source = inherited_owner("Original");
+        let source_group = inherited_group(
+            &owner,
+            PendingImportOwner::Source {
+                owner: source.clone(),
+                original_ordinal: 11,
+                binder: testing::identity("Original", "entry"),
+            },
+        );
+        let bytes = encode_home_certification(&owner, &[source_group], &BTreeMap::new()).unwrap();
+        let edges = certified_native_requirements(&bytes, &owner).unwrap();
+        assert_eq!(
+            edges,
+            vec![(
+                crate::declaration_join::ExactModuleIdentity {
+                    unit: source.unit,
+                    module: source.module
+                },
+                ArtifactDependency::NativeGroup {
+                    dependent_ordinal: 7,
+                    required_ordinal: 11
+                }
+            )]
+        );
+        let binding = testing::identity("Value", "bound");
+        let retained_group = inherited_group(
+            &owner,
+            PendingImportOwner::Retained {
+                identity: binding.clone(),
+                generation: 41,
+            },
+        );
+        let bytes = encode_home_certification(&owner, &[retained_group], &BTreeMap::new()).unwrap();
+        assert!(
+            matches!(&certified_native_requirements(&bytes,&owner).unwrap()[0].1,ArtifactDependency::NativeBinding{dependent_ordinal:7,generation:41,occurrence,..} if occurrence=="bound")
+        );
+        assert!(certified_native_requirements(&bytes, &inherited_owner("Imposter")).is_err());
     }
 
     #[test]
@@ -2491,7 +2617,9 @@ mod tests {
             vec![gb.clone()]
         );
         let mut conflicting_current = ga.clone();
-        if let PendingImportOwner::Source { owner, .. } = &mut conflicting_current.imports[0] {
+        if let PendingImportOwner::Source { owner, .. } =
+            &mut Arc::make_mut(&mut conflicting_current.imports)[0]
+        {
             owner.skinny_iface_sha256 = [91; 32];
         }
         assert!(matches!(

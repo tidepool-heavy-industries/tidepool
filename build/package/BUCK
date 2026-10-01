@@ -7,6 +7,35 @@ tidepool_runtime_shared_libraries(
     visibility = ["PUBLIC"],
 )
 
+# Generate authority for the exact frontend and worker paths used by focused
+# Rust tests without pulling in the complete browser-bearing runtime bundle.
+genrule(
+    name = "compiler_deployment",
+    srcs = [
+        "//tidepool/extract-cmd:tidepool-extract",
+        "//bridge/haskell:tidepool_extract_bin",
+        ":tidepool_extract_runtime_libraries",
+    ],
+    out = "compiler-deployment.json",
+    env = {
+        "TIDEPOOL_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
+    },
+    bash = """set -euo pipefail
+FRONTEND="$(exe //tidepool/extract-cmd:tidepool-extract)"
+WORKER="$(exe //bridge/haskell:tidepool_extract_bin)"
+RUNTIME_LIBRARIES="$PWD/$(location :tidepool_extract_runtime_libraries)"
+mkdir -p "$TMP/worker-libraries"
+for library in "$RUNTIME_LIBRARIES"/*; do
+    test -e "$library"
+    cp -L "$library" "$TMP/worker-libraries/"
+done
+TIDEPOOL_EXTRACT_WORKER="$WORKER" \
+  LD_LIBRARY_PATH="$TMP/worker-libraries${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+  "$FRONTEND" --compiler-deployment-manifest "$PWD/$OUT"
+""",
+    visibility = ["PUBLIC"],
+)
+
 genrule(
     name = "embedded_web_provenance",
     srcs = [
@@ -61,6 +90,11 @@ for library in "$RUNTIME_LIBRARIES"/*; do
     test -e "$library"
     cp -L "$library" "$OUTPUT/bin/__tidepool_extract_bin__shared_libs_symlink_tree/"
 done
+read -r GHC_LIBDIR < "$OUTPUT/share/exomonad/ghc-libdir.txt"
+TIDEPOOL_EXTRACT_WORKER="$OUTPUT/bin/tidepool-extract-bin" \
+  TIDEPOOL_GHC_LIBDIR="$GHC_LIBDIR" \
+  "$OUTPUT/bin/tidepool-extract" --compiler-deployment-manifest \
+    "$OUTPUT/share/exomonad/compiler-deployment.json"
 WEB="$PWD/$(location //web:dist)"
 cp -a "$WEB/web/." "$OUTPUT/share/exomonad/web/"
 cp -a "$PWD/$(location :embedded_web_provenance)" "$OUTPUT/share/exomonad/harness-source-revision.txt"
@@ -77,6 +111,7 @@ sh_test(
         "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location :matched_runtime_bundle)/share/exomonad/web",
         "TIDEPOOL_EXTRACT": "$(location :matched_runtime_bundle)/bin/tidepool-extract",
         "TIDEPOOL_EXTRACT_WORKER": "$(location :matched_runtime_bundle)/bin/tidepool-extract-bin",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location :matched_runtime_bundle)/share/exomonad/compiler-deployment.json",
         "TIDEPOOL_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
         "PATH": read_root_config("nix", "bash").rsplit("/", 1)[0],
     },

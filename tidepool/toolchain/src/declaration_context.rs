@@ -6,6 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::artifact_inventory::{
+    ArtifactEntry, ArtifactInventory, ArtifactKind, ArtifactPayload, ArtifactView,
+};
 use crate::certified_products::{
     certify_inherited_products, certify_inherited_products_with_validation, InheritedProductInput,
     PendingCertifiedGroup,
@@ -15,17 +18,15 @@ use crate::declaration_join::{
     ExactInterfaceOwner, ExactLexicalNode, ExactModuleIdentity, ModuleSnapshot,
 };
 use crate::recovery_artifacts::{
-    self, CertifiedJoinedInterface, CertifiedRecoveryProduct, PackageInterfaceValidation,
-    RecoveryArtifactRef, RecoveryJoinRef,
+    self, CertifiedJoinedInterface, CertifiedRecoveryProduct, CertifiedValueInterface,
+    PackageInterfaceValidation, RecoveryArtifactRef, RecoveryJoinRef, RecoveryValueInterfaceRef,
 };
 use crate::CompileError;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactDeclarationContext {
     producer: [u8; 32],
-    products: Vec<CertifiedRecoveryProduct>,
-    joins: Vec<CertifiedJoinedInterface>,
-    interfaces: Vec<ExactInterfaceOwner>,
+    inventory: ArtifactView,
     lexical: Vec<ExactLexicalNode>,
 }
 
@@ -36,13 +37,15 @@ pub struct MaterializedExactDeclarationContext {
     pub lexical: Vec<ExactLexicalNode>,
 }
 
+#[derive(Clone)]
 pub(crate) struct ExactCompilationRequest {
     pub(crate) context: Arc<ExactDeclarationContext>,
     pub(crate) manifest: PathBuf,
     pub(crate) request_sha256: String,
     pub(crate) semantic_sha256: [u8; 32],
+    pub(crate) producer_sha256: [u8; 32],
     pub(crate) artifacts: Vec<DeclarationArtifact>,
-    pub(crate) groups: Vec<PendingCertifiedGroup>,
+    pub(crate) groups: Arc<[PendingCertifiedGroup]>,
 }
 
 /// A successful compiler transaction's actual generated source, bound to its
@@ -99,6 +102,82 @@ impl ExactSourceAdmission {
 }
 
 impl ExactCompilationRequest {
+    pub(crate) fn in_program_context(
+        &self,
+        root: &Path,
+        context: Arc<ExactDeclarationContext>,
+    ) -> Result<Self, CompileError> {
+        if context.toolchain_identity_sha256() != self.producer_sha256
+            && !(context.toolchain_identity_sha256() == [0; 32]
+                && context.artifact_view().is_empty())
+        {
+            return Err(failure("program context has another producer"));
+        }
+        // This request already owns authenticated materializations for its
+        // baseline context. A later item adds immutable entries, while output
+        // admission still revalidates the full consumed files for tampering.
+        let baseline_ids = self
+            .context
+            .artifact_view()
+            .artifact_ids()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let current_entries = context.artifact_view().entries();
+        let current_ids = current_entries
+            .iter()
+            .map(|entry| entry.descriptor.id)
+            .collect::<BTreeSet<_>>();
+        if !baseline_ids.is_subset(&current_ids) {
+            return Err(failure("program context removed an admitted artifact"));
+        }
+        let new_entries = current_entries
+            .into_iter()
+            .filter(|entry| !baseline_ids.contains(&entry.descriptor.id))
+            .collect::<Vec<_>>();
+        let mut validation = PackageInterfaceValidation::default();
+        let (mut materialized, references) =
+            context.materialize_entries_with_validation(root, &new_entries, &mut validation)?;
+        materialized
+            .artifacts
+            .extend(self.artifacts.iter().cloned());
+        let verified = references
+            .iter()
+            .map(|reference| {
+                recovery_artifacts::verify_materialized_ref_with_validation(
+                    root,
+                    reference,
+                    &mut validation,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(failure)?;
+        let additional = certify_inherited_products_with_validation(
+            &verified
+                .iter()
+                .map(|artifact| InheritedProductInput { artifact })
+                .collect::<Vec<_>>(),
+            &self.groups,
+            &mut validation,
+        )
+        .map_err(failure)?;
+        let groups = if additional.is_empty() {
+            Arc::clone(&self.groups)
+        } else {
+            let mut groups = self.groups.to_vec();
+            groups.extend(additional);
+            groups.into()
+        };
+        Ok(Self {
+            context,
+            manifest: self.manifest.clone(),
+            request_sha256: self.request_sha256.clone(),
+            semantic_sha256: self.semantic_sha256,
+            producer_sha256: self.producer_sha256,
+            artifacts: materialized.artifacts,
+            groups: groups.into(),
+        })
+    }
+
     pub(crate) fn admit_source(
         &self,
         source_path: &Path,
@@ -136,6 +215,29 @@ impl ExactCompilationRequest {
         root: &Path,
         planned: Option<&ExactModuleIdentity>,
     ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
+        self.validate_outputs_selected(root, planned, &self.context)
+    }
+
+    pub(crate) fn validate_outputs_in_context(
+        &self,
+        root: &Path,
+        context: &ExactDeclarationContext,
+    ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
+        if context.toolchain_identity_sha256() != self.producer_sha256
+            && !(context.toolchain_identity_sha256() == [0; 32]
+                && context.artifact_view().is_empty())
+        {
+            return Err(failure("same-transaction context has another producer"));
+        }
+        self.validate_outputs_selected(root, None, context)
+    }
+
+    fn validate_outputs_selected(
+        &self,
+        root: &Path,
+        planned: Option<&ExactModuleIdentity>,
+        context: &ExactDeclarationContext,
+    ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
         self.context.validate_artifacts(&self.artifacts)?;
         if sha256(&std::fs::read(&self.manifest)?) != self.request_sha256 {
             return Err(failure("scope request changed during compilation"));
@@ -156,7 +258,7 @@ impl ExactCompilationRequest {
         }
         receipts
             .iter()
-            .map(|path| self.validate_receipt(&path.join("receipt.cbor"), planned))
+            .map(|path| self.validate_receipt(&path.join("receipt.cbor"), planned, context))
             .collect()
     }
 
@@ -164,6 +266,7 @@ impl ExactCompilationRequest {
         &self,
         path: &Path,
         planned: Option<&ExactModuleIdentity>,
+        context: &ExactDeclarationContext,
     ) -> Result<ExactSourceAdmission, CompileError> {
         use sha2::Digest;
         let bytes = bounded_read(path, 4 * 1024 * 1024)?;
@@ -206,13 +309,13 @@ impl ExactCompilationRequest {
                 .ok_or_else(|| {
                     failure("fresh compilation lacks complete tracked source evidence")
                 })?;
-        let mut exact_owners: BTreeSet<_> = self
-            .artifacts
+        let interfaces = context.interface_owners();
+        let mut exact_owners: BTreeSet<_> = interfaces
             .iter()
-            .map(|artifact| {
+            .map(|interface| {
                 (
-                    artifact.interface.unit.as_str(),
-                    artifact.interface.module.as_str(),
+                    interface.owner.unit.as_str(),
+                    interface.owner.module.as_str(),
                 )
             })
             .collect();
@@ -230,8 +333,7 @@ impl ExactCompilationRequest {
         {
             return Err(failure("fresh module replaced an admitted exact owner"));
         }
-        let mut selected: BTreeSet<_> = self
-            .context
+        let mut selected: BTreeSet<_> = context
             .lexical
             .iter()
             .map(|node| (node.owner.unit.as_str(), node.owner.module.as_str()))
@@ -347,9 +449,7 @@ impl ExactDeclarationContext {
     ) -> Result<Self, CompileError> {
         Self {
             producer: [0; 32],
-            products: Vec::new(),
-            joins: Vec::new(),
-            interfaces: Vec::new(),
+            inventory: ArtifactInventory::default().empty_view(),
             lexical: Vec::new(),
         }
         .extend(authored, joins, lexical)
@@ -361,13 +461,61 @@ impl ExactDeclarationContext {
         joins: &[RecoveryJoinRef],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
+        Self::capture_recovery_with_value_interfaces(root, products, joins, &[], lexical)
+    }
+
+    pub fn capture_recovery_with_value_interfaces(
+        root: &Path,
+        products: &[RecoveryArtifactRef],
+        joins: &[RecoveryJoinRef],
+        values: &[RecoveryValueInterfaceRef],
+        lexical: Vec<ExactLexicalNode>,
+    ) -> Result<Self, CompileError> {
+        Self::capture_recovery_inputs(root, products, joins, values, None, lexical)
+    }
+    pub fn capture_recovery_with_inventory(
+        root: &Path,
+        products: &[RecoveryArtifactRef],
+        joins: &[RecoveryJoinRef],
+        values: &[RecoveryValueInterfaceRef],
+        descriptors: &[crate::artifact_inventory::ArtifactDescriptor],
+        dependencies: &[(
+            crate::artifact_inventory::ArtifactId,
+            crate::artifact_inventory::ArtifactId,
+            crate::artifact_inventory::ArtifactDependency,
+        )],
+        lexical: Vec<ExactLexicalNode>,
+    ) -> Result<Self, CompileError> {
+        Self::capture_recovery_inputs(
+            root,
+            products,
+            joins,
+            values,
+            Some((descriptors, dependencies)),
+            lexical,
+        )
+    }
+    fn capture_recovery_inputs(
+        root: &Path,
+        products: &[RecoveryArtifactRef],
+        joins: &[RecoveryJoinRef],
+        values: &[RecoveryValueInterfaceRef],
+        inventory: Option<(
+            &[crate::artifact_inventory::ArtifactDescriptor],
+            &[(
+                crate::artifact_inventory::ArtifactId,
+                crate::artifact_inventory::ArtifactId,
+                crate::artifact_inventory::ArtifactDependency,
+            )],
+        )>,
+        lexical: Vec<ExactLexicalNode>,
+    ) -> Result<Self, CompileError> {
         let mut context = Self {
             producer: [0; 32],
-            products: Vec::new(),
-            joins: Vec::new(),
-            interfaces: Vec::new(),
+            inventory: ArtifactInventory::default().empty_view(),
             lexical,
         };
+        let mut entries = Vec::new();
         let verified = products
             .iter()
             .map(|reference| recovery_artifacts::verify_materialized_ref(root, reference))
@@ -403,31 +551,63 @@ impl ExactDeclarationContext {
             .iter()
             .map(|owner| identity(&owner.unit, &owner.module))
             .collect();
-            context.interfaces.push(ExactInterfaceOwner {
-                owner: identity(&product.owner().unit, &product.owner().module),
+            entries.push(ArtifactEntry::original(
+                context.producer,
+                product,
                 requirements,
-            });
-            context.products.push(product);
+            )?);
         }
         for reference in joins {
             context.admit_producer(reference.toolchain_identity_sha256)?;
             let artifact =
                 recovery_artifacts::verify_materialized_join(root, reference).map_err(failure)?;
-            context.joins.push(
-                CertifiedJoinedInterface::from_certification(
-                    reference.toolchain_identity_sha256,
-                    reference.unit.clone(),
-                    reference.module.clone(),
-                    artifact.interface_bytes,
-                    artifact.package_imports_bytes,
-                )
-                .map_err(failure)?,
-            );
-            context.interfaces.push(ExactInterfaceOwner {
-                owner: identity(&reference.unit, &reference.module),
-                requirements: Vec::new(),
-            });
+            let join = CertifiedJoinedInterface::from_certification(
+                reference.toolchain_identity_sha256,
+                reference.unit.clone(),
+                reference.module.clone(),
+                artifact.interface_bytes,
+                artifact.package_imports_bytes,
+            )
+            .map_err(failure)?;
+            entries.push(ArtifactEntry::interface(
+                join,
+                ArtifactKind::LexicalJoin,
+                Vec::new(),
+            ));
         }
+        for reference in values {
+            context.admit_producer(reference.interface.toolchain_identity_sha256)?;
+            let artifact = recovery_artifacts::verify_materialized_join(root, &reference.interface)
+                .map_err(failure)?;
+            let interface = CertifiedJoinedInterface::from_certification(
+                reference.interface.toolchain_identity_sha256,
+                reference.interface.unit.clone(),
+                reference.interface.module.clone(),
+                artifact.interface_bytes,
+                artifact.package_imports_bytes,
+            )
+            .map_err(failure)?;
+            let entry = ArtifactEntry::interface(
+                interface,
+                ArtifactKind::ValueInterface,
+                reference.requirements.clone(),
+            );
+            if entry.descriptor.id != reference.artifact_id {
+                return Err(failure("value interface artifact identity differs"));
+            }
+            entries.push(entry);
+        }
+        if let Some((descriptors, dependencies)) = inventory {
+            crate::artifact_inventory::restore_recovery_dependencies(
+                &mut entries,
+                descriptors,
+                dependencies,
+            )?;
+        }
+        context.inventory = context
+            .inventory
+            .inventory()
+            .admit(&context.inventory, entries)?;
         context.normalize()?;
         Ok(context)
     }
@@ -440,50 +620,153 @@ impl ExactDeclarationContext {
         joins: &[Arc<AcceptedJoin>],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
+        let mut entries = Vec::new();
         for certificate in authored {
             self.admit_producer(certificate.toolchain_identity_sha256())?;
-            self.products
-                .extend_from_slice(certificate.recovery_products());
-            self.interfaces.extend_from_slice(&certificate.interfaces);
-            self.joins.extend_from_slice(&certificate.joined_interfaces);
+            self.inventory = self.inventory.merge(certificate.artifact_view())?;
         }
         for join in joins {
             self.admit_producer(join.toolchain_identity_sha256())?;
-            self.products
-                .extend_from_slice(join.context().recovery_products());
-            self.joins.extend_from_slice(&join.context().joins);
-            self.joins.push(join.interface().clone());
-            self.interfaces
-                .extend_from_slice(&join.context().interfaces);
-            self.interfaces.push(ExactInterfaceOwner {
-                owner: identity(join.interface().unit(), join.interface().module()),
-                requirements: join
-                    .context()
-                    .interfaces
-                    .iter()
-                    .map(|interface| interface.owner.clone())
+            self.inventory = self.inventory.merge(join.context().artifact_view())?;
+            entries.push(ArtifactEntry::interface(
+                join.interface().clone(),
+                ArtifactKind::LexicalJoin,
+                join.context()
+                    .interface_owners()
+                    .into_iter()
+                    .map(|interface| interface.owner)
                     .collect(),
-            });
+            ));
         }
+        self.inventory = self.inventory.inventory().admit(&self.inventory, entries)?;
         self.lexical = lexical;
         self.normalize()?;
+        Ok(self)
+    }
+
+    /// Admit the original supporting homes sealed by the same checked-cell
+    /// transaction. Lexical exposure remains a separate caller-selected graph.
+    pub(crate) fn extend_checked_original_products(
+        mut self,
+        producer_sha256: [u8; 32],
+        products: &[CertifiedRecoveryProduct],
+        exact_imports: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+    ) -> Result<Self, CompileError> {
+        self.admit_producer(producer_sha256)?;
+        if products.is_empty() {
+            return Ok(self);
+        }
+        let existing = self.inventory.entries_for_owners(
+            products
+                .iter()
+                .map(|product| identity(&product.owner().unit, &product.owner().module)),
+        );
+        let mut entries = Vec::new();
+        for product in products {
+            let owner = identity(&product.owner().unit, &product.owner().module);
+            if let Some(entry) = existing.get(&owner) {
+                let ArtifactPayload::Original(previous) = &entry.payload else {
+                    return Err(failure(
+                        "supporting original collides with type-only interface",
+                    ));
+                };
+                if previous.owner() != product.owner()
+                    || previous.interface_bytes() != product.interface_bytes()
+                    || previous.product_bytes() != product.product_bytes()
+                    || previous.package_imports_bytes() != product.package_imports_bytes()
+                    || previous.certification_bytes() != product.certification_bytes()
+                {
+                    return Err(failure("supporting original differs from retained owner"));
+                }
+                continue;
+            }
+            let mut requirements = crate::certified_products::certified_home_requirements(
+                product.certification_bytes(),
+                product.owner(),
+            )
+            .map_err(failure)?
+            .into_iter()
+            .map(|owner| identity(&owner.unit, &owner.module))
+            .collect::<Vec<_>>();
+            requirements.extend(exact_imports.get(&owner).into_iter().flatten().cloned());
+            entries.push(ArtifactEntry::original(
+                producer_sha256,
+                product.clone(),
+                requirements,
+            )?);
+        }
+        self.inventory = self.inventory.inventory().admit(&self.inventory, entries)?;
         Ok(self)
     }
 
     pub fn toolchain_identity_sha256(&self) -> [u8; 32] {
         self.producer
     }
-    pub(crate) fn interface_owners(&self) -> &[ExactInterfaceOwner] {
-        &self.interfaces
+    pub fn artifact_view(&self) -> &ArtifactView {
+        &self.inventory
     }
-    pub fn recovery_products(&self) -> &[CertifiedRecoveryProduct] {
-        &self.products
+    pub(crate) fn interface_owners(&self) -> Vec<ExactInterfaceOwner> {
+        self.inventory.interface_owners()
     }
-    pub fn joined_interfaces(&self) -> &[CertifiedJoinedInterface] {
-        &self.joins
+    pub fn recovery_products(&self) -> Vec<CertifiedRecoveryProduct> {
+        self.inventory
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Original(product) => Some(product.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+    pub fn joined_interfaces(&self) -> Vec<CertifiedJoinedInterface> {
+        self.inventory
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Interface(interface, ArtifactKind::LexicalJoin) => {
+                    Some(interface.clone())
+                }
+                _ => None,
+            })
+            .collect()
     }
     pub fn lexical_graph(&self) -> &[ExactLexicalNode] {
         &self.lexical
+    }
+
+    pub fn value_interfaces(&self) -> Vec<CertifiedValueInterface> {
+        self.inventory
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Interface(interface, ArtifactKind::ValueInterface) => {
+                    Some(CertifiedValueInterface::from_admitted_interface(
+                        interface.clone(),
+                        entry.requirements.clone(),
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+    pub fn extend_with_value_interfaces(
+        mut self,
+        values: &[Arc<CertifiedValueInterface>],
+        lexical: Vec<ExactLexicalNode>,
+    ) -> Result<Self, CompileError> {
+        let mut entries = Vec::new();
+        for value in values {
+            self.admit_producer(value.interface().toolchain_identity_sha256())?;
+            entries.push(ArtifactEntry::interface(
+                value.interface().clone(),
+                ArtifactKind::ValueInterface,
+                value.requirements().to_vec(),
+            ));
+        }
+        self.inventory = self.inventory.inventory().admit(&self.inventory, entries)?;
+        self.lexical = lexical;
+        self.normalize()?;
+        Ok(self)
     }
 
     /// Logical identity is independent of materialization paths and of the
@@ -494,10 +777,15 @@ impl ExactDeclarationContext {
         lexical.sort_by_key(|node| &node.owner);
         let value = Value::Array(vec![
             text("TPEXACTCONTEXT"),
-            text("1"),
+            text("2"),
+            text(hex(&sha2::Sha256::digest(
+                serde_json::to_vec(&(self.inventory.descriptors(), self.inventory.dependencies()))
+                    .expect("inventory encoding"),
+            )
+            .into())),
             text(hex(&self.producer)),
             Value::Array(
-                self.products
+                self.recovery_products()
                     .iter()
                     .map(|product| {
                         let owner = product.owner();
@@ -514,7 +802,7 @@ impl ExactDeclarationContext {
                     .collect(),
             ),
             Value::Array(
-                self.joins
+                self.joined_interfaces()
                     .iter()
                     .map(|join| {
                         Value::Array(vec![
@@ -549,6 +837,14 @@ impl ExactDeclarationContext {
         &self,
         artifacts: &[DeclarationArtifact],
     ) -> Result<(), CompileError> {
+        let interfaces = self.interface_owners();
+        let products = self.recovery_products();
+        let mut joins = self.joined_interfaces();
+        joins.extend(
+            self.value_interfaces()
+                .into_iter()
+                .map(|value| value.interface().clone()),
+        );
         let mut seen = BTreeSet::new();
         for artifact in artifacts {
             let exact = &artifact.interface;
@@ -556,8 +852,7 @@ impl ExactDeclarationContext {
             if !seen.insert(owner.clone()) || !exact.path.is_absolute() {
                 return Err(failure("duplicate owner or relative interface path"));
             }
-            let metadata = self
-                .interfaces
+            let metadata = interfaces
                 .iter()
                 .find(|entry| entry.owner == owner)
                 .ok_or_else(|| failure("artifact is not owned by the context"))?;
@@ -570,33 +865,32 @@ impl ExactDeclarationContext {
             {
                 return Err(failure("artifact requirements differ from owned context"));
             }
-            let (iface, packages) =
-                if let Some(product) = self.products.iter().find(|product| {
-                    identity(&product.owner().unit, &product.owner().module) == owner
-                }) {
-                    let snapshot = artifact
-                        .product
-                        .as_ref()
-                        .ok_or_else(|| failure("original product is missing"))?;
-                    if !snapshot.path.is_absolute()
-                        || snapshot.module != exact.module
-                        || snapshot.sha256 != hex(&product.owner().product_sha256)
-                        || std::fs::read(&snapshot.path)? != product.product_bytes()
-                    {
-                        return Err(failure("original product differs from owned bytes"));
-                    }
-                    (product.interface_bytes(), product.package_imports_bytes())
-                } else {
-                    let join = self
-                        .joins
-                        .iter()
-                        .find(|join| identity(join.unit(), join.module()) == owner)
-                        .ok_or_else(|| failure("synthetic anchor is missing"))?;
-                    if artifact.product.is_some() {
-                        return Err(failure("synthetic anchor has an implementation product"));
-                    }
-                    (join.interface_bytes(), join.package_imports_bytes())
-                };
+            let (iface, packages) = if let Some(product) = products
+                .iter()
+                .find(|product| identity(&product.owner().unit, &product.owner().module) == owner)
+            {
+                let snapshot = artifact
+                    .product
+                    .as_ref()
+                    .ok_or_else(|| failure("original product is missing"))?;
+                if !snapshot.path.is_absolute()
+                    || snapshot.module != exact.module
+                    || snapshot.sha256 != hex(&product.owner().product_sha256)
+                    || std::fs::read(&snapshot.path)? != product.product_bytes()
+                {
+                    return Err(failure("original product differs from owned bytes"));
+                }
+                (product.interface_bytes(), product.package_imports_bytes())
+            } else {
+                let join = joins
+                    .iter()
+                    .find(|join| identity(join.unit(), join.module()) == owner)
+                    .ok_or_else(|| failure("synthetic anchor is missing"))?;
+                if artifact.product.is_some() {
+                    return Err(failure("synthetic anchor has an implementation product"));
+                }
+                (join.interface_bytes(), join.package_imports_bytes())
+            };
             if sha256(iface) != exact.sha256 || std::fs::read(&exact.path)? != iface {
                 return Err(failure("interface differs from owned bytes"));
             }
@@ -606,7 +900,7 @@ impl ExactDeclarationContext {
                 return Err(failure("package witness differs from owned bytes"));
             }
         }
-        if seen.len() != self.interfaces.len() {
+        if seen.len() != self.interface_owners().len() {
             return Err(failure("owned artifact closure is incomplete"));
         }
         Ok(())
@@ -621,66 +915,11 @@ impl ExactDeclarationContext {
     }
 
     fn normalize(&mut self) -> Result<(), CompileError> {
-        let mut products = BTreeMap::new();
-        for product in self.products.drain(..) {
-            let owner = identity(&product.owner().unit, &product.owner().module);
-            if let Some(previous) = products.get(&owner) {
-                let previous: &CertifiedRecoveryProduct = previous;
-                if previous.owner() != product.owner()
-                    || previous.interface_bytes() != product.interface_bytes()
-                    || previous.product_bytes() != product.product_bytes()
-                    || previous.package_imports_bytes() != product.package_imports_bytes()
-                    || previous.certification_bytes() != product.certification_bytes()
-                {
-                    return Err(failure("one original owner has differing artifacts"));
-                }
-            } else {
-                products.insert(owner, product);
-            }
-        }
-        let mut joins = BTreeMap::new();
-        for join in self.joins.drain(..) {
-            let owner = identity(join.unit(), join.module());
-            if products.contains_key(&owner) {
-                return Err(failure("synthetic interface collides with original owner"));
-            }
-            if joins.get(&owner).is_some_and(|previous| previous != &join) {
-                return Err(failure("one synthetic owner has differing artifacts"));
-            }
-            joins.insert(owner, join);
-        }
-        let owners = products
-            .keys()
-            .chain(joins.keys())
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        if owners
+        let interfaces = self.interface_owners();
+        let owners = interfaces
             .iter()
-            .map(|owner| &owner.module)
-            .collect::<BTreeSet<_>>()
-            .len()
-            != owners.len()
-        {
-            return Err(failure("same module name occurs under multiple units"));
-        }
-        let mut interfaces = BTreeMap::new();
-        for interface in self.interfaces.drain(..) {
-            if !owners.contains(&interface.owner)
-                || interface
-                    .requirements
-                    .iter()
-                    .any(|owner| !owners.contains(owner))
-            {
-                return Err(failure("incomplete exact interface requirements"));
-            }
-            interfaces
-                .entry(interface.owner)
-                .or_insert_with(BTreeSet::new)
-                .extend(interface.requirements);
-        }
-        if interfaces.len() != owners.len() {
-            return Err(failure("missing original interface metadata"));
-        }
+            .map(|interface| &interface.owner)
+            .collect::<BTreeSet<_>>();
         let lexical_owners = self
             .lexical
             .iter()
@@ -698,15 +937,6 @@ impl ExactDeclarationContext {
         {
             return Err(failure("invalid selected lexical graph"));
         }
-        self.products = products.into_values().collect();
-        self.joins = joins.into_values().collect();
-        self.interfaces = interfaces
-            .into_iter()
-            .map(|(owner, requirements)| ExactInterfaceOwner {
-                owner,
-                requirements: requirements.into_iter().collect(),
-            })
-            .collect();
         Ok(())
     }
 
@@ -729,27 +959,51 @@ impl ExactDeclarationContext {
         ),
         CompileError,
     > {
-        let references = if self.products.is_empty() {
+        self.materialize_entries_with_validation(root, &self.inventory.entries(), validation)
+    }
+
+    fn materialize_entries_with_validation(
+        &self,
+        root: &Path,
+        entries: &[Arc<ArtifactEntry>],
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<
+        (
+            MaterializedExactDeclarationContext,
+            Vec<RecoveryArtifactRef>,
+        ),
+        CompileError,
+    > {
+        let products = entries
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Original(product) => Some(product.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let references = if products.is_empty() {
             Vec::new()
         } else {
             recovery_artifacts::materialize_certified_products_with_validation(
                 root,
                 self.producer,
-                &self.products,
+                &products,
                 validation,
             )
             .map_err(failure)?
         };
-        let joined = self
-            .joins
+        let joined = entries
             .iter()
-            .map(|join| join.materialize_with_validation(root, validation))
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Interface(interface, _) => Some(interface),
+                _ => None,
+            })
+            .map(|interface| interface.materialize_with_validation(root, validation))
             .collect::<Result<Vec<_>, _>>()
             .map_err(failure)?;
-        let requirements = self
-            .interfaces
+        let requirements = entries
             .iter()
-            .map(|interface| (&interface.owner, &interface.requirements))
+            .map(|entry| (&entry.descriptor.owner, &entry.requirements))
             .collect::<BTreeMap<_, _>>();
         let mut artifacts = Vec::new();
         for reference in &references {
@@ -840,9 +1094,9 @@ impl ExactDeclarationContext {
         use sha2::Digest;
         let admitted_empty = authorization.is_some()
             && self.producer == [0; 32]
-            && self.products.is_empty()
-            && self.joins.is_empty()
-            && self.interfaces.is_empty()
+            && self.recovery_products().is_empty()
+            && self.joined_interfaces().is_empty()
+            && self.interface_owners().is_empty()
             && self.lexical.is_empty();
         if !root.is_absolute()
             || (!admitted_empty
@@ -863,8 +1117,9 @@ impl ExactDeclarationContext {
         let semantic_sha256 = self.semantic_sha256();
         let mut fields = vec![
             text("TPEXACTSCOPE"),
-            text(if authorization.is_some() { "3" } else { "1" }),
+            text(if authorization.is_some() { "4" } else { "2" }),
             text(hex(&semantic_sha256)),
+            text(sha256(producer)),
             Value::Array(
                 materialized
                     .artifacts
@@ -905,7 +1160,7 @@ impl ExactDeclarationContext {
                     .collect(),
             ),
             Value::Array(
-                self.products
+                self.recovery_products()
                     .iter()
                     .map(|product| {
                         let owner = product.owner();
@@ -987,10 +1242,54 @@ impl ExactDeclarationContext {
             manifest,
             request_sha256: sha256(&bytes),
             semantic_sha256,
+            producer_sha256: sha2::Sha256::digest(producer).into(),
             artifacts: materialized.artifacts,
-            groups,
+            groups: groups.into(),
         })
     }
+}
+
+pub(crate) fn certified_artifact_view(
+    producer: [u8; 32],
+    products: &[CertifiedRecoveryProduct],
+    interfaces: &[ExactInterfaceOwner],
+    joined: &[CertifiedJoinedInterface],
+    baseline: Option<&ExactDeclarationContext>,
+) -> Result<ArtifactView, CompileError> {
+    let view = baseline.map_or_else(
+        || ArtifactInventory::default().empty_view(),
+        |context| context.artifact_view().clone(),
+    );
+    let mut entries = Vec::new();
+    for product in products {
+        let owner = identity(&product.owner().unit, &product.owner().module);
+        let requirements = interfaces
+            .iter()
+            .find(|interface| interface.owner == owner)
+            .ok_or_else(|| failure("original interface metadata missing"))?
+            .requirements
+            .clone();
+        entries.push(ArtifactEntry::original(
+            producer,
+            product.clone(),
+            requirements,
+        )?);
+    }
+    for join in joined {
+        let owner = identity(join.unit(), join.module());
+        let requirements = interfaces
+            .iter()
+            .find(|interface| interface.owner == owner)
+            .ok_or_else(|| failure("joined interface metadata missing"))?
+            .requirements
+            .clone();
+        entries.push(ArtifactEntry::interface(
+            join.clone(),
+            ArtifactKind::LexicalJoin,
+            requirements,
+        ));
+    }
+    view.inventory().admit(&view, entries)
 }
 
 fn text(value: impl Into<String>) -> Value {
@@ -1020,4 +1319,130 @@ fn hex(bytes: &[u8; 32]) -> String {
 fn sha256(bytes: &[u8]) -> String {
     use sha2::Digest;
     format!("{:x}", sha2::Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
+    #[test]
+    fn unchanged_program_context_reuses_materialization_but_admission_checks_tampering() {
+        let owner = CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "Support".into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: Sha256::digest(b"interface").into(),
+            product_sha256: Sha256::digest(b"product").into(),
+        };
+        let certification =
+            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
+                .unwrap();
+        let product = CertifiedRecoveryProduct::from_certification(
+            owner,
+            b"interface".to_vec(),
+            b"product".to_vec(),
+            Vec::new(),
+            certification,
+        );
+        let context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], Vec::new())
+                .unwrap()
+                .extend_checked_original_products([2; 32], &[product], &BTreeMap::new())
+                .unwrap(),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let artifacts = vec![DeclarationArtifact {
+            interface: ExactIfaceArtifact {
+                unit: "fixture".into(),
+                module: "Support".into(),
+                path: directory.path().join("missing.hi"),
+                sha256: sha256(b"interface"),
+                requirements: Vec::new(),
+            },
+            product: Some(ModuleSnapshot {
+                module: "Support".into(),
+                path: directory.path().join("missing.bin"),
+                sha256: sha256(b"product"),
+            }),
+        }];
+        let request = ExactCompilationRequest {
+            context: context.clone(),
+            manifest: directory.path().join("scope"),
+            request_sha256: String::new(),
+            semantic_sha256: [1; 32],
+            producer_sha256: [2; 32],
+            artifacts,
+            groups: Arc::from([]),
+        };
+        let materialization_root = directory.path().join("program-inputs");
+        let effective = request
+            .in_program_context(&materialization_root, context)
+            .unwrap();
+        assert!(!materialization_root.exists());
+        assert_eq!(
+            effective.artifacts[0].interface.path,
+            request.artifacts[0].interface.path
+        );
+        assert!(Arc::ptr_eq(&effective.groups, &request.groups));
+        assert!(effective
+            .context
+            .validate_artifacts(&effective.artifacts)
+            .is_err());
+    }
+
+    #[test]
+    fn supporting_originals_preserve_owned_products_without_lexical_exposure() {
+        let owner = CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "Support".into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: Sha256::digest(b"interface").into(),
+            product_sha256: Sha256::digest(b"product").into(),
+        };
+        let certification =
+            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
+                .unwrap();
+        let product = CertifiedRecoveryProduct::from_certification(
+            owner.clone(),
+            b"interface".to_vec(),
+            b"product".to_vec(),
+            Vec::new(),
+            certification.clone(),
+        );
+        let context = ExactDeclarationContext::new(&[], &[], Vec::new())
+            .unwrap()
+            .extend_checked_original_products(
+                [2; 32],
+                std::slice::from_ref(&product),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert!(context.lexical_graph().is_empty());
+        assert_eq!(context.artifact_view().descriptors().len(), 1);
+        let repeated = context
+            .clone()
+            .extend_checked_original_products(
+                [2; 32],
+                std::slice::from_ref(&product),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(context.semantic_sha256(), repeated.semantic_sha256());
+        assert_eq!(repeated.artifact_view().inventory().node_count(), 1);
+        let changed = CertifiedRecoveryProduct::from_certification(
+            owner,
+            b"interface".to_vec(),
+            b"changed".to_vec(),
+            Vec::new(),
+            certification,
+        );
+        assert!(context
+            .clone()
+            .extend_checked_original_products([2; 32], &[changed], &BTreeMap::new())
+            .is_err());
+        assert!(context
+            .extend_checked_original_products([99; 32], &[product], &BTreeMap::new())
+            .is_err());
+    }
 }

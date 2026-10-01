@@ -6,6 +6,9 @@ import System.Environment (getArgs)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
 import System.Directory (createDirectoryIfMissing, removeFile, setCurrentDirectory)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
+import qualified Codec.CBOR.Decoding as CD
+import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Encoding (encodeBytes, encodeListLen, encodeString, encodeWord, encodeWord64, encodeNull)
 import Codec.CBOR.Write (toStrictByteString)
 import qualified Data.Map.Strict as Map
@@ -14,10 +17,11 @@ import Control.Exception
   ( evaluate, try, finally, throwIO, SomeAsyncException, SomeException, Exception
   , fromException, toException, IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Data.List (intercalate, nub, isInfixOf, stripPrefix)
+import Data.List (intercalate, nub, isInfixOf, isPrefixOf, stripPrefix)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Data.Word (Word64)
-import Control.Monad (foldM, forM, forM_, when, unless, void)
+import Data.Bits (shiftR)
+import Control.Monad (replicateM, foldM, forM, forM_, when, unless, void)
 import System.Exit (ExitCode(..), exitWith)
 import System.IO (hClose, hPutStrLn, openBinaryTempFile, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
 import qualified System.Info as SystemInfo
@@ -34,15 +38,16 @@ import GHC.Core.DataCon (DataCon)
 import GHC.Core.TyCon (TyCon)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Id (idName)
-import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Name.Occurrence (occNameString, isSymOcc, mkVarOcc)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
 import Tidepool.Binders
   ( extractBindersNamed
   , extractStmtBinders, classifyBlock, exportItemName
-  , analyzeCell, renderCellCheckSource, CellSplitError(..), CellSourceSpan(..)
-  , CellSourcePlan(..), CellAnalysisItem(..), installCellDisplayDeclarations
+  , analyzeCell, analyzeOrderedCell, cellInferenceSegments, renderCellCheckSource, CellSplitError(..), CellSourceSpan(..)
+  , CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), BoundBinder(..),
+    SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ExpressionLiftPlan(..), ExpressionPresentation(..), installCellDisplayDeclarations
   , declarationSourceWithTemplate, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
@@ -62,7 +67,7 @@ import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..)
-  , WireProgram(..), ProjectedGroup(..), SiteRow(..) )
+  , WireProgram(..), ProjectedGroup(..), SiteRow(..), ProjectedGroupBody(..), GlobalDecl(..) )
 import qualified Tidepool.ExecutionSchema as Execution
 import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
@@ -76,9 +81,10 @@ import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.PackageWitness (PackageImportRoot, encodePackageImports)
 import qualified Crypto.Hash.SHA256 as SHA256
-import Numeric (showHex)
+import Numeric (showHex, readHex)
 import Tidepool.DeclarationJoin
   ( DeclarationOperation(..), readDeclarationOperation, validateDeclarationJoin
+  , DeclarationExport(..), ExportIdentity(..), ExportNamespace(..)
   , renderDeclarationJoinOutcome, inspectDeclarationArtifacts
   , renderDeclarationInventoryOutcome )
 import qualified Tidepool.WorkerServer as WorkerServer
@@ -90,17 +96,19 @@ import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), worker
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.ExactScope
   ( ExactCompilation(..), ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
-  , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..)
+  , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , readExactScope, revalidateExactScope, writeExactCompilation )
+import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
+import GHC.Core.Type (splitFunTy_maybe)
 import Tidepool.CheckedCell (CheckedSignature(..), encodeCheckedSignature)
 import Tidepool.PlannedDeclaration
-  ( PlannedDeclaration, PlannedDeclarationRejection(..), PlannedDeclarationInventory, plannedSource, plannedCheckPlan, replaceTemplateModuleHeader
+  ( PlannedDeclaration, PlannedDeclarationRejection(..), PlannedDeclarationInventory, plannedExports, plannedSource, plannedCheckPlan, replaceTemplateModuleHeader
   , preparePlannedDeclaration, certifyPlannedDeclaration
-  , renderPlannedDeclarationInventory )
+  , renderPlannedDeclarationInventory, plannedInterfaceFingerprint )
 import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
   , preparedApplyEntryTargetName, preparedApplyValueTargetName
-  , parseSessionModule )
+  , parseSessionModule, sessionHiPath )
 import Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching
   , OwnerInterfaceCache, newOwnerInterfaceCache, evictOwnerInterfaceMatching )
@@ -113,7 +121,7 @@ import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut)
 import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.TurnSource (extractModuleName, spliceTemplate)
 import Tidepool.DependencyEvidence
-  ( DependencyEvidence(..), DependencyModule(..), ProductAvailability(..)
+  ( DependencyEvidence(..), DependencyModule(..), DependencySource(..), ProductAvailability(..)
   , renderDependencyEvidence, revalidateDependencyEvidence )
 
 renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
@@ -182,6 +190,9 @@ throwCellSplitError errorValue = case errorValue of
     throwIO (LocatedCellRejection sourceSpan
       ("cell ends with a dangling operator `" ++ operatorText
         ++ "`: remove it or supply its right operand"))
+  CellUnsupportedLocalFixity sourceSpan ->
+    throwIO (LocatedCellRejection sourceSpan
+      "local fixity cannot cross prepared item boundaries; put the operator and its fixity in an authored declaration group")
   CellHeaderFailure message -> fail ("cell check template header: " ++ message)
 
 -- | Serve one typed request. Stdout contains exactly one diagnostics document;
@@ -242,22 +253,32 @@ runParsedInvocation compiler caches parsedWorkerRequest = do
 dispatch
   :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
 dispatch compiler caches timing args = do
-  admitted <- trySynchronous $ forM_ (requestSessionArtifacts args) $ \manifest -> do
-    scope <- readExactScope manifest >>= either fail pure
-    forM_ (scopeIncludePaths scope) $ \includes ->
-      unless (requestIncludes args == includes)
-        (throwIO SearchInputsChanged)
-    forM_ (scopeCheckedCell scope) $ \_ ->
-      unless (requestCell args && not (requestTurn args) && not (requestClassify args)
+  admitted <- trySynchronous $ do
+    when (requestCellPlan args) $
+      unless (length (requestFiles args) == 1 && not (requestCell args)
+          && not (requestTurn args) && not (requestClassify args)
+          && null (requestInspections args) && not (isJust (requestSessionArtifacts args))
+          && not (isJust (requestDeclarationJoin args)) && not (isJust (requestModuleCandidates args))
+          && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
+          && not (requestCellFoldTurn args) && not (isJust (requestBindGen args))
+          && Map.null (requestRetainedGenerations args))
+        (throwIO InvalidCellPlanRequest)
+    forM_ (requestSessionArtifacts args) $ \manifest -> do
+      scope <- readExactScope manifest >>= either fail pure
+      forM_ (scopeIncludePaths scope) $ \includes ->
+        unless (requestIncludes args == includes)
+          (throwIO SearchInputsChanged)
+      forM_ (scopeCheckedCell scope) $ \_ ->
+        unless (requestCell args && not (requestTurn args) && not (requestClassify args)
           && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
           && not (requestCertifyHomeProducts args) && not (requestActivationPreview args))
-        (throwIO CheckedPurposeMismatch)
-    forM_ (scopeCheckedItem scope) $ \_ ->
-      unless (requestTurn args && not (requestCell args) && not (requestClassify args)
+          (throwIO CheckedPurposeMismatch)
+      forM_ (scopeCheckedItem scope) $ \_ ->
+        unless (requestTurn args && not (requestCell args) && not (requestClassify args)
           && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
           && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
           && not (isJust (requestTurnPin args)) && not (isJust (requestTarget args)))
-        (throwIO CheckedPurposeMismatch)
+          (throwIO CheckedPurposeMismatch)
   case admitted of
     Left failure -> reportDiags (Left failure)
     Right () -> case requestDeclarationJoin args of
@@ -275,6 +296,7 @@ dispatchSource compiler caches timing args =
                                                   -> reportDiags (Left (toException (userError "inspection type batch requires at least two type queries and no other query kinds")))
         | requestActivationPreview args && (not (requestTurn args) || not (isJust (requestTurnVerdict args)))
                                                   -> reportDiags (Left (toException (userError "activation requires a prepared turn with a generated bind verdict")))
+        | requestCellPlan args                    -> runCellPlanMode args file
         | requestCell args                        -> runCellMode compiler caches args file
         | requestClassify args                    -> runClassifyMode timing args
         | not (null (requestInspections args))    -> runInspectionMode compiler args file
@@ -952,7 +974,21 @@ compileClassifiedTurn
   -> String -> StmtBinders -> String -> [String] -> Maybe CheckedItemAdmission -> Maybe CheckedDisplayAdmission
   -> IORef (Maybe (FilePath, String))
   -> IO TurnOut
-compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt = do
+compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt =
+  compiledTurn <$> compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt [] Nothing
+
+data CompiledTurnOutput = CompiledTurnOutput
+  { compiledTurn :: TurnOut
+  , compiledPipeline :: PreparedPipelineResult
+  , compiledOriginalProducts :: [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
+  , compiledModule :: String
+  }
+
+compileClassifiedTurnKeeping
+  :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
+  -> String -> StmtBinders -> String -> [String] -> Maybe CheckedItemAdmission -> Maybe CheckedDisplayAdmission
+  -> IORef (Maybe (FilePath, String)) -> [String] -> Maybe SourcePrologue -> IO CompiledTurnOutput
+compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt programImports prologue = do
     let templates = requestTurnTemplates args
         -- Splice @tmplFile@ against the turn text, write the spliced module
         -- to a scratch file under 'outDir', and return it alongside the
@@ -964,7 +1000,14 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
         -- (session.rs), which this mode's templates carry over unchanged.
         spliceInto :: FilePath -> IO (String, String, FilePath)
         spliceInto tmplFile = do
-          tmplSrc <- readFile tmplFile
+          originalTemplate <- readFile tmplFile
+          tmplSrc <- case prologue of
+            Nothing -> pure originalTemplate
+            Just authored -> do
+              withImports <- replaceRecipeMarker "default (Int, Double, Text)\n"
+                (concatMap ((++ "\n") . locatedImportSource) (prologueImports authored)
+                  ++ "default (Int, Double, Text)\n") originalTemplate
+              pure (concatMap ((++ "\n") . locatedPragmaSource) (prologuePragmas authored) ++ withImports)
           let original = case (display, admitted) of
                 (Just authority, Nothing) -> displayPlannedDeclaration authority
                 (Nothing, Just authority) -> itemPlannedDeclaration authority
@@ -973,15 +1016,20 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
             Nothing -> pure tmplSrc
             Just ((_, owner), _) -> replaceRecipeMarker "default (Int, Double, Text)\n"
               ("import " ++ owner ++ "\ndefault (Int, Double, Text)\n") tmplSrc
-          tmplWithImports <- insertCheckedTypeImports typeImports withOriginal
+          withProgram <- if null programImports then pure withOriginal else
+            replaceRecipeMarker "default (Int, Double, Text)\n"
+              (concatMap (\owner -> "import " ++ owner ++ "\n") programImports ++ "default (Int, Double, Text)\n") withOriginal
+          tmplWithImports <- insertCheckedTypeImports typeImports withProgram
           spliced <- case (display, admitted) of
-            (Just admission, Nothing) -> checkedDisplayRecipe admission tmplWithImports
+            (Just admission, Nothing) -> if requestCell args
+              then checkedProgramDisplayRecipe admission tmplWithImports
+              else checkedDisplayRecipe admission tmplWithImports
             (Nothing, Nothing) -> pure (spliceTemplate tmplWithImports turnSrc bindersStr)
             (Just _, Just _) -> fail "display and item authority cannot share one recipe"
             (Nothing, Just admission) -> do
               withPrefix <- if null (itemValueImports admission) then pure tmplWithImports else
                 replaceRecipeMarker "default (Int, Double, Text)\n"
-                  (concatMap (\(moduleName',names) -> "import " ++ moduleName' ++ " (" ++ intercalate ", " names ++ ")\n")
+                  (concatMap (\(moduleName',names) -> "import " ++ moduleName' ++ " (" ++ intercalate ", " (map renderProgramBinder names) ++ ")\n")
                     (itemValueImports admission) ++ "default (Int, Double, Text)\n") tmplWithImports
               checkedRecipeSource admission withPrefix turnSrc
           if requestActivationPreview args
@@ -1038,7 +1086,12 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
       then fail "activation requires one prepared bind template"
       else pure ()
     (variant, spliced, compiledPath, prepared) <- compileVariants (0 :: Int) matching
-    let result      = pprPipelineResult prepared
+    let rawResult = pprPipelineResult prepared
+        result = if requestCell args && isJust display then rawResult
+          { prResultType = prResultType rawResult >>= \ty -> case splitFunTy_maybe ty of
+              Just (_,_,_,body) -> Just body
+              Nothing -> Nothing }
+          else rawResult
         preparedModules = pprModules prepared
         binds       = prBinds result
         hscEnv      = prHscEnv result
@@ -1052,13 +1105,13 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
     let asksSites = concatMap paYieldSites preparedArtifacts
     timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
-    timePhase timing "module_products" $
-      writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts
+    originalProducts <- timePhase timing "module_products" $
+      writeCertifiedProductsKeeping outDir hscEnv prepared productContext preparedArtifacts
     -- Mutable turns never enter the artifact cache, but publication must
     -- still reject source changes observed during this compilation.
     validateDependencyEvidence (pprDependencies prepared)
     let wrapped = T.pack spliced
-    case selector of
+    turn <- case selector of
       SBind -> do
         g    <- requireArg "--bind-gen"     (requestBindGen args)
         root <- requireArg "--session-root" (requestSessionRoot args)
@@ -1073,6 +1126,8 @@ compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr t
           return (TBind [T.pack observation] variant bound asksSites wrapped)
         Nothing -> return (TExpr variant asksSites wrapped)
       SDecl -> error ("--turn: unexpected verdict kind: " ++ templateSelectorWireName selector)
+    owner <- maybe (fail "compiled turn has no module owner") pure (extractModuleName spliced)
+    pure (CompiledTurnOutput turn prepared originalProducts owner)
 
 -- | Block classify mode (@--classify@):
 -- classify EVERY positional file in 'requestFiles' with ONE GHC session boot
@@ -1100,8 +1155,43 @@ runClassifyMode timing args =
 -- | Split, classify, and typecheck one notebook cell in a single worker
 -- request. Rust authors the module template (scope/import/effect-row policy);
 -- GHC owns every Haskell decision and returns post-zonk statement binder pins.
+-- Parsing chooses execution ordinals before runtime reserves original owners.
+-- The emitted receipt contains no checked pins, prepared bodies or live values.
+runCellPlanMode :: WorkerRequest -> FilePath -> IO ExitCode
+runCellPlanMode args cellPath = do
+  result <- trySynchronous $ do
+    source <- readFile cellPath
+    templatePath <- requireArg "--cell-template" (requestCellTemplate args)
+    template <- readFile templatePath
+    templates <- forM (requestTurnTemplates args) $ \(kind,path) -> do
+      bytes <- BS.readFile path
+      pure (kind, shaHex bytes)
+    plan <- analyzeOrderedCell template source >>= either throwCellSplitError pure
+    let text = encodeString . T.pack
+        observation = encodeCellOut plan [] [] ""
+        receipt = encodeListLen 7 <> text "TPCELLPLAN1"
+          <> text (shaHex (TE.encodeUtf8 (T.pack source)))
+          <> text (shaHex (TE.encodeUtf8 (T.pack template)))
+          <> encodeListLen (fromIntegral (length templates))
+          <> foldMap (\(kind,digest) -> encodeListLen 2 <> text kind <> text digest) templates
+          <> encodeListLen (fromIntegral (length (requestIncludes args)))
+          <> foldMap text (requestIncludes args)
+          <> encodeListLen (fromIntegral (length (requestInjectVals args)))
+          <> foldMap text (requestInjectVals args)
+          <> encodeBytes observation
+    out <- requireArg "--cell-out" (requestCellOut args)
+    BS.writeFile out (toStrictByteString receipt)
+  reportDiags result
+
 runCellMode :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
 runCellMode compiler caches args cellPath = do
+  exact <- traverse (\manifest -> readExactScope manifest >>= either fail pure) (requestSessionArtifacts args)
+  case exact >>= \scope -> (,) scope <$> (scopeCheckedCell scope >>= checkedPlannedCell) of
+    Just (scope, planned) -> runCellProgramMode compiler caches args cellPath scope planned
+    Nothing -> runLegacyCellMode compiler caches args cellPath
+
+runLegacyCellMode :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
+runLegacyCellMode compiler caches args cellPath = do
   timing <- readTimingEnabled
   provisionalOutput <- newIORef Nothing
   res <- try $ do
@@ -1203,6 +1293,308 @@ runCellMode compiler caches args cellPath = do
     Right _ -> pure ()
   reportDiagsWithWarnings res
 
+-- The worker owns all GHC passes of a cell. Interfaces produced here are
+-- type evidence; no value or effect is evaluated by this transaction.
+data ProgramCellState = ProgramCellState
+  { programPrologue :: SourcePrologue
+  , programExact :: ExactScope
+  , programValues :: [CompletedValueImport]
+  , programOriginal :: Maybe ((String,String),String)
+  , programOriginals :: [((String,String),String)]
+  , programRetained :: Map.Map SymbolIdentity Word64
+  , programPlans :: [CellSourcePlan]
+  , programPins :: [CheckedBinderPin]
+  , programExpressions :: [CellExpressionPlan]
+  , programCheckedSignatures :: [CheckedSignature]
+  , programSources :: [String]
+  , programDeclarations :: [(Int,String)]
+  }
+
+runCellProgramMode :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath
+  -> ExactScope -> PlannedCellAdmission -> IO ExitCode
+runCellProgramMode compiler caches args cellPath exact planned = do
+  timing <- readTimingEnabled
+  attempted <- trySynchronous $ do
+    source <- readFile cellPath
+    templatePath <- requireArg "--cell-template" (requestCellTemplate args)
+    template <- readFile templatePath
+    admission <- maybe (fail "compiled cell has no source admission") pure (scopeCheckedCell exact)
+    validateCheckedCellAdmission args admission source template
+    parserBytes <- BS.readFile (plannedParserPath planned)
+    unless (shaHex parserBytes == plannedParserSha256 planned
+        && plannedReservationDigest planned == checkedAdmissionDigest admission)
+      (fail "compiled cell parser or reservation changed")
+    initial <- analyzeOrderedCell template source >>= either throwCellSplitError pure
+    unless (length (cellPlanItems initial) == length (plannedSlots planned))
+      (fail "compiled cell reservation count differs from parser")
+    root <- requireArg "--session-root" (requestSessionRoot args)
+    let outDir = fromMaybe (takeDirectory cellPath </> "cell-program") (requestOutDir args)
+        initialState = ProgramCellState (cellPlanPrologue initial) exact [] Nothing [] (requestRetainedGenerations args)
+          [] [] [] [] [] []
+    createDirectoryIfMissing True outDir
+    settled <- foldM (compileSegment timing admission template root outDir)
+      initialState (zip [0::Int ..] (cellInferenceSegments initial))
+    let finalPlan = initial { cellPlanItems = concatMap cellPlanItems (programPlans settled) }
+        checkedSource = concat (programSources settled)
+        observations = encodeCellOut finalPlan (programPins settled) (programExpressions settled) checkedSource
+        text = encodeString . T.pack
+        receipt = encodeListLen 11 <> text "TPEXACTPROGRAM" <> text "1"
+          <> text (scopeRequestSha256 exact) <> text (checkedAdmissionDigest admission)
+          <> text (checkedCellSha256 admission) <> text (checkedTemplateSha256 admission)
+          <> text (shaHex observations) <> text (shaHex (TE.encodeUtf8 (T.pack checkedSource)))
+          <> encodeListLen (fromIntegral (length (programCheckedSignatures settled)))
+          <> foldMap encodeCheckedSignature (programCheckedSignatures settled)
+          <> encodeListLen (fromIntegral (length (programDeclarations settled)))
+          <> foldMap (\(index,digest) -> encodeListLen 2 <> encodeWord64 (fromIntegral index) <> text digest)
+            (programDeclarations settled)
+          <> text (plannedParserDigest planned)
+    out <- requireArg "--cell-out" (requestCellOut args)
+    BS.writeFile out observations
+    BS.writeFile (outDir </> "checked-cell.cbor") (toStrictByteString receipt)
+    BS.writeFile (outDir </> "cell-fold.cbor") (encodeCellFoldOutcome CellFoldNotRequested)
+    sourceNow <- readFile cellPath
+    templateNow <- readFile templatePath
+    validateCheckedCellAdmission args admission sourceNow templateNow
+    unless (sourceNow == source && templateNow == template) (fail "compiled cell source changed")
+    pure []
+  reportDiagsWithWarnings attempted
+  where
+    compileSegment timing admission template root outDir state (segmentIndex, segment) = do
+      let offset = sum (map (length . cellPlanItems) (programPlans state))
+          prefix = selectedProgramValues (programValues state)
+          withPrefix = installProgramImports prefix (programOriginals state) segment
+          scope = programExact state
+          localArgs = args { requestModuleCandidates = Nothing, requestInjectVals = map exactModule (maybe [] checkedValueInterfaces (scopeCheckedCell scope))
+            , requestRetainedGenerations = programRetained state }
+          scoped :: Compiler
+          scoped selection retained purpose session path includes products =
+            compiler selection retained (CellProgramCompile (programPurpose state purpose) scope) session path includes products
+          directory = outDir </> "segment-" ++ show segmentIndex
+      createDirectoryIfMissing True directory
+      case cellPlanItems segment of
+        [item] | sbKind (cellAnalysisVerdict item) == KDecl -> do
+          generation <- case plannedSlots planned !! offset of
+            PlannedDeclaration value -> pure value
+            PlannedPrologue value -> pure value
+            _ -> fail "declaration has a native reservation"
+          let owner = "Tidepool.Session.Lib.G" ++ show generation
+              ownAdmission = admission { checkedReservedModules = [owner] }
+          (finalized,_,inventory,extended) <- timePhase timing "cell_program_declaration" $
+            prepareOriginalCellDeclaration scoped caches localArgs template directory
+              (Just (scopeFromWorkerRequest localArgs)) scope ownAdmission withPrefix
+          receipt <- BS.readFile (directory </> "planned-declaration.cbor")
+          let original = Just (("main",owner), extractPlannedFingerprint inventory)
+          -- Keep the ordered item under its original ordinal; its original
+          -- module owns declarations and the generated instances.
+          let declared = [exportOccurrence identity | exported <- plannedExports inventory
+                , identity <- exportHead exported : exportChildren exported
+                , exportNamespace identity /= TypeNamespace]
+              remainingValues = [value { completedValueBinders = kept }
+                | value <- programValues state
+                , let kept = [(name,identifier) | (name,identifier) <- completedValueBinders value, name `notElem` declared]
+                , not (null kept)]
+          pure state { programExact = extended, programOriginal = original
+            , programOriginals = programOriginals state ++ maybe [] pure original
+            , programValues = remainingValues
+            , programPlans = programPlans state ++ [finalized]
+            , programSources = programSources state ++ [plannedSourceFromDirectory finalized]
+            , programDeclarations = programDeclarations state ++ [(offset,shaHex receipt)] }
+        _ -> do
+          let checkPath = directory </> "CellCheck.hs"
+              checkingTemplate = either error id (replaceTemplateModuleHeader "module CellCheck where" template)
+              check plan = do
+                rendered <- either fail pure (renderCellCheckSource checkingTemplate plan)
+                let globalSource = globalProgramKeys offset (length (cellPlanItems plan)) rendered
+                writeFile checkPath globalSource
+                scoped CheckedEnvironment Set.empty
+                  (CheckedItemCompile [] (programOriginal state) prefix)
+                  (Just (scopeFromWorkerRequest localArgs)) checkPath (requestIncludes args) (requestBuildProductsDir args)
+          (checked,compiled) <- timePhase timing "cell_program_segment_check" (checkCellInstances check withPrefix)
+          signatures <- cellCheckedBinderSignatures compiled
+          expressions <- cellExpressionEvidence compiled
+          rendered <- either fail pure (renderCellCheckSource checkingTemplate checked)
+          let globalSource = globalProgramKeys offset (length (cellPlanItems checked)) rendered
+              checkedState = state { programPlans = programPlans state ++ [checked]
+                , programPins = programPins state ++ crCheckedBinderPins compiled
+                , programExpressions = programExpressions state ++ map fst expressions
+                , programCheckedSignatures = programCheckedSignatures state ++ signatures ++ map snd expressions
+                , programSources = programSources state ++ [globalSource] }
+          foldM (compileNative timing admission root outDir)
+            checkedState (zip [offset..] (cellPlanItems checked))
+
+    compileNative timing admission root outDir state (index,item) = do
+      let prefix = selectedProgramValues (programValues state)
+          scope = programExact state
+          slot = plannedSlots planned !! index
+          (generation,observation) = case slot of
+            PlannedBind value -> (value,Nothing)
+            PlannedExpression capture _ name -> (capture,Just name)
+            _ -> error "native item has declaration reservation"
+          source = cellAnalysisSource item
+          verdict = cellAnalysisVerdict item
+          keys = case sbKind verdict of
+            KBind -> ["__tidepool_cell_pin_" ++ show index ++ "_" ++ binder | binder <- sbBinders verdict]
+            KExpr -> ["__tidepool_cell_expr_" ++ show index]
+            KDecl -> []
+          signatures = [signature | key <- keys, signature <- programCheckedSignatures state, signatureKey signature == key]
+          expression = case [value | value <- programExpressions state, expressionPlanKey value `elem` keys] of
+            [value] -> Just value
+            _ -> Nothing
+          itemAdmission = CheckedItemAdmission (checkedAdmissionDigest admission) (checkedAdmissionDigest admission)
+            (fromIntegral index) (shaHex (TE.encodeUtf8 (T.pack source)))
+            (if sbKind verdict == KBind then "bind" else "expr") (sbBinders verdict)
+            (checkedTurnTemplates admission) (map exactModule (scopeValues scope)) signatures
+            (fmap (\value -> case expressionPlanLift value of ExpressionPure -> "pure"; ExpressionEffectful -> "effectful") expression)
+            (fmap (\value -> case expressionPlanPresentation value of ExpressionRendered -> "rendered"; ExpressionOpaque -> "opaque") expression)
+            generation (checkedAdmissionDigest admission) (map programValueImport prefix) observation (programOriginal state)
+            prefix (scopeValues scope)
+          localArgs = args { requestModuleCandidates = Nothing, requestBindGen = Just generation, requestSessionRoot = Just root
+            , requestInjectVals = map exactModule (scopeValues scope)
+            , requestRetainedGenerations = programRetained state }
+          scoped :: Compiler
+          scoped selection retained purpose session path includes products =
+            compiler selection retained (CellProgramCompile (programPurpose state purpose) scope) session path includes products
+          directory = outDir </> "item-" ++ show index
+      createDirectoryIfMissing True directory
+      validateCheckedItemAdmission localArgs itemAdmission source verdict
+      lastAttempt <- newIORef Nothing
+      output <- timePhase timing "cell_program_native" $ compileClassifiedTurnKeeping scoped caches localArgs timing directory
+        source verdict (intercalate ", " (sbBinders verdict)) [] (Just itemAdmission) Nothing lastAttempt (priorProgramImports state) (Just (programPrologue state))
+      extended <- retainProgramProducts directory (compiledPipeline output)
+        [originalProduct | originalProduct@(_,owner,_,_) <- compiledOriginalProducts output, T.unpack owner /= compiledModule output] scope
+      let turn = compiledTurn output
+          retainedState = state { programExact = extended }
+      BS.writeFile (directory </> "turn.cbor") (encodeTurnOut turn)
+      case turn of
+        TBind _ _ binders _ wrapped -> do
+          writeCheckedItemReceipt directory scope itemAdmission (T.unpack wrapped)
+          next <- addProgramValue root generation binders retainedState
+          case (slot,expression) of
+            (PlannedExpression _ display name,Just expressionPlan) ->
+              compileDisplay timing admission root outDir index display name expressionPlan next
+            _ -> pure next
+        _ -> fail "compiled cell native recipe did not return bind metadata"
+
+    compileDisplay timing admission root outDir index generation observation expression state = do
+      let scope = programExact state
+          prefix = selectedProgramValues (programValues state)
+          capture = case plannedSlots planned !! index of
+            PlannedExpression value _ _ -> value
+            _ -> error "display has no capture slot"
+          display = CheckedDisplayAdmission (checkedAdmissionDigest admission) (checkedAdmissionDigest admission)
+            (fromIntegral index) observation capture generation (checkedAdmissionDigest admission)
+            0 [] (checkedTurnTemplates admission) (map exactModule (scopeValues scope)) (map programValueImport prefix)
+            (case expressionPlanPresentation expression of ExpressionRendered -> "rendered"; ExpressionOpaque -> "opaque")
+            (programOriginal state) prefix (scopeValues scope)
+          localArgs = args { requestModuleCandidates = Nothing, requestBindGen = Just generation, requestSessionRoot = Just root
+            , requestInjectVals = map exactModule (scopeValues scope), requestRetainedGenerations = programRetained state }
+          scoped :: Compiler
+          scoped selection retained purpose session path includes products =
+            compiler selection retained (CellProgramCompile (programPurpose state purpose) scope) session path includes products
+          directory = outDir </> "display-" ++ show index
+          verdict = StmtBinders KBind (checkedDisplayBinders display) []
+      createDirectoryIfMissing True directory
+      lastAttempt <- newIORef Nothing
+      output <- timePhase timing "cell_program_display" $ compileClassifiedTurnKeeping scoped caches localArgs timing directory
+        "" verdict (intercalate ", " (sbBinders verdict)) [] Nothing (Just display) lastAttempt (priorProgramImports state) Nothing
+      extended <- retainProgramProducts directory (compiledPipeline output)
+        [originalProduct | originalProduct@(_,owner,_,_) <- compiledOriginalProducts output, T.unpack owner /= compiledModule output] scope
+      let turn = compiledTurn output
+      BS.writeFile (directory </> "turn.cbor") (encodeTurnOut turn)
+      case turn of
+        TBind _ _ binders _ wrapped -> do
+          writeCheckedDisplayReceipt directory scope display (T.unpack wrapped)
+          next <- addProgramValue root generation binders (state { programExact = extended })
+          pure next { programValues = programValues state }
+        _ -> fail "compiled cell display did not return bind metadata"
+
+    scopeValues = maybe [] checkedValueInterfaces . scopeCheckedCell
+    extractPlannedFingerprint inventory = plannedInterfaceFingerprint inventory
+    plannedSourceFromDirectory plan = concatMap cellAnalysisSource (cellPlanItems plan)
+
+programPurpose :: ProgramCellState -> CompilePurpose -> CompilePurpose
+programPurpose state purpose = case purpose of
+  OriginalDeclarationCompile -> ProgramItemCompile True [] (programOriginals state) (selectedProgramValues (programValues state))
+  CheckedItemCompile annotations _ values -> ProgramItemCompile False annotations (programOriginals state) values
+  other -> other
+
+priorProgramImports :: ProgramCellState -> [String]
+priorProgramImports state = [owner | ((_,owner),_) <- programOriginals state
+  , Just owner /= fmap (snd . fst) (programOriginal state)]
+
+renderProgramBinder :: String -> String
+renderProgramBinder name
+  | isSymOcc (mkVarOcc name) = "(" ++ name ++ ")"
+  | otherwise = name
+
+programValueImport :: CompletedValueImport -> (String,[String])
+programValueImport value = (completedValueModule value,map fst (completedValueBinders value))
+
+selectedProgramValues :: [CompletedValueImport] -> [CompletedValueImport]
+selectedProgramValues values =
+  [value { completedValueBinders = kept }
+  | (index,value) <- zip [0::Int ..] values
+  , let kept = [(name,identifier) | (name,identifier) <- completedValueBinders value
+          , Map.lookup name winners == Just index]
+  , not (null kept)]
+  where winners = Map.fromList [(name,index) | (index,value) <- zip [0::Int ..] values
+          , (name,_) <- completedValueBinders value]
+
+installProgramImports :: [CompletedValueImport] -> [((String,String),String)] -> CellSourcePlan -> CellSourcePlan
+installProgramImports values original plan = plan { cellPlanPrologue = prologue
+  { prologueImports = prologueImports prologue ++ imports } }
+  where
+    prologue = cellPlanPrologue plan
+    imports = [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ owner)
+      | ((_,owner),_) <- original]
+      ++ [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ completedValueModule value
+        ++ " (" ++ intercalate ", " (map (renderProgramBinder . fst) (completedValueBinders value)) ++ ")") | value <- values]
+
+globalProgramKeys :: Int -> Int -> String -> String
+globalProgramKeys offset count source = T.unpack $ T.replace "__tidepool_program_" "__tidepool_cell_"
+  (foldr replace (T.pack source) [0..count-1])
+  where
+    replace index = T.replace (T.pack ("__tidepool_cell_pin_" ++ show index ++ "_"))
+        (T.pack ("__tidepool_program_pin_" ++ show (offset+index) ++ "_"))
+      . T.replace (T.pack ("__tidepool_cell_expr_" ++ show index))
+        (T.pack ("__tidepool_program_expr_" ++ show (offset+index)))
+    -- Temporary prefixes avoid replacing a key twice when segments overlap.
+    -- Normalize only after every local key has moved.
+
+addProgramValue :: FilePath -> Word64 -> [BoundBinder] -> ProgramCellState -> IO ProgramCellState
+addProgramValue _ _ [] state = pure state
+addProgramValue root generation binders@(firstBinder:_) state = do
+  owner <- maybe (fail "compiled Val owner is not canonical") pure
+    (parseValModule ("Tidepool.Session.Val.G" ++ show generation))
+  let path = sessionHiPath root owner
+  bytes <- BS.readFile path
+  packages <- BS.readFile (path ++ ".packages")
+  requirementBytes <- BS.readFile (path ++ ".requirements")
+  requirements <- case deserialiseFromBytes (do
+      count <- CD.decodeListLen
+      when (count > 4096) (fail "value type interface dependencies exceed bound")
+      replicateM count $ do
+        fields <- CD.decodeListLen
+        unless (fields == 2) (fail "value type interface dependency is not a pair")
+        (,) <$> (T.unpack <$> CD.decodeString) <*> (T.unpack <$> CD.decodeString)) (BL.fromStrict requirementBytes) of
+    Right (remaining, owners) | BL.null remaining -> pure owners
+    _ -> fail "value type interface dependencies are invalid"
+  let digest = shaHex bytes
+      artifact = ExactIfaceArtifact "main" (bbModule firstBinder) path digest requirements
+      exact = programExact state
+      admission = maybe (error "compiled cell lost admission") id (scopeCheckedCell exact)
+      selection = CompletedValueImport "main" (bbModule firstBinder) path digest
+        [(bbName binder,bbVarId binder) | binder <- binders, not ("__tidepoolMetadata" `isPrefixOf` bbName binder)]
+      extended = exact { scopeCheckedCell = Just admission
+            { checkedValueInterfaces = checkedValueInterfaces admission ++ [artifact] }
+        , scopeInterfaces = scopeInterfaces exact ++ [(artifact,path ++ ".packages",shaHex packages)]
+        , scopeLexical = scopeLexical exact ++ [(("main",bbModule firstBinder),requirements)] }
+      retained = foldr (\binder -> Map.insert
+          (SymbolIdentity "main" (T.pack (bbModule binder)) "value" (T.pack (bbName binder)) Nothing) generation)
+        (programRetained state) binders
+  pure state { programExact = extended, programValues = programValues state ++ [selection]
+    , programRetained = retained }
+
 -- Refine generated instances in the original declaration's typed environment.
 -- The final prepared interface is the only original interface subsequently
 -- installed in the checking transaction.
@@ -1249,10 +1641,17 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
     Nothing (map T.pack (prWarnings result)) artifacts
   writePreparedArtifacts directory artifacts
   products <- writeCertifiedProductsKeeping directory environment prepared productContext artifacts
+  supportScope <- retainProgramProducts directory prepared
+    [originalProduct | originalProduct@(_,owner,_,_) <- products, T.unpack owner /= reserved] exact
   (unit, interfaceBytes) <- case
       [(T.unpack unit, bytes) | (unit, name, bytes, _) <- products, T.unpack name == reserved] of
     [value] -> pure value
     _ -> fail "planned original declaration has no unique prepared interface"
+  let originalProducts = [(unit',name,bytes,groups) | (unit',name,bytes,groups) <- products, T.unpack name == reserved]
+      originalBytes = encodeModuleProducts originalProducts
+      originalGroups' = concat [groups | (_,_,_,groups) <- originalProducts]
+      productPath = directory </> "original.product.cbor"
+  BS.writeFile productPath originalBytes
   let interfacePath = directory </> "original.hi"
       packagesPath = directory </> "original.hi.packages"
       requirements = nub
@@ -1263,9 +1662,17 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
   roots <- maybe (fail "planned original declaration has no package interface witness") pure
     (Map.lookup (mkModuleName reserved) (pprPackageRoots prepared))
   let packageBytes = encodePackageImports interface roots
-      extended = exact
-        { scopeInterfaces = scopeInterfaces exact ++ [(interface, packagesPath, shaHex packageBytes)]
-        , scopeLexical = scopeLexical exact ++ [((unit,reserved), requirements)] }
+      originalProduct = ExactProduct unit reserved
+        (exactProgramProductVersion exact unit reserved (plannedSource original) interfaceBytes originalBytes packageBytes)
+        (shaHex interfaceBytes) (shaHex originalBytes) productPath
+        [ExactOriginalGroup (fromIntegral (Execution.projectedOriginalOrdinal group))
+            (Execution.projectedBinders group)
+            [(globalIdentity global, globalRequiredEvaluated global) | global <- projectedGlobals (Execution.projectedBody group)]
+        | group <- originalGroups']
+      extended = supportScope
+        { scopeProducts = scopeProducts supportScope ++ [originalProduct]
+        , scopeInterfaces = scopeInterfaces supportScope ++ [(interface, packagesPath, shaHex packageBytes)]
+        , scopeLexical = scopeLexical supportScope ++ [((unit,reserved), requirements)] }
       text = encodeString . T.pack
       receipt = encodeListLen 8 <> text "TPEXACTDECL" <> text "1"
         <> text (scopeRequestSha256 exact) <> text reserved <> text (plannedSource original)
@@ -1282,6 +1689,72 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       "authored declarations use the compiler-reserved __result binder")
     rejectPlan InvalidOriginalReservation = throwIO InvalidDeclarationReservation
     rejectPlan rejection = throwIO (InvalidDeclarationWrapper (show rejection))
+
+-- Retain fresh supporting originals from this admitted pass. The source digest
+-- comes from the compiler's validated dependency witness, and each native
+-- product keeps its original group ordinals and qualified Names.
+retainProgramProducts
+  :: FilePath -> PreparedPipelineResult
+  -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])] -> ExactScope -> IO ExactScope
+retainProgramProducts directory prepared products initial = foldM retain initial (zip [0::Int ..] products)
+  where
+    retain scope (index, originalProduct@(unitText,ownerText,interfaceBytes,groups)) = do
+      let unit = T.unpack unitText
+          owner = T.unpack ownerText
+          admitted = [(exactUnit artifact,exactModule artifact) | (artifact,_,_) <- scopeInterfaces scope]
+      when ((unit,owner) `elem` admitted) (fail "fresh source product replaces an admitted original owner")
+      sourceDigest <- case
+          [dependencySourceSha256 source | node <- dependencyModules (pprDependencies prepared)
+            , dependencyModuleUnit node == unit, dependencyModuleName node == owner
+            , source <- dependencySources (pprDependencies prepared)
+            , dependencySourcePath source == dependencyModuleSource node] of
+        [digest] -> pure digest
+        _ -> fail "supporting original lacks one validated source witness"
+      roots <- maybe (fail "supporting original lacks package interface witness") pure
+        (Map.lookup (mkModuleName owner) (pprPackageRoots prepared))
+      let stem = directory </> "retained-original-" ++ show index
+          interfacePath = stem ++ ".hi"
+          packagesPath = stem ++ ".hi.packages"
+          productPath = stem ++ ".product.cbor"
+          requirements = nub [(importedUnit,name)
+            | compilation <- maybe [] pure (pprExactCompilation prepared)
+            , ((sourceUnit,sourceName,_), edges) <- compilationImports compilation
+            , sourceUnit == unit, sourceName == owner
+            , (_,name,False,importedUnit) <- edges]
+          interface = ExactIfaceArtifact unit owner interfacePath (shaHex interfaceBytes) requirements
+          packageBytes = encodePackageImports interface roots
+          productBytes = encodeModuleProducts [originalProduct]
+          original = ExactProduct unit owner
+            (exactProgramProductVersionFromDigest scope unit owner sourceDigest interfaceBytes productBytes packageBytes)
+            (shaHex interfaceBytes) (shaHex productBytes) productPath
+            [ExactOriginalGroup (fromIntegral (Execution.projectedOriginalOrdinal group))
+              (Execution.projectedBinders group)
+              [(globalIdentity global, globalRequiredEvaluated global)
+                | global <- projectedGlobals (Execution.projectedBody group)] | group <- groups]
+      BS.writeFile interfacePath interfaceBytes
+      BS.writeFile packagesPath packageBytes
+      BS.writeFile productPath productBytes
+      pure scope { scopeProducts = scopeProducts scope ++ [original]
+        , scopeInterfaces = scopeInterfaces scope ++ [(interface,packagesPath,shaHex packageBytes)]
+        , scopeLexical = scopeLexical scope ++ [((unit,owner),requirements)] }
+
+exactProgramProductVersion :: ExactScope -> String -> String -> String -> BS.ByteString -> BS.ByteString -> BS.ByteString -> String
+exactProgramProductVersion scope unit owner source =
+  exactProgramProductVersionFromDigest scope unit owner (shaHex (TE.encodeUtf8 (T.pack source)))
+
+exactProgramProductVersionFromDigest :: ExactScope -> String -> String -> String -> BS.ByteString -> BS.ByteString -> BS.ByteString -> String
+exactProgramProductVersionFromDigest scope unit owner sourceDigest iface productBytes packages = shaHex (BS.concat (map frame fields))
+  where
+    fields = ["tidepool-exact-source-home-v2", unhex (scopeProducerSha256 scope), unhex (scopeSemanticSha256 scope)
+      , TE.encodeUtf8 (T.pack unit), TE.encodeUtf8 (T.pack owner)
+      , unhex sourceDigest, iface, productBytes, packages]
+    frame bytes = BS.pack [fromIntegral ((fromIntegral (BS.length bytes) :: Word64) `shiftR` shift)
+      | shift <- [56,48..0]] <> bytes
+    unhex [] = BS.empty
+    unhex (first:second:rest) = case readHex [first,second] of
+      [(byte,"")] -> BS.cons byte (unhex rest)
+      _ -> error "admitted digest is not hexadecimal"
+    unhex _ = error "admitted digest is not even length"
 
 originalDeclarationWrapper :: String -> IO String
 originalDeclarationWrapper template = do
@@ -1340,7 +1813,13 @@ validateCheckedDisplayAdmission args admission source verdict = do
     (fail "display lacks its exact retained observation generation")
 
 checkedDisplayRecipe :: CheckedDisplayAdmission -> String -> IO String
-checkedDisplayRecipe admission template = do
+checkedDisplayRecipe = checkedDisplayRecipeWithInputs False
+
+checkedProgramDisplayRecipe :: CheckedDisplayAdmission -> String -> IO String
+checkedProgramDisplayRecipe = checkedDisplayRecipeWithInputs True
+
+checkedDisplayRecipeWithInputs :: Bool -> CheckedDisplayAdmission -> String -> IO String
+checkedDisplayRecipeWithInputs generic admission template = do
   let rowPrefix = "{{TURN_STMT}} ; _ <- (pure () :: Eff "
       rows = [suffix | line <- lines template, Just suffix <- [stripPrefix rowPrefix line]]
   effectRow <- case rows of
@@ -1351,7 +1830,8 @@ checkedDisplayRecipe admission template = do
     _ -> fail "display requires one exact bind effect-row pin"
   withImports <- replaceRecipeMarker "default (Int, Double, Text)\n"
     ("import qualified Tidepool.Inspection as TidepoolInspection\n"
-      ++ concatMap (\(name, binders) -> "import " ++ name ++ " (" ++ intercalate ", " binders ++ ")\n")
+      ++ (if generic then "import qualified \"ghc-internal\" GHC.Internal.Types as TidepoolProgramTypes\nimport qualified \"text\" Data.Text as TidepoolProgramText\n" else "")
+      ++ concatMap (\(name, binders) -> "import " ++ name ++ " (" ++ intercalate ", " (map renderProgramBinder binders) ++ ")\n")
         (displayValueImports admission) ++ "default (Int, Double, Text)\n") template
   unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` withImports)
     (fail "display requires canonical bind recipe version one")
@@ -1359,9 +1839,10 @@ checkedDisplayRecipe admission template = do
     [page,metadata,alias] -> pure (page,metadata,alias)
     _ -> fail "display requires its three canonical binders"
   let keys = intercalate "," ["T.pack " ++ show key | key <- displayPresented admission]
-      budget = show (displayBudget admission)
+      budget = if generic then "(__tidepoolBudget :: TidepoolProgramTypes.Int)" else show (displayBudget admission)
+      presented = if generic then "(__tidepoolPresented :: [TidepoolProgramText.Text])" else "[" ++ keys ++ "]"
       rendering = if displayPresentation admission == "rendered"
-        then "TidepoolInspection.displayPageWithout [" ++ keys ++ "] " ++ budget
+        then "TidepoolInspection.displayPageWithout " ++ presented ++ " " ++ budget
           ++ " (" ++ displayObservationName admission ++ " ())"
         else "TidepoolInspection.pageWithContinuation " ++ budget
           ++ " (TidepoolInspection.TextLeaf (T.pack \"<opaque value>\")) Nothing"
@@ -1370,7 +1851,12 @@ checkedDisplayRecipe admission template = do
         ++ metadata ++ " <- pure (T.copy (TidepoolInspection.text " ++ page ++ "), TidepoolInspection.pageHasMore "
         ++ page ++ ", TidepoolInspection.pageUnavailable " ++ page ++ ");\n"
         ++ alias ++ " <- pure " ++ page ++ ";\npure (" ++ intercalate ", " [page,metadata,alias] ++ ")\n}"
-  pure (spliceTemplate withImports statement (intercalate ", " [page,metadata,alias]))
+  let spliced = (if generic then ("{-# LANGUAGE PackageImports, ScopedTypeVariables #-}\n" ++) else id) (spliceTemplate withImports statement (intercalate ", " [page,metadata,alias]))
+  if generic then do
+    withArgument <- replaceRecipeMarker "__result = do {" "__result ((__tidepoolBudget :: TidepoolProgramTypes.Int), (__tidepoolPresented :: [TidepoolProgramText.Text])) = do {" spliced
+    prepared <- replaceRecipeMarker "__prepared = TidepoolResume.settle __result" "__prepared input = TidepoolResume.settle (__result input)" withArgument
+    pure prepared
+  else pure spliced
 
 writeCheckedDisplayReceipt :: FilePath -> ExactScope -> CheckedDisplayAdmission -> String -> IO ()
 writeCheckedDisplayReceipt root scope admission source = do

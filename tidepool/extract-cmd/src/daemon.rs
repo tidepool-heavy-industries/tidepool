@@ -8,7 +8,7 @@
 //! ```text
 //! frame     ::= u32-LE length, then that many raw bytes (UTF-8 text)
 //! preflight ::= "TPDPF001"
-//! identity  ::= "TPDPI001" producer[32] boot_epoch[32]
+//! identity  ::= "TPDPI002" producer[32] consumed_worker[32] boot_epoch[32]
 //! request   ::= "TPDRQ001" expected_epoch[32]
 //!               frame(cwd) u32-LE(argc) frame(argv[0]) .. frame(argv[n-1])
 //! transaction ::= "TPDTR001" expected_epoch[32]
@@ -63,7 +63,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_REQUEST_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 const MAX_REQUEST_ARGS: u32 = 4096;
 const PREFLIGHT: &[u8; 8] = b"TPDPF001";
-const PREFLIGHT_RESPONSE: &[u8; 8] = b"TPDPI001";
+const PREFLIGHT_RESPONSE: &[u8; 8] = b"TPDPI002";
 const REQUEST: &[u8; 8] = b"TPDRQ001";
 /// A graceful-stop request: no epoch, no body. The daemon acks with a single
 /// byte while accepted requests continue, then retires its socket exactly as
@@ -481,6 +481,7 @@ pub(crate) fn init_tracing(
 
 pub(crate) struct DaemonBinding {
     pub(crate) producer: [u8; 32],
+    pub(crate) consumed_worker: [u8; 32],
     pub(crate) epoch: [u8; 32],
 }
 
@@ -841,6 +842,9 @@ pub(crate) fn preflight(socket_path: &Path) -> Result<DaemonBinding, DaemonError
     let producer: [u8; 32] = read_exact_or_crash(&mut stream, 32)?
         .try_into()
         .map_err(|_| DaemonError::Crashed)?;
+    let consumed_worker: [u8; 32] = read_exact_or_crash(&mut stream, 32)?
+        .try_into()
+        .map_err(|_| DaemonError::Crashed)?;
     let epoch: [u8; 32] = read_exact_or_crash(&mut stream, 32)?
         .try_into()
         .map_err(|_| DaemonError::Crashed)?;
@@ -849,7 +853,11 @@ pub(crate) fn preflight(socket_path: &Path) -> Result<DaemonBinding, DaemonError
         elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         "compiler phase finished"
     );
-    Ok(DaemonBinding { producer, epoch })
+    Ok(DaemonBinding {
+        producer,
+        consumed_worker,
+        epoch,
+    })
 }
 
 /// Bound on the STOP round trip. The daemon writes its ack immediately,
@@ -1001,6 +1009,8 @@ fn service_transaction(
     prepared: &PreparedWorker,
     config: &DaemonConfig,
     run_id: &str,
+    epoch: &[u8; 32],
+    queue_wait: Duration,
     request_deadline: Duration,
     rotate_after: u64,
     rss_ceiling_mb: u64,
@@ -1010,6 +1020,17 @@ fn service_transaction(
     early_replacements: &mut u64,
     mut next_request: impl FnMut(&mut UnixStream) -> RequestStep,
 ) -> Result<ConnectionOutcome, FrontendError> {
+    tracing::info!(
+        run_id,
+        daemon_pid = std::process::id(),
+        daemon_epoch = %hex(epoch),
+        worker_pid = worker.child.id(),
+        worker_slot,
+        transaction,
+        queue_ms = u64::try_from(queue_wait.as_millis()).unwrap_or(u64::MAX),
+        phase = "compiler_queue",
+        "compiler job dequeued"
+    );
     let mut transaction_failed = worker.begin_transaction().err();
     let mut orderly_end = false;
     while transaction_failed.is_none() {
@@ -1029,6 +1050,10 @@ fn service_transaction(
                     served = *served,
                     transaction,
                     worker = worker_slot,
+                    worker_pid = worker.child.id(),
+                    daemon_pid = std::process::id(),
+                    daemon_epoch = %hex(epoch),
+                    transport = "daemon",
                 );
                 let _entered = request_span.enter();
                 *followed_rotation = false;
@@ -1048,6 +1073,9 @@ fn service_transaction(
                             elapsed_ms,
                             phase = "compiler_service",
                             exit_code = code,
+                            worker_rss_mb = worker_rss_mb_logged(run_id, worker.child.id()),
+                            stdout_bytes = stdout.len() as u64,
+                            stderr_bytes = stderr.len() as u64,
                             transaction,
                             "compiler request finished"
                         );
@@ -1196,6 +1224,8 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
         executable = %executable.display(),
         worker = %prepared.selection().display(),
         producer = %hex(&producer),
+        daemon_pid = std::process::id(),
+        daemon_epoch = %hex(&epoch),
         socket = %config.socket.display(),
         available_mb = available_mb.unwrap_or(0),
         headroom_mb = DEFAULT_MEMORY_HEADROOM_MB,
@@ -1258,6 +1288,7 @@ enum Job {
 }
 
 struct PendingJob {
+    queued_at: Instant,
     job: Job,
     accepted: std::sync::mpsc::Receiver<()>,
     permit: Option<AdmissionPermit>,
@@ -1296,6 +1327,7 @@ fn admit_job(
     };
     let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel(1);
     match sender.try_send(PendingJob {
+        queued_at: Instant::now(),
         job,
         accepted: accepted_rx,
         permit,
@@ -1373,6 +1405,7 @@ fn serve_workers(
     rss_ceiling_mb: u64,
     request_deadline: Duration,
 ) -> Result<u8, FrontendError> {
+    let consumed_worker = prepared.consumed_worker_identity();
     listener.set_nonblocking(true).map_err(FrontendError::Io)?;
     // A single ordinary worker owns at most one accepted job. Persistent
     // mode admits one pending job beyond its occupied worker slots.
@@ -1396,6 +1429,14 @@ fn serve_workers(
             let ready_tx = ready_tx.clone();
             slots.push(scope.spawn(move || -> Result<(), FrontendError> {
                 let mut worker = Worker::spawn(prepared)?;
+                tracing::info!(
+                    run_id,
+                    daemon_pid = std::process::id(),
+                    daemon_epoch = %hex(epoch),
+                    worker_pid = worker.child.id(),
+                    worker_slot = slot,
+                    "compiler worker ready"
+                );
                 ready_tx.send(()).ok();
                 let mut served = 0u64;
                 // The first request this slot ever serves is cold, exactly
@@ -1472,6 +1513,8 @@ fn serve_workers(
                         prepared,
                         config,
                         run_id,
+                        epoch,
+                        pending.queued_at.elapsed(),
                         request_deadline,
                         rotate_after,
                         rss_ceiling_mb,
@@ -1592,9 +1635,10 @@ fn serve_workers(
                     Ok(true) => break 'accept Ok(()),
                     Err(error) => break 'accept Err(error),
                 }
-                let mut response = Vec::with_capacity(72);
+                let mut response = Vec::with_capacity(104);
                 response.extend_from_slice(PREFLIGHT_RESPONSE);
                 response.extend_from_slice(producer);
+                response.extend_from_slice(&consumed_worker);
                 response.extend_from_slice(epoch);
                 log_send_failure(
                     run_id,
@@ -3103,11 +3147,13 @@ tidepool-target phase=desugar module=Execute\n",
             assert_eq!(&request, PREFLIGHT);
             connection.write_all(PREFLIGHT_RESPONSE).unwrap();
             connection.write_all(&[7; 32]).unwrap();
+            connection.write_all(&[8; 32]).unwrap();
             connection.write_all(&[9; 32]).unwrap();
         });
         let binding = preflight(&socket).unwrap();
         server.join().unwrap();
         assert_eq!(binding.producer, [7; 32]);
+        assert_eq!(binding.consumed_worker, [8; 32]);
         assert_eq!(binding.epoch, [9; 32]);
         std::fs::remove_file(socket).ok();
     }
@@ -4507,8 +4553,8 @@ fn main() {{
 
     #[test]
     fn daemon_boot_epoch_contributes_to_endpoint_identity() {
-        let a = crate::CompilerIdentity::daemon([3; 32], [4; 32]);
-        let b = crate::CompilerIdentity::daemon([3; 32], [5; 32]);
+        let a = crate::CompilerIdentity::daemon([3; 32], [2; 32], [4; 32]);
+        let b = crate::CompilerIdentity::daemon([3; 32], [2; 32], [5; 32]);
         assert_eq!(a.producer_bytes(), b.producer_bytes());
         assert_ne!(a.as_bytes(), b.as_bytes());
     }
