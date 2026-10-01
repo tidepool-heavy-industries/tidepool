@@ -71,6 +71,8 @@ rust_filegroup(
         "src/resident_actor/capture_workspace_child.hs": "exomonad/actor/src/resident_actor/capture_workspace_child.hs",
         "src/resident_actor/capture_workspace_tests.rs": "exomonad/actor/src/resident_actor/capture_workspace_tests.rs",
         "src/resident_actor/captured_commit.rs": "exomonad/actor/src/resident_actor/captured_commit.rs",
+        "src/resident_actor/captured_commit/deferred.rs": "exomonad/actor/src/resident_actor/captured_commit/deferred.rs",
+        "src/resident_actor/captured_reader_reuse.hs": "exomonad/actor/src/resident_actor/captured_reader_reuse.hs",
         "src/resident_actor/captured_readers_parent.hs": "exomonad/actor/src/resident_actor/captured_readers_parent.hs",
         "src/resident_actor/child_initialization.rs": "exomonad/actor/src/resident_actor/child_initialization.rs",
         "src/resident_actor/child_launch.rs": "exomonad/actor/src/resident_actor/child_launch.rs",
