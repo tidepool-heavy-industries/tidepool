@@ -11,6 +11,9 @@ use tidepool_runtime::HaskellValue;
 mod recipe_check;
 use recipe_check::RecipeCheckReq;
 
+#[path = "../../facade/src/actor_host/effect_vocabulary.rs"]
+mod effect_vocabulary;
+
 type ActorKey = (String, i64, i64);
 
 struct Capture {
@@ -133,8 +136,9 @@ fn run() {
     let support = PathBuf::from(&args[5]);
     std::fs::create_dir_all(&scratch).unwrap();
     let (module, _) = entry.rsplit_once('.').expect("qualified recipe entry");
-    let effects =
-        tidepool_mcp::ensure_effects_module(&[tidepool_mcp::recipe_check_decl()]).unwrap();
+    let mut declarations = effect_vocabulary::exomonad_effect_declarations();
+    declarations.push(tidepool_mcp::recipe_check_decl());
+    let effects = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
     let mut includes = effects.include_paths().to_vec();
     includes.extend([
         root.join("bridge/haskell/lib"),
