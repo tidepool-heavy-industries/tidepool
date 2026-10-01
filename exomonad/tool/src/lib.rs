@@ -83,15 +83,117 @@ pub enum ToolArguments {
     Structured(serde_json::Value),
 }
 
-/// Transport correlation carried unchanged when the host protocol supplies it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Conversation identity supplied by the owning host transport.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConversationOrigin {
+    Embedded {
+        run: String,
+        actor: String,
+        incarnation: String,
+    },
+    External {
+        thread_id: String,
+    },
+}
+
+/// The original model operation, independent of any nested local invocation.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
+pub struct OriginalOperation {
+    pub origin: ConversationOrigin,
+    pub request_id: String,
+    pub call_id: String,
+}
+
+impl OriginalOperation {
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        let origin_complete = match &self.origin {
+            ConversationOrigin::Embedded {
+                run,
+                actor,
+                incarnation,
+            } => !run.is_empty() && !actor.is_empty() && !incarnation.is_empty(),
+            ConversationOrigin::External { thread_id } => !thread_id.is_empty(),
+        };
+        origin_complete && !self.request_id.is_empty() && !self.call_id.is_empty()
+    }
+
+    #[must_use]
+    pub fn external_thread(&self) -> Option<&str> {
+        match &self.origin {
+            ConversationOrigin::External { thread_id } => Some(thread_id),
+            ConversationOrigin::Embedded { .. } => None,
+        }
+    }
+}
+
+/// A direct invocation has correlation but no enclosing model operation to release.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(tag = "kind", content = "identity", rename_all = "snake_case")]
+pub enum ToolInvocationOrigin {
+    Model(OriginalOperation),
+    Direct {
+        origin: ConversationOrigin,
+        request_id: String,
+    },
+}
+
+/// Original operation and nested invocation identity are retained separately.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ToolInvocationContext {
-    /// Recorded model invocation owning this execution, when supplied by the host.
-    pub context_call_id: Option<String>,
-    pub thread_id: String,
-    pub turn_id: String,
+    pub origin: ToolInvocationOrigin,
     pub call_id: String,
     pub namespace: Option<String>,
+}
+
+impl ToolInvocationContext {
+    #[must_use]
+    pub fn external(
+        thread_id: String,
+        request_id: String,
+        call_id: String,
+        context_call_id: Option<String>,
+        namespace: Option<String>,
+    ) -> Self {
+        let origin = ConversationOrigin::External { thread_id };
+        let origin = match context_call_id {
+            Some(call_id) => ToolInvocationOrigin::Model(OriginalOperation {
+                origin,
+                request_id,
+                call_id,
+            }),
+            None => ToolInvocationOrigin::Direct { origin, request_id },
+        };
+        Self {
+            origin,
+            call_id,
+            namespace,
+        }
+    }
+
+    #[must_use]
+    pub fn model_operation(&self) -> Option<&OriginalOperation> {
+        match &self.origin {
+            ToolInvocationOrigin::Model(operation) => Some(operation),
+            ToolInvocationOrigin::Direct { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn request_id(&self) -> &str {
+        match &self.origin {
+            ToolInvocationOrigin::Model(operation) => &operation.request_id,
+            ToolInvocationOrigin::Direct { request_id, .. } => request_id,
+        }
+    }
 }
 
 /// One validated invocation of an actor's resident tool surface.

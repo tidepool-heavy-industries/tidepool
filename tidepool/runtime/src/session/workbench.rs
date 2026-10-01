@@ -54,11 +54,47 @@ pub fn escape_workbench_haskell_string(value: &str) -> String {
     output
 }
 
-/// Exact hosted invocation coordinates supplied by the trusted transport.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkbenchForkBoundary {
-    pub thread_id: String,
-    pub call_id: String,
+/// A model operation or an internal route owns exactly one release boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum WorkbenchForkBoundary {
+    Hosted(exomonad_tool::OriginalOperation),
+    Route {
+        actor_id: u64,
+        incarnation: u64,
+        watch_id: u64,
+    },
+    Execution {
+        actor_id: u64,
+        incarnation: u64,
+        execution_id: WorkbenchExecutionId,
+    },
+}
+
+impl WorkbenchForkBoundary {
+    #[must_use]
+    pub fn external(thread_id: String, request_id: String, call_id: String) -> Self {
+        Self::Hosted(exomonad_tool::OriginalOperation {
+            origin: exomonad_tool::ConversationOrigin::External { thread_id },
+            request_id,
+            call_id,
+        })
+    }
+
+    #[must_use]
+    pub fn hosted(&self) -> Option<&exomonad_tool::OriginalOperation> {
+        match self {
+            Self::Hosted(operation) => Some(operation),
+            Self::Route { .. } | Self::Execution { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        match self {
+            Self::Hosted(operation) => operation.is_complete(),
+            Self::Route { .. } | Self::Execution { .. } => true,
+        }
+    }
 }
 
 /// One ordered request against a persistent Haskell workbench.

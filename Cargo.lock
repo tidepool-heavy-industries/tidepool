@@ -3790,6 +3790,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ciborium",
+ "exomonad-tool",
  "frunk",
  "log",
  "parking_lot",

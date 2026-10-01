@@ -17,10 +17,11 @@ fn capture(
     let original = session.mint_detached_scope(parent).unwrap();
     let retained = session.retain_lexical_scope(original).unwrap();
     let retained_scope = retained.scope();
-    let boundary = WorkbenchForkBoundary {
-        thread_id: "thread".into(),
-        call_id: "unfinished-parent".into(),
-    };
+    let boundary = WorkbenchForkBoundary::external(
+        "thread".into(),
+        "request".into(),
+        "unfinished-parent".into(),
+    );
     let token = groups.capture_checkpoint_with_retained_scope(
         "capture".into(),
         ActorRef::first(crate::ActorId(1)),

@@ -244,7 +244,7 @@ impl WorkbenchExecutionControl {
     pub(crate) fn is_computing_hosted_cell(&self) -> bool {
         self.invocation
             .as_ref()
-            .is_some_and(|invocation| invocation.namespace.is_none())
+            .is_some_and(|invocation| invocation.0.namespace.is_none())
             && self.terminal_reply().is_none()
             && matches!(
                 self.phase.load(std::sync::atomic::Ordering::Acquire),
@@ -571,33 +571,30 @@ pub(crate) struct ResidentToolClient {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct WorkbenchCallKey {
-    context_call_id: Option<String>,
-    thread_id: String,
-    turn_id: String,
-    call_id: String,
-    namespace: Option<String>,
-}
+pub(crate) struct WorkbenchCallKey(ToolInvocationContext);
 
 impl From<ToolInvocationContext> for WorkbenchCallKey {
     fn from(context: ToolInvocationContext) -> Self {
-        Self {
-            context_call_id: context.context_call_id,
-            thread_id: context.thread_id,
-            turn_id: context.turn_id,
-            call_id: context.call_id,
-            namespace: context.namespace,
-        }
+        Self(context)
     }
 }
 
 impl WorkbenchCallKey {
+    pub(crate) fn is_original_invocation(&self) -> bool {
+        self.0.namespace.is_none()
+            && self
+                .0
+                .model_operation()
+                .is_some_and(|original| original.call_id == self.0.call_id)
+    }
+
     pub(crate) fn matches_boundary(
         &self,
         boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
     ) -> bool {
-        self.thread_id == boundary.thread_id
-            && self.context_call_id.as_deref() == Some(boundary.call_id.as_str())
+        self.0
+            .model_operation()
+            .is_some_and(|operation| boundary.hosted() == Some(operation))
     }
 }
 
@@ -608,22 +605,39 @@ fn execution_id(actor: crate::ActorRef, operation: &WorkbenchCallKey) -> Workben
     }
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"tidepool.workbench-execution.v2\0");
+    hasher.update(b"tidepool.workbench-execution.v3\0");
     hasher.update(&actor.id.0.to_le_bytes());
     hasher.update(&actor.incarnation.0.to_le_bytes());
-    match &operation.context_call_id {
-        Some(context_call_id) => {
+    let (origin, request_id) = match &operation.0.origin {
+        exomonad_tool::ToolInvocationOrigin::Model(original) => {
             hasher.update(&[1]);
-            field(&mut hasher, context_call_id.as_bytes());
+            field(&mut hasher, original.call_id.as_bytes());
+            (&original.origin, &original.request_id)
         }
-        None => {
+        exomonad_tool::ToolInvocationOrigin::Direct { origin, request_id } => {
             hasher.update(&[0]);
+            (origin, request_id)
+        }
+    };
+    match origin {
+        exomonad_tool::ConversationOrigin::External { thread_id } => {
+            hasher.update(&[0]);
+            field(&mut hasher, thread_id.as_bytes());
+        }
+        exomonad_tool::ConversationOrigin::Embedded {
+            run,
+            actor,
+            incarnation,
+        } => {
+            hasher.update(&[1]);
+            field(&mut hasher, run.as_bytes());
+            field(&mut hasher, actor.as_bytes());
+            field(&mut hasher, incarnation.as_bytes());
         }
     }
-    field(&mut hasher, operation.thread_id.as_bytes());
-    field(&mut hasher, operation.turn_id.as_bytes());
-    field(&mut hasher, operation.call_id.as_bytes());
-    match &operation.namespace {
+    field(&mut hasher, request_id.as_bytes());
+    field(&mut hasher, operation.0.call_id.as_bytes());
+    match &operation.0.namespace {
         Some(namespace) => {
             hasher.update(&[1]);
             field(&mut hasher, namespace.as_bytes());
@@ -863,21 +877,17 @@ impl ResidentToolClient {
                 .dispatch_registered_workbench(request, control, None, installed_tools, None)
                 .await;
         };
-        if let Some(context_call_id) = &invocation.context_call_id {
-            request =
-                request.with_fork_boundary(tidepool_runtime::session::WorkbenchForkBoundary {
-                    thread_id: invocation.thread_id.clone(),
-                    call_id: context_call_id.clone(),
-                });
+        if let Some(operation) = invocation.model_operation() {
+            request = request.with_fork_boundary(
+                tidepool_runtime::session::WorkbenchForkBoundary::Hosted(operation.clone()),
+            );
         }
         let operation = WorkbenchCallKey::from(invocation);
         let execution = execution_id(self.actor.identity(), &operation);
         request = request.with_execution_id(execution.clone());
         let control = WorkbenchExecutionControl::new(Some(operation.clone()));
-        // Visible on the actor from before the dispatch gate until this call
-        // returns or is dropped: while queued on the gate or computing,
-        // `cancel_workbench` cannot interrupt it, and the host's delivery
-        // pump must not start an input exchange that would wait on it.
+        // Publish before waiting for admission so transport cancellation can
+        // identify this exact invocation throughout dispatch and execution.
         let published = HostedCellPublication::publish(&self.actor, &control);
         let _turn = self.dispatch_gate.lock().await;
         {
@@ -888,9 +898,9 @@ impl ResidentToolClient {
             tracing::info!(
                 actor = %self.actor.identity(),
                 execution = %execution,
-                call_id = %operation.call_id,
-                context_call_id = operation.context_call_id.as_deref().unwrap_or(""),
-                turn_id = %operation.turn_id,
+                call_id = %operation.0.call_id,
+                context_call_id = operation.0.model_operation().map(|original| original.call_id.as_str()).unwrap_or(""),
+                turn_id = %operation.0.request_id(),
                 items = request.items.len(),
                 "workbench cell dispatched to its actor"
             );
@@ -1130,13 +1140,13 @@ mod tests {
     }
 
     fn call_key(call_id: &str) -> WorkbenchCallKey {
-        ToolInvocationContext {
-            context_call_id: Some("outer-call".into()),
-            thread_id: "thread".into(),
-            turn_id: "turn".into(),
-            call_id: call_id.into(),
-            namespace: Some("actor".into()),
-        }
+        ToolInvocationContext::external(
+            "thread".into(),
+            "turn".into(),
+            call_id.into(),
+            Some("outer-call".into()),
+            Some("actor".into()),
+        )
         .into()
     }
 
@@ -1146,10 +1156,26 @@ mod tests {
         let original = execution_id(actor, &call_key("call-1"));
         assert_eq!(original, execution_id(actor, &call_key("call-1")));
         assert_ne!(original, execution_id(actor, &call_key("call-2")));
+        let mut different_request = call_key("call-1");
+        let exomonad_tool::ToolInvocationOrigin::Model(operation) = &mut different_request.0.origin
+        else {
+            panic!("test context must carry the original operation");
+        };
+        operation.request_id = "later-turn".into();
+        assert_ne!(original, execution_id(actor, &different_request));
         let mut different_context = call_key("call-1");
-        different_context.context_call_id = Some("different-outer-call".into());
+        let exomonad_tool::ToolInvocationOrigin::Model(operation) = &mut different_context.0.origin
+        else {
+            panic!("test context must carry the original operation");
+        };
+        operation.call_id = "different-outer-call".into();
         assert_ne!(original, execution_id(actor, &different_context));
-        different_context.context_call_id = None;
+        different_context.0.origin = exomonad_tool::ToolInvocationOrigin::Direct {
+            origin: exomonad_tool::ConversationOrigin::External {
+                thread_id: "thread".into(),
+            },
+            request_id: "turn".into(),
+        };
         assert_ne!(original, execution_id(actor, &different_context));
         assert_ne!(
             original,
@@ -1161,6 +1187,46 @@ mod tests {
                 &call_key("call-1")
             )
         );
+    }
+
+    #[test]
+    fn local_invocations_share_only_the_exact_original_operation_boundary() {
+        use exomonad_tool::{ConversationOrigin, OriginalOperation, ToolInvocationOrigin};
+        use tidepool_runtime::session::WorkbenchForkBoundary;
+
+        let original = OriginalOperation {
+            origin: ConversationOrigin::Embedded {
+                run: "run".into(),
+                actor: "root".into(),
+                incarnation: "first".into(),
+            },
+            request_id: "request-1".into(),
+            call_id: "provider-call".into(),
+        };
+        let first = WorkbenchCallKey::from(ToolInvocationContext {
+            origin: ToolInvocationOrigin::Model(original.clone()),
+            call_id: "nested-1".into(),
+            namespace: None,
+        });
+        let second = WorkbenchCallKey::from(ToolInvocationContext {
+            call_id: "nested-2".into(),
+            ..first.0.clone()
+        });
+        let boundary = WorkbenchForkBoundary::Hosted(original.clone());
+        assert!(first.matches_boundary(&boundary));
+        assert!(second.matches_boundary(&boundary));
+        let actor = crate::ActorRef::first(crate::ActorId(7));
+        assert_ne!(execution_id(actor, &first), execution_id(actor, &second));
+
+        let mut reused = original.clone();
+        reused.request_id = "request-2".into();
+        assert!(!first.matches_boundary(&WorkbenchForkBoundary::Hosted(reused)));
+        let mut successor = original;
+        let ConversationOrigin::Embedded { incarnation, .. } = &mut successor.origin else {
+            unreachable!();
+        };
+        *incarnation = "second".into();
+        assert!(!first.matches_boundary(&WorkbenchForkBoundary::Hosted(successor)));
     }
 
     fn terminal_reply() -> crate::KernelWorkbenchReply {
@@ -1306,7 +1372,7 @@ mod tests {
     #[test]
     fn only_an_unsettled_unnamespaced_cell_outside_sleep_is_computing() {
         let mut key = call_key("call-1");
-        key.namespace = None;
+        key.0.namespace = None;
         let control = WorkbenchExecutionControl::new(Some(key));
         assert!(control.is_computing_hosted_cell());
         control.arm_sleep();
@@ -1369,13 +1435,13 @@ mod tests {
             .unwrap();
         let actor = crate::LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
         let client = ResidentToolClient::local(actor.clone());
-        let invocation = ToolInvocationContext {
-            context_call_id: Some("outer-call".into()),
-            thread_id: "thread".into(),
-            turn_id: "turn".into(),
-            call_id: "call-1".into(),
-            namespace: None,
-        };
+        let invocation = ToolInvocationContext::external(
+            "thread".into(),
+            "turn".into(),
+            "call-1".into(),
+            Some("outer-call".into()),
+            None,
+        );
         let dispatch = |client: ResidentToolClient, invocation: ToolInvocationContext| {
             tokio::spawn(async move {
                 client
@@ -1400,7 +1466,7 @@ mod tests {
                         candidate
                             .invocation
                             .as_ref()
-                            .is_some_and(|key| key.call_id == "queued-call")
+                            .is_some_and(|key| key.0.call_id == "queued-call")
                     })
                     .is_some()
                 {
@@ -1469,14 +1535,15 @@ mod tests {
     #[test]
     fn rapid_actor_completion_cannot_be_republished_by_transport_handoff() {
         let slot = crate::kernel::HostedCellPublications::default();
-        let control =
-            WorkbenchExecutionControl::new(Some(WorkbenchCallKey::from(ToolInvocationContext {
-                context_call_id: None,
-                thread_id: "thread".into(),
-                turn_id: "turn".into(),
-                call_id: "call".into(),
-                namespace: None,
-            })));
+        let control = WorkbenchExecutionControl::new(Some(WorkbenchCallKey::from(
+            ToolInvocationContext::external(
+                "thread".into(),
+                "turn".into(),
+                "call".into(),
+                None,
+                None,
+            ),
+        )));
         slot.publish_transport(Arc::clone(&control));
         slot.claim(&control);
         slot.complete(&control);
