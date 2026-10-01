@@ -95,6 +95,31 @@ pub struct NativeBindingRequirement {
     pub generation: u64,
 }
 
+/// A package export required by one original native group. Its interface
+/// witness certifies the owner; activation still requires its exact live lease.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct RetainedPackageDependency {
+    pub dependent_ordinal: u32,
+    pub identity: tidepool_repr::execution_schema::SymbolIdentity,
+    pub generation: u64,
+    pub interface_digest: [u8; 32],
+}
+
+/// A selected external package obligation, rooted at its demanding original.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct NativePackageRequirement {
+    pub artifact_id: ArtifactId,
+    pub identity: tidepool_repr::execution_schema::SymbolIdentity,
+    pub generation: u64,
+    pub interface_digest: [u8; 32],
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NativeRequirements {
+    pub bindings: Vec<NativeBindingRequirement>,
+    pub packages: Vec<NativePackageRequirement>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactDescriptor {
     pub id: ArtifactId,

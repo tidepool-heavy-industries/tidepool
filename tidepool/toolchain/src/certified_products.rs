@@ -47,6 +47,13 @@ pub enum PendingImportOwner {
         identity: SymbolIdentity,
         generation: u64,
     },
+    RetainedPackage {
+        unit: String,
+        module: String,
+        binder: SymbolIdentity,
+        generation: u64,
+        interface_digest: [u8; 32],
+    },
     Package {
         unit: String,
         module: String,
@@ -67,6 +74,13 @@ pub enum ReceiptImportOwner {
     Retained {
         identity: SymbolIdentity,
         generation: u64,
+    },
+    RetainedPackage {
+        unit: String,
+        module: String,
+        binder: SymbolIdentity,
+        generation: u64,
+        interface_digest: [u8; 32],
     },
     Package {
         unit: String,
