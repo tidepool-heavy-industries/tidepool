@@ -12,9 +12,9 @@ import Data.List (isPrefixOf)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
-import GHC (runGhc, setSession, ms_mod_name, ms_hsc_src)
+import GHC (runGhc, setSession, ms_mod_name, ms_hsc_src, parseModule, typecheckModule)
 import GHC.Driver.Env (HscEnv(..))
-import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries')
+import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
 import GHC.Types.SourceFile (HscSource(..))
 import Control.Monad.IO.Class (liftIO)
 import GHC.Driver.Session (targetProfile)
@@ -31,8 +31,8 @@ import System.IO (hClose, hPutStrLn, openTempFile, stderr)
 import System.Process (readProcessWithExitCode)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencyImport(..)
-  , DependencyResolution(..), dependencySourceSha256, sourceEvidence )
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), freshExactState)
+  , DependencyResolution(..), dependencySourceSha256, sourceEvidence, selectedHomeRequirements )
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), freshExactState, installExactLexicalGraph)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
 import Tidepool.GhcPipeline
@@ -44,6 +44,7 @@ import Tidepool.PreparedStg (PreparedModule(..))
 
 main :: IO ()
 main = getArgs >>= \case
+  ["--home-instance-edges"] -> selectedHomeInstanceEdges
   ["--fresh", work] -> reuseFresh work >>= requireReused "fresh worker"
   ["--mixed-fresh", work, count] -> reuseFresh work >>= requireMixed (read count)
   ["--mixed"] -> do
@@ -84,6 +85,38 @@ main = getArgs >>= \case
     mixedGraph False 1
     mixedGraph True 10
   _ -> fail "unexpected SOURCE boot test arguments"
+
+selectedHomeInstanceEdges :: IO ()
+selectedHomeInstanceEdges = withScratch $ \work -> do
+  forM_ ["InstanceOwner", "InstanceRelay", "InstanceConsumer"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name ++ ".hs") (work </> name ++ ".hs")
+  cold <- runPipelineSelected (PreparedProducts Nothing)
+    (work </> "InstanceConsumer.hs") [work]
+  let evidence = pprDependencies cold
+      producer = prHscEnv (pprPipelineResult cold)
+      consumers = [node | node@(ModuleNode _ summary) <- mgModSummaries' (hsc_mod_graph producer)
+        , ms_mod_name summary == mkModuleName "InstanceConsumer"]
+  lexical <- forM ["InstanceOwner", "InstanceRelay"] $ \name -> do
+    requirements <- either fail pure (selectedHomeRequirements evidence "main" name)
+    pure (ExactIfaceArtifact "main" name (work </> name ++ ".hi") "" requirements, requirements)
+  unless (map snd lexical == [[], [("main", "InstanceOwner")]]) $
+    fail "selected home receipt omitted the transitive instance owner or admitted a package import"
+  let altered = evidence { dependencyModules =
+        [node { dependencyModuleSource = "missing-owner.hs" }
+        | node <- dependencyModules evidence] }
+  case selectedHomeRequirements altered "main" "InstanceRelay" of
+    Left _ -> pure ()
+    Right _ -> fail "selected home receipt accepted an unmatched source owner"
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    rebuilt <- liftIO (installExactLexicalGraph (mkModuleGraph consumers) lexical producer)
+    setSession =<< either (liftIO . fail) pure rebuilt
+    case consumers of
+      [ModuleNode _ summary] -> do
+        _ <- parseModule summary >>= typecheckModule
+        pure ()
+      _ -> liftIO (fail "instance graph lacks one source consumer")
+  putStrLn "selected home instance edges: transitive instance, package exclusion and owner mismatch passed"
 
 -- The fixed two-module SOURCE SCC is surrounded by ordinary candidate
 -- products. A separate case makes Independent1 a real ordinary+boot input;
