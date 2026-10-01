@@ -256,8 +256,12 @@ where
             .map(|child| {
                 let record = records
                     .get(&child)
-                    .filter(|record| record.terminal.is_none())
-                    .ok_or_else(|| format!("direct fork child {child:?} is unavailable"))?;
+                    .filter(|record| {
+                        record.terminal.is_none() || record.descriptor.fork_boundary().is_none()
+                    })
+                    .ok_or_else(|| {
+                        format!("direct deferred fork child {child:?} is unavailable")
+                    })?;
                 Ok((child, record.descriptor.clone()))
             })
             .collect::<Result<Vec<_>, String>>()?
