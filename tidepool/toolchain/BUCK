@@ -31,10 +31,6 @@ rust_filegroup(
         "src/timing.rs": "tidepool/toolchain/src/timing.rs",
         "src/toolchain.rs": "tidepool/toolchain/src/toolchain.rs",
         "src/turn_observations.rs": "tidepool/toolchain/src/turn_observations.rs",
-        "tests/fixtures/owned-declaration/ExactConsumer.hs": "tidepool/toolchain/tests/fixtures/owned-declaration/ExactConsumer.hs",
-        "tests/fixtures/owned-declaration/G1.hs": "tidepool/toolchain/tests/fixtures/owned-declaration/G1.hs",
-        "tests/fixtures/owned-declaration/G3.hs": "tidepool/toolchain/tests/fixtures/owned-declaration/G3.hs",
-        "tests/fixtures/typeable-tuple/G1.hs": "tidepool/toolchain/tests/fixtures/typeable-tuple/G1.hs",
     },
 )
 

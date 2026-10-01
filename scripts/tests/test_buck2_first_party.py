@@ -16,6 +16,7 @@ import unittest
 GENERATOR = Path(__file__).resolve().parents[1] / "buck2-first-party.py"
 FEATURES = GENERATOR.with_name("buck2_cargo_features.py")
 PROFILE = GENERATOR.with_name("native-profile.toml")
+TEST_OWNERSHIP = GENERATOR.with_name("test_source_ownership.py")
 
 
 class FirstPartySources(unittest.TestCase):
@@ -28,6 +29,7 @@ class FirstPartySources(unittest.TestCase):
         shutil.copyfile(GENERATOR, self.root / "scripts/buck2-first-party.py")
         shutil.copyfile(FEATURES, self.root / "scripts/buck2_cargo_features.py")
         shutil.copyfile(PROFILE, self.root / "scripts/native-profile.toml")
+        shutil.copyfile(TEST_OWNERSHIP, self.root / "scripts/test_source_ownership.py")
         self.bin = self.base / "bin"
         self.bin.mkdir()
         cargo = self.bin / "cargo"
@@ -208,6 +210,55 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             groups["tidepool-extract_sources"]["src/main.rs"],
             "tidepool/extract-cmd/src/main.rs",
         )
+
+    def test_registered_runtime_test_sources_stay_out_of_production_inputs(self):
+        self.write("tidepool/runtime/src/lib.rs", "mod session;\n")
+        self.write("tidepool/runtime/src/session/mod.rs", "#[cfg(test)]\nmod turn_scaling_tests;\n")
+        self.write("tidepool/runtime/src/session/turn_scaling_tests.rs",
+                   'const SOURCE: &str = include_str!("fixtures/compiled-cell-simple.hs");\n')
+        self.write("tidepool/runtime/src/session/fixtures/compiled-cell-simple.hs", "pure 42\n")
+        self.write("tidepool/runtime/src/session/ordinary.rs",
+                   'const SOURCE: &str = include_str!("fixtures/unreviewed.hs");\n')
+        self.write("tidepool/runtime/src/session/fixtures/unreviewed.hs", "unknown input\n")
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, groups = self.groups("tidepool/runtime")
+        production = groups["tidepool_runtime_sources"]
+        unit = groups["tidepool_runtime_unit_tests_sources"]
+        for path in ("src/session/turn_scaling_tests.rs",
+                     "src/session/fixtures/compiled-cell-simple.hs"):
+            self.assertNotIn(path, production)
+            self.assertIn(path, unit)
+        self.assertIn("src/session/ordinary.rs", production)
+        self.assertIn("src/session/fixtures/unreviewed.hs", production)
+
+    def test_registered_inline_toolchain_fixture_stays_in_unit_inputs(self):
+        self.write("tidepool/toolchain/src/declaration_join.rs",
+                   '#[cfg(test)]\nmod authored_tests {\n'
+                   'const SOURCE: &str = include_str!("../tests/fixtures/owned-declaration/G1.hs");\n}\n')
+        self.write("tidepool/toolchain/tests/fixtures/owned-declaration/G1.hs", "module G1 where\n")
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, groups = self.groups("tidepool/toolchain")
+        path = "tests/fixtures/owned-declaration/G1.hs"
+        self.assertNotIn(path, groups["tidepool_toolchain_sources"])
+        self.assertIn(path, groups["tidepool_toolchain_unit_tests_sources"])
+
+    def test_cancellation_measurement_fixture_is_kept_in_the_shared_test_binary(self):
+        self.write("bridge/facade/src/actor_host.rs", "#[cfg(test)]\nmod m1_host_tests;\n")
+        self.write("bridge/facade/src/actor_host/m1_host_tests.rs",
+                   '#[path = "m1_cancel_performance.rs"]\nmod cancel_performance;\n')
+        self.write("bridge/facade/src/actor_host/m1_cancel_performance.rs",
+                   'const SOURCE: &str = include_str!("m1_cancel_cell.hs");\n')
+        self.write("bridge/facade/src/actor_host/m1_cancel_cell.hs", "sleep (seconds 300)\n")
+        result = self.generate("--package", "tidepool")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, groups = self.groups("bridge/facade")
+        for path in ("src/actor_host/m1_cancel_performance.rs", "src/actor_host/m1_cancel_cell.hs"):
+            self.assertIn(path, groups["tidepool_unit_tests_sources"])
+            for name, sources in groups.items():
+                if name != "tidepool_unit_tests_sources":
+                    self.assertNotIn(path, sources, name)
 
     def test_plain_profile_disables_both_roots_and_omits_codex_source_tree(self):
         result = self.generate("--package", "tidepool", "--package", "exomonad-agent")

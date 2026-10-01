@@ -22,6 +22,7 @@ from buck2_cargo_features import (
     reject_forbidden_closure,
     resolve as resolve_cargo_features,
 )
+from test_source_ownership import TEST_ONLY_SOURCES
 
 
 def cargo_dependency_key(dependency):
@@ -376,13 +377,18 @@ TIDEPOOL_CODEX_TEST_ONLY_SOURCES = {
 NO_DEFAULT_PROFILE = load_profile(ROOT)
 
 
-def source_inputs(package, target, features=()):
+def source_inputs(package, target, features=(), test_target=False):
     directory = ROOT / CURRENT_DIR
     source_root = pathlib.Path(target["src_path"]).resolve()
     sources = {directory / "Cargo.toml"}
     external = {}
+    test_only = (TEST_ONLY_SOURCES.get(package["name"], frozenset())
+                 if not test_target
+                 else frozenset())
     if source_root.is_relative_to(directory / "src"):
         sources.update((directory / "src").rglob("*.rs"))
+        sources = {source for source in sources
+                   if source.relative_to(ROOT).as_posix() not in test_only}
         facade_unit_test = package["name"] == "tidepool" and target["name"].endswith("_unit_tests")
         if package["name"] == "tidepool" and "codex-compat" not in features:
             codex_root = directory / "src/host_dynamic_tools.rs"
@@ -493,6 +499,8 @@ def source_inputs(package, target, features=()):
         relatives = list(includes.findall(contents))
         for relative in relatives:
             included = (source.parent / relative).resolve()
+            if included.is_relative_to(ROOT) and included.relative_to(ROOT).as_posix() in test_only:
+                continue
             if (
                 package["name"] == "tidepool"
                 and not target["name"].endswith("_unit_tests")
@@ -530,7 +538,7 @@ def source_inputs(package, target, features=()):
     return dict(sorted(mapped.items(), key=lambda item: item[1]))
 
 
-def render_rule(rule, name, target, package, deps, named, extra="", features=()):
+def render_rule(rule, name, target, package, deps, named, extra="", features=(), test_target=False):
     crate_root = target["src_path"]
     src_root = pathlib.Path(crate_root).relative_to(ROOT).as_posix()
     target_edition = next(t["edition"] for t in package["targets"] if t["src_path"] == crate_root)
@@ -542,7 +550,10 @@ def render_rule(rule, name, target, package, deps, named, extra="", features=())
     ]
     lines.extend(
         "        " + json.dumps(source) + ": " + json.dumps(mapped) + ","
-        for source, mapped in source_inputs(package, target, features).items()
+        for source, mapped in source_inputs(
+            package, target, features,
+            test_target=test_target or rule in ("tidepool_rust_test", "tidepool_rust_isolated_test"),
+        ).items()
     )
     lines.extend([
         "    },",
@@ -850,7 +861,7 @@ tidepool_buildscript_run(
         if package_name == "tidepool-runtime":
             unit_rule = "tidepool_rust_binary"
             unit_extra = '    rustc_flags = ["--test"],'
-        rules.append(render_rule(unit_rule, unit_target["name"], unit_target, package, unit_deps, unit_named, unit_extra, features=package_features))
+        rules.append(render_rule(unit_rule, unit_target["name"], unit_target, package, unit_deps, unit_named, unit_extra, features=package_features, test_target=True))
         if package_name == "tidepool":
             rules.append(facade_test_cases(unit_target["name"]))
         if package_name == "tidepool-runtime":

@@ -11,6 +11,7 @@ import sys
 # Also support importlib-based unit tests without changing their caller cwd.
 sys.path.insert(0, str(Path(__file__).parent))
 from fixture_dependencies import affected as affected_fixtures
+from test_source_ownership import test_source_owner
 
 # These packages' unit tests do not launch the extractor. Keep this explicit:
 # default nextest filters constrain execution, not Cargo's build graph.
@@ -122,6 +123,10 @@ def select(metadata, changed, root):
             continue
         if path in ("Cargo.toml", "Cargo.lock", "flake.nix", "flake.lock", "rust-toolchain.toml", "justfile") or path.startswith((".cargo/", ".config/", "scripts/", "dev/")):
             reasons.add(path)
+            continue
+        test_owner = test_source_owner(path)
+        if test_owner in packages:
+            add(test_owner, "lib")
             continue
         if path.startswith("bridge/haskell/"):
             if file.suffix in (".hs", ".cabal", ".cbor", ".json") or file.name.startswith("cabal.project"):

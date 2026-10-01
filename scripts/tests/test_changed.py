@@ -91,6 +91,53 @@ class Selection(unittest.TestCase):
         self.assertIn("registration", actions)
         self.assertEqual(checks, {})
 
+    def test_registered_runtime_unit_sources_do_not_propagate_production_checks(self):
+        self.package("tidepool-runtime", path="tidepool/runtime")
+        self.package("runtime-consumer", ["tidepool-runtime"])
+        for source in (
+            "tidepool/runtime/src/session/turn_scaling_tests.rs",
+            "tidepool/runtime/src/session/exact_recovery_acceptance_tests.rs",
+            "tidepool/runtime/src/session/fixtures/compiled-cell-simple.hs",
+        ):
+            with self.subTest(source=source):
+                selection, checks, actions, _ = self.select(source)
+                self.assertEqual(selection, {"tidepool-runtime": {("lib", "")}})
+                self.assertEqual(checks, {})
+                self.assertEqual(actions, set())
+
+    def test_unregistered_src_fixture_retains_conservative_production_selection(self):
+        self.package("tidepool-runtime", path="tidepool/runtime")
+        self.package("runtime-consumer", ["tidepool-runtime"])
+        selection, checks, _, _ = self.select(
+            "tidepool/runtime/src/session/fixtures/unreviewed.hs")
+        self.assertIn(("test", "suite"), selection["tidepool-runtime"])
+        self.assertEqual(set(checks), {"tidepool-runtime", "runtime-consumer"})
+
+    def test_registered_toolchain_fixture_selects_only_its_unit_target(self):
+        self.package("tidepool-toolchain", path="tidepool/toolchain")
+        selection, checks, actions, _ = self.select(
+            "tidepool/toolchain/tests/fixtures/owned-declaration/G1.hs")
+        self.assertEqual(selection, {"tidepool-toolchain": {("lib", "")}})
+        self.assertEqual(checks, {})
+        self.assertEqual(actions, set())
+
+    def test_cancellation_fixture_selects_only_the_facade_unit_target(self):
+        self.package("tidepool", path="bridge/facade")
+        selection, checks, actions, _ = self.select(
+            "bridge/facade/src/actor_host/m1_cancel_cell.hs")
+        self.assertEqual(selection, {"tidepool": {("lib", "")}})
+        self.assertEqual(checks, {})
+        self.assertEqual(actions, set())
+
+    def test_production_edit_keeps_fanout_when_mixed_with_registered_test_source(self):
+        self.package("tidepool-runtime", path="tidepool/runtime")
+        self.package("runtime-consumer", ["tidepool-runtime"])
+        selection, checks, _, _ = self.select(
+            "tidepool/runtime/src/session/fixtures/compiled-cell-simple.hs",
+            "tidepool/runtime/src/session/turn.rs")
+        self.assertIn(("test", "suite"), selection["tidepool-runtime"])
+        self.assertEqual(set(checks), {"tidepool-runtime", "runtime-consumer"})
+
     def test_shared_build_change_requires_explicit_integration(self):
         _, _, _, reasons = self.select("Cargo.lock", "scripts/battery.sh")
         self.assertEqual(reasons, {"Cargo.lock", "scripts/battery.sh"})
