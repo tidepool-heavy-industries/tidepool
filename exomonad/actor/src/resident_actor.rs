@@ -12025,31 +12025,40 @@ pub(crate) async fn publish_request_notifications(
             ),
         }
     }
-    for notification in requests.take_settlement_notifications() {
+    if !requests.has_settlement_notifications() {
+        return;
+    }
+    let _publication = requests.lock_settlement_publication().await;
+    while requests.has_settlement_notifications() {
+        // Keep the exact notice in the registry while capacity is unavailable.
+        // The publication lock prevents another publisher from claiming it
+        // between reservation and this synchronous send.
+        let permit = match deployments.reserve().await {
+            Ok(permit) => permit,
+            Err(_closed) => {
+                tracing::warn!(
+                    kind = "settlement_changed",
+                    outcome = "closed",
+                    "publishing settlement notice: deployment observer channel has no consumer"
+                );
+                break;
+            }
+        };
+        let Some(notification) = requests.take_next_settlement_notification() else {
+            break;
+        };
         let owner = notification.owner;
         let request = notification.request;
         let preview_len = notification.reply_preview.as_ref().map(String::len);
-        match deployments
-            .send(LocalResidentDeployment::SettlementChanged { notification })
-            .await
-        {
-            Ok(()) => tracing::info!(
-                actor = ?owner,
-                request = ?request,
-                kind = "settlement_changed",
-                preview_len,
-                outcome = "sent",
-                "publishing settlement notice"
-            ),
-            Err(_closed) => tracing::warn!(
-                actor = ?owner,
-                request = ?request,
-                kind = "settlement_changed",
-                preview_len,
-                outcome = "closed",
-                "publishing settlement notice: deployment observer channel has no consumer"
-            ),
-        }
+        permit.send(LocalResidentDeployment::SettlementChanged { notification });
+        tracing::info!(
+            actor = ?owner,
+            request = ?request,
+            kind = "settlement_changed",
+            preview_len,
+            outcome = "sent",
+            "publishing settlement notice"
+        );
     }
 }
 

@@ -516,3 +516,174 @@ fn direct_command_wait_cancellation_restores_notice_but_capture_consumes_it() {
         }
     }
 }
+
+fn restore_command_notice(
+    registry: &Arc<RequestRegistry>,
+    owner: ActorRef,
+    job: &str,
+    notify_owner: bool,
+) -> RequestId {
+    let request = registry.reserve_command_settlement(owner, job.into(), notify_owner);
+    let watch = registry
+        .register_transient_watch(
+            owner,
+            vec![vec![(
+                request,
+                crate::request::WatchRequirement::Response {
+                    allow_failure: false,
+                },
+            )]],
+        )
+        .unwrap();
+    let lease = TransientWatchLease::new(registry, owner, watch);
+    assert!(registry
+        .settle_command(request, format!("{job}: exit 0"), Some("revision".into()))
+        .is_empty());
+    // Cancellation releases the observation without consuming its wake.
+    drop(lease);
+    request
+}
+
+fn channel_filler(owner: ActorRef) -> LocalResidentDeployment {
+    LocalResidentDeployment::Retired {
+        actor: owner,
+        terminal: ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "fill deployment channel".into(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn cancelled_full_channel_publication_retains_restored_command_notice_for_exactly_one_retry()
+{
+    let registry = Arc::new(RequestRegistry::default());
+    let owner = ActorRef::first(ActorId(92));
+    let request = restore_command_notice(&registry, owner, "restored-job", true);
+    let (deployments, mut receive) = mpsc::channel(1);
+    assert!(deployments.try_send(channel_filler(owner)).is_ok());
+
+    let mut publication = Box::pin(publish_request_notifications(
+        &registry,
+        &deployments,
+        Vec::new(),
+    ));
+    assert!(matches!(
+        futures_util::poll!(&mut publication),
+        Poll::Pending
+    ));
+    drop(publication);
+    assert!(registry.has_settlement_notifications());
+    assert!(matches!(
+        receive.recv().await,
+        Some(LocalResidentDeployment::Retired { .. })
+    ));
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        publish_request_notifications(&registry, &deployments, Vec::new()),
+    )
+    .await
+    .expect("cancelled publication must release its publisher lock");
+    let Some(LocalResidentDeployment::SettlementChanged { notification }) = receive.recv().await
+    else {
+        panic!("retry must deliver the retained settlement notice");
+    };
+    assert_eq!(notification.owner, owner);
+    assert_eq!(notification.request, request);
+    assert_eq!(notification.command_job.as_deref(), Some("restored-job"));
+    assert_eq!(notification.target_revision.as_deref(), Some("revision"));
+    assert_eq!(
+        notification.reply_preview.as_deref(),
+        Some("restored-job: exit 0")
+    );
+    assert_eq!(notification.sequence, notification.watermark);
+    assert!(notification.occurred_at_unix_ms > 0);
+    assert!(!registry.has_settlement_notifications());
+    assert!(receive.try_recv().is_err());
+
+    // A silent command retains its original reporting policy after cancellation.
+    restore_command_notice(&registry, owner, "silent-job", false);
+    assert!(deployments.try_send(channel_filler(owner)).is_ok());
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        publish_request_notifications(&registry, &deployments, Vec::new()),
+    )
+    .await
+    .expect("an empty notice queue must not wait for channel capacity");
+    assert!(matches!(
+        receive.try_recv(),
+        Ok(LocalResidentDeployment::Retired { .. })
+    ));
+    assert!(receive.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn competing_settlement_publishers_preserve_fifo_without_duplicates_or_empty_queue_waits() {
+    let registry = Arc::new(RequestRegistry::default());
+    let owner = ActorRef::first(ActorId(93));
+    let first_request = restore_command_notice(&registry, owner, "first-job", true);
+    let second_request = restore_command_notice(&registry, owner, "second-job", true);
+    let (deployments, mut receive) = mpsc::channel(1);
+    assert!(deployments.try_send(channel_filler(owner)).is_ok());
+    let mut first = Box::pin(publish_request_notifications(
+        &registry,
+        &deployments,
+        Vec::new(),
+    ));
+    let mut second = Box::pin(publish_request_notifications(
+        &registry,
+        &deployments,
+        Vec::new(),
+    ));
+    assert!(matches!(futures_util::poll!(&mut first), Poll::Pending));
+    assert!(matches!(futures_util::poll!(&mut second), Poll::Pending));
+    assert!(matches!(
+        receive.recv().await,
+        Some(LocalResidentDeployment::Retired { .. })
+    ));
+    assert!(matches!(futures_util::poll!(&mut first), Poll::Pending));
+    assert!(matches!(futures_util::poll!(&mut second), Poll::Pending));
+    let Some(LocalResidentDeployment::SettlementChanged {
+        notification: first_notice,
+    }) = receive.recv().await
+    else {
+        panic!("first queued settlement must publish first");
+    };
+    assert_eq!(first_notice.request, first_request);
+    assert!(matches!(futures_util::poll!(&mut first), Poll::Ready(())));
+    // The first publisher has filled the channel with the last notice. The
+    // second must finish immediately because there is nothing left to claim.
+    assert!(matches!(futures_util::poll!(&mut second), Poll::Ready(())));
+    let Some(LocalResidentDeployment::SettlementChanged {
+        notification: second_notice,
+    }) = receive.recv().await
+    else {
+        panic!("second queued settlement must publish second");
+    };
+    assert_eq!(second_notice.request, second_request);
+    assert!(first_notice.sequence < second_notice.sequence);
+    assert!(!registry.has_settlement_notifications());
+    assert!(receive.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn closed_settlement_channel_preserves_notice_for_a_new_publication_channel() {
+    let registry = Arc::new(RequestRegistry::default());
+    let owner = ActorRef::first(ActorId(94));
+    let request = restore_command_notice(&registry, owner, "retained-job", true);
+    let (closed, receive) = mpsc::channel(1);
+    drop(receive);
+    publish_request_notifications(&registry, &closed, Vec::new()).await;
+    assert!(registry.has_settlement_notifications());
+
+    let (deployments, mut receive) = mpsc::channel(1);
+    publish_request_notifications(&registry, &deployments, Vec::new()).await;
+    assert!(matches!(
+        receive.recv().await,
+        Some(LocalResidentDeployment::SettlementChanged { notification })
+            if notification.request == request
+    ));
+    assert!(!registry.has_settlement_notifications());
+    assert!(receive.try_recv().is_err());
+}

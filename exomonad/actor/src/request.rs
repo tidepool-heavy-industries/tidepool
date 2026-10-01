@@ -9,7 +9,7 @@ pub use updates::{
     UpdateReconciliationError,
 };
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -482,7 +482,7 @@ struct RequestStateTable {
     cleaning: std::collections::HashSet<ActorRef>,
     requests: HashMap<RequestId, RequestRecord>,
     watches: HashMap<WatchId, WatchRecord>,
-    settlement_notifications: Vec<SettlementNotification>,
+    settlement_notifications: VecDeque<SettlementNotification>,
 }
 
 /// One process-local owner for request identity, terminal state, and watch
@@ -491,6 +491,7 @@ struct RequestStateTable {
 #[derive(Default)]
 pub(crate) struct RequestRegistry {
     state: Mutex<RequestStateTable>,
+    settlement_publication: tokio::sync::Mutex<()>,
 }
 
 /// A cancellable subscription to one retained watch's readiness transition.
@@ -1340,8 +1341,29 @@ impl RequestRegistry {
         notifications
     }
 
+    /// Serialize publishers across channel reservation without holding the
+    /// request-state lock. Cancellation leaves unclaimed notices in the queue.
+    pub(crate) async fn lock_settlement_publication(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.settlement_publication.lock().await
+    }
+
+    pub(crate) fn has_settlement_notifications(&self) -> bool {
+        !self.state.lock().settlement_notifications.is_empty()
+    }
+
+    /// Called by the serialized publisher only after reserving channel capacity.
+    /// Claim and permit delivery must have no intervening suspension point.
+    pub(crate) fn take_next_settlement_notification(&self) -> Option<SettlementNotification> {
+        self.state.lock().settlement_notifications.pop_front()
+    }
+
+    #[cfg(test)]
     pub(crate) fn take_settlement_notifications(&self) -> Vec<SettlementNotification> {
-        std::mem::take(&mut self.state.lock().settlement_notifications)
+        self.state
+            .lock()
+            .settlement_notifications
+            .drain(..)
+            .collect()
     }
 
     /// Remove request identities which never crossed the admission commit.
@@ -2622,19 +2644,21 @@ fn queue_settlement_notifications(state: &mut RequestStateTable) {
     ) in settlements
     {
         let sequence = next_event_sequence(state, owner);
-        state.settlement_notifications.push(SettlementNotification {
-            owner,
-            request,
-            label,
-            transition,
-            reply_preview,
-            target_path,
-            target_revision,
-            command_job,
-            occurred_at_unix_ms: unix_time_ms(),
-            sequence,
-            watermark: sequence,
-        });
+        state
+            .settlement_notifications
+            .push_back(SettlementNotification {
+                owner,
+                request,
+                label,
+                transition,
+                reply_preview,
+                target_path,
+                target_revision,
+                command_job,
+                occurred_at_unix_ms: unix_time_ms(),
+                sequence,
+                watermark: sequence,
+            });
     }
 }
 
