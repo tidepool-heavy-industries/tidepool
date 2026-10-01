@@ -12,11 +12,12 @@ module Tidepool.DependencyEvidence
   , sourceEvidenceWithFingerprint
   , revalidateDependencyEvidence
   , renderDependencyEvidence
+  , selectedHomeRequirements
   ) where
 
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
-import Data.List (intercalate)
+import Data.List (intercalate, nub, sort)
 import Control.Monad (forM)
 import Numeric (showHex)
 import GHC.Fingerprint.Type (Fingerprint)
@@ -72,6 +73,29 @@ data DependencyResolution = DependencyResolution
   , dependencyResolutionSelected :: Maybe FilePath
   , dependencyResolutionCandidates :: [FilePath]
   }
+
+-- Preserve home import edges when a fresh source module becomes an exact
+-- interface. Package imports have no selected source; an owner is resolved
+-- through the same downsweep source selection, including boot witnesses.
+selectedHomeRequirements :: DependencyEvidence -> String -> String -> Either String [(String, String)]
+selectedHomeRequirements evidence unit owner = do
+  node <- case [node | node <- dependencyModules evidence
+    , dependencyModuleUnit node == unit, dependencyModuleName node == owner
+    , not (dependencyModuleBoot node)] of
+    [node] -> Right node
+    _ -> Left "supporting original lacks one dependency owner"
+  sort . nub <$> mapM selected
+    [edge | edge <- dependencyModuleImports node, Just _ <- [dependencyImportSelected edge]]
+  where
+    selected edge = case
+        [node | node <- dependencyModules evidence
+          , Just (dependencyModuleSource node) == dependencyImportSelected edge
+          , dependencyModuleName node == dependencyImportName edge
+          , dependencyModuleBoot node == dependencyImportBoot edge
+          , dependencyModuleUnit node == unit
+          , any ((== dependencyModuleSource node) . dependencySourcePath) (dependencySources evidence)] of
+      [node] -> Right (dependencyModuleUnit node, dependencyModuleName node)
+      _ -> Left "selected home import lacks one captured dependency owner"
 
 sourceEvidence :: FilePath -> IO DependencySource
 sourceEvidence path = fst <$> sourceEvidenceWithFingerprint path

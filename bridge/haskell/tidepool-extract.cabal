@@ -14,6 +14,7 @@ extra-source-files:
   test-prepared-stg/ModuleProductA.hs
   test-prepared-stg/ModuleProductB.hs
   test-cell-splitter/fixtures/declaration-join/*/*.hs
+  test-cell-splitter/fixtures/session-fixities/*.hs
   test-source-boot/fixtures/*.hs
   test-source-boot/fixtures/*.hs-boot
   test-planned-declaration/fixtures/*.hs

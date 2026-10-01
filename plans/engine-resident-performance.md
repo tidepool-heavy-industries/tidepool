@@ -159,3 +159,18 @@ the valid multi-item program reached a worker error after 64 seconds
 (`ordinary source candidates cannot accompany exact declaration owners`), and
 the path-only durable graph lacked configured run authority. Its retained traces
 are failure evidence, with no completed durable or warm measurements.
+
+Additional complete-cell verticals share the same upfront compiler/consumer
+helper. `late_record_selector_replaces_earlier_cell_value` checks that a later
+record selector replaces a prior heap binding and displays 2.
+`complete_cell_preserves_exact_local_fixity` is ignored while the local fixity
+production guard remains; after its reviewed removal it must display 8.
+`durable_mixed_originals_recover_independent_native_entry` is an opt-in durable
+fixture: it publishes live x, independent y=42, then dependent z=x; asserts the
+persisted root dependency classifications; and launches the already-built
+native test binary for one exact fresh-process test. That process opens the
+owned retained graph, verifies x has no live heap binding, and demands only y,
+which must display 42 despite z's unavailable native dependency. The battery
+continues to own the one compiler daemon. This fixture does not establish the
+packaged host cold-start target, same-name rebinding refusal, or instance
+fallback behavior; those need their own owning assertions.

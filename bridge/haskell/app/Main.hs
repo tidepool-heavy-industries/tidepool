@@ -36,7 +36,8 @@ import GHC.Unit.Types (unitString)
 import GHC.Core (Bind(..), CoreBind)
 import GHC.Core.DataCon (DataCon)
 import GHC.Core.TyCon (TyCon)
-import GHC.Types.Name (nameOccName)
+import GHC.Types.Name (nameOccName, nameModule)
+import GHC.Builtin.Types (intTyConName)
 import GHC.Types.Id (idName)
 import GHC.Types.Name.Occurrence (occNameString, isSymOcc, mkVarOcc)
 import qualified Data.Text as T
@@ -122,7 +123,7 @@ import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.TurnSource (extractModuleName, spliceTemplate)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencySource(..), ProductAvailability(..)
-  , renderDependencyEvidence, revalidateDependencyEvidence )
+  , renderDependencyEvidence, revalidateDependencyEvidence, selectedHomeRequirements )
 
 renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
 renderAsksJson sites = "[" ++ intercalate "," (map renderAskJson sites) ++ "]"
@@ -1652,12 +1653,9 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       originalGroups' = concat [groups | (_,_,_,groups) <- originalProducts]
       productPath = directory </> "original.product.cbor"
   BS.writeFile productPath originalBytes
+  requirements <- programInterfaceRequirements prepared unit reserved
   let interfacePath = directory </> "original.hi"
       packagesPath = directory </> "original.hi.packages"
-      requirements = nub
-        [(importedUnit,name) | compilation <- maybe [] pure (pprExactCompilation prepared)
-          , ((_,name',_), edges) <- compilationImports compilation, name' == reserved
-          , (_,name,False,importedUnit) <- edges]
       interface = ExactIfaceArtifact unit reserved interfacePath (shaHex interfaceBytes) requirements
   roots <- maybe (fail "planned original declaration has no package interface witness") pure
     (Map.lookup (mkModuleName reserved) (pprPackageRoots prepared))
@@ -1712,15 +1710,11 @@ retainProgramProducts directory prepared products initial = foldM retain initial
         _ -> fail "supporting original lacks one validated source witness"
       roots <- maybe (fail "supporting original lacks package interface witness") pure
         (Map.lookup (mkModuleName owner) (pprPackageRoots prepared))
+      requirements <- programInterfaceRequirements prepared unit owner
       let stem = directory </> "retained-original-" ++ show index
           interfacePath = stem ++ ".hi"
           packagesPath = stem ++ ".hi.packages"
           productPath = stem ++ ".product.cbor"
-          requirements = nub [(importedUnit,name)
-            | compilation <- maybe [] pure (pprExactCompilation prepared)
-            , ((sourceUnit,sourceName,_), edges) <- compilationImports compilation
-            , sourceUnit == unit, sourceName == owner
-            , (_,name,False,importedUnit) <- edges]
           interface = ExactIfaceArtifact unit owner interfacePath (shaHex interfaceBytes) requirements
           packageBytes = encodePackageImports interface roots
           productBytes = encodeModuleProducts [originalProduct]
@@ -1737,6 +1731,16 @@ retainProgramProducts directory prepared products initial = foldM retain initial
       pure scope { scopeProducts = scopeProducts scope ++ [original]
         , scopeInterfaces = scopeInterfaces scope ++ [(interface,packagesPath,shaHex packageBytes)]
         , scopeLexical = scopeLexical scope ++ [((unit,owner),requirements)] }
+
+programInterfaceRequirements :: PreparedPipelineResult -> String -> String -> IO [(String, String)]
+programInterfaceRequirements prepared unit owner = do
+  fresh <- either fail pure (selectedHomeRequirements (pprDependencies prepared) unit owner)
+  let exact = [(importedUnit,name)
+        | compilation <- maybe [] pure (pprExactCompilation prepared)
+        , ((sourceUnit,sourceName,False), edges) <- compilationImports compilation
+        , sourceUnit == unit, sourceName == owner
+        , (_,name,False,importedUnit) <- edges]
+  pure (nub (fresh ++ exact))
 
 exactProgramProductVersion :: ExactScope -> String -> String -> String -> BS.ByteString -> BS.ByteString -> BS.ByteString -> String
 exactProgramProductVersion scope unit owner source =
@@ -1830,7 +1834,9 @@ checkedDisplayRecipeWithInputs generic admission template = do
     _ -> fail "display requires one exact bind effect-row pin"
   withImports <- replaceRecipeMarker "default (Int, Double, Text)\n"
     ("import qualified Tidepool.Inspection as TidepoolInspection\n"
-      ++ (if generic then "import qualified \"ghc-internal\" GHC.Internal.Types as TidepoolProgramTypes\nimport qualified \"text\" Data.Text as TidepoolProgramText\n" else "")
+      ++ (if generic then "import qualified " ++ show (unitString (moduleUnit (nameModule intTyConName)))
+        ++ " " ++ moduleNameString (moduleName (nameModule intTyConName))
+        ++ " as TidepoolProgramTypes\nimport qualified \"text\" Data.Text as TidepoolProgramText\n" else "")
       ++ concatMap (\(name, binders) -> "import " ++ name ++ " (" ++ intercalate ", " (map renderProgramBinder binders) ++ ")\n")
         (displayValueImports admission) ++ "default (Int, Double, Text)\n") template
   unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` withImports)
