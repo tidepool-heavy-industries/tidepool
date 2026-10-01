@@ -684,6 +684,20 @@ impl ArtifactView {
         entries.sort_by(|a, b| a.descriptor.owner.cmp(&b.descriptor.owner));
         entries
     }
+    /// Explicitly retained roots, excluding their hidden dependency closure.
+    pub(crate) fn root_entries(&self) -> Vec<Arc<ArtifactEntry>> {
+        let state = self.0.inventory.0.lock().expect("inventory lock");
+        state.view_queries.fetch_add(1, Ordering::Relaxed);
+        let entries = self
+            .roots()
+            .iter()
+            .filter_map(|id| state.payloads.get(id).cloned())
+            .collect::<Vec<_>>();
+        state
+            .entry_handle_copies
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+        entries
+    }
     pub(crate) fn entries_for_owners(
         &self,
         owners: impl Iterator<Item = ExactModuleIdentity>,

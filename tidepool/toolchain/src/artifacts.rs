@@ -898,7 +898,8 @@ impl ModuleCandidateOffer {
                         )
                     })
                     .map_or(planned.parsed_plan.items().len(), |offset| index + offset);
-                admissions.extend(initial.validate_outputs_in_context(&segment_root, &context)?);
+                admissions
+                    .extend(program_request.validate_outputs_in_context(&segment_root, &context)?);
                 while index < end {
                     program_request = program_request
                         .in_program_context(&root.join("program-inputs"), context.clone())?;
@@ -911,10 +912,10 @@ impl ModuleCandidateOffer {
                         .expect("exact program offer")
                         .validate_outputs(&directory)?;
                     context = self.admit_program_support(
+                        &mut program_request,
                         context,
                         &output,
                         &source_admissions,
-                        initial.producer_sha256,
                     )?;
                     admissions.extend(source_admissions);
                     let generation = match &planned.slots[index] {
@@ -943,10 +944,10 @@ impl ModuleCandidateOffer {
                             .expect("exact program offer")
                             .validate_outputs(&directory)?;
                         context = self.admit_program_support(
+                            &mut program_request,
                             context,
                             &output,
                             &source_admissions,
-                            initial.producer_sha256,
                         )?;
                         admissions.extend(source_admissions);
                         context = self.admit_program_value(
@@ -1151,10 +1152,10 @@ impl ModuleCandidateOffer {
 
     fn admit_program_support(
         &self,
+        request: &mut crate::declaration_context::ExactCompilationRequest,
         context: Arc<crate::declaration_join::ExactDeclarationContext>,
         output: &ProgramNativeOutput,
         admissions: &[crate::declaration_context::ExactSourceAdmission],
-        producer: [u8; 32],
     ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
         let module = extract_module_name(&output.source).ok_or_else(|| {
             CompileError::ExtractFailed("program support output has no target owner".into())
@@ -1166,24 +1167,7 @@ impl ModuleCandidateOffer {
             .filter(|product| product.owner().module != module)
             .cloned()
             .collect::<Vec<_>>();
-        let mut imports = BTreeMap::new();
-        for admission in admissions {
-            for (owner, requirements) in &admission.exact_imports {
-                if imports
-                    .insert(owner.clone(), requirements.clone())
-                    .is_some_and(|old| old != *requirements)
-                {
-                    return Err(CompileError::ExtractFailed(
-                        "program support original changed exact imports".into(),
-                    ));
-                }
-            }
-        }
-        Ok(Arc::new(
-            (*context)
-                .clone()
-                .extend_checked_original_products(producer, &support, &imports)?,
-        ))
+        request.admit_program_support(context, &support, admissions)
     }
 
     fn admit_program_value(

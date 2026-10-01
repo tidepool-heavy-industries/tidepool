@@ -46,6 +46,8 @@ pub(crate) struct ExactCompilationRequest {
     pub(crate) producer_sha256: [u8; 32],
     pub(crate) artifacts: Vec<DeclarationArtifact>,
     pub(crate) groups: Arc<[PendingCertifiedGroup]>,
+    // Only current-program source-selected support can add these roots.
+    program_support: Option<ArtifactView>,
 }
 
 /// A successful compiler transaction's actual generated source, bound to its
@@ -83,6 +85,72 @@ pub(crate) struct ExactProductAdmission<'a> {
 }
 
 impl ExactSourceAdmission {
+    pub(crate) fn home_imports(
+        &self,
+    ) -> Result<BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>, CompileError> {
+        let mut imports = BTreeMap::new();
+        for node in self.evidence.modules.iter().filter(|node| !node.boot) {
+            if !self
+                .evidence
+                .sources
+                .iter()
+                .any(|source| source.path == node.source)
+            {
+                return Err(failure(
+                    "original source import owner lacks its captured source",
+                ));
+            }
+            let owner = identity(&node.unit, &node.module);
+            let mut requirements = self
+                .exact_imports
+                .get(&owner)
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            for edge in &node.imports {
+                let Some(selected) = &edge.selected else {
+                    continue;
+                };
+                if !matches!(&edge.qualifier, crate::cache::ImportQualifier::Unqualified)
+                    && !matches!(&edge.qualifier,
+                        crate::cache::ImportQualifier::ThisUnit(unit) if unit == &node.unit)
+                {
+                    return Err(failure("selected home import has another unit qualifier"));
+                }
+                let selected_owners = self
+                    .evidence
+                    .modules
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.source == *selected
+                            && candidate.module == edge.module
+                            && candidate.boot == edge.boot
+                            && candidate.unit == node.unit
+                            && self
+                                .evidence
+                                .sources
+                                .iter()
+                                .any(|source| source.path == *selected)
+                    })
+                    .collect::<Vec<_>>();
+                let [selected_owner] = selected_owners.as_slice() else {
+                    return Err(failure(
+                        "selected home import lacks one captured source owner",
+                    ));
+                };
+                requirements.insert(identity(&selected_owner.unit, &selected_owner.module));
+            }
+            if imports
+                .insert(owner, requirements.into_iter().collect())
+                .is_some()
+            {
+                return Err(failure("duplicate original source import owner"));
+            }
+        }
+        Ok(imports)
+    }
+
     pub(crate) fn validate_ineligible_evidence(&self, bytes: &[u8]) -> Result<(), CompileError> {
         let mut expected: crate::cache::DependencyEvidence =
             serde_json::from_slice(&self.evidence_bytes).map_err(failure)?;
@@ -178,7 +246,76 @@ impl ExactCompilationRequest {
             producer_sha256: self.producer_sha256,
             artifacts: materialized.artifacts,
             groups: groups.into(),
+            program_support: self.program_support.clone(),
         })
+    }
+
+    pub(crate) fn admit_program_support(
+        &mut self,
+        context: Arc<ExactDeclarationContext>,
+        products: &[CertifiedRecoveryProduct],
+        admissions: &[ExactSourceAdmission],
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        let retained = self.context.artifact_view().entries_for_owners(
+            products
+                .iter()
+                .map(|product| identity(&product.owner().unit, &product.owner().module)),
+        );
+        let selected = self
+            .program_support
+            .as_ref()
+            .map(ArtifactView::root_entries)
+            .unwrap_or_default()
+            .iter()
+            .map(|entry| entry.descriptor.id)
+            .collect::<BTreeSet<_>>();
+        if retained
+            .values()
+            .any(|entry| !selected.contains(&entry.descriptor.id))
+        {
+            return Err(failure(
+                "program support cannot select a retained hidden owner",
+            ));
+        }
+        let mut imports = BTreeMap::new();
+        for admission in admissions {
+            for (owner, requirements) in admission.home_imports()? {
+                if imports
+                    .insert(owner, requirements.clone())
+                    .is_some_and(|old| old != requirements)
+                {
+                    return Err(failure(
+                        "program support original changed selected home imports",
+                    ));
+                }
+            }
+        }
+        for product in products {
+            if !imports.contains_key(&identity(&product.owner().unit, &product.owner().module)) {
+                return Err(failure("program support lacks its fresh source admission"));
+            }
+        }
+        let context = Arc::new((*context).clone().extend_checked_original_products(
+            self.producer_sha256,
+            products,
+            &imports,
+        )?);
+        if products.is_empty() {
+            return Ok(context);
+        }
+        let entries = context.artifact_view().entries_for_owners(
+            products
+                .iter()
+                .map(|product| identity(&product.owner().unit, &product.owner().module)),
+        );
+        let fresh = context
+            .artifact_view()
+            .select_roots(entries.values().map(|entry| entry.descriptor.id).collect())?;
+        self.program_support = Some(match &self.program_support {
+            Some(previous) => previous.merge(&fresh)?,
+            None => fresh,
+        });
+        Ok(context)
     }
 
     pub(crate) fn admit_source(
@@ -341,6 +478,17 @@ impl ExactCompilationRequest {
             .iter()
             .map(|node| (node.owner.unit.as_str(), node.owner.module.as_str()))
             .collect();
+        let support_entries = self
+            .program_support
+            .as_ref()
+            .map(ArtifactView::root_entries)
+            .unwrap_or_default();
+        selected.extend(support_entries.iter().map(|entry| {
+            (
+                entry.descriptor.owner.unit.as_str(),
+                entry.descriptor.owner.module.as_str(),
+            )
+        }));
         if let Some(planned) = planned {
             selected.insert((planned.unit.as_str(), planned.module.as_str()));
         }
@@ -1248,6 +1396,7 @@ impl ExactDeclarationContext {
             producer_sha256: sha2::Sha256::digest(producer).into(),
             artifacts: materialized.artifacts,
             groups: groups.into(),
+            program_support: None,
         })
     }
 }
@@ -1330,6 +1479,320 @@ mod tests {
     use sha2::{Digest, Sha256};
     use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
 
+    fn support_product(module: &str) -> CertifiedRecoveryProduct {
+        let interface = format!("{module} interface").into_bytes();
+        let mut product = Vec::new();
+        ciborium::ser::into_writer(
+            &Value::Array(vec![
+                text("TPMOD"),
+                Value::Integer(1.into()),
+                Value::Array(vec![Value::Array(vec![
+                    text("fixture"),
+                    text(module),
+                    Value::Bytes(interface.clone()),
+                    Value::Array(vec![]),
+                ])]),
+            ]),
+            &mut product,
+        )
+        .unwrap();
+        let owner = CachedHomeOwner {
+            unit: "fixture".into(),
+            module: module.into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: Sha256::digest(&interface).into(),
+            product_sha256: Sha256::digest(&product).into(),
+        };
+        let certification =
+            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
+                .unwrap();
+        let mut packages = Vec::new();
+        ciborium::ser::into_writer(
+            &Value::Array(vec![
+                text("TPPKGROOTS"),
+                text("1"),
+                Value::Array(vec![
+                    text(&owner.unit),
+                    text(&owner.module),
+                    text(sha256(&interface)),
+                ]),
+                Value::Array(vec![]),
+            ]),
+            &mut packages,
+        )
+        .unwrap();
+        CertifiedRecoveryProduct::from_certification(
+            owner,
+            interface,
+            product,
+            packages,
+            certification,
+        )
+    }
+
+    fn support_admission(root: &Path) -> ExactSourceAdmission {
+        let modules = [
+            ("InstanceOwner", None),
+            ("InstanceRelay", Some("InstanceOwner")),
+        ];
+        let mut sources = Vec::new();
+        let mut nodes = Vec::new();
+        for (module, dependency) in modules {
+            let path = root.join(format!("{module}.hs"));
+            let source = format!("module {module} where\n");
+            std::fs::write(&path, &source).unwrap();
+            sources.push(crate::cache::SourceEvidence {
+                path: path.clone(),
+                sha256: sha256(source.as_bytes()),
+            });
+            nodes.push(crate::cache::ModuleEvidence {
+                unit: "fixture".into(),
+                module: module.into(),
+                boot: false,
+                source: path,
+                imports: dependency
+                    .into_iter()
+                    .map(|dependency| crate::cache::ModuleImportEvidence {
+                        qualifier: crate::cache::ImportQualifier::Unqualified,
+                        module: dependency.into(),
+                        boot: false,
+                        selected: Some(root.join(format!("{dependency}.hs"))),
+                    })
+                    .collect(),
+                product: crate::cache::ProductAvailability::Ready,
+            });
+        }
+        let evidence = crate::cache::DependencyEvidence {
+            version: 4,
+            cache_safe: true,
+            selection_complete: true,
+            sources,
+            resolutions: vec![],
+            packages: vec![],
+            modules: nodes,
+        };
+        ExactSourceAdmission {
+            witness: ExactSourceWitness {
+                source_path: root.join("Target.hs"),
+                source_sha256: [3; 32],
+            },
+            evidence_bytes: serde_json::to_vec(&evidence).unwrap(),
+            evidence,
+            exact_imports: BTreeMap::new(),
+        }
+    }
+
+    fn program_request(
+        root: &Path,
+        context: Arc<ExactDeclarationContext>,
+    ) -> ExactCompilationRequest {
+        let manifest = root.join("scope");
+        std::fs::write(&manifest, b"scope").unwrap();
+        ExactCompilationRequest {
+            context,
+            manifest,
+            request_sha256: sha256(b"scope"),
+            semantic_sha256: [1; 32],
+            producer_sha256: [2; 32],
+            artifacts: vec![],
+            groups: Arc::from([]),
+            program_support: None,
+        }
+    }
+
+    fn import_receipt(root: &Path, request: &ExactCompilationRequest, imported: &str) -> PathBuf {
+        let directory = root.join(format!("receipt-{imported}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = "module Consumer where\n";
+        let path = root.join("Consumer.hs");
+        std::fs::write(&path, source).unwrap();
+        let snapshot = directory.join("source.hs");
+        std::fs::write(&snapshot, source).unwrap();
+        let evidence = crate::cache::DependencyEvidence {
+            version: 4,
+            cache_safe: true,
+            selection_complete: true,
+            sources: vec![crate::cache::SourceEvidence {
+                path: path.clone(),
+                sha256: sha256(source.as_bytes()),
+            }],
+            resolutions: vec![],
+            packages: vec![],
+            modules: vec![crate::cache::ModuleEvidence {
+                unit: "fixture".into(),
+                module: "Consumer".into(),
+                boot: false,
+                source: path.clone(),
+                imports: vec![],
+                product: crate::cache::ProductAvailability::Ready,
+            }],
+        };
+        let value = Value::Array(vec![
+            text("TPEXACTCOMPILE"),
+            text("1"),
+            text(&request.request_sha256),
+            text(hex(&request.semantic_sha256)),
+            path_value(&path).unwrap(),
+            text(sha256(source.as_bytes())),
+            path_value(&snapshot).unwrap(),
+            text(serde_json::to_string(&evidence).unwrap()),
+            Value::Array(vec![Value::Array(vec![
+                text("fixture"),
+                text("Consumer"),
+                Value::Bool(false),
+                Value::Array(vec![Value::Array(vec![
+                    text("none"),
+                    text(imported),
+                    Value::Bool(false),
+                    text("fixture"),
+                ])]),
+            ])]),
+        ]);
+        let receipt = directory.join("receipt.cbor");
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+        std::fs::write(&receipt, bytes).unwrap();
+        receipt
+    }
+
+    #[test]
+    fn program_support_retains_selected_home_edges_without_public_exposure() {
+        let directory = tempfile::tempdir().unwrap();
+        let hidden = support_product("Hidden");
+        let baseline = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_checked_original_products([2; 32], &[hidden], &BTreeMap::new())
+                .unwrap(),
+        );
+        let mut request = program_request(directory.path(), baseline.clone());
+        let admission = support_admission(directory.path());
+        let context = request
+            .admit_program_support(
+                baseline.clone(),
+                &[
+                    support_product("InstanceOwner"),
+                    support_product("InstanceRelay"),
+                ],
+                &[admission],
+            )
+            .unwrap();
+        assert!(context.lexical_graph().is_empty());
+        assert!(baseline.lexical_graph().is_empty());
+        let relay = context
+            .artifact_view()
+            .entries_for_owners(std::iter::once(identity("fixture", "InstanceRelay")));
+        assert_eq!(
+            relay[&identity("fixture", "InstanceRelay")].requirements,
+            vec![identity("fixture", "InstanceOwner")]
+        );
+        let effective = request
+            .in_program_context(&directory.path().join("program-inputs"), context)
+            .unwrap();
+        let receipt = import_receipt(directory.path(), &effective, "InstanceRelay");
+        assert!(effective
+            .validate_receipt(&receipt, None, &effective.context)
+            .is_ok());
+        let receipt = import_receipt(directory.path(), &effective, "Hidden");
+        assert!(effective
+            .validate_receipt(&receipt, None, &effective.context)
+            .is_err());
+    }
+
+    #[test]
+    fn program_support_refuses_retained_hidden_owner_and_forged_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let products = [
+            support_product("InstanceOwner"),
+            support_product("InstanceRelay"),
+        ];
+        let baseline = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_checked_original_products([2; 32], &products, &BTreeMap::new())
+                .unwrap(),
+        );
+        let mut request = program_request(directory.path(), baseline.clone());
+        assert!(request
+            .admit_program_support(baseline, &products, &[support_admission(directory.path())])
+            .is_err());
+        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let mut request = program_request(directory.path(), empty.clone());
+        let mut forged = support_admission(directory.path());
+        forged.evidence.modules[0].source = directory.path().join("AnotherOwner.hs");
+        assert!(request
+            .admit_program_support(empty, &products, &[forged])
+            .is_err());
+    }
+
+    #[test]
+    fn program_support_refuses_conflicting_selected_edges() {
+        let directory = tempfile::tempdir().unwrap();
+        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let mut request = program_request(directory.path(), empty.clone());
+        let original = support_admission(directory.path());
+        let mut changed = support_admission(directory.path());
+        changed.evidence.modules[1].imports.clear();
+        assert!(request
+            .admit_program_support(
+                empty,
+                &[
+                    support_product("InstanceOwner"),
+                    support_product("InstanceRelay")
+                ],
+                &[original, changed]
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn program_support_dependency_closure_does_not_select_hidden_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let hidden = support_product("Hidden");
+        let context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products([2; 32], &[hidden], &BTreeMap::new())
+            .unwrap();
+        let context = Arc::new(
+            context
+                .extend_checked_original_products(
+                    [2; 32],
+                    &[support_product("InstanceRelay")],
+                    &BTreeMap::from([(
+                        identity("fixture", "InstanceRelay"),
+                        vec![identity("fixture", "Hidden")],
+                    )]),
+                )
+                .unwrap(),
+        );
+        let entries = context
+            .artifact_view()
+            .entries_for_owners(std::iter::once(identity("fixture", "InstanceRelay")));
+        let mut request = program_request(directory.path(), context.clone());
+        request.program_support = Some(
+            context
+                .artifact_view()
+                .select_roots(vec![
+                    entries[&identity("fixture", "InstanceRelay")].descriptor.id,
+                ])
+                .unwrap(),
+        );
+        assert_eq!(
+            request
+                .program_support
+                .as_ref()
+                .unwrap()
+                .descriptors()
+                .len(),
+            2
+        );
+        let receipt = import_receipt(directory.path(), &request, "InstanceRelay");
+        assert!(request.validate_receipt(&receipt, None, &context).is_ok());
+        let receipt = import_receipt(directory.path(), &request, "Hidden");
+        assert!(request.validate_receipt(&receipt, None, &context).is_err());
+        assert!(context.lexical_graph().is_empty());
+    }
+
     #[test]
     fn first_program_context_growth_materializes_and_checks_new_original() {
         let interface = b"interface".to_vec();
@@ -1391,6 +1854,7 @@ mod tests {
             producer_sha256: [2; 32],
             artifacts: vec![],
             groups: Arc::from([]),
+            program_support: None,
         };
         let root = directory.path().join("program-inputs");
         assert!(!root.exists());
@@ -1455,6 +1919,7 @@ mod tests {
             producer_sha256: [2; 32],
             artifacts,
             groups: Arc::from([]),
+            program_support: None,
         };
         let materialization_root = directory.path().join("program-inputs");
         let effective = request
