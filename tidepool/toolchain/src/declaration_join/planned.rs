@@ -150,11 +150,65 @@ pub(super) fn admit_authored_artifact_closure(
                     .map(|descriptor| descriptor.owner),
             );
         }
-        merge_admitted_source_imports(
-            &mut original_imports,
-            &admitted.home_imports()?,
-            &available_owners,
-        )?;
+        let source_imports = admitted.home_imports()?;
+        let source_owner = admitted
+            .evidence
+            .modules
+            .iter()
+            .find(|module| !module.boot && module.source == admitted.witness.source_path())
+            .map(|module| ExactModuleIdentity {
+                unit: module.unit.clone(),
+                module: module.module.clone(),
+            });
+        let direct_imports = source_owner
+            .as_ref()
+            .and_then(|owner| source_imports.get(owner))
+            .cloned()
+            .unwrap_or_default();
+        let inherited = context
+            .map(|context| {
+                context
+                    .lexical_graph()
+                    .iter()
+                    .map(|node| node.owner.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let missing_adjacency = direct_imports
+            .iter()
+            .filter(|owner| {
+                available_owners.contains(*owner)
+                    && !source_imports.contains_key(*owner)
+                    && !inherited.contains(*owner)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let adjacency_status = direct_imports
+            .iter()
+            .map(|owner| {
+                (
+                    owner,
+                    source_imports.contains_key(owner),
+                    available_owners.contains(owner),
+                    inherited.contains(owner),
+                )
+            })
+            .take(16)
+            .collect::<Vec<_>>();
+        tracing::debug!(
+            target: "tidepool_toolchain::planned_source_admission",
+            source_owner = ?source_owner,
+            home_import_owner_count = source_imports.len(),
+            source_owner_direct_import_count = direct_imports.len(),
+            source_owner_direct_imports = ?direct_imports.iter().take(16).collect::<Vec<_>>(),
+            source_owner_direct_imports_omitted = direct_imports.len().saturating_sub(16),
+            source_owner_adjacency_status = ?adjacency_status,
+            missing_adjacency_count = missing_adjacency.len(),
+            missing_adjacency = ?missing_adjacency.iter().take(16).collect::<Vec<_>>(),
+            missing_adjacency_omitted = missing_adjacency.len().saturating_sub(16),
+            "validated planned declaration source imports"
+        );
+        merge_admitted_source_imports(&mut original_imports, &source_imports, &available_owners)?;
     }
     let joined_interfaces =
         context.map_or_else(Vec::new, |context| context.joined_interfaces().to_vec());
