@@ -932,6 +932,12 @@ struct SuspendedCast {
     site: u64,
     receiver_continuation: ResidentHole,
     handler_realm: RealmId,
+    cleanup: Option<crate::resident_workbench::ParkedHoleAbortGuard>,
+}
+
+struct PendingActorProgram {
+    outcome: ResidentOutcome,
+    cleanup: Option<crate::resident_workbench::ParkedHoleAbortGuard>,
 }
 
 enum InteractivePark {
@@ -1257,7 +1263,7 @@ pub struct ResidentKernelBehavior<H, O> {
     /// An abstention's reason lives here and nowhere else.
     after_tool: crate::after_tool::AfterToolLog,
     forest_control: bool,
-    pending_program: Option<ResidentOutcome>,
+    pending_program: Option<PendingActorProgram>,
     pending_reply: Option<crate::RequestId>,
     /// The bounded reply-value preview `stage_request_reply` obtained for
     /// `pending_reply`, if any -- carried to the settlement notice minted
@@ -3670,7 +3676,15 @@ where
             // bindings, whatever `standing` now reads while the resumed
             // program is stabilized.
             self.outstanding_interactive = None;
-            self.pending_program = Some(outcome);
+            let cleanup = self.environment.runner.handoff_actor_continuation(
+                context.clone(), &outcome,
+            )?;
+            if let Some(suspended) = &mut self.suspended_cast {
+                // The previous Interactive hole was consumed by resume_live;
+                // its successor now has the pending program's exact guard.
+                suspended.cleanup.take();
+            }
+            self.pending_program = Some(PendingActorProgram { outcome, cleanup });
             self.pending_reply = Some(request);
             self.pending_reply_preview = reply_preview;
             Ok(())
@@ -7105,6 +7119,7 @@ where
                         site,
                         receiver_continuation,
                         handler_realm,
+                        cleanup: None,
                     },
                     outcome,
                 )
@@ -7121,6 +7136,7 @@ where
                     site,
                     receiver_continuation,
                     handler_realm,
+                    cleanup: None,
                 },
                 outcome,
             },
@@ -7142,6 +7158,7 @@ where
                     site,
                     receiver_continuation,
                     handler_realm,
+                    cleanup: _cleanup,
                 },
             outcome,
         } = settlement;
@@ -9059,7 +9076,20 @@ where
                         // The cancellation landed: this request no longer owes
                         // `respond` bindings.
                         self.outstanding_interactive = None;
-                        self.pending_program = Some(outcome);
+                        let cleanup = self
+                            .environment
+                            .runner
+                            .handoff_actor_continuation(context.clone(), &outcome)
+                            .map_err(|error| {
+                                workbench_failure_after_operations(
+                                    &cursor.receipts,
+                                    cursor.index,
+                                    request.items.len(),
+                                    error,
+                                    cursor.unit.operations.clone(),
+                                )
+                            })?;
+                        self.pending_program = Some(PendingActorProgram { outcome, cleanup });
                         self.pending_cancellation = Some(request_id);
                         cursor.receipts.push(WorkbenchItemReceipt {
                             diagnostics: Vec::new(),
@@ -10807,35 +10837,61 @@ where
                 return Ok(KernelStep::Continue(()));
             }
             let context = self.context(kernel.identity());
-            let outcome = self
-                .pending_program
-                .take()
-                .ok_or_else(|| KernelBehaviorError {
-                    detail: "resident actor resumed without a pending Haskell action".into(),
-                })?;
-            let step = if let Some(suspended) = self.suspended_cast.take() {
-                self.advance_cast_handler(
-                    kernel,
-                    &context,
-                    &crate::CallAncestry::begin(context.actor),
-                    suspended,
-                    outcome,
-                )
-                .await
-                .map_err(Self::failure)
-            } else {
-                self.stabilize_program(
-                    kernel,
-                    &context,
-                    &crate::CallAncestry::begin(context.actor),
-                    outcome,
-                    None,
-                )
-                .await
-                .map_err(Self::failure)
+            let PendingActorProgram { outcome, cleanup } =
+                self.pending_program
+                    .take()
+                    .ok_or_else(|| KernelBehaviorError {
+                        detail: "resident actor resumed without a pending Haskell action".into(),
+                    })?;
+            let mut handler = self.suspended_cast.take();
+            if let Some(handler) = &mut handler {
+                handler.cleanup.take();
+            }
+            let resumed = async {
+                if let Some(suspended) = &handler {
+                    self.advance_cast_handler(
+                        kernel,
+                        &context,
+                        &crate::CallAncestry::begin(context.actor),
+                        SuspendedCast {
+                            site: suspended.site,
+                            receiver_continuation: suspended.receiver_continuation.clone(),
+                            handler_realm: suspended.handler_realm,
+                            cleanup: None,
+                        },
+                        outcome,
+                    )
+                    .await
+                    .map_err(Self::failure)
+                } else {
+                    self.stabilize_program(
+                        kernel,
+                        &context,
+                        &crate::CallAncestry::begin(context.actor),
+                        outcome,
+                        None,
+                    )
+                    .await
+                    .map_err(Self::failure)
+                }
+            };
+            let step = match &cleanup {
+                Some(cleanup) => cleanup.registration().scope(resumed).await,
+                None => resumed.await,
             };
             match step {
                 Ok(step) => {
+                    if let Some(cleanup) = cleanup {
+                        if let Some(suspended) = &mut self.suspended_cast {
+                            // A repeated AgentSession remains in the handler's
+                            // distinct realm. Keep exact cleanup until it finishes.
+                            suspended.cleanup = Some(cleanup);
+                        } else {
+                            // finish_receiver closed the handler realm; ordinary
+                            // actor standing now owns any remaining receiver hole.
+                            cleanup.disarm();
+                        }
+                    }
                     if let Some(request) = self.pending_reply.take() {
                         let reply_preview = self.pending_reply_preview.take();
                         // Only this actor can read its own descriptor and
@@ -10867,6 +10923,12 @@ where
                     Ok(step)
                 }
                 Err(error) => {
+                    if let Some(mut handler) = handler {
+                        // Failed stabilization still owes exact handler realm
+                        // retirement; actor root realm cleanup cannot cover it.
+                        handler.cleanup = cleanup;
+                        self.suspended_cast = Some(handler);
+                    }
                     self.pending_reply_preview = None;
                     if let Some(request) = self.pending_reply.take() {
                         let notifications = self.environment.requests.fail_reply_settlement(
@@ -10994,6 +11056,22 @@ where
             self.boot = None;
             self.sources.clear();
             let mut retained_errors = invocation_cleanup.into_iter().flatten().collect::<Vec<_>>();
+            self.pending_program.take();
+            if let Some(suspended) = self.suspended_cast.take() {
+                if let Err(error) = self
+                    .environment
+                    .runner
+                    .close_realm_wait(
+                        context.clone(),
+                        suspended.handler_realm,
+                        deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    )
+                    .await
+                {
+                    retained_errors.push(error.to_string());
+                }
+                drop(suspended);
+            }
             for retained in std::mem::take(&mut self.retained_replacements) {
                 let placement = retained.placement;
                 drop(retained);

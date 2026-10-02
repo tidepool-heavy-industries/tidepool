@@ -1168,11 +1168,19 @@ impl ParkedHoleAbortGuard {
 
     /// The owning checkout is in hand: the hole's fate is now decided
     /// synchronously within it, so no background cleanup is needed.
-    fn disarm(self) {
+    pub(crate) fn disarm(self) {
         let mut state = self.shared.state.lock();
         *state = ParkedHoleState::Settled;
         drop(state);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContinuationHandoffFailure {
+    WrongOwner,
+    Abandoned,
+    Settled,
+    NotOwned,
 }
 
 impl Drop for ParkedHoleAbortGuard {
@@ -3043,6 +3051,13 @@ impl<H, O> ResidentActorWorkbench<H, O> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
+    #[error("actor continuation handoff refused: actor {actor:?}, placement {placement:?}, continuation {continuation}, reason {reason:?}")]
+    ContinuationHandoff {
+        actor: crate::ActorRef,
+        placement: crate::ActorPlacement,
+        continuation: String,
+        reason: ContinuationHandoffFailure,
+    },
     #[error("actor retired before machine admission: {0:?}")]
     RetiredBeforeAdmission(crate::ActorTerminal),
     #[error(transparent)]
@@ -7344,6 +7359,69 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    /// Move only the returned actor-program successor out of a hosted cell's
+    /// cleanup set. The target guard is established before the source releases
+    /// its exact id; all other cell continuations remain owned by the cell.
+    pub(crate) fn handoff_actor_continuation(
+        &self,
+        context: crate::ActorSessionContext,
+        outcome: &ResidentOutcome,
+    ) -> Result<Option<ParkedHoleAbortGuard>, ResidentActorWorkbenchError> {
+        let Some(cont_id) = outcome_continuation_id(outcome) else {
+            return Ok(None);
+        };
+        let reason = "actor program abandoned before continuation settlement".to_owned();
+        let source = SLOT_CONTINUATION_OWNER.try_with(Clone::clone).ok();
+        let Some(source) = source else {
+            return Ok(Some(ParkedHoleAbortGuard::with_latest(
+                &self.access,
+                context,
+                Some(cont_id),
+                reason,
+            )));
+        };
+        let refusal = |reason| ResidentActorWorkbenchError::ContinuationHandoff {
+            actor: context.actor,
+            placement: context.placement,
+            continuation: cont_id.clone(),
+            reason,
+        };
+        let exact_owner = source.0.owner == Some((context.actor, context.placement));
+        let private_owner = source
+            .0
+            .retained_authority
+            .as_ref()
+            .and_then(|authority| {
+                authority.downcast_ref::<crate::resident_actor::ExecutionResourceOwners>()
+            })
+            .is_some_and(|resources| resources.authorizes_cleanup_context(&context));
+        if !exact_owner && !private_owner {
+            return Err(refusal(ContinuationHandoffFailure::WrongOwner));
+        }
+        let mut state = source.0.state.lock();
+        let current = match &mut *state {
+            ParkedHoleState::Owned(current) => current,
+            ParkedHoleState::Abandoned(_) => {
+                return Err(refusal(ContinuationHandoffFailure::Abandoned))
+            }
+            ParkedHoleState::Settled => return Err(refusal(ContinuationHandoffFailure::Settled)),
+        };
+        if !current.contains(&cont_id) {
+            return Err(refusal(ContinuationHandoffFailure::NotOwned));
+        }
+        let target = ParkedHoleAbortGuard::with_retained_latest(
+            &self.access,
+            context.clone(),
+            Some(cont_id.clone()),
+            reason,
+            source.0.retained_authority.clone(),
+        );
+        current.remove(&cont_id);
+        tracing::info!(actor = ?context.actor, continuation = %cont_id,
+            remaining_cell_holes = current.len(), "actor continuation custody transferred");
+        Ok(Some(target))
+    }
+
     /// Establish the exact durable public surface before root readiness.
     pub(crate) async fn bind_durable_root_public_owner(
         &self,
@@ -18109,6 +18187,157 @@ mod request_tests {
                 "the parked hole was never aborted after the guard was dropped armed"
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn actor_continuation_handoff_preserves_successor_and_aborts_other_cell_holes() {
+        let (machines, mut context, source, _root) = actor_registry_fixture();
+        context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
+        let workbench =
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+        let runner = ResidentActorRunner::new(machines, source.clone());
+        let cell = ParkedHoleAbortGuard::with_latest(
+            &workbench.access,
+            context.clone(),
+            None,
+            "test cell abandoned".into(),
+        );
+        let registration = cell.registration();
+        let (successor, other) = registration
+            .scope(async {
+                let mut outcomes = Vec::new();
+                for _ in 0..2 {
+                    let (block, verdict) = suspending_fragment();
+                    let step = workbench
+                        .begin_fragment_split(
+                            context.clone(),
+                            source.clone(),
+                            vec![],
+                            block,
+                            Some(verdict),
+                        )
+                        .await
+                        .expect("real native fragment parks");
+                    let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+                        panic!("expected native suspension");
+                    };
+                    outcomes.push(*outcome);
+                }
+                let other = outcomes.pop().unwrap();
+                (outcomes.pop().unwrap(), other)
+            })
+            .await;
+        let successor_id = outcome_continuation_id(&successor).unwrap();
+        let other_id = outcome_continuation_id(&other).unwrap();
+        let actor = registration
+            .sync_scope(|| runner.handoff_actor_continuation(context.clone(), &successor))
+            .expect("actor accepts exact successor")
+            .expect("suspended successor has cleanup");
+        assert_eq!(
+            registration.awaiting_acknowledgement(),
+            vec![other_id.clone()]
+        );
+        let duplicate = registration
+            .sync_scope(|| runner.handoff_actor_continuation(context.clone(), &successor));
+        assert!(matches!(
+            duplicate,
+            Err(ResidentActorWorkbenchError::ContinuationHandoff {
+                reason: ContinuationHandoffFailure::NotOwned,
+                ..
+            })
+        ));
+        assert_eq!(
+            registration.awaiting_acknowledgement(),
+            vec![other_id.clone()]
+        );
+        drop(cell);
+        let inspect = |expected_actor: bool| {
+            let successor_id = successor_id.clone();
+            let other_id = other_id.clone();
+            let context = context.clone();
+            let workbench = &workbench;
+            async move {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let settled = workbench
+                            .access
+                            .with_machine(context.clone(), {
+                                let successor_id = successor_id.clone();
+                                let other_id = other_id.clone();
+                                move |session, _, _| {
+                                    let parked = session.parked_holes();
+                                    if expected_actor {
+                                        assert!(parked.contains(&successor_id.as_str()));
+                                    }
+                                    Ok(!parked.contains(&other_id.as_str())
+                                        && parked.contains(&successor_id.as_str())
+                                            == expected_actor)
+                                }
+                            })
+                            .await
+                            .expect("native cleanup checkout");
+                        if settled {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("exact cleanup settles");
+            }
+        };
+        inspect(true).await;
+        drop(actor);
+        inspect(false).await;
+    }
+
+    #[tokio::test]
+    async fn actor_continuation_handoff_refuses_abandoned_settled_and_foreign_owners() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let runner = ResidentActorRunner::new(machines, source);
+        let outcome = ResidentOutcome::Suspended {
+            output: vec![],
+            hole: ResidentHole::plain("successor"),
+            request: HaskellValue::Con(tidepool_repr::DataConId(0), vec![]),
+        };
+        for reason in [
+            ContinuationHandoffFailure::Abandoned,
+            ContinuationHandoffFailure::Settled,
+            ContinuationHandoffFailure::WrongOwner,
+        ] {
+            let state = match reason {
+                ContinuationHandoffFailure::Abandoned => {
+                    ParkedHoleState::Abandoned(["successor".into()].into_iter().collect())
+                }
+                ContinuationHandoffFailure::Settled => ParkedHoleState::Settled,
+                _ => ParkedHoleState::Owned(["successor".into()].into_iter().collect()),
+            };
+            let mut owner = context.placement;
+            if reason == ContinuationHandoffFailure::WrongOwner {
+                owner.lexical_scope = tidepool_codegen::scope::ScopeId(u64::MAX);
+            }
+            let guard = ParkedHoleAbortGuard {
+                shared: Arc::new(ParkedHoleAbortState {
+                    owner: Some((context.actor, owner)),
+                    abort: Arc::new(|_| {}),
+                    state: Mutex::new(state),
+                    reason: "test".into(),
+                    retained_authority: None,
+                }),
+            };
+            let registration = guard.registration();
+            let before = registration.awaiting_acknowledgement();
+            let error = registration
+                .sync_scope(|| runner.handoff_actor_continuation(context.clone(), &outcome))
+                .err()
+                .expect("refused handoff");
+            assert!(
+                matches!(error, ResidentActorWorkbenchError::ContinuationHandoff {
+                reason: actual, ..
+            } if actual == reason)
+            );
+            assert_eq!(registration.awaiting_acknowledgement(), before);
         }
     }
 
