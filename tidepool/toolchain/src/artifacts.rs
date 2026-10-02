@@ -2139,16 +2139,12 @@ fn checked_output_context(
         .filter(|product| product.owner().module != module)
         .cloned()
         .collect::<Vec<_>>();
-    Ok(Arc::new(
-        (*exact.context).clone().extend_checked_original_products(
-            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                &offer.producer,
-            )
-            .sha256(),
-            &support,
-            &source_admission.exact_imports,
-        )?,
-    ))
+    let mut request = exact.clone();
+    request.admit_program_support(
+        exact.context.clone(),
+        &support,
+        std::slice::from_ref(source_admission),
+    )
 }
 
 fn merge_package_closure(
