@@ -241,6 +241,12 @@ where
 /// return no keys even when their static Haskell vocabulary exists.
 pub trait InstalledEffectSupport {
     fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey>;
+
+    /// Families this instance recognizes, including inert implementations.
+    /// Nominal dispatch stops at the first recognizer in the installed stack.
+    fn handled_effect_families(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+        self.installed_effect_support()
+    }
 }
 
 impl InstalledEffectSupport for frunk::HNil {
@@ -254,7 +260,18 @@ impl<H: InstalledEffectSupport, T: InstalledEffectSupport> InstalledEffectSuppor
 {
     fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
         let mut keys = self.head.installed_effect_support();
+        let shadowed = self.head.handled_effect_families();
         for key in self.tail.installed_effect_support() {
+            if !shadowed.contains(&key) && !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        keys
+    }
+
+    fn handled_effect_families(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+        let mut keys = self.head.handled_effect_families();
+        for key in self.tail.handled_effect_families() {
             if !keys.contains(&key) {
                 keys.push(key);
             }
@@ -267,11 +284,19 @@ impl<H: InstalledEffectSupport> InstalledEffectSupport for std::sync::Arc<H> {
     fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
         (**self).installed_effect_support()
     }
+
+    fn handled_effect_families(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+        (**self).handled_effect_families()
+    }
 }
 
 impl<H: InstalledEffectSupport> InstalledEffectSupport for parking_lot::Mutex<H> {
     fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
         self.lock().installed_effect_support()
+    }
+
+    fn handled_effect_families(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+        self.lock().handled_effect_families()
     }
 }
 

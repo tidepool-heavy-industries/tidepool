@@ -1896,6 +1896,11 @@ mod tests {
             active_stack.installed_effect_support(),
             vec![exomonad_tool::ActorEffectKey::RepoEvent.into()]
         );
+        let shadowed = frunk::hlist![
+            RepoEventHandler::with_source(Box::new(InertObservationSource), EventConfig::default()),
+            RepoEventHandler::with_source(Box::new(Active), EventConfig::default())
+        ];
+        assert!(shadowed.installed_effect_support().is_empty());
     }
 
     fn commit_event(id: i64, tree: &str, oid: &str) -> EvRepositoryEvent {
@@ -3386,9 +3391,13 @@ mod tests {
 }
 
 impl tidepool_mcp::InstalledEffectSupport for RepoEventHandler {
+    fn handled_effect_families(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+        vec![exomonad_tool::ActorEffectKey::RepoEvent.into()]
+    }
+
     fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
         if self.state.lock().source.lock().supports_repository_events() {
-            vec![exomonad_tool::ActorEffectKey::RepoEvent.into()]
+            self.handled_effect_families()
         } else {
             Vec::new()
         }
