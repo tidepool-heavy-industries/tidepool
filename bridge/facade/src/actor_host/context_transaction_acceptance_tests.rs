@@ -254,15 +254,22 @@ fn has_user_text(request: &ResponsesRequest, expected: &str) -> bool {
 
 fn root_context_state(fixture: &RunningBrowserHost) -> harness::context::ContextRequestState {
     let store = fixture.runtime.store();
-    let path = AgentPath("/root".into());
-    let head = store.agent(&path).unwrap().unwrap().head_request.unwrap();
+    let identity = harness::embedding::HostIdentity {
+        run: runtime_namespace(&fixture.campaign.config.run_root),
+        actor: AgentPath("/root".into()),
+        incarnation: fixture.campaign.actor.identity().incarnation.0.to_string(),
+    };
+    let head = store
+        .embedded_agent_head(&identity)
+        .unwrap()
+        .expect("embedded actor has a committed conversation head");
     store
         .context_request_state(
             &head,
             &harness::model::ConversationIdentity::Embedded {
-                run: runtime_namespace(&fixture.campaign.config.run_root),
-                actor: path,
-                incarnation: fixture.campaign.actor.identity().incarnation.0.to_string(),
+                run: identity.run,
+                actor: identity.actor,
+                incarnation: identity.incarnation,
             },
         )
         .unwrap()
