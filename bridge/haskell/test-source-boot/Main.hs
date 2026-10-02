@@ -22,6 +22,7 @@ import GHC.Core qualified as Core
 import GHC.Types.Literal (Literal(..), LitNumType(..))
 import GHC.Types.Name (getOccString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
+import GHC.Utils.Logger (Logger, popLogHook)
 import GHC.Driver.Env (HscEnv(..), hsc_HPT)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt)
 import GHC.Unit.Finder (initFinderCache, addModuleToFinder)
@@ -720,6 +721,15 @@ exactExecutionHiddenInstance = withTiming $ withScratch $ \work -> do
       fail "hiding a class parent acquired its child quoter execution capability"
   putStrLn "execution instances: sealed quoter executes, fresh provider cannot borrow private orphan, failure recovers"
 
+-- The returned environment includes this cycle's collector. Removing it must
+-- leave the empty boot stack; an older collector would make another pop succeed.
+assertSingleDiagnosticCollector :: HscEnv -> IO ()
+assertSingleDiagnosticCollector environment = do
+  bootLogger <- evaluate (popLogHook (hsc_logger environment))
+  older <- try (evaluate (popLogHook bootLogger)) :: IO (Either SomeException Logger)
+  unless (case older of Left _ -> True; Right _ -> False) $
+    fail "compiler request retained diagnostic collectors from previous cycles"
+
 exactToOrdinary :: IO ()
 exactToOrdinary = withTiming $ withScratch $ \work -> do
   forM_ ["ExecutionClass.hs","ExecutionHiddenOrphan.hs","ExecutionSealedQuoter.hs"
@@ -757,6 +767,7 @@ exactToOrdinary = withTiming $ withScratch $ \work -> do
     let ordinaryQuote = do
           result <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
             (work </> "ExecutionClassQuoteTarget.hs") [work] Nothing
+          assertSingleDiagnosticCollector (prHscEnv (pprPipelineResult result))
           unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult result))
               && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult result)))))
               && not (isJust (lookupHpt (hsc_HPT (prHscEnv (pprPipelineResult result))) (mkModuleName "ExecutionHiddenOrphan")))
@@ -788,6 +799,7 @@ exactToOrdinary = withTiming $ withScratch $ \work -> do
     copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" (work </> "MetadataQuoteSupport.hs")
     afterCancel <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
       (work </> "MetadataQuotedTarget.hs") [work] Nothing
+    assertSingleDiagnosticCollector (prHscEnv (pprPipelineResult afterCancel))
     unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult afterCancel))
         && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult afterCancel)))))) $
       fail "ordinary request after cancellation reused the old helper executable"
