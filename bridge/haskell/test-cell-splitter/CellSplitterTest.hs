@@ -4,7 +4,7 @@
 module Main where
 
 import Control.Monad (forM_, unless, when)
-import Control.Exception (SomeException, bracket, finally, throwIO, try)
+import Control.Exception (SomeException, bracket, finally, fromException, throwIO, try)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, tails)
@@ -65,6 +65,7 @@ main = getArgs >>= \case
   ["--function-value-iface"] -> functionValueInterfaceCompilation >> putStrLn "function value interface: 1 passed"
   ["--session-fixities"] -> sessionFixitiesCompilation >> putStrLn "session fixities: 1 passed"
   ["--unreachable-compile-time"] -> unreachableCompileTimeCompilation >> putStrLn "unreachable compile-time: 1 passed"
+  ["--checked-load-boundary"] -> checkedLoadBoundaryCompilation >> putStrLn "checked load boundary: 4 passed"
   _ -> runAllTests
 
 runAllTests :: IO ()
@@ -1089,6 +1090,68 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
     temporary = do
       parent <- getTemporaryDirectory
       (path, handle) <- openTempFile parent "tidepool-validation-memo"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+-- CHECK targets keep typed source failures while dependencies retain their
+-- own failure boundary, including when either participates in a boot cycle.
+checkedLoadBoundaryCompilation :: IO ()
+checkedLoadBoundaryCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let target = root </> "CheckedLoadTarget.hs"
+      dependency = root </> "CheckedLoadDependency.hs"
+      cycleA = root </> "CheckedLoadCycleA.hs"
+      cycleB = root </> "CheckedLoadCycleB.hs"
+      compile path = runPipelineSelected CheckedEnvironment path [root]
+      expectTargetFailure label path = do
+        result <- try (compile path) :: IO (Either SomeException CheckedEnvironmentResult)
+        case result of
+          Left failure | Just (_ :: SourceError) <- fromException failure -> pure ()
+          Left failure -> fail (label ++ " lost its typed target error: " ++ show failure)
+          Right _ -> fail (label ++ " accepted an authored duplicate instance")
+  writeFile target $ unlines
+    [ "module CheckedLoadTarget where"
+    , "data Custom = Custom"
+    , "instance Show Custom where show _ = \"first\""
+    , "instance Show Custom where show _ = \"second\""
+    ]
+  expectTargetFailure "leaf CHECK" target
+  writeFile dependency "module CheckedLoadDependency where\nvalue = missingDependencyName\n"
+  writeFile target "module CheckedLoadTarget where\nimport CheckedLoadDependency\nvalue' = value\n"
+  result <- try (compile target) :: IO (Either SomeException CheckedEnvironmentResult)
+  case result of
+    Left failure | Just (DependencySourceFailure _) <- fromException failure -> pure ()
+    Left failure -> fail ("dependency error changed ownership: " ++ show failure)
+    Right _ -> fail "CHECK accepted an invalid dependency"
+  writeFile (root </> "CheckedLoadCycleA.hs-boot")
+    "module CheckedLoadCycleA where\nvalue :: Int\n"
+  writeFile cycleB $ unlines
+    [ "module CheckedLoadCycleB where"
+    , "import {-# SOURCE #-} CheckedLoadCycleA (value)"
+    , "helper :: Int"
+    , "helper = value"
+    ]
+  let validCycle = unlines
+        [ "module CheckedLoadCycleA where"
+        , "import CheckedLoadCycleB (helper)"
+        , "value :: Int"
+        , "value = helper"
+        ]
+  writeFile cycleA (validCycle ++ unlines
+    [ "data Custom = Custom"
+    , "instance Show Custom where show _ = \"first\""
+    , "instance Show Custom where show _ = \"second\""
+    ])
+  expectTargetFailure "boot-cycle CHECK" cycleA
+  writeFile cycleA validCycle
+  writeFile target "module CheckedLoadTarget where\nimport CheckedLoadCycleA (value)\nresult = value\n"
+  _ <- compile target
+  pure ()
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-checked-load-boundary"
       hClose handle
       removeFile path
       createDirectory path

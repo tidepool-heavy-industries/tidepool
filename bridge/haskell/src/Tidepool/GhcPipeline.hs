@@ -22,7 +22,9 @@ module Tidepool.GhcPipeline
 import GHC hiding (typeKind)
 import GHC.Driver.Main (hscDesugar, batchMsg, hscTidy, hscCompileCoreExpr')
 import GHC.Driver.Pipeline (compileOne')
-import GHC.Driver.Hooks (hscCompileCoreExprHook)
+import GHC.Driver.Pipeline.Execute (runPhase)
+import GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..))
+import GHC.Driver.Hooks (hscCompileCoreExprHook, runPhaseHook)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Driver.Backend (backendGeneratesCode, backendWritesFiles)
 import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit)
@@ -48,7 +50,7 @@ import GHC.Utils.Logger (LogAction)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
-import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..), mkNodeKey)
+import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..), mkNodeKey, nodeDependencies)
 import GHC.Unit.Home (homeUnitId, isHomeUnit)
 import GHC.Unit.Types (unitString)
 import GHC.Data.Graph.Directed (flattenSCCs)
@@ -1625,25 +1627,54 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
     let plannedLoadGraph = cpLoadGraph plan
         (loadGraph, loadHowMuch) = case preparation of
           CheckOnly ->
-            -- Keep the graph intact and ask GHC for the target's dependencies.
-            -- Removing the source node by hand also invalidates its hs-boot
-            -- cycle; LoadDependenciesOf retains the boot interface without
-            -- compiling the metadata target itself. Session plans that defer
-            -- the target for value-interface injection have already removed it
-            -- and therefore keep their dependency-only LoadAllTargets graph.
-            case [ mkModule (homeUnitId (hsc_home_unit previous)) (ms_mod_name ms)
-                 | ModuleNode _ ms <- mgModSummaries' plannedLoadGraph
+            -- GHC 9.12's LoadDependenciesOf build plan also compiles its root.
+            -- An acyclic leaf target belongs to the checked frontend below;
+            -- exclude it from load rather than checking it twice. Preserve a
+            -- target needed by another node or its own hs-boot graph intact.
+            case [ (node, ms)
+                 | node@(ModuleNode _ ms) <- mgModSummaries' plannedLoadGraph
                  , ms_mod_name ms == targetName
                  , ms_hsc_src ms == HsSrcFile ] of
-              targetHomeModule : _ ->
-                (plannedLoadGraph, LoadDependenciesOf targetHomeModule)
+              (targetNode, summary) : _
+                | let targetKey = mkNodeKey targetNode
+                , not (any (\case
+                    ModuleNode _ ms -> ms_mod ms == ms_mod summary && ms_hsc_src ms == HsBootFile
+                    _ -> False) (mgModSummaries' plannedLoadGraph))
+                , not (any (elem targetKey . nodeDependencies False) (mgModSummaries' plannedLoadGraph)) ->
+                    (mkModuleGraph [node | node <- mgModSummaries' plannedLoadGraph
+                      , mkNodeKey node /= targetKey], LoadAllTargets)
+                | otherwise -> (plannedLoadGraph, LoadDependenciesOf
+                    (mkModule (homeUnitId (hsc_home_unit previous)) targetName))
               [] -> (plannedLoadGraph, LoadAllTargets)
           _ -> (plannedLoadGraph, LoadAllTargets)
+    targetLoadFailure <- liftIO (newIORef Nothing)
+    beforeLoad <- getSession
+    let originalPhaseHook = runPhaseHook (hsc_hooks beforeLoad)
+        runOriginalPhase :: TPhase a -> IO a
+        runOriginalPhase phase = case originalPhaseHook of
+          Nothing -> runPhase phase
+          Just (PhaseHook hook) -> hook phase
+        captureTargetFailure :: TPhase a -> IO a
+        captureTargetFailure phase@(T_Hsc _ summary)
+          | ms_mod_name summary == targetName, ms_hsc_src summary == HsSrcFile =
+              runOriginalPhase phase `catch` \failure -> do
+                writeIORef targetLoadFailure (Just (failure :: SourceError))
+                throwIO failure
+        captureTargetFailure phase = runOriginalPhase phase
+    -- A target in a boot cycle cannot be removed from GHC's build plan.
+    -- Preserve its typed frontend failure before the make driver renders it;
+    -- generated-instance recovery must never classify rendered diagnostics.
+    when (case preparation of CheckOnly -> True; PrepareStg -> False) $
+      setSession beforeLoad { hsc_hooks = (hsc_hooks beforeLoad)
+        { runPhaseHook = Just (PhaseHook captureTargetFailure) } }
     loadT0 <- monotonicTime
     loadResources <- beginResourceTiming timing
     loadFlag <- withLoadTargets (cpLoadTargets plan) $ load' mCache loadHowMuch dependencyDiagnostic (Just batchMsg)
                (scopeRetainedModuleGraph (mapMG canonicalizeLoadSummary loadGraph))
     loadT1 <- monotonicTime
+    afterLoad <- getSession
+    setSession afterLoad { hsc_hooks = (hsc_hooks afterLoad)
+      { runPhaseHook = originalPhaseHook } }
     endResourceTiming loadResources "compile" "ghc_load"
     -- 'ghc_load' phase (TIDEPOOL_TIMING): the 'load'' call alone, nothing
     -- else. FLAT — see 'ghc_setup' above; the two rows partition the work,
@@ -1681,6 +1712,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
               _ -> Map.empty
         pure sources
       Failed -> do
+        targetFailure <- liftIO (readIORef targetLoadFailure)
+        forM_ targetFailure (liftIO . throwIO)
         diagnostics <- liftIO (nub . reverse <$> readIORef errorRef)
         liftIO $ throwIO $ if null diagnostics
           then DependencyWorkerFailure
