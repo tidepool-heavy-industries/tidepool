@@ -15573,7 +15573,7 @@ mod request_tests {
                     total: 1,
                     source: "lookupRecovery <- pure (31 :: Int)".into(),
                 },
-                Some(generated_binds_verdict("lookupRecovery")),
+                Some(generated_bind_verdict("lookupRecovery")),
             )
             .await
             .expect("machine and compiler remain usable after cancellation");
