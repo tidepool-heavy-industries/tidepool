@@ -131,24 +131,89 @@ pub struct ExternalStorageStats {
     pub freed_objects: usize,
 }
 
+/// The registries joined by the complete machine root snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GcRootClass {
+    NativeStack,
+    TemporaryRust,
+    Exception,
+    Persistent,
+    Stowed,
+    Code,
+    Remembered,
+}
+
+impl GcRootClass {
+    const ALL: [Self; 7] = [
+        Self::NativeStack,
+        Self::TemporaryRust,
+        Self::Exception,
+        Self::Persistent,
+        Self::Stowed,
+        Self::Code,
+        Self::Remembered,
+    ];
+}
+
+/// A slot may have registrations in several classes. The bounded bitset
+/// preserves that fact instead of attributing it to an arbitrary first match.
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+pub struct GcRootClasses(u8);
+
+impl GcRootClasses {
+    pub fn contains(self, class: GcRootClass) -> bool {
+        self.0 & (1 << class as usize) != 0
+    }
+}
+
+impl std::fmt::Debug for GcRootClasses {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(
+                GcRootClass::ALL
+                    .into_iter()
+                    .filter(|class| self.contains(*class)),
+            )
+            .finish()
+    }
+}
+
+pub(crate) struct GcRootBoundaries([usize; 7]);
+
+impl GcRootBoundaries {
+    pub(crate) fn classify(&self, slots: &[*mut *mut u8], slot: usize) -> GcRootClasses {
+        let mut classes = GcRootClasses::default();
+        let mut start = 0;
+        for (class, end) in GcRootClass::ALL.into_iter().zip(self.0) {
+            if slots[start..end].iter().any(|root| *root as usize == slot) {
+                classes.0 |= 1 << class as usize;
+            }
+            start = end;
+        }
+        classes
+    }
+}
+
 /// One complete, point-in-time set of slots that collection must trace and
 /// rewrite. Remembered edges stay separately classified: minor collection
 /// consumes them as roots, while major collection reaches them through their
 /// live old/external owners rather than letting a dead owner root itself.
-///
-/// The constructor is private to [`MachineState::complete_root_snapshot`], so
-/// collectors cannot accidentally select only one registry. Stack roots are
-/// supplied by the checked frame walk; every ambient machine registry and the
-/// two VM tail-call slots are joined here in one owning entry point.
+/// Construction belongs to `MachineState::complete_root_snapshot`, which joins
+/// a checked native-frame walk with every ambient registry.
 pub(crate) struct GcRootSnapshot {
     slots: Vec<*mut *mut u8>,
     remembered_slots: Vec<*mut *mut u8>,
+    boundaries: GcRootBoundaries,
 }
 
 impl GcRootSnapshot {
-    pub(crate) fn into_slots(mut self) -> Vec<*mut *mut u8> {
+    pub(crate) fn into_slots(self) -> Vec<*mut *mut u8> {
+        self.into_classified_slots().0
+    }
+
+    pub(crate) fn into_classified_slots(mut self) -> (Vec<*mut *mut u8>, GcRootBoundaries) {
         self.slots.append(&mut self.remembered_slots);
-        self.slots
+        (self.slots, self.boundaries)
     }
 
     /// Strong roots for a full graph trace. Remembered slots describe edges
@@ -1701,16 +1766,32 @@ impl MachineState {
                 + usize::from(!self.prepared_exception.get().is_null()),
         );
         slots.extend_from_slice(stack_roots);
+        let stack_end = slots.len();
         self.extend_rust_roots(&mut slots);
+        let rust_end = slots.len() - usize::from(!self.prepared_exception.get().is_null());
+        let exception_end = slots.len();
         self.extend_persistent_roots(&mut slots);
+        let persistent_end = slots.len();
         self.extend_stowed_roots(&mut slots);
+        let stowed_end = slots.len();
         self.extend_code_roots(&mut slots);
+        let code_end = slots.len();
         let mut remembered_slots = Vec::with_capacity(self.remembered_slots.borrow().len());
         self.extend_remembered_slots(&mut remembered_slots);
+        let remembered_end = slots.len() + remembered_slots.len();
 
         GcRootSnapshot {
             slots,
             remembered_slots,
+            boundaries: GcRootBoundaries([
+                stack_end,
+                rust_end,
+                exception_end,
+                persistent_end,
+                stowed_end,
+                code_end,
+                remembered_end,
+            ]),
         }
     }
 
@@ -3770,22 +3851,30 @@ mod tests {
         ms.register_stowed_root(&mut stowed_value);
         ms.register_code_roots([&mut code_value as *mut *mut u8]);
         ms.register_remembered_slot(&mut remembered_value);
+        ms.register_persistent_root(&mut rust_value);
+        ms.prepared_exception.set(7usize as *mut u8);
 
         // SAFETY: every argument is the stable address of a live local pointer
         // slot for the duration of this assertion.
-        let slots = unsafe { ms.complete_root_snapshot(&[&mut stack_value]) }.into_slots();
+        let (slots, classes) =
+            unsafe { ms.complete_root_snapshot(&[&mut stack_value]) }.into_classified_slots();
 
-        assert_eq!(slots.len(), 6);
-        for expected in [
-            &mut stack_value as *mut *mut u8,
-            &mut rust_value,
-            &mut persistent_value,
-            &mut stowed_value,
-            &mut code_value,
-            &mut remembered_value,
+        assert_eq!(slots.len(), 8);
+        for (expected, class) in [
+            (&mut stack_value as *mut *mut u8, GcRootClass::NativeStack),
+            (&mut rust_value, GcRootClass::TemporaryRust),
+            (ms.prepared_exception.as_ptr(), GcRootClass::Exception),
+            (&mut persistent_value, GcRootClass::Persistent),
+            (&mut stowed_value, GcRootClass::Stowed),
+            (&mut code_value, GcRootClass::Code),
+            (&mut remembered_value, GcRootClass::Remembered),
         ] {
             assert!(slots.contains(&expected));
+            assert!(classes.classify(&slots, expected as usize).contains(class));
         }
+        let duplicated = classes.classify(&slots, &mut rust_value as *mut *mut u8 as usize);
+        assert!(duplicated.contains(GcRootClass::TemporaryRust));
+        assert!(duplicated.contains(GcRootClass::Persistent));
     }
 
     #[test]

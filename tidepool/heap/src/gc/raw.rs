@@ -20,6 +20,48 @@ pub struct CopyResult {
     pub bytes_copied: usize,
 }
 
+/// The readable slot that supplied a failed evacuation's managed reference.
+/// Object and descriptor addresses name already admitted owners; `value` is
+/// diagnostic data only and must never be dereferenced to describe a failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CopyEdge {
+    Root {
+        slot: usize,
+        value: usize,
+    },
+    ObjectField {
+        object: usize,
+        descriptor: usize,
+        offset: usize,
+        slot: usize,
+        value: usize,
+    },
+    ExternalSlot {
+        object: usize,
+        descriptor: usize,
+        payload: usize,
+        kind: ExternalStorageKind,
+        slot: usize,
+        value: usize,
+    },
+}
+
+/// The last indirection read from an authenticated object before failure.
+/// One hop suffices to identify its physical owner without retaining a graph.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CopyIndirection {
+    pub object: usize,
+    pub descriptor: usize,
+    pub state: DescriptorState,
+    pub target: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CopyFailureOrigin {
+    pub edge: CopyEdge,
+    pub indirection: Option<CopyIndirection>,
+}
+
 /// Stable descriptor owners and scratch for the prepared bump-region collector.
 /// Descriptor addresses are the header identities; object addresses are found
 /// afresh from the exact initialized region on every collection.
@@ -48,6 +90,8 @@ pub struct DescriptorSpace {
     /// begins; a full log is an integrity failure, never a mid-copy
     /// allocation.
     forwarding_log: Option<Vec<(usize, u64, u64)>>,
+    copy_failure: Option<CopyFailureOrigin>,
+    copy_indirection: Option<CopyIndirection>,
 }
 
 /// Registration checkpoint for a prepared-program install, opened by
@@ -69,6 +113,19 @@ struct OwnerLog {
 }
 
 impl DescriptorSpace {
+    /// First failed edge in the most recent copy. No allocation or additional
+    /// heap reads are needed to retain this bounded physical provenance.
+    pub fn copy_failure_origin(&self) -> Option<CopyFailureOrigin> {
+        self.copy_failure
+    }
+
+    fn record_copy_failure(&mut self, edge: CopyEdge) {
+        self.copy_failure.get_or_insert(CopyFailureOrigin {
+            edge,
+            indirection: self.copy_indirection,
+        });
+    }
+
     /// Open an undo log for registrations. Only one mark is open at a time;
     /// opening a new one discards any stale log.
     pub fn mark_owners(&mut self) -> OwnersMark {
@@ -137,6 +194,8 @@ impl DescriptorSpace {
             external_payloads: HashMap::new(),
             owner_log: None,
             forwarding_log: None,
+            copy_failure: None,
+            copy_indirection: None,
         })
     }
 
@@ -849,6 +908,8 @@ unsafe fn copy_prevalidated_from_source(
     external: Option<&dyn ExternalPayloadOwner>,
     whole_source: bool,
 ) -> Result<CopyResult, DescriptorTraceError> {
+    descriptors.copy_failure = None;
+    descriptors.copy_indirection = None;
     let source_bytes = source.bytes();
     let to_base = tospace.as_mut_ptr() as usize;
     let to_end = to_base
@@ -873,6 +934,7 @@ unsafe fn copy_prevalidated_from_source(
         let address = descriptors.root_slots[index];
         let slot = address as *mut *mut u8;
         let value = std::ptr::read(slot).cast::<u8>() as usize;
+        descriptors.copy_indirection = None;
         let relocated = evacuate_descriptor(
             value,
             source,
@@ -881,7 +943,14 @@ unsafe fn copy_prevalidated_from_source(
             &mut free,
             descriptors,
             admitted,
-        )?;
+        )
+        .map_err(|error| {
+            descriptors.record_copy_failure(CopyEdge::Root {
+                slot: address,
+                value,
+            });
+            error
+        })?;
         std::ptr::write(slot, relocated as *mut u8);
     }
     let mut scan = 0;
@@ -911,6 +980,7 @@ unsafe fn copy_prevalidated_from_source(
                         continue;
                     }
                     let value = std::ptr::read(slot).cast::<u8>() as usize;
+                    descriptors.copy_indirection = None;
                     let relocated = evacuate_descriptor(
                         value,
                         source,
@@ -919,7 +989,18 @@ unsafe fn copy_prevalidated_from_source(
                         &mut free,
                         descriptors,
                         admitted,
-                    )?;
+                    )
+                    .map_err(|error| {
+                        descriptors.record_copy_failure(CopyEdge::ExternalSlot {
+                            object: object as usize,
+                            descriptor: descriptor.initial_header_word(),
+                            payload: published as usize,
+                            kind,
+                            slot: slot as usize,
+                            value,
+                        });
+                        error
+                    })?;
                     std::ptr::write(slot, relocated as *mut u8);
                 }
             }
@@ -930,6 +1011,7 @@ unsafe fn copy_prevalidated_from_source(
                     return;
                 }
                 let value = std::ptr::read(slot).cast::<u8>() as usize;
+                descriptors.copy_indirection = None;
                 match evacuate_descriptor(
                     value,
                     source,
@@ -940,7 +1022,16 @@ unsafe fn copy_prevalidated_from_source(
                     admitted,
                 ) {
                     Ok(relocated) => std::ptr::write(slot, relocated as *mut u8),
-                    Err(error) => edge_error = Some(error),
+                    Err(error) => {
+                        descriptors.record_copy_failure(CopyEdge::ObjectField {
+                            object: object as usize,
+                            descriptor: descriptor.initial_header_word(),
+                            offset: slot as usize - object as usize,
+                            slot: slot as usize,
+                            value,
+                        });
+                        edge_error = Some(error);
+                    }
                 }
             })?;
             if let Some(error) = edge_error {
@@ -1097,6 +1188,12 @@ unsafe fn evacuate_descriptor(
             return Err(DescriptorTraceError::InvalidManagedTag { address, tag });
         }
         let stored_target = std::ptr::read(pointer.add(8).cast::<usize>());
+        descriptors.copy_indirection = Some(CopyIndirection {
+            object: address,
+            descriptor: descriptor.initial_header_word(),
+            state,
+            target: stored_target,
+        });
         let probe = if descriptor.kind() == ObjectKind::Thunk {
             stored_target
         } else {
@@ -1258,6 +1355,12 @@ unsafe fn resolve_updated(
                     });
                 }
                 let stored_target = std::ptr::read(current.add(8).cast::<usize>());
+                descriptors.copy_indirection = Some(CopyIndirection {
+                    object: address,
+                    descriptor: descriptor.initial_header_word(),
+                    state: actual_state,
+                    target: stored_target,
+                });
                 if let Some(owner) = admitted {
                     if let Some(reference) =
                         owner.admit((stored_target & !7) | usize::from(current_tag))?
@@ -1300,6 +1403,12 @@ unsafe fn resolve_updated(
                 });
             }
             let stored_target = std::ptr::read(current.add(8).cast::<usize>());
+            descriptors.copy_indirection = Some(CopyIndirection {
+                object: address,
+                descriptor: descriptor.initial_header_word(),
+                state: actual_state,
+                target: stored_target,
+            });
             if let Some(reference) = descriptors.static_reference(stored_target)? {
                 forward_updated_path(source, descriptors, reference)?;
                 return Ok(reference);
@@ -1379,6 +1488,12 @@ unsafe fn resolve_updated(
             return Err(DescriptorTraceError::UpdatedCycle { address });
         }
         let target = std::ptr::read(current.add(8).cast::<usize>());
+        descriptors.copy_indirection = Some(CopyIndirection {
+            object: address,
+            descriptor: descriptor.initial_header_word(),
+            state: actual_state,
+            target,
+        });
         if target == 0 {
             return Err(DescriptorTraceError::InvalidUpdatedTarget);
         }

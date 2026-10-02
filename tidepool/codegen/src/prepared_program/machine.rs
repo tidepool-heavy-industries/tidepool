@@ -4289,6 +4289,51 @@ mod tests {
     }
 
     #[test]
+    fn promotion_failure_classifies_the_original_persistent_sibling_root() {
+        // This slot outlives the machine that registers it. The invalid target
+        // is diagnostic data; neither the collector nor the capsule reads it.
+        let invalid = 0xdead_0008;
+        let mut corrupt = Box::new(invalid as *mut u8);
+        let (mut machine, _) = machine();
+        machine.machine.register_persistent_root(&mut *corrupt);
+        let mut builder = machine.managed_builder().unwrap();
+        let unit = builder.constructor(DataConId(900), &[]).unwrap();
+        let error = builder.finish(RealmId::ROOT, unit).unwrap_err();
+        let ExecutionError::Runtime(failure) = error else {
+            panic!("runtime failure")
+        };
+        let RuntimeError::IncompletePromotion(diagnostic) = &failure.cause else {
+            panic!("promotion failure")
+        };
+        assert_eq!(failure.disposition, MachineDisposition::Unavailable);
+        assert_eq!(
+            diagnostic.promotion.phase,
+            tidepool_heap::gc::promotion::PromotionPhase::SiblingFixup
+        );
+        assert_eq!(
+            diagnostic.promotion.cause,
+            tidepool_heap::execution_descriptor::DescriptorTraceError::InvalidManagedPointer {
+                address: invalid
+            }
+        );
+        assert!(diagnostic
+            .root_classes
+            .unwrap()
+            .contains(crate::machine_state::GcRootClass::Persistent));
+        assert_eq!(
+            diagnostic.promotion.origin,
+            Some(tidepool_heap::gc::raw::CopyFailureOrigin {
+                edge: tidepool_heap::gc::raw::CopyEdge::Root {
+                    slot: &mut *corrupt as *mut *mut u8 as usize,
+                    value: invalid
+                },
+                indirection: None,
+            })
+        );
+        assert_eq!(machine.machine.last_failure(), Some(failure));
+    }
+
+    #[test]
     fn managed_result_handle_allocation_failure_leaves_no_unowned_roots() {
         let (mut machine, program) = machine();
         let call = PreparedCallOptions {

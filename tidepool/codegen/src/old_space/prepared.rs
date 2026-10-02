@@ -3,16 +3,48 @@
 //! invocation boxes this owner, clears the machine-state borrow at teardown,
 //! and remains !Send so compiled-code custody stays on its owning thread.
 
-use crate::{context::VMContext, host_fns::RuntimeError, machine_state::MachineState};
+use crate::{
+    context::VMContext,
+    host_fns::{RetentionPromotionDiagnostic, RuntimeError},
+    machine_state::{GcRootBoundaries, MachineState},
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tidepool_heap::{
     descriptor_region::{DescriptorArena, DescriptorOldSpace, DescriptorSourceSpace},
     execution_descriptor::{DescriptorState, DescriptorTraceError, ObjectDescriptor},
     external_storage::ExternalPayloadOwner,
-    gc::promotion::{compact_descriptor_arenas, promote_and_fixup_with_external, PromotionFailure},
+    gc::{
+        promotion::{
+            compact_descriptor_arenas, promote_and_fixup_with_external, PromotionDiagnostic,
+            PromotionFailure,
+        },
+        raw::CopyEdge,
+    },
     managed_reference::{tag_of, tag_valid, untag},
 };
+
+fn incomplete_promotion(
+    promotion: PromotionDiagnostic,
+    roots: &[*mut *mut u8],
+    classes: &GcRootBoundaries,
+) -> RuntimeError {
+    let root_classes = match promotion.origin.map(|origin| origin.edge) {
+        Some(CopyEdge::Root { slot, .. }) => Some(classes.classify(roots, slot)),
+        _ => None,
+    };
+    RuntimeError::IncompletePromotion(RetentionPromotionDiagnostic {
+        promotion,
+        root_classes,
+    })
+}
+
+fn post_copy_failure(cause: DescriptorTraceError) -> RuntimeError {
+    RuntimeError::IncompletePromotion(RetentionPromotionDiagnostic {
+        promotion: PromotionDiagnostic::post_copy(cause),
+        root_classes: None,
+    })
+}
 
 struct Previous<'a>(&'a [DescriptorArena]);
 
@@ -201,7 +233,7 @@ impl super::OldSpace {
                 .current_failure()
                 .map_or(crate::host_fns::bad_pointer(), |failure| failure.cause));
         }
-        let snapshot = machine.complete_root_snapshot(&[]).into_slots();
+        let (snapshot, classes) = machine.complete_root_snapshot(&[]).into_classified_slots();
         let mut state = machine
             .take_gc_state()
             .ok_or_else(|| crate::host_fns::bad_pointer())?;
@@ -278,7 +310,9 @@ impl super::OldSpace {
             )
             .map_err(|error| match error {
                 PromotionFailure::Preparation(error) => preparation_error(error),
-                PromotionFailure::Incomplete(error) => RuntimeError::IncompletePromotion(error),
+                PromotionFailure::Incomplete(error) => {
+                    incomplete_promotion(error, &snapshot, &classes)
+                }
             })?;
 
             // The copy succeeded: the retiring arenas hold only forwarding
@@ -315,7 +349,7 @@ impl super::OldSpace {
                         }
                     })
                 })
-                .map_err(RuntimeError::IncompletePromotion)?;
+                .map_err(post_copy_failure)?;
             let after_bytes = copied.bytes_copied;
             Ok(PreparedCompactionStats {
                 before_bytes,
@@ -443,7 +477,7 @@ impl super::OldSpace {
         if already_stable {
             return Ok(());
         }
-        let roots = machine.complete_root_snapshot(&[]).into_slots();
+        let (roots, classes) = machine.complete_root_snapshot(&[]).into_classified_slots();
         let mut state = machine
             .take_gc_state()
             .ok_or_else(|| crate::host_fns::bad_pointer())?;
@@ -499,7 +533,9 @@ impl super::OldSpace {
             )
             .map_err(|error| match error {
                 PromotionFailure::Preparation(error) => preparation_error(error),
-                PromotionFailure::Incomplete(error) => RuntimeError::IncompletePromotion(error),
+                PromotionFailure::Incomplete(error) => {
+                    incomplete_promotion(error, &roots, &classes)
+                }
             })?;
             // Publish the consistent nursery before retention bookkeeping.
             // Any subsequent bookkeeping failure is terminal and preserves
@@ -513,9 +549,7 @@ impl super::OldSpace {
             machine.bump_gc_generation();
             machine
                 .retain_external_payloads(&copied.promoted_external_payloads)
-                .map_err(|error| {
-                    RuntimeError::IncompletePromotion(DescriptorTraceError::ExternalPayload(error))
-                })?;
+                .map_err(|error| post_copy_failure(DescriptorTraceError::ExternalPayload(error)))?;
             Ok(())
         })();
         machine.put_gc_state(state);

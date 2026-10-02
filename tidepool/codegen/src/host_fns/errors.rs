@@ -1,11 +1,22 @@
 //! Runtime failures and diagnostics for prepared execution.
 
 use crate::gc::frame_walker::FrameWalkError;
-use crate::machine_state::{current_machine, ExternalStorageKind, MachineDisposition};
+use crate::machine_state::{
+    current_machine, ExternalStorageKind, GcRootClasses, MachineDisposition,
+};
 use crate::prepared_control::CallStatus;
 
 /// Addresses below this are considered invalid (null page guard).
 pub(crate) const MIN_VALID_ADDR: u64 = 0x1000;
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{promotion}, root_classes={root_classes:?}")]
+pub struct RetentionPromotionDiagnostic {
+    pub promotion: tidepool_heap::gc::promotion::PromotionDiagnostic,
+    /// Present for an initial root failure. Field ownership is described by
+    /// the heap capsule's authenticated object/descriptor or external payload.
+    pub root_classes: Option<GcRootClasses>,
+}
 
 /// Runtime errors raised by JIT code via host functions.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -95,7 +106,7 @@ pub enum RuntimeError {
     /// complete sibling fixup. Both semispaces and descriptor owners must be
     /// retained through unwind; the invocation is permanently unavailable.
     #[error("incomplete retention promotion: {0}")]
-    IncompletePromotion(tidepool_heap::execution_descriptor::DescriptorTraceError),
+    IncompletePromotion(RetentionPromotionDiagnostic),
     /// Application exhausted its full-signature and prefix probes for an
     /// otherwise-owned callable header. The failing application has not
     /// invoked a target and leaves the machine reusable.
