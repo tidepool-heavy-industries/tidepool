@@ -456,6 +456,58 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
 }
 
 #[tokio::test]
+async fn notebook_failed_cells_preserve_completed_native_prefix() {
+    let campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let failed = dispatch_haskell_script(policy, include_str!("notebook_prefix_failure.hs")).await;
+    assert_eq!(failed["status"], "rejected", "{failed}");
+    let items = failed["items"].as_array().unwrap();
+    assert_eq!(items.len(), 4, "{failed}");
+    assert_eq!(items[0]["status"], "committed", "{failed}");
+    assert_eq!(items[1]["status"], "committed", "{failed}");
+    assert_eq!(items[2]["status"], "rejected", "{failed}");
+    assert_eq!(items[3]["status"], "notRun", "{failed}");
+    let recovered = committed(policy, "prefixValue").await;
+    assert_eq!(recovered["items"][0]["output"], "41", "{recovered}");
+    let missing_tail = dispatch_haskell_script(policy, "tailValue").await;
+    assert_eq!(missing_tail["status"], "rejected", "{missing_tail}");
+    assert!(
+        missing_tail.to_string().contains("not in scope"),
+        "{missing_tail}"
+    );
+    let failed = super::test_campaign::dispatch_haskell_script_result(
+        policy,
+        include_str!("notebook_prefix_runtime_failure.hs"),
+    )
+    .await
+    .expect_err("later native item must fail");
+    let exomonad_actor::ResidentToolError::Invocation(
+        exomonad_actor::KernelInvocationFailure::Workbench(failure),
+    ) = failed
+    else {
+        panic!("native failure classification required: {failed}");
+    };
+    assert_eq!(
+        failure
+            .diagnostic
+            .as_ref()
+            .expect("native failure diagnostic")
+            .phase,
+        tidepool_toolchain::failclass::Phase::Run
+    );
+    assert!(failure.receipts.iter().any(|receipt| receipt
+        .installed_bindings
+        .iter()
+        .any(|name| name == "runtimePrefix")));
+    let recovered = committed(policy, "runtimePrefix").await;
+    assert_eq!(recovered["items"][0]["output"], "51", "{recovered}");
+    let missing_tail = dispatch_haskell_script(policy, "runtimeTail").await;
+    assert_eq!(missing_tail["status"], "rejected", "{missing_tail}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn notebook_cell_prologue_applies_to_check_stage_and_execution() {
     let campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();

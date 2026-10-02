@@ -7,6 +7,8 @@ use crate::{OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchAdvance, Work
 
 #[cfg(test)]
 mod model_tests;
+#[cfg(test)]
+mod prefix_tests;
 
 /// Source and tool owners admitted once for this hosted execution. Compiler
 /// recipe observations are added by the workbench's original snapshot owner.
@@ -1239,8 +1241,8 @@ where
                     .expect("same after-tool invocation");
                 owned.state.effects.after_tool_active = false;
                 owned.state.cursor.running = None;
-                // A failed cleanup is an execution failure: it cannot publish the
-                // private writes or call the original result an acknowledged timeout.
+                // Failed cleanup remains an execution failure. Earlier completed
+                // machine items may survive; this result is never an acknowledged timeout.
                 if let Err(error) = &binding {
                     if matches!(
                         &answer,
@@ -1819,6 +1821,10 @@ where
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> Result<WorkbenchAdvance<Self>, KernelInvocationFailure> {
         owned.state.effects.invocation_work.close();
+        // Completed machine items belong to the continuing lexical session
+        // even when a later item fails. Publish their fixed private intent,
+        // retaining the original whole-cell result for context and child gates.
+        // The same publication decision still vetoes admitted cancellation.
         if owned.private.is_some() && private_publication_required(&result) {
             return Ok(WorkbenchAdvance::Park(Self::publish_owned_execution_task(
                 owned,
@@ -2016,17 +2022,23 @@ where
 fn private_publication_required(
     result: &Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
 ) -> bool {
+    let completed_prefix = |receipts: &[WorkbenchItemReceipt]| {
+        receipts
+            .iter()
+            .any(|receipt| receipt.status == WorkbenchItemStatus::Committed)
+    };
     let response = match result {
         Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
         | Ok(KernelStep::Stop {
             output: response, ..
         }) => response,
-        Err(_) => return false,
+        Err(failure) => return completed_prefix(&failure.receipts),
     };
-    !matches!(
-        response.status,
-        WorkbenchRunStatus::Rejected | WorkbenchRunStatus::RequestCancelled
-    )
+    match response.status {
+        WorkbenchRunStatus::Rejected => completed_prefix(&response.items),
+        WorkbenchRunStatus::RequestCancelled => false,
+        _ => true,
+    }
 }
 
 fn private_publication_failure(
