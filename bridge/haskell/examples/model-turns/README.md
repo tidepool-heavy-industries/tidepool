@@ -53,7 +53,15 @@ model for its next request with `setNextModel "executor"`. The argument is
 `Text`: the host resolves a configured alias first, then treats an unmatched
 value as a literal model identifier.
 Select its reasoning effort with `C.setNextEffort C.High`; `C.Effort` aliases
-the existing `ForkEffort` type.
+the existing `ForkEffort` type. Context, model, and effort changes commit
+together on whole-cell success. An effort change preserves the model and
+existing context prefix.
+
+The editable `Context` retains native evidence. Provider input for another
+model projects completed reasoning exchanges as attributed readable notes,
+including visible summaries and tool inputs/results. The Store keeps the
+originals. Pending exchanges, unknown provenance, and incompatible opaque
+compaction prevent switching; they are not converted into empty summaries.
 
 The returned `Context` has a bounded structural display, so a direct
 `getContext` or `modifyContext` cell result shows authored blocks and safe

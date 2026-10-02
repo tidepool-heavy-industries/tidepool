@@ -27,10 +27,10 @@ waits for completion before its caller continues to the next inference. The
 spec selects each notebook's scheduling and effect profile. The pause applies
 to that caller; it does not wait for actor-owned deferred children. Only a
 synchronous profile can include `ContextReadWrite`, which provides context
-editing and `setNextModel`.
+editing, `setNextModel`, and `setNextEffort`.
 
-Context and next-model edits staged by a synchronous cell commit together only
-when the whole cell succeeds. A failed cell does not commit those edits, but it
+Context, next-model, and next-effort edits staged by a synchronous cell commit
+together only when the whole cell succeeds. A failed cell does not commit those edits, but it
 cannot undo external effects already issued, such as a command or provider
 request. For parent curation followed by delegation, finish the synchronous
 parent invocation with `unfoldDeferred`; its actor-owned children then start
@@ -38,7 +38,14 @@ from the committed context. Do not await those children inside the invocation
 that creates them. `bridge/haskell/examples/model-turns/ContextWorkflow.hs`
 contains compiled examples of this workflow. `setNextModel` takes `Text`: the
 host resolves a configured alias first, then treats an unmatched value as a
-literal model identifier.
+literal model identifier. `C.setNextEffort C.High` changes the next request’s
+reasoning effort while preserving the model and existing context prefix.
+
+The editable context retains native evidence. For another model’s inference,
+completed reasoning exchanges become attributed readable notes with their
+visible summaries, calls, and results; the Store retains the originals.
+Pending exchanges, unknown provenance, and incompatible opaque compaction
+prevent a model switch rather than silently discard evidence.
 
 Repeated context reads in one invocation see its staged edits. Saving a
 `Context` binding saves data, not edit authority: passing that value to

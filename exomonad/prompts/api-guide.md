@@ -93,6 +93,8 @@ labels and handle its `Either`.
 With `import qualified Tidepool.Agent.Context as C`, a synchronous cell with
 `ContextReadWrite` can stage the next request's effort using
 `C.setNextEffort C.High`; `C.Effort` aliases the existing `ForkEffort` type.
+Context, model, and effort changes commit together on whole-cell success.
+Effort changes preserve the model and existing context prefix.
 
 The activation supplies typed `sessionInput`, its reply declaration, and the
 roster of siblings admitted with you; use `inspectFull sessionInput` only for
