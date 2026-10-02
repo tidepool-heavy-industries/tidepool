@@ -133,7 +133,7 @@ Compiler artifacts remain file-backed. This bounds response materialization;
 temporary capture files can still grow while the request handler runs, and fixed
 metadata subprocess probes do not use the framed response budget.
 
-The crate remains a dependency leaf for proc macros. In addition to `blake3`
+In addition to `blake3`
 for immutable endpoint identity, it uses the workspace tracing stack because
 the compiler CLI owns daemon process observability. Its wire formats are small,
 versioned, and implemented in-repo. Keep framing and field validation here;

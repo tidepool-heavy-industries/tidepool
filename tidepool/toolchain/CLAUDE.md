@@ -7,11 +7,11 @@ compiled-artifact cache (`cache.rs`), the ONE policy-bearing compile front
 door (`artifacts.rs`), and the structured extract-diagnostics contract
 (`diag.rs`, `timing.rs`). Sits between `tidepool-extract-cmd` (the endpoint
 and invocation boundary this crate executes through) and `tidepool-runtime` (the
-high-level compile/run API and session substrate, which depends on this
-crate and re-exports what its own downstream callers still reach through
-`tidepool_runtime::` paths — `paths`, `toolchain`, `cache`, `artifacts`,
-`diag`, and `timing` are thin module shims there). Does NOT belong: the
-session substrate, turn supervision, or anything that dispatches over
+high-level compile/run API and session substrate). Consumers of path,
+toolchain, cache and diagnostic modules import `tidepool_toolchain` directly.
+The runtime keeps those module imports crate-private and exposes selected
+compile APIs, `CompileError` and `PreparedArtifact` at its root. Does NOT belong:
+the session substrate, turn supervision, or anything that dispatches over
 `RuntimeError`/`SessionError` — those types live in `tidepool-runtime` and
 must not be visible here (this crate sits below it). `failclass.rs`'s
 `classify_compile` (a pure `CompileError` decision tree) lives here for that

@@ -303,6 +303,24 @@ live outside source or in the separately mounted build directory.
 or Git state. `exomonad run-map` reads a run's recorded artifacts without starting
 or attaching to anything.
 
+Retired managed worktrees retain sealed source layers rather than eagerly copying
+the whole checkout. The [worktree registry](../../exomonad/worktree/src/registry.rs)
+records that custody; [retirement and restoration](../../exomonad/worktree/src/create.rs)
+preserve the layers and materialize them on demand. A retained checkout path is
+not an ordinary readable working tree until restoration finishes. Inspect a
+child's committed work through the shared Git namespace and typed observation.
+
+[Copy admission](../../exomonad/node/src/copy_admission.rs) serializes cooperating
+copies on a filesystem; [source import](../../bridge/facade/src/actor_host/workspace.rs),
+[compaction](../../bridge/facade/src/actor_host/overlay_resource.rs) and worktree
+restoration acquire it before materializing files. It does not bound later writes
+or total durable retention. Before claiming bounded storage across repeated runs,
+retain a repeated fork/retire/cleanup inventory and restart restoration evidence,
+including staged and unstaged changes, submodules and untracked work. ENOSPC
+checks must exercise import, publication, retirement and journal writes while
+preserving the previous authoritative state. Reclaim only after confirming that
+live writers, mounts and retained readers no longer depend on the resource.
+
 `exomonad run-map <run-dir> --perfetto` exports recorded host trace metadata for
 Perfetto. Use `--since 15m`, `--actor ID@INCARNATION`, `--execution ID`, or
 `--call-id ID` to bound the timeline. `--from-unix-ms` and `--until-unix-ms`

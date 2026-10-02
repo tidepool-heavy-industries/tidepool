@@ -1,8 +1,10 @@
 # Wave 19 preparation
 
 User authorized finishing the inter-wave batch, rebuilding, and launching a Sol
-Medium root with parallel feature trees. Four Luna-owned components are specified
-in `plans/wave19-feature-trees.md` and the new harness checkout's NEXT.md.
+Medium root with parallel feature trees. The four Luna-owned components were
+history, portable replay, bounded progress/cancellation and timeline. The original
+scope is retained in Git (`git show d14deb83418d3c831e74b870204344b43955302c:plans/wave19-feature-trees.md`)
+and the launch checkout's NEXT.md.
 Wave18 remains stopped incomplete. Wave19 explicitly owns its recovery defect;
 no stale run must finish before the new assignment can begin.
 
