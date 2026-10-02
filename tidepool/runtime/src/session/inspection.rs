@@ -1687,7 +1687,7 @@ mod tests {
         let results = run_inspections(InspectionRequest {
             exact_context: None,
             preamble: concat!(
-                "{-# LANGUAGE NoImplicitPrelude, DataKinds #-}\n",
+                "{-# LANGUAGE NoImplicitPrelude, DataKinds, TypeOperators #-}\n",
                 "module Expr where\n",
                 "import Prelude\n",
                 "import qualified Tidepool.Effects.Core as LookupEffects\n",
