@@ -9,6 +9,7 @@
 module Tidepool.Command.Tools
   ( ShellTools (..),
     Execute (..),
+    EnvironmentEntry (..),
     WriteInput (..),
     ReadOutput (..),
     CancelCommand (..),
@@ -43,7 +44,7 @@ import Tidepool.Inspection (Display (..))
 data Execute = Execute
   { cmd :: Text,
     workdir :: Maybe Text,
-    environment :: Maybe (Map.Map Text Text),
+    environment :: Maybe [EnvironmentEntry],
     memory_mib :: Maybe Int,
     tty :: Maybe Bool,
     stdin :: Maybe Bool,
@@ -52,6 +53,12 @@ data Execute = Execute
     intent :: Maybe Text,
     focus :: Maybe Text,
     background :: Maybe Bool
+  }
+  deriving (Generic, FromJSON, JsonSchema)
+
+data EnvironmentEntry = EnvironmentEntry
+  { name :: Text,
+    value :: Text
   }
   deriving (Generic, FromJSON, JsonSchema)
 
@@ -113,7 +120,7 @@ toolsWith presenter =
   ShellTools
     { bash =
         tool
-          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (positive, default 1024), tty or piped stdin (mutually exclusive). By default the invocation owns the command until terminal completion, then presents output once. yield_time_ms (0..300000) opts into bounded observation and actor ownership if still running; no automatic notice. max_output_bytes clamps to 1024..32768 (default 32768). Returns session_id and a retained Cmd.Job. Use focus when output may be large or is a failing build/test: say what you are looking for (\"the failing test and its assertion\") and the result keeps the relevant sections and names what was omitted. Without focus, output is head/tail truncated; read_output pages retained output by byte range without rerunning. background: true returns at once (focus, yield_time_ms, max_output_bytes ignored); a notice with exit status, output tail and starting commit wakes you when it finishes. intent gives the command's purpose to its presenter."
+          "Execute Bash once; no shell profiles. Optional workdir and environment list of {name,value} entries; later duplicate names win. memory_mib (positive, default 1024); tty or piped stdin (mutually exclusive). By default the invocation owns the command until terminal completion, then presents output once. yield_time_ms (0..300000) opts into bounded observation and actor ownership if still running; no automatic notice. max_output_bytes clamps to 1024..32768 (default 32768). Returns session_id and a retained Cmd.Job. Use focus when output may be large or is a failing build/test: say what you are looking for (\"the failing test and its assertion\") and the result keeps the relevant sections and names what was omitted. Without focus, output is head/tail truncated; read_output pages retained output by byte range without rerunning. background: true returns at once (focus, yield_time_ms, max_output_bytes ignored); a notice with exit status, output tail and starting commit wakes you when it finishes. intent gives the command's purpose to its presenter."
           (executeWith presenter),
       writeStdin =
         tool
@@ -199,9 +206,14 @@ executeWith presenter
      in case executeOptions memory terminal pipe observationWait observationLimit of
       Left rejection -> pure (renderOptionError rejection)
       Right (memoryMiB, options) -> do
-        let command =
+        let environmentVariables =
+              Map.toList . Map.fromList $
+                [ (variableName, variableValue)
+                  | EnvironmentEntry {name = variableName, value = variableValue} <- fromMaybe [] env
+                ]
+            command =
               maybe id Cmd.inDirectory directory $
-                Cmd.withEnvironment (maybe [] Map.toList env) $
+                Cmd.withEnvironment environmentVariables $
                   Cmd.withMemory (Cmd.MiB memoryMiB) $
                     input (Cmd.bashCommand script)
             input =

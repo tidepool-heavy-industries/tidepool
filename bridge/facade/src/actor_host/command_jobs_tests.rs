@@ -502,7 +502,11 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
     let running = tokio::spawn(call(
         "bash",
         serde_json::json!({
-            "cmd":"printf literal", "workdir":"src", "environment":{"EXAMPLE":"value"},
+            "cmd":"printf literal", "workdir":"src",
+            "environment":[
+                {"name":"EXAMPLE","value":"first"},
+                {"name":"EXAMPLE","value":"value"}
+            ],
             "memory_mib":64, "stdin":true, "yield_time_ms":0, "max_output_bytes":2048,
         }),
     ));
