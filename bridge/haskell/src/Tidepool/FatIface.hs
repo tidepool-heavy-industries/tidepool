@@ -10,7 +10,7 @@ module Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, lookupFatIface, evictFatIfaceMatching
   , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact
   , ExactInterfaceFailure(..), readExactInterface
-  , OwnerInterfaceCache, newOwnerInterfaceCache, lookupOwnerInterface
+  , OwnerInterfaceContext(..), OwnerInterfaceCache, newOwnerInterfaceCache, lookupOwnerInterface
   , cacheOwnerInterface, evictOwnerInterfaceMatching
   ) where
 
@@ -260,27 +260,35 @@ renderReadInterfaceError failure = case failure of
     path ++ ": expected " ++ showSDocUnsafe (ppr expected)
       ++ ", found " ++ showSDocUnsafe (ppr actual)
 
+-- | The defining context needed after an owner's interface has been read and
+-- typechecked. The original 'ModIface' is not needed for recovered-body
+-- preparation and is not retained here.
+data OwnerInterfaceContext = OwnerInterfaceContext
+  { ownerInterfaceLocation :: ModLocation
+  , ownerInterfaceTyCons :: [TyCon]
+  }
+
 -- | Daemon-lifetime cache of an owner module's already-read-and-typechecked
--- defining interface: its 'ModIface', the 'ModLocation' 'readExactInterface'
--- resolved it at, and the 'TyCon's 'typecheckIface' produced. Recovered-body
+-- defining context: the 'ModLocation' 'readExactInterface' resolved it at,
+-- and the 'TyCon's 'typecheckIface' produced. Recovered-body
 -- preparation ('Tidepool.PreparedStg.prepareRecoveredBodies') reads and
 -- typechecks an owner's interface at most once per cache lifetime; only
 -- successful outcomes are cached; a failure is retried on the next lookup
 -- rather than pinned, since the interface read may simply not have been
 -- attempted with the right toolchain state yet.
 newtype OwnerInterfaceCache =
-  OwnerInterfaceCache (MVar (Map.Map Module (ModIface, ModLocation, [TyCon])))
+  OwnerInterfaceCache (MVar (Map.Map Module OwnerInterfaceContext))
 
 newOwnerInterfaceCache :: IO OwnerInterfaceCache
 newOwnerInterfaceCache = OwnerInterfaceCache <$> newMVar Map.empty
 
 lookupOwnerInterface :: OwnerInterfaceCache -> Module
-  -> IO (Maybe (ModIface, ModLocation, [TyCon]))
+  -> IO (Maybe OwnerInterfaceContext)
 lookupOwnerInterface (OwnerInterfaceCache cacheRef) owner =
   Map.lookup owner <$> readMVar cacheRef
 
 cacheOwnerInterface :: OwnerInterfaceCache -> Module
-  -> (ModIface, ModLocation, [TyCon]) -> IO ()
+  -> OwnerInterfaceContext -> IO ()
 cacheOwnerInterface (OwnerInterfaceCache cacheRef) owner value =
   modifyMVar_ cacheRef (pure . Map.insert owner value)
 

@@ -63,7 +63,7 @@ import Tidepool.PreparedSites (PreparedSite, SiteRejection)
 import Tidepool.TypePolicy (TypeGraph(..))
 import Tidepool.FatIface
   ( ExactInterfaceFailure(..), readExactInterface
-  , OwnerInterfaceCache, lookupOwnerInterface, cacheOwnerInterface )
+  , OwnerInterfaceContext(..), OwnerInterfaceCache, lookupOwnerInterface, cacheOwnerInterface )
 import Tidepool.PreparedFacts (PreparedFacts, extractPreparedFacts)
 
 -- | Typed, pre-CorePrep input to the prepared pipeline.
@@ -294,14 +294,15 @@ prepareRecoveredBodiesUncached hscEnv ownerCache owner bindings = do
           case details of
             Left reason -> pure (Left (RecoveredModuleInterfaceFailure owner reason))
             Right tycons -> do
-              let hit = (iface, location, tycons)
+              let hit = OwnerInterfaceContext location tycons
               cacheOwnerInterface ownerCache owner hit
               pure (Right hit)
   case resolved of
     Left failure -> pure (Left failure)
-    Right (_iface, location, tycons) -> do
+    Right context -> do
       prepared <- trySynchronous (prepareRecoveredModule hscEnv
-        (RecoveredModuleInput owner location tycons bindings))
+        (RecoveredModuleInput owner (ownerInterfaceLocation context)
+          (ownerInterfaceTyCons context) bindings))
       pure $ case prepared of
         Left reason -> Left (RecoveredModulePreparationFailure owner reason)
         Right value -> Right value

@@ -20,6 +20,7 @@ import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Var (varName, varType)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import System.Directory (getCurrentDirectory)
+import System.Environment (getArgs)
 import System.FilePath ((</>))
 import System.Exit (ExitCode(..))
 import System.Process (proc, readCreateProcessWithExitCode)
@@ -34,7 +35,7 @@ import Tidepool.ExecutionSchema
   , TopBinding(..), ValueRef(..), WireProgram(..) )
 import Tidepool.FatIface
   ( FatIfaceLookup(..), newFatIfaceCache, lookupFatIfaceExact
-  , newOwnerInterfaceCache )
+  , newOwnerInterfaceCache, lookupOwnerInterface, evictOwnerInterfaceMatching )
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult(..)
   , PipelineResult(prHscEnv), runPipelineSelected )
@@ -51,6 +52,18 @@ assert ok message = unless ok (ioError (userError message))
 
 main :: IO ()
 main = do
+  args <- getArgs
+  case args of
+    [] -> assertAllRecoveredBodies
+    ["owner-interface-cache"] -> do
+      root <- getCurrentDirectory
+      libdir <- trim <$> readProcessGhc ["--print-libdir"]
+      assertSemigroupSubset root libdir
+      putStrLn "owner interface cache: ok (reused owner, evicted owner, missing interface retried)"
+    _ -> ioError (userError "expected no arguments or owner-interface-cache")
+
+assertAllRecoveredBodies :: IO ()
+assertAllRecoveredBodies = do
   root <- getCurrentDirectory
   let source = root </> "test-prepared-stg" </> "RecoveredBody.hs"
   libdir <- trim <$> readProcessGhc ["--print-libdir"]
@@ -173,13 +186,15 @@ main = do
     renderModule = showSDocUnsafe . ppr
     renderName = showSDocUnsafe . ppr
 
-    trim = reverse . dropWhile (== '\n') . reverse
+trim :: String -> String
+trim = reverse . dropWhile (== '\n') . reverse
 
-    readProcessGhc args = do
-      (code, out, err) <- readCreateProcessWithExitCode (proc "ghc" args) ""
-      case code of
-        ExitSuccess -> pure out
-        _ -> ioError (userError ("ghc failed: " ++ err))
+readProcessGhc :: [String] -> IO String
+readProcessGhc args = do
+  (code, out, err) <- readCreateProcessWithExitCode (proc "ghc" args) ""
+  case code of
+    ExitSuccess -> pure out
+    _ -> ioError (userError ("ghc failed: " ++ err))
 
 assertSemigroupSubset :: FilePath -> String -> IO ()
 assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
@@ -260,13 +275,33 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
   liftIO $ assert (any isStimes allReferences)
     ("stimesMonoid1 dependency disappeared from references: "
       ++ intercalate ", " (map renderId allReferences))
-  sourceHome <- liftIO $ prepareRecoveredBodies hsc ownerCache bodyCache (pmModule prepared) []
-  case sourceHome of
-    Left RecoveredModuleInterfaceFailure{} -> pure ()
-    Left failure -> liftIO $ ioError (userError
-      ("missing source-home interface reported wrong failure: " ++ show failure))
-    Right _ -> liftIO $ ioError (userError
-      "missing source-home interface was unexpectedly readable")
+  liftIO $ evictOwnerInterfaceMatching ownerCache (== owner)
+  evicted <- liftIO $ lookupOwnerInterface ownerCache owner
+  liftIO $ case evicted of
+    Nothing -> pure ()
+    Just _ -> ioError (userError "request-boundary eviction retained the owner context")
+  freshBodyCache <- liftIO newPreparedBodyCache
+  afterEviction <- liftIO $ prepareRecoveredBodies hsc ownerCache freshBodyCache owner
+    (bindList productOneBody)
+  liftIO $ case afterEviction of
+    Right value -> assert (pmModule value == owner)
+      "reloaded owner context changed the recovered defining owner"
+    Left failure -> ioError (userError
+      ("recovery after owner eviction failed: " ++ show failure))
+  let missingOwner = pmModule prepared
+      assertMissingInterface = do
+        sourceHome <- prepareRecoveredBodies hsc ownerCache bodyCache missingOwner []
+        case sourceHome of
+          Left RecoveredModuleInterfaceFailure{} -> pure ()
+          Left failure -> ioError (userError
+            ("missing source-home interface reported wrong failure: " ++ show failure))
+          Right _ -> ioError (userError
+            "missing source-home interface was unexpectedly readable")
+        failedContext <- lookupOwnerInterface ownerCache missingOwner
+        case failedContext of
+          Nothing -> pure ()
+          Just _ -> ioError (userError "failed interface read was cached")
+  liftIO $ assertMissingInterface >> assertMissingInterface
   where
     isSemigroupOwner identifier = case nameModule_maybe (varName identifier) of
       Just owner -> moduleNameString (moduleName owner)
