@@ -10746,9 +10746,9 @@ enum CompiledBlock {
 struct CellSplitSnapshot {
     view: crate::ActorCompileView,
     candidate_module: tidepool_repr::SessionModule,
-    /// Retained imports for the speculative single-item compile. `view` owns
-    /// a reserved value generation before the snapshot leaves its checkout.
-    /// Source freshness is checked again before installation.
+    /// Retained imports for the speculative single-item compile. Legacy fold
+    /// snapshots reserve a value generation; protected setup delegates its
+    /// ordered reservations to runtime admission. Installation rechecks source.
     retained: Vec<(SymbolIdentity, u64)>,
 }
 

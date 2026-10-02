@@ -99,7 +99,7 @@ async fn accepted_native_reply_publication_refusal_settles_request_and_retires_a
         // child receiver is used. A parent-owned startup hole cannot pass this.
         let submission = execute(
             &requester,
-            "let Right requestLabel = Agents.labelFromText \"publication-refusal\"\nresponse <- Agents.request @Int nativeAgent (Agents.assignment requestLabel ())\npure True",
+            include_str!("terminal_transfer_request.hs"),
             None,
         )
         .await
