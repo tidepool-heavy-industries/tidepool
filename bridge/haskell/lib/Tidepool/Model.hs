@@ -120,7 +120,9 @@ data ModelResult a = ModelResult
 -- Haskell callback finishes cooperatively. Ordinary Haskell cleanup can run
 -- after this function returns. Parent-cell cancellation follows the engine's
 -- cancellation contract and cannot be caught by this wrapper.
-invokeModel :: (Member ModelCall effects, HasAgentApi tools (Eff effects))
+-- Callback and after-tool programs use the ordinary row, even inside a
+-- synchronous notebook. Raise a base-row invocation into the enclosing row.
+invokeModel :: (Member ModelCall effects, HasAgentApi tools (Eff effects), AsyncEffects effects)
             => ModelTurn tools effects a -> Text -> Eff effects (ModelResult a)
 invokeModel turn input = case compileTools (specTools (turnSpec turn)) of
   Left err -> pure (failed (InvalidModelSpec (renderToolCompileError err)))

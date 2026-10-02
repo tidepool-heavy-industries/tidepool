@@ -66,7 +66,7 @@ instance (KnownToolEffect effect, KnownToolEffects effects) => KnownToolEffects 
 type family AsyncEffects (effects :: [Type -> Type]) :: Constraint where
   AsyncEffects '[] = ()
   AsyncEffects (ContextReadWrite ': effects) =
-    TypeError ('Text "ContextReadWrite requires a synchronous Haskell tool; wrap HaskellCell in Sync.")
+    TypeError ('Text "ContextReadWrite cannot be used by an asynchronous tool, model callback, or hook.")
   AsyncEffects (effect ': effects) = AsyncEffects effects
 
 actorEffectName :: ActorEffectKey -> Text

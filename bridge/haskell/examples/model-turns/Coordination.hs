@@ -44,7 +44,7 @@ data EvidenceTools mode = EvidenceTools
 
 -- For a small decision from a complete packet, prefer Jev. Use this turn when
 -- deciding requires fetching particular evidence and explaining the boundary.
-routeChange :: Member ModelCall effects
+routeChange :: (Member ModelCall effects, AsyncEffects effects)
             => (Text -> Eff effects Text)
             -> ChangePacket -> Eff effects (ModelResult RoutingDecision)
 routeChange readRef packet = invokeModel
@@ -66,7 +66,7 @@ data CoordinationTools mode = CoordinationTools
 
 -- A supplied sender enforces the admitted recipients. This turn can inspect,
 -- ask the owner, and report the observed delivery; it cannot widen authority.
-clarifyDependency :: Member ModelCall effects
+clarifyDependency :: (Member ModelCall effects, AsyncEffects effects)
                   => (Text -> Eff effects Text)
                   -> (Clarification -> Eff effects Delivery)
                   -> Text -> Eff effects (ModelResult Text)
@@ -78,7 +78,7 @@ clarifyDependency inspect sendQuestion packet = invokeModel
       "Resolve one dependency ambiguity from this packet. Inspect only what is needed, ask at most one concrete question if unresolved, and return the observed state and next owner. Do not invent an acknowledgment."))
   packet
 
-prepareHandoff :: Member ModelCall effects
+prepareHandoff :: (Member ModelCall effects, AsyncEffects effects)
                => (Text -> Eff effects Text)
                -> Text -> Eff effects (ModelResult Text)
 prepareHandoff readRef packet = invokeModel
@@ -86,7 +86,7 @@ prepareHandoff readRef packet = invokeModel
     "Prepare a concise handoff: exact candidate, changed contract, completed checks, unverified behavior, next owner. Preserve evidence references. Inspect missing referenced facts; never turn compiled-only into passed.")
   packet
 
-investigateFailure :: Member ModelCall effects
+investigateFailure :: (Member ModelCall effects, AsyncEffects effects)
                    => (Text -> Eff effects Text)
                    -> Text -> Eff effects (ModelResult Text)
 investigateFailure readRef packet = invokeModel
