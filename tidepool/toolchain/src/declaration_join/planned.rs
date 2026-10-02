@@ -155,6 +155,7 @@ pub(super) fn admit_authored_artifact_closure(
             target: "tidepool_toolchain::planned_source_admission",
             tracing::Level::DEBUG
         ) {
+            let witness_source = bounded_source_path(admitted.witness.source_path());
             let source_owner = admitted
                 .evidence
                 .modules
@@ -174,6 +175,26 @@ pub(super) fn admit_authored_artifact_closure(
                     !module.boot && module.source.as_path() == admitted.witness.source_path()
                 })
                 .count();
+            let evidence_source_owners = admitted
+                .evidence
+                .modules
+                .iter()
+                .take(64)
+                .map(|module| {
+                    (
+                        module.unit.as_str(),
+                        module.module.as_str(),
+                        module.boot,
+                        bounded_source_path(&module.source),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let exact_import_owners = admitted.exact_imports.keys().take(64).collect::<Vec<_>>();
+            let selected_original_owners = admitted
+                .selected_originals
+                .keys()
+                .take(64)
+                .collect::<Vec<_>>();
             let direct_imports = source_owner
                 .as_ref()
                 .and_then(|owner| source_imports.get(owner))
@@ -188,6 +209,8 @@ pub(super) fn admit_authored_artifact_closure(
                         .collect::<std::collections::BTreeSet<_>>()
                 })
                 .unwrap_or_default();
+            let available_owner_keys = available_owners.iter().take(64).collect::<Vec<_>>();
+            let inherited_owner_keys = inherited.iter().take(64).collect::<Vec<_>>();
             let missing_adjacency = direct_imports
                 .iter()
                 .filter(|owner| {
@@ -211,8 +234,22 @@ pub(super) fn admit_authored_artifact_closure(
                 .collect::<Vec<_>>();
             tracing::debug!(
                 target: "tidepool_toolchain::planned_source_admission",
+                witness_source = %witness_source,
                 source_owner = ?source_owner,
                 witness_source_owner_count,
+                evidence_source_owner_count = admitted.evidence.modules.len(),
+                evidence_source_owners = ?evidence_source_owners,
+                evidence_source_owners_omitted = admitted.evidence.modules.len().saturating_sub(64),
+                exact_import_owners = ?exact_import_owners,
+                exact_import_owners_omitted = admitted.exact_imports.len().saturating_sub(64),
+                selected_original_owners = ?selected_original_owners,
+                selected_original_owners_omitted = admitted.selected_originals.len().saturating_sub(64),
+                available_owner_count = available_owners.len(),
+                available_owner_keys = ?available_owner_keys,
+                available_owner_keys_omitted = available_owners.len().saturating_sub(64),
+                inherited_owner_count = inherited.len(),
+                inherited_owner_keys = ?inherited_owner_keys,
+                inherited_owner_keys_omitted = inherited.len().saturating_sub(64),
                 home_import_owner_count = source_imports.len(),
                 home_import_owners = ?source_imports.keys().take(64).collect::<Vec<_>>(),
                 home_import_owners_omitted = source_imports.len().saturating_sub(64),
@@ -285,6 +322,15 @@ fn merge_admitted_source_imports(
         })
         .collect();
     Ok(())
+}
+
+fn bounded_source_path(path: &Path) -> String {
+    let rendered = path.to_string_lossy();
+    if rendered.chars().count() <= 256 {
+        rendered.into_owned()
+    } else {
+        format!("{}…", rendered.chars().take(256).collect::<String>())
+    }
 }
 
 #[derive(Deserialize)]
