@@ -14,6 +14,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 -- | Mode-interpreted agent tool records compiled into declarations and
 -- dynamic dispatch.
 --
@@ -57,8 +58,11 @@ module Tidepool.Agent.Contract
   , HaskellTool
   , haskellTool
   , HaskellTools (..)
+  , AsyncHaskellTools
   , haskellTools
+  , asyncHaskellTools
   , defaultWorkbenchSpec
+  , defaultAsyncWorkbenchSpec
   , SyncEffects
   , KnownToolEffects
   , AsyncEffects
@@ -245,6 +249,18 @@ haskellTool
      )
   => Text -> HaskellTool schedule effects base
 haskellTool description = HaskellTool description (toolSchedule (Proxy @schedule)) (toolEffectNames (Proxy @effects))
+
+-- | Notebook tools for a host without context-transaction support.
+data AsyncHaskellTools effects mode = AsyncHaskellTools
+  { haskell :: mode :- HaskellCell effects
+  } deriving (Generic)
+
+asyncHaskellTools
+  :: forall effects. (KnownToolEffects effects, AsyncEffects effects)
+  => AsyncHaskellTools effects (AsServerT (Eff effects))
+asyncHaskellTools = AsyncHaskellTools
+  { haskell = HaskellTool "Run an asynchronous resident Haskell cell." Asynchronous (toolEffectNames (Proxy @effects))
+  }
 
 -- | Ordinary notebooks and synchronous notebooks share the same resident scope.
 data HaskellTools effects mode = HaskellTools
@@ -904,6 +920,12 @@ defaultWorkbenchSpec
   :: (KnownToolEffects effects, AsyncEffects effects)
   => AgentSpec (HaskellTools effects) effects
 defaultWorkbenchSpec = defaultSpec { specTools = haskellTools }
+
+-- | Hosted default when the runtime supplies only ordinary notebook effects.
+defaultAsyncWorkbenchSpec
+  :: (KnownToolEffects effects, AsyncEffects effects)
+  => AgentSpec (AsyncHaskellTools effects) effects
+defaultAsyncWorkbenchSpec = defaultSpec { specTools = asyncHaskellTools }
 
 -- | The entry index the retained dispatcher serves an ordinary tool call at.
 toolCallEntry :: Int
