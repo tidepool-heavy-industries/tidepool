@@ -784,6 +784,7 @@ async fn resident_sync_context_failure_keeps_prefix_model_and_defers_children() 
     );
     let parent = next_round(&mut rounds).await;
     successful_output(&parent.request, "context-setup");
+    let original_setup = retained_output_item(&parent.request.input, "context-setup").clone();
     let before = root_context_state(&fixture);
     parent.cell_with_reasoning(
         "context-failure",
@@ -798,6 +799,11 @@ async fn resident_sync_context_failure_keeps_prefix_model_and_defers_children() 
     assert!(has_user_text(&successor.request, "parent-original"));
     assert!(!has_user_text(&successor.request, "must-not-publish"));
     let raw = raw_request_items(&fixture, &successor.request);
+    assert_eq!(retained_output_item(&raw, "context-setup"), &original_setup);
+    assert_eq!(
+        retained_output_item(&successor.request.input, "context-setup"),
+        &original_setup
+    );
     assert_native_exchange_preserved(&successor.request, &raw, "context-failure");
     assert_eq!(
         successor
@@ -815,6 +821,18 @@ async fn resident_sync_context_failure_keeps_prefix_model_and_defers_children() 
     let after = root_context_state(&fixture);
     assert_eq!(after.generation, before.generation);
     assert_eq!(after.model, before.model);
+    assert_eq!(
+        after
+            .history
+            .iter()
+            .find(|(_, _, item)| item == &original_setup)
+            .map(|(_, hash, _)| hash),
+        before
+            .history
+            .iter()
+            .find(|(_, _, item)| item == &original_setup)
+            .map(|(_, hash, _)| hash)
+    );
     let terminal = retained_output(&successor.request, "context-failure");
     assert_eq!(
         terminal["failure"]["phase"],
@@ -944,6 +962,7 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
     );
     let parent = next_round(&mut rounds).await;
     successful_output(&parent.request, "context-setup");
+    let original_setup = retained_output_item(&parent.request.input, "context-setup").clone();
     parent.cell_with_reasoning(
         "context-cancel",
         include_str!("fixtures/context_acceptance_cancel.hs"),
@@ -1023,6 +1042,11 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
     assert!(has_user_text(&successor.request, "parent-original"));
     assert!(!has_user_text(&successor.request, "must-not-publish"));
     let raw = raw_request_items(&fixture, &successor.request);
+    assert_eq!(retained_output_item(&raw, "context-setup"), &original_setup);
+    assert_eq!(
+        retained_output_item(&successor.request.input, "context-setup"),
+        &original_setup
+    );
     assert_native_exchange_preserved(&successor.request, &raw, "context-cancel");
     assert_eq!(
         successor
@@ -1045,6 +1069,18 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
     let after = root_context_state(&fixture);
     assert_eq!(after.generation, before.generation);
     assert_eq!(after.model, before.model);
+    assert_eq!(
+        after
+            .history
+            .iter()
+            .find(|(_, _, item)| item == &original_setup)
+            .map(|(_, hash, _)| hash),
+        before
+            .history
+            .iter()
+            .find(|(_, _, item)| item == &original_setup)
+            .map(|(_, hash, _)| hash)
+    );
     assert_eq!(fixture.campaign.actor.identity(), root_identity);
     assert!(fixture.campaign.actor.terminal().get().is_none());
     let prefix = |history: Vec<(harness::model::RequestId, harness::item::ItemHash, Item)>| {
