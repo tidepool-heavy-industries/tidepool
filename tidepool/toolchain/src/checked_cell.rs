@@ -3033,6 +3033,7 @@ mod tests {
                     owner: selected.clone(),
                     imports: Vec::new(),
                 }],
+                vec![selected.clone(), unrelated.clone()],
             ),
         );
 
@@ -3041,7 +3042,7 @@ mod tests {
         );
         let enriched_context = Arc::new(
             crate::declaration_join::ExactDeclarationContext::new(
-                &[],
+                std::slice::from_ref(&certificate),
                 &[],
                 vec![
                     ExactLexicalNode {

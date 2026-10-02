@@ -335,29 +335,73 @@ impl CertifiedAuthoredDeclaration {
         owner: ExactModuleIdentity,
         roots: Vec<ExactModuleIdentity>,
         source_lexical_imports: Vec<ExactLexicalNode>,
+        retained_owners: Vec<ExactModuleIdentity>,
     ) -> Self {
-        let product = CertifiedRecoveryProduct::from_certification(
-            tidepool_repr::execution_schema::CachedHomeOwner {
-                unit: owner.unit.clone(),
-                module: owner.module.clone(),
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut owners = vec![owner.clone()];
+        owners.extend(roots.iter().cloned());
+        owners.extend(retained_owners);
+        let owners = owners.into_iter().collect::<BTreeSet<_>>();
+        let mut entries = Vec::new();
+        for artifact_owner in owners {
+            let bytes = artifact_owner.module.as_bytes().to_vec();
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            let home_owner = tidepool_repr::execution_schema::CachedHomeOwner {
+                unit: artifact_owner.unit.clone(),
+                module: artifact_owner.module.clone(),
                 module_version: tidepool_repr::execution_schema::ModuleVersion([1; 32]),
-                skinny_iface_sha256: [2; 32],
-                product_sha256: [3; 32],
-            },
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
+                skinny_iface_sha256: digest,
+                product_sha256: digest,
+            };
+            let certification = crate::certified_products::encode_home_certification(
+                &home_owner,
+                &[],
+                &BTreeMap::new(),
+            )
+            .expect("synthetic test product certification");
+            let product = CertifiedRecoveryProduct::from_certification(
+                home_owner,
+                bytes.clone(),
+                bytes,
+                Vec::new(),
+                certification,
+            );
+            let requirements = if artifact_owner == owner {
+                roots.clone()
+            } else {
+                Vec::new()
+            };
+            entries.push(
+                crate::artifact_inventory::ArtifactEntry::original([2; 32], product, requirements)
+                    .expect("synthetic test artifact entry"),
+            );
+        }
+        let inventory = crate::artifact_inventory::ArtifactInventory::default();
+        let artifacts = inventory
+            .admit(&inventory.empty_view(), entries)
+            .expect("synthetic test artifact inventory");
         Self {
-            product,
-            artifacts: crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+            product: artifacts
+                .entries()
+                .into_iter()
+                .find_map(|entry| match &entry.payload {
+                    crate::artifact_inventory::ArtifactPayload::Original(product)
+                        if product.owner().unit == owner.unit
+                            && product.owner().module == owner.module =>
+                    {
+                        Some(product.clone())
+                    }
+                    _ => None,
+                })
+                .expect("synthetic authored original"),
+            artifacts,
             lexical_exports: Vec::new(),
             introduced_exports: Vec::new(),
             instances: InstanceInventory::default(),
             family_closure: Vec::new(),
             source_sha256: [4; 32],
-            toolchain_identity_sha256: [0; 32],
+            toolchain_identity_sha256: [2; 32],
             original_imports: vec![ExactInterfaceOwner {
                 owner,
                 requirements: roots,
