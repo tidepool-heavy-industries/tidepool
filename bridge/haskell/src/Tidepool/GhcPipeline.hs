@@ -162,7 +162,7 @@ import Tidepool.Timing
   , readMemoTraceEnabled, emitMemoCycleGraph, emitMemoMissTrace )
 import Tidepool.PreparedStg (PreparedElaboration(..), PreparedModule(..), prepareModule)
 import Tidepool.PreparedSites
-  ( elaboratePreparedSites, resolvePreparedSiblings, resolveSiteAuthority
+  ( elaboratePreparedSites, resolvePreparedSiblings, resolvePreparedInterfaceSiblings, resolveSiteAuthority
   , siteAuthorityEffectRequestTypeIds )
 import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.RetainedUnfoldings
@@ -1591,6 +1591,26 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
       Succeeded -> do
         cpAfterLoad plan
         loaded <- getSession
+        -- Exact owners excluded from downsweep and certified source candidates
+        -- supply interfaces instead of fresh/memoized prepared bodies. Restore
+        -- their nominal site siblings before any new target is elaborated.
+        case preparation of
+          CheckOnly -> pure ()
+          PrepareStg -> do
+            let siblingOwners = Map.fromList
+                  ([(mkModuleName (exactModule iface), exactUnit iface)
+                   | scope <- maybe [] pure (pvExactScope variant)
+                   , (iface, _, _) <- scopeInterfaces scope]
+                   ++ [(name, candidateUnit (admittedCandidateOriginal candidate))
+                      | (name, candidate) <- Map.toList acceptedCandidates])
+            forM_ (Map.toList siblingOwners) $ \(name, unit) ->
+              case lookupHpt (hsc_HPT loaded) name of
+                Just hmi
+                  | moduleName (mi_module (hm_iface hmi)) == name
+                  , unitString (moduleUnit (mi_module (hm_iface hmi))) == unit ->
+                    liftIO $ modifyIORef' preparedSiblingsRef
+                      (Map.union (resolvePreparedInterfaceSiblings hmi))
+                _ -> pure ()
         let sources = case (preparation, pvExactScope variant) of
               (CheckOnly, Just _) -> Map.fromList
                 [ (ms_mod_name summary, (ms_mod summary, ms_hs_hash summary, hmi))
