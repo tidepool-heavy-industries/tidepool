@@ -211,6 +211,33 @@ pub(super) fn admit_authored_artifact_closure(
                 .unwrap_or_default();
             let available_owner_keys = available_owners.iter().take(64).collect::<Vec<_>>();
             let inherited_owner_keys = inherited.iter().take(64).collect::<Vec<_>>();
+            let home_import_rows = source_imports
+                .iter()
+                .take(64)
+                .map(|(owner, requirements)| {
+                    (
+                        owner,
+                        requirements.iter().take(64).collect::<Vec<_>>(),
+                        requirements.len().saturating_sub(64),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let inherited_lexical_rows = context
+                .map(|context| {
+                    context
+                        .lexical_graph()
+                        .iter()
+                        .take(64)
+                        .map(|node| {
+                            (
+                                &node.owner,
+                                node.imports.iter().take(64).collect::<Vec<_>>(),
+                                node.imports.len().saturating_sub(64),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             let missing_adjacency = direct_imports
                 .iter()
                 .filter(|owner| {
@@ -250,9 +277,15 @@ pub(super) fn admit_authored_artifact_closure(
                 inherited_owner_count = inherited.len(),
                 inherited_owner_keys = ?inherited_owner_keys,
                 inherited_owner_keys_omitted = inherited.len().saturating_sub(64),
+                inherited_lexical_rows = ?inherited_lexical_rows,
+                inherited_lexical_rows_omitted = context
+                    .map(|context| context.lexical_graph().len().saturating_sub(64))
+                    .unwrap_or_default(),
                 home_import_owner_count = source_imports.len(),
                 home_import_owners = ?source_imports.keys().take(64).collect::<Vec<_>>(),
                 home_import_owners_omitted = source_imports.len().saturating_sub(64),
+                home_import_rows = ?home_import_rows,
+                home_import_rows_omitted = source_imports.len().saturating_sub(64),
                 source_owner_direct_import_count = direct_imports.len(),
                 source_owner_direct_imports = ?direct_imports.iter().take(16).collect::<Vec<_>>(),
                 source_owner_direct_imports_omitted = direct_imports.len().saturating_sub(16),
