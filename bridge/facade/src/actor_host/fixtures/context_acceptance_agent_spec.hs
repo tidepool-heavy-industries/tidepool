@@ -26,6 +26,7 @@ newtype CurateArgs = CurateArgs { proceed :: Bool }
 
 data ContextTools effects mode = ContextTools
   { haskell :: mode :- HaskellCell effects
+  , haskellSync :: mode :- Sync (HaskellCell (SyncEffects effects))
   , curate :: mode :- Sync (Call CurateArgs Text)
   }
   deriving Generic
@@ -36,6 +37,7 @@ agentSpec
 agentSpec = defaultSpec
   { specTools = ContextTools
       { haskell = A.haskell (A.haskellTools @effects)
+      , haskellSync = A.haskellSync (A.haskellTools @effects)
       , curate = syncTool "Curate this actor's context and select its next model." curateContext
       }
   }
@@ -44,4 +46,5 @@ curateContext :: CurateArgs -> Eff (SyncEffects effects) Text
 curateContext _ = do
   _ <- C.modifyContext (over C.editableTexts (T.replace "parent-original" "compiled-handler-curated"))
   C.setNextModel "executor"
+  C.setNextEffort C.High
   pure "compiled-handler-committed"

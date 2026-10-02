@@ -238,6 +238,11 @@ async fn start_with_spec(
             "[defaults]\nmodel='test-model'\n[models]\nexecutor='gpt-6.1-sol'\n".to_owned();
         if let Some(spec) = spec {
             std::fs::write(authored.join("AgentSpec.hs"), spec).unwrap();
+            std::fs::write(
+                authored.join("ContextWorkflow.hs"),
+                include_str!("../../../haskell/examples/model-turns/ContextWorkflow.hs"),
+            )
+            .unwrap();
             configuration.push_str("[haskell]\nsource_roots=['.']\nspec='AgentSpec.agentSpec'\n");
         }
         std::fs::write(authored.join("config.toml"), configuration).unwrap();
@@ -414,10 +419,16 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
         .tools
         .iter()
         .any(|tool| tool["name"] == "haskell"));
+    assert!(first
+        .request
+        .tools
+        .iter()
+        .any(|tool| tool["name"] == "haskell_sync"));
     assert!(first.request.tools.iter().any(|tool| {
         tool["name"] == "curate" && tool["type"] == "function" && tool["strict"] == true
     }));
     let session = first.request.session_id.clone();
+    assert_eq!(first.request.pinned_effort, harness::model::Effort::Low);
     first.function("compiled-context", "curate", json!({"proceed": true}));
     let successor = next_round(&mut rounds).await;
     assert!(successor.is_root());
@@ -430,6 +441,16 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
     );
     assert_eq!(successor.request.session_id, session);
     assert_eq!(successor.request.model, "gpt-6.1-sol");
+    assert_eq!(successor.request.pinned_effort, harness::model::Effort::Low);
+    assert_eq!(
+        successor
+            .request
+            .input
+            .iter()
+            .rev()
+            .find_map(Item::configuration_effort),
+        Some(harness::model::Effort::High)
+    );
     assert!(
         has_user_text(&successor.request, "compiled-handler-curated"),
         "committed input: {:?}",
@@ -445,7 +466,41 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
     assert_eq!(after.model.as_deref(), Some("gpt-6.1-sol"));
     assert_eq!(fixture.campaign.actor.identity(), actor);
     assert!(fixture.campaign.actor.terminal().get().is_none());
-    successor.finish();
+    successor.cell(
+        "inspect-context",
+        include_str!("fixtures/context_acceptance_inspect.hs"),
+    );
+    let inspected = next_round(&mut rounds).await;
+    assert!(inspected.is_root());
+    assert_eq!(inspected.request.session_id, session);
+    assert_eq!(inspected.request.model, "gpt-6.1-sol");
+    let output = successful_output(&inspected.request, "inspect-context");
+    let displayed = output["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["output"].as_str())
+        .filter(|text| text.contains("Context") && text.contains("blocks"))
+        .collect::<Vec<_>>();
+    assert_eq!(displayed.len(), 2, "{output}");
+    assert!(
+        displayed[0].contains("compiled-handler-curated"),
+        "{output}"
+    );
+    assert!(displayed[1].contains("Reviewed by the parent."), "{output}");
+    assert!(displayed[1].contains("Child finding:"), "{output}");
+    assert!(has_user_text(
+        &inspected.request,
+        "compiled-handler-curated Reviewed by the parent."
+    ));
+    assert!(has_user_text(
+        &inspected.request,
+        "Child finding: The cache key must include the selected transcript prefix."
+    ));
+    assert_eq!(root_context_state(&fixture).generation, 2);
+    assert_eq!(fixture.campaign.actor.identity(), actor);
+    assert!(fixture.campaign.actor.terminal().get().is_none());
+    inspected.finish();
     fixture.stop().await.unwrap();
 }
 
