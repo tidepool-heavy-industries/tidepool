@@ -36,6 +36,19 @@ impl RequestedRound {
             .expect("resident Engine still awaits its scripted reply");
     }
 
+    fn function(self, call_id: &str, name: &str, arguments: Value) {
+        self.reply
+            .send(ResponsesTurn {
+                response_id: format!("response-{call_id}"),
+                items: vec![Item(json!({
+                    "type": "function_call", "call_id": call_id,
+                    "name": name, "arguments": arguments.to_string(),
+                }))],
+                usage: Default::default(),
+            })
+            .expect("resident Engine still awaits its scripted reply");
+    }
+
     fn finish(self) {
         self.reply
             .send(ResponsesTurn {
@@ -83,11 +96,14 @@ fn successful_output(request: &ResponsesRequest, call_id: &str) -> Value {
         matches!(output["status"].as_str(), Some("completed" | "committed")),
         "{output}"
     );
-    assert!(output["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|item| item["status"] == "committed"));
+    assert!(
+        output["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["status"] == "committed"),
+        "{output}"
+    );
     output
 }
 
@@ -121,17 +137,29 @@ async fn start() -> (
     RunningBrowserHost,
     mpsc::UnboundedReceiver<RequestedRound>,
 ) {
+    start_with_spec(None).await
+}
+
+async fn start_with_spec(
+    spec: Option<&str>,
+) -> (
+    tempfile::TempDir,
+    RunningBrowserHost,
+    mpsc::UnboundedReceiver<RequestedRound>,
+) {
     let (files, settings) = settings();
     let (requests, rounds) = mpsc::unbounded_channel();
     let transport: Arc<dyn ResponsesTransport> = Arc::new(ScriptedProvider(requests));
     let fixture = RunningBrowserHost::start_configured(&settings, &transport, |config| {
         let authored = config.workspace.join(".exomonad");
         std::fs::create_dir_all(&authored).unwrap();
-        std::fs::write(
-            authored.join("config.toml"),
-            "[defaults]\nmodel='test-model'\n[models]\nexecutor='gpt-6.1-sol'\n",
-        )
-        .unwrap();
+        let mut configuration =
+            "[defaults]\nmodel='test-model'\n[models]\nexecutor='gpt-6.1-sol'\n".to_owned();
+        if let Some(spec) = spec {
+            std::fs::write(authored.join("AgentSpec.hs"), spec).unwrap();
+            configuration.push_str("[haskell]\nsource_roots=['.']\nspec='AgentSpec.agentSpec'\n");
+        }
+        std::fs::write(authored.join("config.toml"), configuration).unwrap();
         test_campaign::commit_workspace(&config.workspace);
         config.workspace_inputs = Some(
             crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
@@ -236,10 +264,10 @@ async fn resident_sync_context_commits_before_deferred_children_and_child_model_
                 "parent inferred twice before another input"
             );
             assert_eq!(round.request.session_id, root_session);
+            successful_output(&round.request, "context-parent");
             assert_eq!(round.request.model, "parent-curated-model");
             assert!(has_user_text(&round.request, "parent-curated"));
             assert!(!has_user_text(&round.request, "parent-original"));
-            successful_output(&round.request, "context-parent");
             root_committed = true;
             round.finish();
         } else if child_sessions.insert(round.request.session_id.clone()) {
@@ -268,6 +296,54 @@ async fn resident_sync_context_commits_before_deferred_children_and_child_model_
     assert_eq!(child_sessions.len(), 2);
     assert_eq!(fixture.campaign.actor.identity(), root_identity);
     assert!(fixture.campaign.actor.terminal().get().is_none());
+    fixture.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn resident_compiled_sync_handler_commits_context_and_model_before_inference() {
+    let (_files, fixture, mut rounds) = start_with_spec(Some(include_str!(
+        "fixtures/context_acceptance_agent_spec.hs"
+    )))
+    .await;
+    let actor = fixture.campaign.actor.identity();
+    let first = next_round(&mut rounds).await;
+    assert!(first.is_root());
+    assert!(first
+        .request
+        .tools
+        .iter()
+        .any(|tool| tool["name"] == "haskell"));
+    assert!(first.request.tools.iter().any(|tool| {
+        tool["name"] == "curate" && tool["type"] == "function" && tool["strict"] == true
+    }));
+    let session = first.request.session_id.clone();
+    let before = root_context_state(&fixture);
+    first.function("compiled-context", "curate", json!({"proceed": true}));
+    let successor = next_round(&mut rounds).await;
+    assert!(successor.is_root());
+    let terminal = successor
+        .request
+        .input
+        .iter()
+        .find(|item| {
+            item.0["type"] == "function_call_output" && item.0["call_id"] == "compiled-context"
+        })
+        .expect("compiled handler terminal output must precede the next inference");
+    let output: Value = serde_json::from_str(terminal.0["output"].as_str().unwrap()).unwrap();
+    assert_eq!(output, json!("compiled-handler-committed"), "{output}");
+    assert_eq!(successor.request.session_id, session);
+    assert_eq!(successor.request.model, "gpt-6.1-sol");
+    assert!(has_user_text(
+        &successor.request,
+        "compiled-handler-curated"
+    ));
+    assert!(!has_user_text(&successor.request, "parent-original"));
+    let after = root_context_state(&fixture);
+    assert_eq!(after.generation, before.generation + 1);
+    assert_eq!(after.model.as_deref(), Some("gpt-6.1-sol"));
+    assert_eq!(fixture.campaign.actor.identity(), actor);
+    assert!(fixture.campaign.actor.terminal().get().is_none());
+    successor.finish();
     fixture.stop().await.unwrap();
 }
 
