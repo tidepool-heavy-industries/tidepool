@@ -5477,7 +5477,7 @@ where
                     return Ok(ResidentWorkbenchStep::Rejected(diagnostic))
                 }
             };
-            return begin_ready_block_split(
+            return Box::pin(begin_ready_block_split(
                 &self.access,
                 context,
                 specification.source.clone(),
@@ -5485,7 +5485,7 @@ where
                 block,
                 ready,
                 display_budget,
-            )
+            ))
             .await;
         }
         let ready = match prepared.ready {
@@ -5527,7 +5527,7 @@ where
                 Ok(turn_source)
             })
             .await?;
-        begin_ready_block_split(
+        Box::pin(begin_ready_block_split(
             &self.access,
             context,
             turn_source,
@@ -5535,7 +5535,7 @@ where
             block,
             *ready,
             display_budget,
-        )
+        ))
         .await
     }
 
@@ -6942,7 +6942,7 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    let step = run_ready_block_split(
+    let step = Box::pin(run_ready_block_split(
         access,
         context.clone(),
         turn_source,
@@ -6950,7 +6950,7 @@ where
         block,
         compiled,
         display_budget,
-    );
+    ));
     let step = step.await?;
     settle_deferred_display(access, context, step).await
 }

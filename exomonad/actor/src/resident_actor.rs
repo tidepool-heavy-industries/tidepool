@@ -7379,13 +7379,13 @@ where
                 .await?;
             None
         };
-        self.stabilize_program(
+        Box::pin(self.stabilize_program(
             kernel,
             context,
             &crate::CallAncestry::begin(context.actor),
             outcome,
             prepared,
-        )
+        ))
         .await
     }
 
