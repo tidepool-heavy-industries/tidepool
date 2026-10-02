@@ -1337,6 +1337,13 @@ impl ModuleCandidateOffer {
                             .original_home_imports()
                             .map(|(owner, _)| owner.clone()),
                     )
+                    .chain(
+                        original
+                            .certificate
+                            .source_lexical_imports()
+                            .iter()
+                            .map(|node| node.owner.clone()),
+                    )
                     .collect::<BTreeSet<_>>();
                 for (owner, imports) in original.certificate.original_home_imports() {
                     let imports = imports
@@ -1350,6 +1357,22 @@ impl ModuleCandidateOffer {
                     {
                         return Err(CompileError::ExtractFailed(
                             "program changed an admitted original import".into(),
+                        ));
+                    }
+                }
+                for node in original.certificate.source_lexical_imports() {
+                    let imports = node
+                        .imports
+                        .iter()
+                        .filter(|owner| selected.contains(*owner))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if lexical
+                        .insert(node.owner.clone(), imports.clone())
+                        .is_some_and(|old| old != imports)
+                    {
+                        return Err(CompileError::ExtractFailed(
+                            "program changed authenticated inherited source imports".into(),
                         ));
                     }
                 }
