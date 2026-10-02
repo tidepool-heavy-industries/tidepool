@@ -676,6 +676,92 @@ impl ExactSourceAdmission {
 }
 
 impl ExactCompilationRequest {
+    /// Capture metadata from this still-live offer, never from reconstructed
+    /// source or current cache state. The copy is diagnostic, not authority.
+    pub(crate) fn retain_input_diagnostics(&self, destination: &Path) -> std::io::Result<()> {
+        use std::io::Read;
+        #[derive(serde::Serialize)]
+        struct Facts<'a> {
+            scope: &'static str,
+            original_manifest: &'a Path,
+            retained_manifest: &'static str,
+            request_sha256: &'a str,
+            observed_manifest_sha256: String,
+            manifest_matches_request: bool,
+            semantic_sha256: String,
+            producer_sha256: String,
+            selected_lexical_graph: &'a [ExactLexicalNode],
+            retained_interfaces: &'a [DeclarationArtifact],
+            source_selected_support: Vec<crate::artifact_inventory::ArtifactDescriptor>,
+            checked_value_imports: Vec<(&'a str, &'a str)>,
+        }
+        struct BoundedBytes(Vec<u8>);
+        impl Write for BoundedBytes {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if bytes.len() > EXACT_SCOPE_BYTES_LIMIT - self.0.len() {
+                    return Err(std::io::Error::other(
+                        "exact request diagnostics exceed four MiB",
+                    ));
+                }
+                self.0.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        // Read with a limit so a changed/growing manifest cannot cause an
+        // unbounded diagnostic allocation. Keep its actual bytes and hash.
+        let mut bytes = Vec::new();
+        std::fs::File::open(&self.manifest)?
+            .take((EXACT_SCOPE_BYTES_LIMIT + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > EXACT_SCOPE_BYTES_LIMIT {
+            return Err(std::io::Error::other(
+                "exact request manifest exceeds four MiB",
+            ));
+        }
+        let directory = destination.join("exact-request");
+        std::fs::create_dir(&directory)?;
+        std::fs::write(directory.join("manifest.cbor"), &bytes)?;
+        let support = self
+            .program_support
+            .as_ref()
+            .map(ArtifactView::root_entries)
+            .unwrap_or_default();
+        let checked_value_imports = self.checked_value_imports.owners().collect::<Vec<_>>();
+        if self.artifacts.len() > EXACT_SCOPE_GRAPHS_LIMIT
+            || self.context.lexical.len() > EXACT_SCOPE_GRAPHS_LIMIT
+            || support.len() > EXACT_SCOPE_GRAPHS_LIMIT
+            || checked_value_imports.len() > EXACT_SCOPE_GRAPHS_LIMIT
+        {
+            return Err(std::io::Error::other(
+                "exact request diagnostic owners exceed 4096",
+            ));
+        }
+        let observed_manifest_sha256 = crate::checked_cell::hash(&bytes);
+        let facts = Facts {
+            scope: "original compiler offer; diagnostic only; never compiler authority",
+            original_manifest: &self.manifest,
+            retained_manifest: "manifest.cbor",
+            manifest_matches_request: observed_manifest_sha256 == self.request_sha256,
+            observed_manifest_sha256,
+            request_sha256: &self.request_sha256,
+            semantic_sha256: hex(&self.semantic_sha256),
+            producer_sha256: hex(&self.producer_sha256),
+            selected_lexical_graph: &self.context.lexical,
+            retained_interfaces: &self.artifacts,
+            source_selected_support: support
+                .iter()
+                .map(|entry| entry.descriptor.clone())
+                .collect(),
+            checked_value_imports,
+        };
+        let mut encoded = BoundedBytes(Vec::new());
+        serde_json::to_writer_pretty(&mut encoded, &facts).map_err(std::io::Error::other)?;
+        std::fs::write(directory.join("facts.json"), encoded.0)
+    }
+
     pub(crate) fn apply_to(
         &self,
         command: &mut tidepool_extract_cmd::ExtractCmd,
