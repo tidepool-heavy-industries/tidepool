@@ -16,6 +16,8 @@ mod cell_context;
 mod cell_model;
 #[cfg(all(test, feature = "codex-compat"))]
 pub(crate) mod command_jobs_tests;
+#[cfg(test)]
+mod command_test_backend;
 mod commands;
 mod context_wire;
 mod effect_vocabulary;
