@@ -6,8 +6,7 @@ use std::thread::JoinHandle;
 use exomonad_agent::backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 use exomonad_agent::seam::{
     AgentActivity, AgentBackendError, AgentId, BackendThreadId, CycleResultPayload, ModelPolicy,
-    ReasoningEffort, TokenUsage, ToolCallId, ToolDeclaration, ToolImplementation, ToolOutcome,
-    ToolScheduling,
+    ReasoningEffort, TokenUsage, ToolCallId, ToolDeclaration, ToolOutcome,
 };
 use exomonad_agent::spawn::{
     format_running_agents, AnswerFailure, CoupledSpawner, CycleProgress, CycleSaga, OneCycleRun,
@@ -1510,7 +1509,10 @@ mod tests {
     use std::time::Duration;
 
     use exomonad_agent::backend::mock::{MockBackend, MockFailure, MockStep};
-    use exomonad_agent::seam::{CycleSpec, ThreadSpec, ToolCall, ToolReply, TurnEvent, TurnId};
+    use exomonad_agent::seam::{
+        CycleSpec, ThreadSpec, ToolCall, ToolImplementation, ToolReply, ToolScheduling, TurnEvent,
+        TurnId,
+    };
     use exomonad_worktree::create::WorktreeHandle;
     use exomonad_worktree::id::{BranchName, GitOid, WorktreeId};
     use exomonad_worktree::registry::{WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus};
