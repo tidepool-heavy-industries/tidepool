@@ -4,6 +4,7 @@
 use ciborium::value::Value;
 use serde::{Deserialize, Serialize};
 
+mod candidate_diagnostics;
 #[cfg(test)]
 mod codec_measurement;
 pub(crate) mod deployment;

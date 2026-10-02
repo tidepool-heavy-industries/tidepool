@@ -349,6 +349,12 @@ pub enum CertificationError {
     Mismatch(&'static str),
     #[error("compiler product evidence is no longer valid")]
     StaleEvidence,
+    #[error("original candidate evidence for {unit}:{module} failed: {failure:?}")]
+    CandidateEvidence {
+        unit: String,
+        module: String,
+        failure: Box<crate::cache::DependencyEvidenceFailure>,
+    },
     #[error("compiler execution source proof rejected: {0}")]
     ExecutionSource(#[source] Box<crate::CompileError>),
     #[error("invalid original module product: {0}")]
@@ -3013,12 +3019,19 @@ pub(crate) fn certify_products(
                     if accepted.module_version.as_ref() != Some(&bundle.owner.module_version)
                         || bundle.owner.skinny_iface_sha256 != accepted.skinny_iface_sha256
                         || bundle.owner.product_sha256 != accepted.product_sha256
-                        || !bundle.evidence.valid(&bundle.target_source)
                         || bundle.source_sha256 != hex(&accepted.source_sha256)
                         || bundle.iface_sha256 != hex(&accepted.skinny_iface_sha256)
                     {
                         return Err(CertificationError::Mismatch("candidate owner/evidence"));
                     }
+                    bundle
+                        .evidence
+                        .validate(&bundle.target_source)
+                        .map_err(|failure| CertificationError::CandidateEvidence {
+                            unit: key.0.clone(),
+                            module: key.1.clone(),
+                            failure: Box::new(failure),
+                        })?;
                     if sha(&read_bounded(&bundle.source, SOURCE_LIMIT)?) != accepted.source_sha256
                         || sha(&read_bounded(&bundle.iface_path, PACKAGE_INTERFACE_LIMIT)?)
                             != accepted.skinny_iface_sha256
