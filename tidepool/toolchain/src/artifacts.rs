@@ -1051,7 +1051,7 @@ impl ModuleCandidateOffer {
             specification,
             exact.validate_outputs_with_planned(
                 root,
-                planned.as_ref().map(|planned| &planned.certificate),
+                planned.as_ref().map(|planned| planned.certificate.as_ref()),
             )?,
             &self.include,
             planned,
