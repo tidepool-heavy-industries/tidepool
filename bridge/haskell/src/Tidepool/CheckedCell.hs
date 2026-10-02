@@ -25,7 +25,7 @@ import GHC
 import GHC.Core.Type (tyConsOfType, coreView)
 import GHC.Core.TyCo.Rep (Type(..), TyLit(..))
 import GHC.Data.FastString (unpackFS)
-import GHC.Types.Var (VarBndr(..), ForAllTyFlag(..), Specificity(..), FunTyFlag(..), isTyVar)
+import GHC.Types.Var (VarBndr(..), ForAllTyFlag(..), Specificity(..), FunTyFlag(..), isTyVar, varType)
 import Tidepool.TypePolicy (stabilizeEffectRows)
 import GHC.Core.TyCon (tyConName, isFamilyTyCon)
 import GHC.Driver.Env (lookupType, hsc_home_unit)
