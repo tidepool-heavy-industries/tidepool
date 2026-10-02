@@ -124,6 +124,7 @@ impl InputFixture {
             &[],
             FixtureCompilation::Startup,
         ));
+        assert_startup_origin("producer", &producer, true);
         let TurnResult::Bind {
             compiled: receiver,
             bound,
@@ -138,6 +139,7 @@ impl InputFixture {
         else {
             panic!("native protocol receiver is a real retained Haskell binding");
         };
+        assert_startup_origin("receiver", &receiver, false);
         let [receiver_binder] = bound.as_slice() else {
             panic!("exactly one native protocol receiver binding");
         };
@@ -239,6 +241,76 @@ impl InputFixture {
 enum FixtureCompilation {
     Startup,
     Scoped,
+}
+
+fn assert_startup_origin(label: &str, compiled: &CompiledTurn, requires_input: bool) {
+    let proof = compiled
+        .certification
+        .as_ref()
+        .and_then(|certification| certification.compile_input_identity.as_ref());
+    let matches = compiled
+        .certification
+        .as_ref()
+        .is_some_and(|certification| {
+            proof.is_some_and(|proof| {
+                proof.matches_bundle(
+                    &compiled.prepared,
+                    &certification.groups,
+                    &certification.target_owners,
+                    &certification.package_interfaces,
+                    &compiled.table,
+                    &compiled.asks,
+                )
+            })
+        });
+    let sites = compiled
+        .asks
+        .iter()
+        .map(|site| {
+            serde_json::json!({
+                "site": site.site,
+                "inputs": site.inputs.len(),
+                "input_witnesses": site.input_type_witnesses.len(),
+                "first_input_witness": site.input_type_witnesses.first().and_then(Option::as_ref).map(|witness| witness.commitment()),
+            })
+        })
+        .collect::<Vec<_>>();
+    eprintln!(
+        "ACTIVATION_ORIGIN {}",
+        serde_json::json!({
+            "stage": label,
+            "certification_present": compiled.certification.is_some(),
+            "compile_input_identity_present": proof.is_some(),
+            "matches_bundle": matches,
+            "sites": sites,
+        })
+    );
+    assert!(
+        proof.is_some(),
+        "{label}: startup compiler input proof absent"
+    );
+    assert!(matches, "{label}: startup compiler input bundle mismatch");
+    if requires_input {
+        assert!(
+            compiled.asks.iter().any(|site| {
+                site.input_type_witnesses.len() == site.inputs.len()
+                    && site
+                        .input_type_witnesses
+                        .first()
+                        .is_some_and(Option::is_some)
+            }),
+            "{label}: original canonical input witness absent"
+        );
+    }
+}
+
+#[test]
+fn activation_startup_producer_retains_original_bundle_authority() {
+    let _fixture = InputFixture::compile(
+        include_str!("fixtures/activation-input-function.hs"),
+        false,
+        SessionId(1700),
+    );
 }
 
 fn compile_turn(
