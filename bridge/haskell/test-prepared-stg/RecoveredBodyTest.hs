@@ -521,7 +521,7 @@ assertRaiseContracts root = do
       -- The contract is that nothing can follow the raise: the body demands a
       -- NoSuccess operation, either directly or as the scrutinee of a case
       -- with no alternatives (the shape projection may give a demanded raise).
-      let nonReturningOperation body = case body of
+      let nonReturningOperation expression = case expression of
             Operation operation _ -> Just operation
             Case scrutinee _ _ _ [] -> nonReturningOperation scrutinee
             _ -> Nothing
