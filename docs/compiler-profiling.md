@@ -119,7 +119,13 @@ its resource deltas still cover its complete span.
 Existing `tidepool-timing-detail` diagnostics now include monotonic start/end,
 process CPU, allocation and GC deltas. Nested phases overlap; never add children
 to their parent. Flat phases measured through `timePhase` have a corresponding
-resource detail. Manually accumulated flat phases have no inferred resource
+resource detail. GHC setup and dependency loading have explicit resource spans;
+their existing flat timings differ slightly because sampling adds overhead.
+Per-module `typecheck` spans include parsing, classification, transformation,
+typechecking and family validation. `checked_typecheck` spans cover that work
+only when a checked candidate needs fresh typechecking; reused candidates do
+not emit a synthetic span. Planning between setup and loading remains outside
+those spans. Other manually accumulated flat phases have no inferred resource
 span. An action that throws before completion has no completed span; missing
 phases are unmeasured, not zero. `allocated_bytes` follows RTS accounting and
 can lag until GC; these counters do not force collection. `major_gcs` and
