@@ -53,6 +53,11 @@ same-user PID and fences PID reuse by process start ticks. It waits for perf's
 explicit enable acknowledgement before launching the command, records UTC and
 `CLOCK_MONOTONIC` anchors, and samples RSS from `/proc` every 50 ms. Recording
 uses userspace `cpu-clock` at 199 Hz, no inherited tasks and no call graph.
+Perf uses eight ring-buffer pages per CPU by default. `--mmap-pages` selects
+a power of two between one and 1024. Smaller buffers reduce locked-memory
+demand for parallel captures; report lost samples rather than assuming that
+the smaller buffer is sufficient. An mmap allocation failure is a capture
+failure, not evidence that the compiler request failed.
 Pass no command to capture externally submitted work for a bounded duration.
 The script owns and terminates its request command on timeout or capture failure;
 it never terminates the selected worker or changes OS settings.

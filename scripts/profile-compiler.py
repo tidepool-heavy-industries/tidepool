@@ -683,6 +683,8 @@ def main():
     parser.add_argument("--perf", default="perf")
     parser.add_argument("--duration", type=float, default=30, help="maximum seconds; command timeout when present")
     parser.add_argument("--frequency", type=int, default=199)
+    parser.add_argument("--mmap-pages", type=int, default=8,
+                        help="perf ring-buffer pages per CPU (power of two, 1..1024)")
     parser.add_argument("--rss-interval", type=float, default=0.05)
     parser.add_argument("--timing-log", type=Path, help="existing worker/daemon log; captures only new bytes")
     parser.add_argument("--worker-build-identity", type=Path, help="frozen build identity JSON with worker_sha256 and source provenance")
@@ -696,6 +698,8 @@ def main():
         parser.error("capture requires --pid (or use --reanalyze for offline recovery)")
     if not (0 < args.duration <= 300 and 0.01 <= args.rss_interval <= 10 and 0 < args.frequency <= 1000):
         parser.error("duration must be <=300s, frequency <=1000Hz, and RSS interval between 10ms and 10s; duration and frequency positive")
+    if not (1 <= args.mmap_pages <= 1024 and args.mmap_pages & (args.mmap_pages - 1) == 0):
+        parser.error("mmap-pages must be a power of two between 1 and 1024")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     proc = Path(f"/proc/{args.pid}")
     if proc.stat().st_uid != os.getuid():
@@ -714,6 +718,7 @@ def main():
         "worker_sha256": digest(proc / "exe"), "request_ids": args.request_id,
         "command": command, "duration_limit_seconds": args.duration,
         "frequency_hz": args.frequency, "event": "cpu-clock:u",
+        "perf_mmap_pages_per_cpu": args.mmap_pages,
         "clock": "CLOCK_MONOTONIC", "call_graph": "none; leaf samples only",
         "rss_interval_seconds": args.rss_interval, "derived_file_limit_bytes": DERIVED_LIMIT,
         "timing_log_limit_bytes": TIMING_LIMIT, "phase_limit": PHASE_LIMIT,
@@ -745,6 +750,7 @@ def main():
     control_read, control_write = os.pipe()
     ack_read, ack_write = os.pipe()
     perf_args = [perf, "record", "--clockid", "mono", "-e", "cpu-clock:u", "-F", str(args.frequency),
+                 "-m", str(args.mmap_pages),
                  "--no-inherit", "--no-buildid-cache", "--buildid-all", "--max-size", "64M",
                  "--delay=-1", "--control", f"fd:{control_read},{ack_write}",
                  "-p", str(args.pid), "-o", str(out / "cpu.perf.data")]
