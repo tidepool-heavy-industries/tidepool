@@ -6,7 +6,7 @@ module AgentSpec (agentSpec) where
 import Control.Monad.Freer (Member)
 import GHC.Generics (Generic)
 import Tidepool.Agent.Contract
-import Tidepool.Effects.Core (Jev, Lookup)
+import Tidepool.Effects.Core (Lookup)
 import qualified Tidepool.Lookup.Tools as LookupTools
 
 data CampaignTools effects mode = CampaignTools
@@ -18,7 +18,6 @@ data CampaignTools effects mode = CampaignTools
 agentSpec ::
   ( KnownToolEffects effects
   , AsyncEffects effects
-  , Member Jev effects
   , Member Lookup effects
   ) =>
   AgentSpec (CampaignTools effects) effects
