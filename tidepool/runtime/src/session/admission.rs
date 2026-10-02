@@ -11,6 +11,64 @@ use tidepool_repr::Generation;
 
 use super::{PersistentSession, PublicVisibilitySnapshot, SessionCompileView, SessionError};
 
+#[derive(Debug, thiserror::Error)]
+pub enum NativeSetupAdmissionFailure {
+    #[error("expected one binderless Bind, items={items}, first={first:?}, binders={binders}")]
+    Shape {
+        items: usize,
+        first: Option<tidepool_toolchain::cell_plan::ParsedCellPlanKind>,
+        binders: usize,
+    },
+    #[error("specification digest differs: planned={planned:?}, admitted={admitted:?}")]
+    SpecificationDigest {
+        planned: [u8; 32],
+        admitted: [u8; 32],
+    },
+    #[error("ordered include paths differ: planned={planned:?}, admitted={admitted:?}")]
+    IncludePaths {
+        planned: NativeSetupInputInventory,
+        admitted: NativeSetupInputInventory,
+    },
+    #[error("ordered injection differs: planned={planned:?}, reachable={reachable:?}")]
+    InjectionInventory {
+        planned: NativeSetupInputInventory,
+        reachable: NativeSetupInputInventory,
+    },
+    #[error("parser item index differs at {position}: observed={observed}")]
+    ItemOrder { position: usize, observed: usize },
+}
+
+/// A bounded diagnostic commitment to the complete ordered input inventory.
+#[derive(Debug)]
+pub struct NativeSetupInputInventory {
+    pub count: usize,
+    pub digest: [u8; 32],
+    pub first: Vec<String>,
+}
+
+impl NativeSetupInputInventory {
+    fn new<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Self {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"Tidepool.NativeSetupInputInventory.v1");
+        let mut count = 0;
+        let mut first = Vec::new();
+        for value in values {
+            count += 1;
+            hash.update(&(value.len() as u64).to_le_bytes());
+            hash.update(value);
+            if first.len() < 8 {
+                first.push(String::from_utf8_lossy(value).chars().take(128).collect());
+            }
+        }
+        hash.update(&(count as u64).to_le_bytes());
+        Self {
+            count,
+            digest: *hash.finalize().as_bytes(),
+            first,
+        }
+    }
+}
+
 /// A detached lexical owner captured in the same checkout as its public base.
 /// Its scope retains exact binding and native shares through the existing
 /// binding-store owner; completion must retire that scope once.
@@ -2013,7 +2071,14 @@ impl PersistentSession {
             || plan.items()[0].kind() != Kind::Bind
             || !plan.items()[0].binders().is_empty()
         {
-            return Err(SessionError::StaleStagedDeclaration);
+            return Err(self.native_setup_refusal(
+                scope,
+                NativeSetupAdmissionFailure::Shape {
+                    items: plan.items().len(),
+                    first: plan.items().first().map(|item| item.kind()),
+                    binders: plan.items().first().map_or(0, |item| item.binders().len()),
+                },
+            ));
         }
         self.admit_cell_with_plan(
             scope,
@@ -2050,6 +2115,19 @@ impl PersistentSession {
         )
     }
 
+    fn native_setup_refusal(
+        &self,
+        scope: ScopeId,
+        reason: NativeSetupAdmissionFailure,
+    ) -> SessionError {
+        SessionError::InvalidNativeSetupAdmission {
+            owner: self.admission_owner().identity,
+            owner_epoch: self.admission_owner().epoch(),
+            scope,
+            reason,
+        }
+    }
+
     fn admit_cell_with_plan(
         &mut self,
         scope: ScopeId,
@@ -2068,26 +2146,64 @@ impl PersistentSession {
             .ok_or(SessionError::DeadScope(scope))?
             .with_scoped_injection();
         if let Some(plan) = &plan {
-            if plan.specification_digest() != specification_digest
-                || plan.include_paths().len() != include_paths.len()
+            let injected = view
+                .injected_values()
+                .iter()
+                .map(|module| module.module_name())
+                .collect::<Vec<_>>();
+            let refusal = if plan.specification_digest() != specification_digest {
+                Some(NativeSetupAdmissionFailure::SpecificationDigest {
+                    planned: plan.specification_digest(),
+                    admitted: specification_digest,
+                })
+            } else if plan.include_paths().len() != include_paths.len()
                 || !plan
                     .include_paths()
                     .iter()
                     .zip(&include_paths)
                     .all(|(a, b)| a.as_os_str() == b.as_os_str())
-                || plan.injected_modules()
-                    != view
-                        .injected_values()
-                        .iter()
-                        .map(|module| module.module_name())
-                        .collect::<Vec<_>>()
-                || plan
-                    .items()
+            {
+                Some(NativeSetupAdmissionFailure::IncludePaths {
+                    planned: NativeSetupInputInventory::new(
+                        plan.include_paths()
+                            .iter()
+                            .map(|path| path.as_os_str().as_encoded_bytes()),
+                    ),
+                    admitted: NativeSetupInputInventory::new(
+                        include_paths
+                            .iter()
+                            .map(|path| path.as_os_str().as_encoded_bytes()),
+                    ),
+                })
+            } else if plan.injected_modules() != injected {
+                Some(NativeSetupAdmissionFailure::InjectionInventory {
+                    planned: NativeSetupInputInventory::new(
+                        plan.injected_modules()
+                            .iter()
+                            .map(|module| module.as_bytes()),
+                    ),
+                    reachable: NativeSetupInputInventory::new(
+                        injected.iter().map(|module| module.as_bytes()),
+                    ),
+                })
+            } else {
+                plan.items()
                     .iter()
                     .enumerate()
-                    .any(|(index, item)| item.index() != index)
-            {
-                return Err(SessionError::StaleStagedDeclaration);
+                    .find(|(index, item)| item.index() != *index)
+                    .map(|(position, item)| NativeSetupAdmissionFailure::ItemOrder {
+                        position,
+                        observed: item.index(),
+                    })
+            };
+            if let Some(reason) = refusal {
+                return Err(
+                    if matches!(native_purpose, Some(NativeCellPurpose::Setup)) {
+                        self.native_setup_refusal(scope, reason)
+                    } else {
+                        SessionError::StaleStagedDeclaration
+                    },
+                );
             }
         }
         let view_digest = self

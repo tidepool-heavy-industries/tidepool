@@ -4619,7 +4619,9 @@ where
                     mounted_input.as_ref(),
                     execution
                         .as_ref()
-                        .map(|execution| execution.admission.as_ref()),
+                        .map_or(CellSnapshotAdmission::ProtectedSetup, |execution| {
+                            CellSnapshotAdmission::PrivateExecution(execution.admission.as_ref())
+                        }),
                 )?;
                 let prepared = source.prepare(&snapshot.view);
                 let preamble = cell_module_preamble(
@@ -10780,8 +10782,15 @@ where
         response,
         request,
         mounted_input,
-        None,
+        CellSnapshotAdmission::LegacyFold,
     )
+}
+
+#[derive(Clone, Copy)]
+enum CellSnapshotAdmission<'a> {
+    LegacyFold,
+    ProtectedSetup,
+    PrivateExecution(&'a tidepool_runtime::session::PrivateExecutionAdmission),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10793,7 +10802,7 @@ fn snapshot_cell_split_owned<H, O>(
     response: Option<&ResponseExpectation>,
     request: Option<crate::RequestId>,
     mounted_input: Option<&MountedHostInput>,
-    execution: Option<&tidepool_runtime::session::PrivateExecutionAdmission>,
+    admission: CellSnapshotAdmission<'_>,
 ) -> Result<(ActorWorkbenchSource, CellSplitSnapshot), ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -10828,7 +10837,7 @@ where
     }
     .into();
     source.preamble = actor_preamble(&source.preamble, context).into();
-    let view = if let Some(execution) = execution {
+    let view = if let CellSnapshotAdmission::PrivateExecution(execution) = admission {
         if execution.private_scope() != context.placement.lexical_scope {
             return Err(ResidentActorWorkbenchError::Resident(
                 ResidentError::Session(
@@ -10845,13 +10854,26 @@ where
             .compile_view(session_view)?
             .with_workbench_imports(&source.workbench_imports)
             .with_type_modules(type_modules)
+    } else if matches!(admission, CellSnapshotAdmission::ProtectedSetup) {
+        let session_view = session
+            .compile_view_in(context.placement.lexical_scope)
+            .ok_or(ResidentActorWorkbenchError::Resident(
+                ResidentError::Session(tidepool_runtime::session::SessionError::DeadScope(
+                    context.placement.lexical_scope,
+                )),
+            ))?
+            .with_scoped_injection();
+        context
+            .compile_view(session_view)?
+            .with_workbench_imports(&source.workbench_imports)
+            .with_type_modules(type_modules)
     } else {
         actor_compile_view(session, context, &source, type_modules)?
     };
     // The fold can write a Val interface during the whole-cell check. Claim
     // its identity before releasing checkout: rejecting a stale result later
     // cannot undo a compiler overwriting another actor's interface.
-    if execution.is_none() {
+    if matches!(admission, CellSnapshotAdmission::LegacyFold) {
         session.reserve_value_generations_through(view.next_value_generation());
     }
     let retained = session.prepared_retained();
@@ -18951,8 +18973,47 @@ mod request_tests {
     #[test]
     fn native_setup_admission_refuses_other_parser_shapes_before_reservation() {
         let (mut session, context, source, _root) = host_mount_fixture();
-        let view = actor_compile_view(&session, &context, &source, &[]).unwrap();
-        let prepared = source.prepare(&view);
+        let mut sibling = context.clone();
+        sibling.actor = crate::ActorRef::first(crate::ActorId(2));
+        sibling.placement.lexical_scope = session.mint_isolated_scope();
+        let _foreign_input = mount_json_input(
+            &mut session,
+            &sibling,
+            &source,
+            &[],
+            &serde_json::json!(42),
+            None,
+        )
+        .expect("sibling owns a genuine compiled native value");
+        let raw_view = actor_compile_view(&session, &context, &source, &[]).unwrap();
+        let raw_injection = source.prepare(&raw_view).injected;
+        let before_snapshot = raw_view.next_value_generation();
+        let (scoped_source, snapshot) = snapshot_cell_split_owned(
+            &mut session,
+            &context,
+            source.clone(),
+            &[],
+            None,
+            None,
+            None,
+            CellSnapshotAdmission::ProtectedSetup,
+        )
+        .unwrap();
+        let prepared = scoped_source.prepare(&snapshot.view);
+        assert!(!raw_injection.is_empty());
+        assert!(
+            prepared.injected.is_empty(),
+            "sibling values are not selected by setup"
+        );
+        assert_eq!(snapshot.view.next_value_generation(), before_snapshot);
+        assert_eq!(
+            session
+                .compile_view_in(context.placement.lexical_scope)
+                .unwrap()
+                .next_value_generation(),
+            before_snapshot,
+            "protected snapshot must leave reservation to ordered admission"
+        );
         let template = resident_cell_check_template(
             &prepared.preamble,
             &context.haskell_effects_alias,
@@ -19080,6 +19141,51 @@ mod request_tests {
             )
             .is_err(),
             "bare public cell admission must not acquire native setup authority"
+        );
+        let mut leaked = specification.as_ref().clone();
+        leaked.injected_modules = raw_injection;
+        let leaked = Arc::new(leaked);
+        let leaked_plan =
+            tidepool_toolchain::artifacts::parse_cell_plan(leaked.clone(), &prepared.include)
+                .unwrap();
+        let before_refusal = session
+            .compile_view_in(context.placement.lexical_scope)
+            .unwrap()
+            .next_value_generation();
+        let refusal = match session.admit_native_setup_cell_in(
+            context.placement.lexical_scope,
+            leaked_plan,
+            leaked.clone(),
+            leaked.specification_digest(),
+            [9; 32],
+            prepared.include.clone(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("setup accepted foreign injection"),
+        };
+        match refusal {
+            tidepool_runtime::session::SessionError::InvalidNativeSetupAdmission {
+                scope,
+                reason:
+                    tidepool_runtime::session::NativeSetupAdmissionFailure::InjectionInventory {
+                        planned,
+                        reachable,
+                    },
+                ..
+            } => {
+                assert_eq!(scope, context.placement.lexical_scope);
+                assert!(planned.count > 0);
+                assert_eq!(reachable.count, 0);
+                assert_ne!(planned.digest, reachable.digest);
+            }
+            other => panic!("expected exact injection refusal, got {other:?}"),
+        }
+        assert_eq!(
+            session
+                .compile_view_in(context.placement.lexical_scope)
+                .unwrap()
+                .next_value_generation(),
+            before_refusal
         );
         let plan = tidepool_toolchain::artifacts::parse_cell_plan(
             specification.clone(),

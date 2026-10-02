@@ -59,9 +59,10 @@ pub use persistent::{
 };
 
 pub use admission::{
-    CheckedDisplaySettlement, PrivateExecutionAdmission, RuntimeCellAdmission,
-    RuntimeCheckedDisplayAdmission, RuntimeCheckedItemAdmission, RuntimeCheckedPrefix,
-    RuntimeCheckedPrefixSnapshot, RuntimeLexicalScopeLease,
+    CheckedDisplaySettlement, NativeSetupAdmissionFailure, NativeSetupInputInventory,
+    PrivateExecutionAdmission, RuntimeCellAdmission, RuntimeCheckedDisplayAdmission,
+    RuntimeCheckedItemAdmission, RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot,
+    RuntimeLexicalScopeLease,
 };
 pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{
@@ -381,6 +382,15 @@ pub enum SessionError {
     InvalidRecoveryInitialization {
         scope: ScopeId,
         reason: RecoveryInitializationFailure,
+    },
+    #[error(
+        "native setup admission owner={owner}, epoch={owner_epoch}, scope={scope:?}: {reason}"
+    )]
+    InvalidNativeSetupAdmission {
+        owner: uuid::Uuid,
+        owner_epoch: u64,
+        scope: ScopeId,
+        reason: NativeSetupAdmissionFailure,
     },
     #[error("private value replacement requires a certified lexical overlay")]
     UnsupportedPrivateValueReplacement,
