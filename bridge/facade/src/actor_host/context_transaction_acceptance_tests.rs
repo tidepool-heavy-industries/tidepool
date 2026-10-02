@@ -44,14 +44,31 @@ impl RequestedRound {
             .expect("resident Engine still awaits its scripted reply");
     }
 
-    fn function(self, call_id: &str, name: &str, arguments: Value) {
+    fn cell_with_reasoning(self, call_id: &str, source: &str) {
+        self.respond_with_reasoning(
+            call_id,
+            Item(json!({
+                "type": "custom_tool_call", "call_id": call_id,
+                "name": "haskell_sync", "input": source,
+            })),
+        );
+    }
+
+    fn function_with_reasoning(self, call_id: &str, name: &str, arguments: Value) {
+        self.respond_with_reasoning(
+            call_id,
+            Item(json!({
+                "type": "function_call", "call_id": call_id,
+                "name": name, "arguments": arguments.to_string(),
+            })),
+        );
+    }
+
+    fn respond_with_reasoning(self, call_id: &str, call: Item) {
         self.reply
             .send(ResponsesTurn {
                 response_id: format!("response-{call_id}"),
-                items: vec![Item(json!({
-                    "type": "function_call", "call_id": call_id,
-                    "name": name, "arguments": arguments.to_string(),
-                }))],
+                items: vec![reasoning_item(call_id), call],
                 usage: Default::default(),
             })
             .expect("resident Engine still awaits its scripted reply");
@@ -138,8 +155,11 @@ async fn next_round_with_state(
 }
 
 fn retained_output(request: &ResponsesRequest, call_id: &str) -> Value {
-    let item = request
-        .input
+    retained_output_items(&request.input, call_id)
+}
+
+fn retained_output_items(items: &[Item], call_id: &str) -> Value {
+    let item = items
         .iter()
         .find(|item| {
             matches!(
@@ -152,7 +172,11 @@ fn retained_output(request: &ResponsesRequest, call_id: &str) -> Value {
 }
 
 fn successful_output(request: &ResponsesRequest, call_id: &str) -> Value {
-    let output = retained_output(request, call_id);
+    successful_output_items(&request.input, call_id)
+}
+
+fn successful_output_items(items: &[Item], call_id: &str) -> Value {
+    let output = retained_output_items(items, call_id);
     assert!(
         matches!(output["status"].as_str(), Some("completed" | "committed")),
         "{output}"
@@ -166,6 +190,61 @@ fn successful_output(request: &ResponsesRequest, call_id: &str) -> Value {
         "{output}"
     );
     output
+}
+
+fn reasoning_item(call_id: &str) -> Item {
+    Item(json!({
+        "type": "reasoning", "id": format!("reasoning-{call_id}"),
+        "encrypted_content": format!("opaque-{call_id}"),
+        "summary": [{"type": "summary_text", "text": format!("visible reasoning for {call_id}")}],
+    }))
+}
+
+fn raw_request_items(fixture: &RunningBrowserHost, request: &ResponsesRequest) -> Vec<Item> {
+    let run = runtime_namespace(&fixture.campaign.config.run_root);
+    let actor_and_incarnation = request
+        .session_id
+        .strip_prefix(&format!("{run}:"))
+        .expect("request belongs to this embedded run");
+    let (actor, incarnation) = actor_and_incarnation
+        .rsplit_once(':')
+        .expect("embedded request carries its exact incarnation");
+    let store = fixture.runtime.store();
+    let frontier = store
+        .embedded_round_frontier(&harness::embedding::HostIdentity {
+            run,
+            actor: AgentPath(actor.to_owned()),
+            incarnation: incarnation.to_owned(),
+        })
+        .unwrap();
+    let head = frontier
+        .pending_head
+        .or(frontier.settled_head)
+        .expect("the observed provider request has admitted history");
+    store
+        .context_history(&head)
+        .unwrap()
+        .into_iter()
+        .map(|(_, _, item)| item)
+        .collect()
+}
+
+fn assert_portable_exchange(request: &ResponsesRequest, call_id: &str, tool: &str) {
+    assert!(
+        request
+            .input
+            .iter()
+            .all(|item| item.0.get("encrypted_content").is_none()),
+        "foreign encrypted reasoning escaped into {} input: {:?}",
+        request.model,
+        request.input
+    );
+    let input = serde_json::to_string(&request.input).unwrap();
+    assert!(
+        input.contains(&format!("visible reasoning for {call_id}")),
+        "{input}"
+    );
+    assert!(input.contains(call_id) && input.contains(tool), "{input}");
 }
 
 fn context_operations(output: &Value) -> Vec<&Value> {
@@ -365,7 +444,7 @@ async fn resident_sync_context_commits_before_deferred_children_and_child_model_
     assert!(parent.is_root());
     successful_output(&parent.request, "context-setup");
     let root_session = parent.request.session_id.clone();
-    parent.cell(
+    parent.cell_with_reasoning(
         "context-parent",
         include_str!("fixtures/context_acceptance_parent.hs"),
     );
@@ -381,7 +460,10 @@ async fn resident_sync_context_commits_before_deferred_children_and_child_model_
                 "parent inferred twice before another input"
             );
             assert_eq!(round.request.session_id, root_session);
-            successful_output(&round.request, "context-parent");
+            let raw = raw_request_items(&fixture, &round.request);
+            successful_output_items(&raw, "context-parent");
+            assert!(raw.contains(&reasoning_item("context-parent")));
+            assert_portable_exchange(&round.request, "context-parent", "haskell_sync");
             assert_eq!(round.request.model, "parent-curated-model");
             assert!(has_user_text(&round.request, "parent-curated"));
             assert!(!has_user_text(&round.request, "parent-original"));
@@ -389,16 +471,22 @@ async fn resident_sync_context_commits_before_deferred_children_and_child_model_
             round.finish();
         } else if child_sessions.insert(round.request.session_id.clone()) {
             assert!(child_sessions.len() <= 2, "launched an unexpected child");
-            assert_eq!(round.request.model, "test-model");
+            assert_eq!(round.request.model, "child-preparation-model");
             assert!(has_user_text(&round.request, "parent-curated"));
             assert!(!has_user_text(&round.request, "parent-original"));
-            successful_output(&round.request, "context-parent");
-            round.cell(
+            let raw = raw_request_items(&fixture, &round.request);
+            successful_output_items(&raw, "context-parent");
+            assert!(raw.contains(&reasoning_item("context-parent")));
+            assert_portable_exchange(&round.request, "context-parent", "haskell_sync");
+            round.cell_with_reasoning(
                 "context-child",
                 include_str!("fixtures/context_acceptance_child.hs"),
             );
         } else {
-            let output = successful_output(&round.request, "context-child");
+            let raw = raw_request_items(&fixture, &round.request);
+            let output = successful_output_items(&raw, "context-child");
+            assert!(raw.contains(&reasoning_item("context-child")));
+            assert_portable_exchange(&round.request, "context-child", "haskell_sync");
             assert_eq!(round.request.model, "gpt-6.1-sol");
             assert!(has_user_text(&round.request, "child-curated"));
             assert!(!has_user_text(&round.request, "parent-curated"));
@@ -445,10 +533,13 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
     }));
     let session = first.request.session_id.clone();
     assert_eq!(first.request.pinned_effort, harness::model::Effort::Low);
-    first.function("compiled-context", "curate", json!({"proceed": true}));
+    first.function_with_reasoning("compiled-context", "curate", json!({"proceed": true}));
     let successor = next_round(&mut rounds).await;
     assert!(successor.is_root());
-    let output = successful_output(&successor.request, "compiled-context");
+    let raw = raw_request_items(&fixture, &successor.request);
+    let output = successful_output_items(&raw, "compiled-context");
+    assert!(raw.contains(&reasoning_item("compiled-context")));
+    assert_portable_exchange(&successor.request, "compiled-context", "curate");
     assert_eq!(output["total"], 1, "{output}");
     assert_eq!(output["nextIndex"], 1, "{output}");
     assert_eq!(
