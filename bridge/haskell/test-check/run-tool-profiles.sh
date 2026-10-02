@@ -4,15 +4,17 @@ if [[ ${1:-} != --in-dev-shell ]]; then
   exec bash scripts/dev-shell.sh bash "$0" --in-dev-shell "$@"
 fi
 shift
-support=${1:?provide the directory containing production generated Tidepool/Effects/Core.hs}
+support=${1:?provide the generated Core, Authored and Effects include directory}
 scratch=${2:-target/context-spec/tool-profiles}
-test -f "$support/Tidepool/Effects/Core.hs"
+for source in Tidepool/Effects/Core.hs Tidepool/Effects/Authored.hs Tidepool/Effects.hs; do
+  test -f "$support/$source"
+done
 mkdir -p "$scratch/objects"
 {
   git rev-parse HEAD
   command -v ghc
   ghc --version
-  sha256sum "$support/Tidepool/Effects/Core.hs"
+  sha256sum "$support/Tidepool/Effects/Core.hs" "$support/Tidepool/Effects/Authored.hs" "$support/Tidepool/Effects.hs"
 } > "$scratch/provenance.log"
 includes=(-i"$support" -ibridge/haskell/lib -ibridge/haskell/actors)
 ghc -O0 -Wall "${includes[@]}" -outputdir "$scratch/objects" \
