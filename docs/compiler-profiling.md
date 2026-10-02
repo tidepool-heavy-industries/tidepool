@@ -87,6 +87,19 @@ labels remain distinct from observed compiler request IDs. `samples.txt`, `repor
 `rss.jsonl` and the selected log suffix retain the underlying evidence. Timing
 log replacement or truncation is reported, rather than silently accepted.
 
+`capture.json` also records the selected worker's unified cgroup path and
+bounded start/end snapshots for up to 16 ancestors. The snapshots read
+`cpu.stat`, `memory.events`, current/max/high memory values, and CPU, memory,
+and IO pressure when those files are available. Cumulative CPU, event and
+pressure `total` counters include deltas; memory values and PSI averages remain
+start/end gauges. A counter decrease is reported as a reset. Missing,
+unreadable, oversized or disappeared cgroup data is retained as an explicit
+status. If the worker's unified path changes, deltas are omitted. Parent
+cgroups are shared context and their counters cannot be attributed to this
+worker or request; start/end snapshots can also miss brief pressure spikes.
+Offline reanalysis retains these original snapshots and does not resample the
+cgroup.
+
 `phase_leaf_groups` reports up to eight leaf symbols and DSOs for each qualified
 invocation and phase, plus unknown, unparsed and remaining sample counts.
 Repeated spans of the same group use the union of their intervals so a CPU
