@@ -152,7 +152,8 @@ impl HostedContextBinding for EmbeddedContextBinding {
                     &state.draft.document,
                 ))),
                 ContextReq::PutContextWith(document) => {
-                    state.draft.document = super::context_wire::from_wire(document);
+                    state.draft.document = super::context_wire::from_wire(document)
+                        .map_err(|error| EffectError::Handler(error.to_string()))?;
                     state.changed = true;
                     Ok(Response::new(()))
                 }

@@ -1,12 +1,14 @@
 //! Typed conversion between Store context documents and their Haskell wire form.
 
 use harness::context::{
-    ContextBlock, ContextDocument, ContextNativeKind, ContextReference, ContextRole,
+    ContextBlock, ContextDocument, ContextError, ContextNativeKind, ContextReference, ContextRole,
+    ContextTextSelector, ContextVisibleText,
 };
 use tidepool_bridge_effects::{
     ContextBlock as WireBlock, ContextDocument as WireDocument,
     ContextNativeKind as WireNativeKind, ContextReference as WireReference,
-    ContextRole as WireRole,
+    ContextRole as WireRole, ContextTextSelector as WireTextSelector,
+    ContextVisibleText as WireVisibleText,
 };
 
 pub(super) fn to_wire(document: &ContextDocument) -> WireDocument {
@@ -15,10 +17,14 @@ pub(super) fn to_wire(document: &ContextDocument) -> WireDocument {
     }
 }
 
-pub(super) fn from_wire(document: WireDocument) -> ContextDocument {
-    ContextDocument {
-        blocks: document.blocks.into_iter().map(block_from_wire).collect(),
-    }
+pub(super) fn from_wire(document: WireDocument) -> Result<ContextDocument, ContextError> {
+    Ok(ContextDocument {
+        blocks: document
+            .blocks
+            .into_iter()
+            .map(block_from_wire)
+            .collect::<Result<_, _>>()?,
+    })
 }
 
 fn block_to_wire(block: &ContextBlock) -> WireBlock {
@@ -39,17 +45,19 @@ fn block_to_wire(block: &ContextBlock) -> WireBlock {
             kind,
             preview,
             protected,
+            texts,
         } => WireBlock::Native {
             reference: reference_to_wire(reference),
             kind: native_kind_to_wire(*kind),
             preview: preview.clone(),
             protected: *protected,
+            texts: texts.iter().map(text_to_wire).collect(),
         },
     }
 }
 
-fn block_from_wire(block: WireBlock) -> ContextBlock {
-    match block {
+fn block_from_wire(block: WireBlock) -> Result<ContextBlock, ContextError> {
+    Ok(match block {
         WireBlock::Text {
             reference,
             role,
@@ -66,13 +74,46 @@ fn block_from_wire(block: WireBlock) -> ContextBlock {
             kind,
             preview,
             protected,
+            texts,
         } => ContextBlock::Native {
             reference: reference_from_wire(reference),
             kind: native_kind_from_wire(kind),
             preview,
             protected,
+            texts: texts
+                .into_iter()
+                .map(text_from_wire)
+                .collect::<Result<_, _>>()?,
         },
+    })
+}
+
+fn text_to_wire(text: &ContextVisibleText) -> WireVisibleText {
+    WireVisibleText {
+        reference: reference_to_wire(&text.reference),
+        selector: match &text.selector {
+            ContextTextSelector::MessageText { part } => WireTextSelector::MessageText {
+                part: i64::from(*part),
+            },
+            ContextTextSelector::ToolResultText => WireTextSelector::ToolResultText,
+        },
+        text: text.text.clone(),
+        editable: text.editable,
     }
+}
+
+fn text_from_wire(text: WireVisibleText) -> Result<ContextVisibleText, ContextError> {
+    Ok(ContextVisibleText {
+        reference: reference_from_wire(text.reference),
+        selector: match text.selector {
+            WireTextSelector::MessageText { part } => ContextTextSelector::MessageText {
+                part: u32::try_from(part).map_err(|_| ContextError::InvalidReference)?,
+            },
+            WireTextSelector::ToolResultText => ContextTextSelector::ToolResultText,
+        },
+        text: text.text,
+        editable: text.editable,
+    })
 }
 
 fn reference_to_wire(reference: &ContextReference) -> WireReference {
@@ -119,7 +160,8 @@ fn native_kind_from_wire(kind: WireNativeKind) -> ContextNativeKind {
 mod tests {
     use super::{from_wire, to_wire};
     use harness::context::{
-        ContextBlock, ContextDocument, ContextNativeKind, ContextReference, ContextRole,
+        ContextBlock, ContextDocument, ContextError, ContextNativeKind, ContextReference,
+        ContextRole, ContextTextSelector, ContextVisibleText,
     };
 
     #[test]
@@ -146,22 +188,58 @@ mod tests {
                     kind: ContextNativeKind::CompletedExchange,
                     preview: "completed".into(),
                     protected: false,
+                    texts: vec![ContextVisibleText {
+                        reference: ContextReference::from_raw("output:2".into()),
+                        selector: ContextTextSelector::ToolResultText,
+                        text: "[Trimmed: repetitive output]\nsuccess".into(),
+                        editable: true,
+                    }],
                 },
                 ContextBlock::Native {
                     reference: ContextReference::from_raw("native:3".into()),
                     kind: ContextNativeKind::Opaque,
                     preview: "opaque".into(),
                     protected: true,
+                    texts: vec![ContextVisibleText {
+                        reference: ContextReference::from_raw("message:3".into()),
+                        selector: ContextTextSelector::MessageText { part: 2 },
+                        text: "Visible message in an opaque envelope".into(),
+                        editable: true,
+                    }],
                 },
                 ContextBlock::Native {
                     reference: ContextReference::from_raw("native:4".into()),
                     kind: ContextNativeKind::Pending,
                     preview: "pending".into(),
                     protected: true,
+                    texts: vec![ContextVisibleText {
+                        reference: ContextReference::from_raw("message:4".into()),
+                        selector: ContextTextSelector::MessageText { part: 0 },
+                        text: "Protected visible text".into(),
+                        editable: false,
+                    }],
                 },
             ],
         };
 
-        assert_eq!(from_wire(to_wire(&document)), document);
+        assert_eq!(from_wire(to_wire(&document)).unwrap(), document);
+    }
+
+    #[test]
+    fn invalid_message_part_is_rejected_without_aliasing_another_part() {
+        for part in [-1, i64::from(u32::MAX) + 1] {
+            let text = super::WireVisibleText {
+                reference: super::WireReference {
+                    raw: "message:1".into(),
+                },
+                selector: super::WireTextSelector::MessageText { part },
+                text: "replacement".into(),
+                editable: true,
+            };
+            assert!(matches!(
+                super::text_from_wire(text),
+                Err(ContextError::InvalidReference)
+            ));
+        }
     }
 }
