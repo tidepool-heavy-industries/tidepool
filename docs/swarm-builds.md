@@ -149,18 +149,48 @@ its own Buck action key and reuse remains at the current crate/component action
 boundaries. The pinned Nix compilers and third-party Rust optimization remain
 unchanged.
 
-For a matched production host and extractor worker, select the profile on each
-Buck invocation:
+For a matched native production runtime, select the profile on the bundle
+invocation:
 
 ```sh
 bash scripts/buck2-run.sh build --local-only -c remote.enabled=false \
   -c tidepool.profile=production \
-  //bridge/facade:tidepool //bridge/haskell:tidepool_extract_bin
+  //build/package:native_runtime_bundle --show-output
 ```
 
 Unknown profile names fail during target analysis. The setting can also be
 stored in a local Buck config, but the exact command should be retained with
 performance evidence so the action profile is clear.
+
+`//build/package:native_runtime_bundle` packages the Buck-built `exomonad`,
+`exomonad-view-helper`, `tidepool-extract`, and `tidepool-extract-bin` as sibling
+executables, together with the matched browser assets and Haskell library
+sources. Copy the complete output into a unique retained run directory before
+starting acceptance or a live run. The worker must link project libraries
+statically so that retaining its executable also retains all mutable project
+code; shared libraries from the pinned Nix closure remain external inputs.
+
+Generate deployment authority **after copying**, using the selected absolute
+bundle path and the pinned GHC directory recorded in that bundle:
+
+```sh
+# Set BUNDLE to the absolute path of the complete retained bundle.
+export TIDEPOOL_EXTRACT="$BUNDLE/bin/tidepool-extract"
+export TIDEPOOL_EXTRACT_WORKER="$BUNDLE/bin/tidepool-extract-bin"
+export TIDEPOOL_GHC_LIBDIR="$(cat "$BUNDLE/share/exomonad/ghc-libdir.txt")"
+export TIDEPOOL_COMPILER_DEPLOYMENT="$BUNDLE/share/exomonad/compiler-deployment.json"
+export TIDEPOOL_PRELUDE_DIR="$BUNDLE/share/exomonad/stdlib"
+export EXOMONAD_EMBEDDED_ASSET_ROOT="$BUNDLE/share/exomonad/web"
+unset TIDEPOOL_COMPILER_MODULES TIDEPOOL_EXTRACT_DAEMON_SOCKET
+"$TIDEPOOL_EXTRACT" --compiler-deployment-manifest "$TIDEPOOL_COMPILER_DEPLOYMENT"
+"$BUNDLE/bin/exomonad" init
+```
+
+This native bundle uses the source library and its own compiler. The separate
+`matched_runtime_bundle` below owns the Nix compiler and certified stdlib
+products. Keep the pinned Nix closures materialized and supply the normal
+admitted runtime tools, including the separately installed Codex package, on
+`PATH`. Neither bundle builds Codex.
 
 The matched runtime bundle includes `share/exomonad/compiler-deployment.json`,
 generated from that bundle's frontend, worker, and pinned GHC library directory

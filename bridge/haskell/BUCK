@@ -80,10 +80,13 @@ haskell_library(
 
 haskell_binary(
     name = "tidepool_extract_bin",
+    # Retain project code in the executable copied at run startup; installed
+    # packages remain dynamically linked from the immutable Nix closure.
+    link_style = "static_pic",
     srcs = {"Main.hs": "app/Main.hs"},
     deps = [":tidepool_extract_internal"],
     compiler_flags = extractor_binary_flags("-XOverloadedStrings"),
-    linker_flags = extractor_binary_link_flags() + ["-with-rtsopts=-T"],
+    linker_flags = ["-dynamic"] + extractor_library_link_flags() + ["-with-rtsopts=-T"],
     visibility = ["PUBLIC"],
 )
 
