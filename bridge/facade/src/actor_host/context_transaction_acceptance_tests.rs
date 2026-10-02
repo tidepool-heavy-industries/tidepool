@@ -89,7 +89,12 @@ fn successful_output(request: &ResponsesRequest, call_id: &str) -> Value {
     let item = request
         .input
         .iter()
-        .find(|item| item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == call_id)
+        .find(|item| {
+            matches!(
+                item.0["type"].as_str(),
+                Some("custom_tool_call_output" | "function_call_output")
+            ) && item.0["call_id"] == call_id
+        })
         .unwrap_or_else(|| panic!("next inference omitted terminal output for {call_id}"));
     let output: Value = serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap();
     assert!(
@@ -320,16 +325,13 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
     first.function("compiled-context", "curate", json!({"proceed": true}));
     let successor = next_round(&mut rounds).await;
     assert!(successor.is_root());
-    let terminal = successor
-        .request
-        .input
-        .iter()
-        .find(|item| {
-            item.0["type"] == "function_call_output" && item.0["call_id"] == "compiled-context"
-        })
-        .expect("compiled handler terminal output must precede the next inference");
-    let output: Value = serde_json::from_str(terminal.0["output"].as_str().unwrap()).unwrap();
-    assert_eq!(output, json!("compiled-handler-committed"), "{output}");
+    let output = successful_output(&successor.request, "compiled-context");
+    assert_eq!(output["total"], 1, "{output}");
+    assert_eq!(output["nextIndex"], 1, "{output}");
+    assert_eq!(
+        output["items"][0]["output"], "compiled-handler-committed",
+        "{output}"
+    );
     assert_eq!(successor.request.session_id, session);
     assert_eq!(successor.request.model, "gpt-6.1-sol");
     assert!(has_user_text(
