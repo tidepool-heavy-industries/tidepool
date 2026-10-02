@@ -150,6 +150,19 @@ fn request_for_tool(
     }
 }
 
+// Builtins are served by their owning actor routes and are absent from the
+// compiled AgentSpec. Only exact owned declarations use that admission path.
+fn selected_contract(declaration: &HostedTool) -> Option<HostedTool> {
+    if declaration == &crate::status_tool::declaration()
+        || declaration == &crate::reload_spec_tool::declaration()
+        || declaration == &crate::reload_helpers_tool::declaration()
+    {
+        None
+    } else {
+        Some(declaration.clone())
+    }
+}
+
 fn haskell_tool_instructions() -> &'static str {
     PromptId::HaskellToolInstructions.body()
 }
@@ -267,7 +280,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                     installed_tools,
                     capture,
                     context,
-                    Some(declaration.clone()),
+                    selected_contract(declaration),
                 )
                 .await
         })
@@ -343,6 +356,29 @@ mod tests {
             unsupported.kind = kind;
             assert!(project_tools(vec![unsupported]).is_err());
         }
+    }
+
+    #[test]
+    fn builtin_dispatch_uses_owned_admission_without_a_spec_leaf() {
+        for builtin in [
+            crate::status_tool::declaration(),
+            crate::reload_spec_tool::declaration(),
+            crate::reload_helpers_tool::declaration(),
+        ] {
+            let request =
+                request_for_tool(&builtin, ToolArguments::Structured(serde_json::json!({})))
+                    .unwrap();
+            assert_eq!(request.tool_call().unwrap().name, builtin.name());
+            assert!(selected_contract(&builtin).is_none());
+            let mut altered = builtin.clone();
+            let HostedTool::Function(tool) = &mut altered else {
+                unreachable!()
+            };
+            tool.schedule = exomonad_tool::ToolScheduling::BeforeNextInference;
+            assert!(selected_contract(&altered).is_some());
+        }
+        let authored = HostedTool::try_from(raw("authored")).unwrap();
+        assert_eq!(selected_contract(&authored), Some(authored.clone()));
     }
 
     #[test]
