@@ -1684,6 +1684,11 @@ mod tests {
     fn info_lookup_with_effect_row_imports_its_generated_qualified_names() {
         eval_harness::require_extract();
         let session = tempfile::tempdir().unwrap();
+        let effects_include = eval_harness::effects_include();
+        let include = effects_include
+            .iter()
+            .map(std::path::PathBuf::as_path)
+            .collect::<Vec<_>>();
         let results = run_inspections(InspectionRequest {
             exact_context: None,
             preamble: concat!(
@@ -1694,7 +1699,7 @@ mod tests {
                 "type ActorSurface = '[LookupEffects.AgentTools, LookupEffects.ContextReadWrite]\n",
             ),
             imports: "",
-            include: &[],
+            include: &include,
             session_root: session.path(),
             inject_modules: &[],
             queries: &[InspectionQuery::Info("map".into())],
@@ -1705,11 +1710,14 @@ mod tests {
         })
         .unwrap();
 
-        assert!(matches!(
-            results.as_slice(),
-            [InspectionResult::Info { query, entries }]
-                if query == "map" && !entries.is_empty()
-        ));
+        assert!(
+            matches!(
+                results.as_slice(),
+                [InspectionResult::Info { query, entries }]
+                    if query == "map" && !entries.is_empty()
+            ),
+            "{results:?}"
+        );
     }
 
     #[test]
