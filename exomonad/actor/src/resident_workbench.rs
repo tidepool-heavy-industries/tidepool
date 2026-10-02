@@ -5026,6 +5026,7 @@ where
         hole: ResidentHole,
         request: crate::lookup::LookupRequest,
         usage: crate::UsagePointerTable,
+        execution_control: Option<Arc<crate::WorkbenchExecutionControl>>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         let source = RequestWorkbenchScope {
             response: self.response.as_ref(),
@@ -5039,46 +5040,192 @@ where
         // `sessionReply`/`sessionInput`/`reportProgress` only then, and a
         // miss on one of those names outside that window should say so.
         let request_pending = self.request.is_some();
-        self.access
-            .with_machine(context, move |session, context, _| {
-                let view = actor_compile_view(session, context, &source, &type_modules)?;
+        // Documentation and rejected-only requests need the current view for
+        // their response, but no compiler request. Keep those small paths in
+        // one checkout and avoid a blocking-pool hop.
+        if !crate::lookup::has_inspection_work(&request, "") {
+            return self
+                .access
+                .with_machine(context, move |session, context, _| {
+                    let view = actor_compile_view(session, context, &source, &type_modules)?;
+                    let provenance = structured_provenance(
+                        &view,
+                        &source,
+                        tidepool_runtime::session::NameScope::Current,
+                    );
+                    let prepared = source.prepare(&view);
+                    let mut answer = crate::lookup::execute(
+                        request,
+                        provenance.fingerprint,
+                        &prepared.imports,
+                        &prepared.injected,
+                        &source.workspace_modules,
+                        usage,
+                        |queries| {
+                            inspect_lookup_queries(
+                                &view,
+                                &prepared.preamble,
+                                &prepared.imports,
+                                &prepared.include,
+                                &prepared.injected,
+                                &context.haskell_effects_alias,
+                                queries,
+                                None,
+                            )
+                        },
+                    );
+                    if !request_pending {
+                        crate::lookup::note_request_only_bindings(&mut answer);
+                    }
+                    session
+                        .resume_classified(hole, answer)
+                        .map_err(classify_resumption)
+                })
+                .await;
+        }
+
+        let snapshot_source = source.clone();
+        let snapshot_modules = Arc::clone(&type_modules);
+        let (view, provenance) = self
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let view =
+                    actor_compile_view(session, context, &snapshot_source, &snapshot_modules)?;
                 let provenance = structured_provenance(
                     &view,
-                    &source,
+                    &snapshot_source,
                     tidepool_runtime::session::NameScope::Current,
                 );
-                let prepared = source.prepare(&view);
-                let include = prepared
-                    .include
-                    .iter()
-                    .map(PathBuf::as_path)
-                    .collect::<Vec<_>>();
-                let mut answer = crate::lookup::execute(
-                    request,
-                    provenance.fingerprint,
-                    &prepared.imports,
-                    &prepared.injected,
-                    &source.workspace_modules,
-                    usage,
-                    |queries| {
-                        if queries.is_empty() {
-                            return Ok(vec![]);
-                        }
-                        run_inspections(InspectionRequest {
-                            exact_context: view.exact_declaration_context().cloned(),
-                            preamble: &prepared.preamble,
-                            imports: &prepared.imports,
-                            include: &include,
-                            session_root: view.session_root(),
-                            inject_modules: &prepared.injected,
-                            queries,
-                            effects: Some(&context.haskell_effects_alias),
-                        })
-                        .map_err(crate::lookup::LookupInspectionError::Compiler)
-                    },
-                );
-                if !request_pending {
-                    crate::lookup::note_request_only_bindings(&mut answer);
+                Ok((view, provenance))
+            })
+            .await?;
+
+        let prepared = source.prepare(&view);
+        let source_layer_revision = crate::agent_spec::layer_revision(&context.source_layer);
+        let mut answer = if crate::lookup::requires_inspection(
+            &request,
+            &prepared.imports,
+            &provenance.fingerprint,
+        ) {
+            let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
+            let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
+            let timing = crate::call_timing::current_registration();
+            let compile_span = tracing::info_span!(
+                "compile_blocking",
+                actor = %context.actor,
+                session = %context.placement.session,
+                operation = "lookup",
+            );
+            let request_view = provenance.fingerprint.clone();
+            let imports = prepared.imports.clone();
+            let preamble = prepared.preamble.clone();
+            let injected = prepared.injected.clone();
+            let include = prepared.include.clone();
+            let effects = context.haskell_effects_alias.clone();
+            let workspace_modules = source.workspace_modules.clone();
+            let compile_cancellation = cancellation.clone();
+            let inspection_view = view.clone();
+            let spawn = {
+                let _entered = compile_span.enter();
+                spawn_blocking_in_span(move || {
+                    let answer = tidepool_runtime::with_compiler_transaction_cancellable(
+                        compile_cancellation,
+                        || {
+                            crate::lookup::execute(
+                                request,
+                                request_view,
+                                &imports,
+                                &injected,
+                                &workspace_modules,
+                                usage,
+                                |queries| {
+                                    inspect_lookup_queries(
+                                        &inspection_view,
+                                        &preamble,
+                                        &imports,
+                                        &include,
+                                        &injected,
+                                        &effects,
+                                        queries,
+                                        timing.as_ref(),
+                                    )
+                                },
+                            )
+                        },
+                    );
+                    #[cfg(test)]
+                    lookup_inspection_probe::after_request();
+                    answer
+                })
+            };
+            let mut spawn = spawn;
+            let answer = if let Some(control) = execution_control {
+                // The retained workbench owner keeps this operation alive
+                // until its cancellation path settles. Forward that authority
+                // into the exact compiler transaction instead of relying on
+                // dropping this future to interrupt GHC.
+                tokio::select! {
+                    result = &mut spawn => result.map_err(ResidentActorWorkbenchError::Join)?,
+                    () = control.wait_for_cancellation() => {
+                        cancellation.cancel();
+                        let _ = spawn.await.map_err(ResidentActorWorkbenchError::Join)?;
+                        cancel_on_drop.0 = None;
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "lookup interrupted by invocation cancellation".into(),
+                        ));
+                    }
+                }
+            } else {
+                spawn.await.map_err(ResidentActorWorkbenchError::Join)?
+            };
+            cancel_on_drop.0 = None;
+            answer
+        } else {
+            crate::lookup::execute(
+                request,
+                provenance.fingerprint.clone(),
+                &prepared.imports,
+                &prepared.injected,
+                &source.workspace_modules,
+                usage,
+                |queries| {
+                    inspect_lookup_queries(
+                        &view,
+                        &prepared.preamble,
+                        &prepared.imports,
+                        &prepared.include,
+                        &prepared.injected,
+                        &context.haskell_effects_alias,
+                        queries,
+                        None,
+                    )
+                },
+            )
+        };
+
+        if !request_pending {
+            crate::lookup::note_request_only_bindings(&mut answer);
+        }
+
+        let revalidate_source = source.clone();
+        let revalidate_modules = type_modules;
+        self.access
+            .with_machine(context, move |session, context, _| {
+                let fresh_view =
+                    actor_compile_view(session, context, &revalidate_source, &revalidate_modules)?;
+                let fresh_prepared = revalidate_source.prepare(&fresh_view);
+                let source_revision_unchanged =
+                    crate::agent_spec::layer_revision(&context.source_layer)
+                        == source_layer_revision;
+                if !fresh_view.is_current_for(&view)
+                    || fresh_prepared.preamble != prepared.preamble
+                    || fresh_prepared.imports != prepared.imports
+                    || fresh_prepared.include != prepared.include
+                    || !source_revision_unchanged
+                {
+                    answer.results.clear();
+                    answer.candidates.clear();
+                    answer.issue = Some("lookup compile view changed".into());
                 }
                 session
                     .resume_classified(hole, answer)
@@ -12580,6 +12727,98 @@ fn structured_introspection_answer(
     }
 }
 
+fn inspect_lookup_queries(
+    view: &crate::ActorCompileView,
+    preamble: &str,
+    imports: &str,
+    include: &[PathBuf],
+    injected: &[String],
+    effects: &str,
+    queries: &[InspectionQuery],
+    timing: Option<&crate::call_timing::CallTimingRegistration>,
+) -> Result<Vec<tidepool_runtime::session::InspectionResult>, crate::lookup::LookupInspectionError>
+{
+    if queries.is_empty() {
+        return Ok(vec![]);
+    }
+    let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let inspect = || {
+        run_inspections(InspectionRequest {
+            exact_context: view.exact_declaration_context().cloned(),
+            preamble,
+            imports,
+            include: &include,
+            session_root: view.session_root(),
+            inject_modules: injected,
+            queries,
+            effects: Some(effects),
+        })
+        .map_err(crate::lookup::LookupInspectionError::Compiler)
+    };
+    let result = match timing {
+        Some(timing) => timing.timed_compile_sync(inspect),
+        None => inspect(),
+    };
+    result
+}
+
+#[cfg(test)]
+mod lookup_inspection_probe {
+    use std::sync::{mpsc, Arc, Mutex, OnceLock};
+
+    struct Probe {
+        completed: mpsc::SyncSender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    static ACTIVE: OnceLock<Mutex<Option<Arc<Probe>>>> = OnceLock::new();
+
+    pub(super) struct Installed {
+        probe: Arc<Probe>,
+    }
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            let active = ACTIVE.get_or_init(Default::default);
+            let mut active = active.lock().unwrap_or_else(|poison| poison.into_inner());
+            if active
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &self.probe))
+            {
+                *active = None;
+            }
+        }
+    }
+
+    pub(super) fn install() -> (Installed, mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (completed_tx, completed_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::channel();
+        let probe = Arc::new(Probe {
+            completed: completed_tx,
+            release: Mutex::new(release_rx),
+        });
+        let active = ACTIVE.get_or_init(Default::default);
+        *active.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(Arc::clone(&probe));
+        (Installed { probe }, completed_rx, release_tx)
+    }
+
+    pub(super) fn after_request() {
+        let active = ACTIVE.get_or_init(Default::default);
+        let probe = active
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        if let Some(probe) = probe {
+            let _ = probe.completed.send(());
+            let _ = probe
+                .release
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .recv();
+        }
+    }
+}
+
 fn structured_provenance(
     compile_view: &crate::ActorCompileView,
     source: &ActorWorkbenchSource,
@@ -12750,6 +12989,206 @@ mod tool_dispatch_tests {
 #[cfg(test)]
 mod request_tests {
     use super::*;
+
+    fn host_lookup_mount_fixture() -> (
+        ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        crate::ActorSessionContext,
+        ActorWorkbenchSource,
+        tempfile::TempDir,
+    ) {
+        use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+        use tidepool_runtime::session::{ModuleEnv, SessionLib};
+
+        tidepool_testing::eval_harness::require_extract();
+        let declarations = [
+            tidepool_mcp::notifications_decl(),
+            tidepool_mcp::sleep_decl(),
+            tidepool_mcp::lookup_decl(),
+        ];
+        let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
+        let mut include = effects.include_paths().to_vec();
+        include.push(tidepool_testing::eval_harness::prelude_path());
+        include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"));
+        let preamble = insert_preamble_imports(
+            &tidepool_mcp::build_preamble(&declarations, false),
+            "qualified Tidepool.Actors.Exomonad as Exomonad\nqualified Tidepool.Lookup as LookupApi",
+        );
+        let effects_alias = "'[Exomonad.Notifications, Sleep, Lookup]";
+        let session_id = tidepool_repr::SessionId((u64::from(std::process::id()) << 16) | 4_245);
+        let session_root = tempfile::tempdir().expect("session root");
+        let lib = SessionLib::open(
+            session_id,
+            session_root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .expect("declaration plane")
+        .with_validation_include(include.clone());
+        let mut session = ResidentSession::unbootstrapped(
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput::new(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(lib),
+        );
+        let lexical_scope = session.mint_isolated_scope();
+        let resource_scope = RealmId::fresh();
+        session
+            .set_actor_execution(
+                tidepool_runtime::session::SessionRunContext {
+                    lexical_scope,
+                    resource_scope,
+                    ..tidepool_runtime::session::SessionRunContext::ROOT
+                },
+                EffectRunPolicy::HandleOrSuspend,
+                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .expect("actor execution context");
+        let context = crate::ActorSessionContext {
+            actor: crate::ActorRef::first(crate::ActorId(1)),
+            placement: crate::ActorPlacement {
+                session: session_id,
+                resource_scope,
+                lexical_scope,
+            },
+            effect_policy: EffectRunPolicy::HandleOrSuspend,
+            live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            source_imports: crate::ActorSourceImports::default(),
+            haskell_effects_alias: effects_alias.into(),
+            source_layer: std::sync::Arc::from([]),
+        };
+        (
+            session,
+            context,
+            ActorWorkbenchSource::new(preamble, include),
+            session_root,
+        )
+    }
+
+    fn actor_lookup_registry_fixture() -> (
+        Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
+        crate::ActorSessionContext,
+        ActorWorkbenchSource,
+        tempfile::TempDir,
+    ) {
+        let (session, context, source, root) = host_lookup_mount_fixture();
+        let machines = Arc::new(ActorMachineRegistry::<
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput,
+        >::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
+        (machines, context, source, root)
+    }
+
+    fn lookup_trace_path() -> PathBuf {
+        PathBuf::from(
+            std::env::var_os("TIDEPOOL_EXTRACT_DAEMON_LOG")
+                .expect("focused lookup proof needs the private compiler daemon trace"),
+        )
+        .parent()
+        .expect("daemon log parent")
+        .join("compiler.jsonl")
+    }
+
+    fn compiler_trace_events(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .expect("read private compiler daemon trace")
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    }
+
+    fn compiler_request_ids(event: &serde_json::Value) -> Vec<String> {
+        event["spans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|span| span["name"] == "compile_request")
+            .filter_map(|span| span["compile_request"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    fn compiler_trace_started_ids(path: &std::path::Path) -> std::collections::HashSet<String> {
+        compiler_trace_events(path)
+            .into_iter()
+            .filter(|event| event["fields"]["message"] == "compiler request started")
+            .flat_map(|event| compiler_request_ids(&event))
+            .collect()
+    }
+
+    fn compiler_request_event(path: &std::path::Path, request: &str, message: &str) -> bool {
+        compiler_trace_events(path).iter().any(|event| {
+            event["fields"]["message"] == message
+                && compiler_request_ids(event).iter().any(|id| id == request)
+        })
+    }
+
+    fn wait_for_new_compiler_request(
+        path: &std::path::Path,
+        before: &std::collections::HashSet<String>,
+    ) -> String {
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            if let Some(request) = compiler_trace_started_ids(path)
+                .difference(before)
+                .next()
+                .cloned()
+            {
+                return request;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no compiler request-start event appeared in {}",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_compiler_request_event(path: &std::path::Path, request: &str, message: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            assert!(
+                !compiler_request_event(path, request, "compiler request finished"),
+                "compiler request {request} finished before {message}"
+            );
+            if compiler_request_event(path, request, message) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no {message} event for compiler request {request} appeared in {}",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn varied_lookup_queries() -> Vec<String> {
+        [
+            "Int -> Int",
+            "Integer -> Integer",
+            "Bool -> Bool",
+            "Char -> Char",
+            "Ordering -> Ordering",
+            "Maybe Int -> Maybe Int",
+            "Either Int Bool -> Either Int Bool",
+            "[Int] -> [Int]",
+        ]
+        .into_iter()
+        .cycle()
+        .take(32)
+        .map(|ty| format!(":: {ty}"))
+        .collect()
+    }
+
+    fn real_lookup_request(queries: Vec<String>) -> crate::lookup::LookupRequest {
+        crate::lookup::LookupRequest {
+            queries,
+            discover: false,
+            expected_view: None,
+            candidate_limit: 128,
+            references: vec![],
+        }
+    }
 
     fn host_mount_fixture() -> (
         ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
@@ -14854,6 +15293,294 @@ mod request_tests {
         >::new());
         machines.insert_idle(session_id, Box::new(session));
         (machines, context, source, root)
+    }
+
+    #[tokio::test]
+    async fn lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc() {
+        for sibling_write in [false, true] {
+            let (machines, context, source, _root) = actor_lookup_registry_fixture();
+            let workbench = Arc::new(ResidentActorWorkbench::new(
+                Arc::clone(&machines),
+                source.clone(),
+                None,
+                None,
+                vec![],
+            ));
+            let validation = if sibling_write {
+                concat!(
+                    "lookupValidation <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"pollResponse\"]) >>= \\result -> ",
+                    "if lookupIssue result == Nothing && not (null (lookupResults result)) ",
+                    "then pure True else error \"unrelated sibling write invalidated lookup\""
+                )
+            } else {
+                concat!(
+                    "lookupValidation <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"pollResponse\"]) >>= \\result -> ",
+                    "if lookupIssue result == Just \"lookup compile view changed\" && null (lookupResults result) ",
+                    "then pure True else error \"stale lookup metadata escaped\""
+                )
+            };
+            let step = workbench
+                .begin_fragment_split(
+                    context.clone(),
+                    source.clone(),
+                    Vec::new(),
+                    ParsedBlock {
+                        ordinal: 1,
+                        total: 1,
+                        source: validation.into(),
+                    },
+                    Some(generated_bind_verdict("lookupValidation")),
+                )
+                .await
+                .expect("lookup fragment compiles and suspends");
+            let (fragment, outcome) = match step {
+                ResidentWorkbenchStep::Running { fragment, outcome } => (fragment, outcome),
+                ResidentWorkbenchStep::Rejected(rejection) => {
+                    panic!("lookup fixture rejected: {rejection:#?}")
+                }
+                ResidentWorkbenchStep::Committed { output, .. } => {
+                    panic!("lookup fixture completed before the effect: {output}")
+                }
+                _ => panic!("lookup fixture returned an unexpected workbench step"),
+            };
+            let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+                panic!("lookup effect should park a continuation")
+            };
+            let (probe, completed, release) = lookup_inspection_probe::install();
+            let trace_path = lookup_trace_path();
+            let requests_before = compiler_trace_started_ids(&trace_path);
+            let task_workbench = Arc::clone(&workbench);
+            let task_context = context.clone();
+            let task = tokio::spawn(async move {
+                task_workbench
+                    .resume_lookup(
+                        task_context,
+                        hole,
+                        real_lookup_request(varied_lookup_queries()),
+                        crate::UsagePointerTable::default(),
+                        None,
+                    )
+                    .await
+            });
+
+            let trace_for_wait = trace_path.clone();
+            let active_request = tokio::task::spawn_blocking(move || {
+                wait_for_new_compiler_request(&trace_for_wait, &requests_before)
+            })
+            .await
+            .expect("request-start waiter joins");
+            assert!(!active_request.is_empty());
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                workbench
+                    .access
+                    .with_machine(context.clone(), |_, _, _| Ok(())),
+            )
+            .await
+            .expect("machine checkout is released while GHC inspection is active")
+            .expect("machine checkout succeeds during GHC inspection");
+            assert!(
+                !compiler_request_event(&trace_path, &active_request, "compiler request finished"),
+                "exact GHC request {active_request} finished before the competing checkout"
+            );
+
+            let gate_waiter = tokio::task::spawn_blocking(move || {
+                completed
+                    .recv_timeout(Duration::from_secs(90))
+                    .expect("real inspection result reached the revalidation gate")
+            });
+            gate_waiter.await.expect("inspection gate waiter joins");
+            assert!(compiler_request_event(
+                &trace_path,
+                &active_request,
+                "compiler request finished"
+            ));
+
+            if sibling_write {
+                let sibling_parent_context = context.clone();
+                let sibling_source = source.clone();
+                workbench
+                    .access
+                    .with_machine(context.clone(), move |session, _, _| {
+                        let sibling = session.mint_isolated_scope();
+                        let mut sibling_context = sibling_parent_context;
+                        sibling_context.placement.lexical_scope = sibling;
+                        let (binder, compiled, generation) = compile_host_binding(
+                            session,
+                            &sibling_context,
+                            &sibling_source,
+                            &[],
+                            "lookup_sibling_value",
+                            TEXT_BINDING_TYPE_NAME,
+                            TEXT_BINDING_ANCHOR,
+                            text_binding_carrier_imports(),
+                            true,
+                        )?;
+                        session
+                            .mount_text_binding_in(
+                                sibling,
+                                &binder,
+                                generation,
+                                compiled.into_code(),
+                                "unrelated sibling value",
+                            )
+                            .map_err(ResidentActorWorkbenchError::Resident)?;
+                        Ok(())
+                    })
+                    .await
+                    .expect("a sibling-only binding commits");
+            } else {
+                workbench
+                    .access
+                    .with_machine(context.clone(), move |session, context, _| {
+                        session
+                            .define_scoped_in(
+                                context.placement.lexical_scope,
+                                &["data LookupViewChanged = LookupViewChanged"],
+                            )
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                            })?;
+                        Ok(())
+                    })
+                    .await
+                    .expect("visible declaration changes the actor compile view");
+            }
+
+            drop(probe);
+            release.send(()).expect("release real lookup result");
+            let outcome = task
+                .await
+                .expect("lookup task joins")
+                .expect("lookup resumes after revalidation");
+            let settled = workbench
+                .settle_item(context.clone(), *fragment, outcome)
+                .await
+                .expect("lookup continuation settles");
+            assert!(
+                matches!(settled, ResidentWorkbenchStep::Committed { .. }),
+                "Haskell continuation validates the stale or preserved lookup result"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_lookup_interrupts_its_started_compiler_request_and_recovers() {
+        let (machines, context, source, _root) = actor_lookup_registry_fixture();
+        let workbench = Arc::new(ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            source.clone(),
+            None,
+            None,
+            vec![],
+        ));
+        let trace_path = lookup_trace_path();
+        let step = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source.clone(),
+                Vec::new(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "lookupResult <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"pollResponse\"])".into(),
+                },
+                Some(generated_binds_verdict(&["lookupResult".into()])),
+            )
+            .await
+            .expect("lookup fragment compiles and suspends");
+        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+            panic!("lookup effect should suspend the fragment")
+        };
+        let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+            panic!("lookup effect should park a continuation")
+        };
+        let continuation_id = hole.cont_id().to_owned();
+        let requests_before = compiler_trace_started_ids(&trace_path);
+        let cancellation = crate::WorkbenchExecutionControl::untracked();
+        let task_cancellation = Arc::clone(&cancellation);
+        let task_continuation_id = continuation_id.clone();
+        let task_workbench = Arc::clone(&workbench);
+        let task_context = context.clone();
+        let task = tokio::spawn(async move {
+            let guard = ParkedHoleAbortGuard::new(
+                &task_workbench.access,
+                task_context.clone(),
+                task_continuation_id,
+                "cancelled lookup request".into(),
+            );
+            SLOT_CONTINUATION_OWNER
+                .scope(
+                    guard.registration(),
+                    task_workbench.resume_lookup(
+                        task_context,
+                        hole,
+                        real_lookup_request(varied_lookup_queries()),
+                        crate::UsagePointerTable::default(),
+                        Some(task_cancellation),
+                    ),
+                )
+                .await
+        });
+        let trace_for_wait = trace_path.clone();
+        let request = tokio::task::spawn_blocking(move || {
+            wait_for_new_compiler_request(&trace_for_wait, &requests_before)
+        })
+        .await
+        .expect("request-start waiter joins");
+        assert!(cancellation.request_cancellation());
+        assert!(task.await.expect("cancelled lookup task joins").is_err());
+        let trace_for_wait = trace_path.clone();
+        tokio::task::spawn_blocking(move || {
+            wait_for_compiler_request_event(
+                &trace_for_wait,
+                &request,
+                "compiler request abandoned by client",
+            )
+        })
+        .await
+        .expect("abandoned request waiter joins");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let parked = workbench
+                .access
+                .with_machine(context.clone(), |session, _, _| {
+                    Ok(session
+                        .parked_holes()
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>())
+                })
+                .await
+                .expect("inspect parked lookup continuation");
+            if !parked.contains(&continuation_id) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelled lookup continuation remained parked"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let recovered = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source,
+                Vec::new(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "lookupRecovery <- pure (31 :: Int)".into(),
+                },
+                Some(generated_binds_verdict("lookupRecovery")),
+            )
+            .await
+            .expect("machine and compiler remain usable after cancellation");
+        assert!(
+            matches!(recovered, ResidentWorkbenchStep::Committed { .. }),
+            "fresh compiler work completes after the cancelled lookup settles"
+        );
     }
 
     /// A bare, unbootstrapped-but-idle machine at an arbitrary session id —

@@ -4110,6 +4110,7 @@ where
                         continuation,
                         request,
                         environment.usage_pointers.clone(),
+                        control.clone(),
                     )
                     .await
             }),
