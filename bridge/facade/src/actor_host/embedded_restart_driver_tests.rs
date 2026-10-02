@@ -401,6 +401,7 @@ async fn driver_retains_actor_after_eof_and_explicit_input_never_redispatches_ad
         let actor = exomonad_actor::ActorRef::first(exomonad_actor::ActorId(1));
         let task = tokio::spawn({
             let runtime = runtime.clone();
+            let settings = settings.clone();
             async move {
                 drive_conversation_with_transport::<Offline, _>(
                     embedded,
@@ -448,6 +449,49 @@ async fn driver_retains_actor_after_eof_and_explicit_input_never_redispatches_ad
             1,
             "interruption must not retry itself"
         );
+        // Reopen only the driver around the same retained host identity. The
+        // durable interruption must still forbid an automatic provider request.
+        stop.send_replace(true);
+        tokio::time::timeout(std::time::Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let embedded = attach_with_provider(&runtime, identity.clone(), effect.clone());
+        let conversation = embedded.conversation.clone();
+        let transport = InterruptedStream {
+            inputs: inputs.clone(),
+            effect: effect.clone(),
+            emit_call,
+        };
+        let (stop, cancel) = watch::channel(false);
+        let (lifecycle, _observations) =
+            watch::channel((None, harness::server::HostActorLifecycle::Waiting));
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                drive_conversation_with_transport::<Offline, _>(
+                    embedded,
+                    runtime,
+                    &settings,
+                    "test".into(),
+                    Effort::Low,
+                    "offline".into(),
+                    cancel,
+                    lifecycle,
+                    actor,
+                    transport,
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(
+            inputs.lock().unwrap().len(),
+            1,
+            "reopening must not retry interruption"
+        );
+        assert!(!task.is_finished());
         conversation
             .input("next", "operator", "continue explicitly")
             .await
