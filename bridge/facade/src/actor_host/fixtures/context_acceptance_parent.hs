@@ -7,7 +7,7 @@ do
   C.setNextModel "parent-curated-model"
   let Right firstLabel = labelFromText "first"
   let Right secondLabel = labelFromText "second"
-  let first = withLifetime ActorOwned (withModel (Literal "test-model") (coding @Text projectHead (assignment firstLabel ("specialize this child" :: Text))))
-  let second = withLifetime ActorOwned (withModel (Literal "test-model") (coding @Text projectHead (assignment secondLabel ("specialize this child" :: Text))))
+  let first = withLifetime ActorOwned (withModel (Literal "test-model") (narrowed @'[Replies] @Text knownEffects (codingPolicy projectHead) (assignment firstLabel ("specialize this child" :: Text))))
+  let second = withLifetime ActorOwned (withModel (Literal "test-model") (narrowed @'[Replies] @Text knownEffects (codingPolicy projectHead) (assignment secondLabel ("specialize this child" :: Text))))
   workers <- unfoldDeferred (batch ("context-acceptance" :: CampaignLabel) ("committed" :: ForkGroupLabel)) ((,) <$> child first <*> child second)
   pure True
