@@ -159,11 +159,21 @@ pub(super) fn admit_authored_artifact_closure(
                 .evidence
                 .modules
                 .iter()
-                .find(|module| !module.boot && module.source == admitted.witness.source_path())
+                .find(|module| {
+                    !module.boot && module.source.as_path() == admitted.witness.source_path()
+                })
                 .map(|module| ExactModuleIdentity {
                     unit: module.unit.clone(),
                     module: module.module.clone(),
                 });
+            let witness_source_owner_count = admitted
+                .evidence
+                .modules
+                .iter()
+                .filter(|module| {
+                    !module.boot && module.source.as_path() == admitted.witness.source_path()
+                })
+                .count();
             let direct_imports = source_owner
                 .as_ref()
                 .and_then(|owner| source_imports.get(owner))
@@ -202,7 +212,10 @@ pub(super) fn admit_authored_artifact_closure(
             tracing::debug!(
                 target: "tidepool_toolchain::planned_source_admission",
                 source_owner = ?source_owner,
+                witness_source_owner_count,
                 home_import_owner_count = source_imports.len(),
+                home_import_owners = ?source_imports.keys().take(64).collect::<Vec<_>>(),
+                home_import_owners_omitted = source_imports.len().saturating_sub(64),
                 source_owner_direct_import_count = direct_imports.len(),
                 source_owner_direct_imports = ?direct_imports.iter().take(16).collect::<Vec<_>>(),
                 source_owner_direct_imports_omitted = direct_imports.len().saturating_sub(16),
