@@ -73,19 +73,26 @@ impl RunningBrowserHost {
                 Ok(None) => "pending",
                 Ok(Some(harness::turn::JobOutput::Completed(Ok(_)))) => "completed",
                 Ok(Some(harness::turn::JobOutput::Completed(Err(_)))) => "failed",
-                Ok(Some(harness::turn::JobOutput::Cancelled)) => "cancelled",
+                Ok(Some(
+                    harness::turn::JobOutput::Cancelled
+                    | harness::turn::JobOutput::CancelledWithReceipt(_),
+                )) => "cancelled",
                 Ok(Some(harness::turn::JobOutput::Interrupted)) => "interrupted",
                 Ok(Some(harness::turn::JobOutput::CancellationUnconfirmed(_))) => "unconfirmed",
                 Err(_) => "lookup_failed",
             };
             let failure = match &scheduler {
-                Ok(Some(harness::turn::JobOutput::Completed(Err(error)))) => {
-                    Some(error.message().chars().take(2048).collect::<String>())
-                }
+                Ok(Some(
+                    harness::turn::JobOutput::Completed(Err(error))
+                    | harness::turn::JobOutput::CancelledWithReceipt(Err(error)),
+                )) => Some(error.message().chars().take(2048).collect::<String>()),
                 Ok(Some(harness::turn::JobOutput::CancellationUnconfirmed(error))) => {
                     Some(error.chars().take(2048).collect::<String>())
                 }
-                Ok(Some(harness::turn::JobOutput::Completed(Ok(value)))) => {
+                Ok(Some(
+                    harness::turn::JobOutput::Completed(Ok(value))
+                    | harness::turn::JobOutput::CancelledWithReceipt(Ok(value)),
+                )) => {
                     let items = value["items"].as_array();
                     let failures = items
                         .into_iter()

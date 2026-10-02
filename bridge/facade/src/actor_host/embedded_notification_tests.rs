@@ -87,8 +87,8 @@ fn embedded_settings() -> (tempfile::TempDir, crate::exomonad::EmbeddedLaunchCon
         "embedded-notification-test-secret-32-bytes",
     )
     .unwrap();
-    let codex_auth_file = files.path().join("codex-auth.json");
-    std::fs::write(&codex_auth_file, "{}").unwrap();
+    let credential_file = files.path().join("codex-auth.json");
+    std::fs::write(&credential_file, "{}").unwrap();
     (
         files,
         crate::exomonad::EmbeddedLaunchConfig {
@@ -98,7 +98,8 @@ fn embedded_settings() -> (tempfile::TempDir, crate::exomonad::EmbeddedLaunchCon
             asset_root: assets,
             browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
             session_secret_file: Some(session_secret_file),
-            codex_auth_file,
+            provider: crate::exomonad::EmbeddedModelProvider::Codex,
+            credential_file,
             context_capacity_tokens: 200_000,
             concurrent_jobs: 1,
         },

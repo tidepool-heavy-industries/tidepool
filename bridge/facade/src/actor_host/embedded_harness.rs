@@ -1,8 +1,8 @@
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -28,7 +28,7 @@ use harness::{
     store::Store,
     turn::JobScheduler,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
 use super::cell_context::{EmbeddedContextBinding, ModelResolver};
@@ -886,27 +886,32 @@ impl CancellationOwner for EmbeddedDispatcher {
             Err(error) => return CancellationAcknowledgment::Unconfirmed(error.to_string()),
         };
         match self.snapshot.cancel(context).await {
-            Ok(WorkbenchCancellationOutcome::Cancelled { .. }) => {
-                CancellationAcknowledgment::Stopped
+            Ok(WorkbenchCancellationOutcome::Cancelled { reply, .. }) => {
+                CancellationAcknowledgment::StoppedWithReceipt(workbench_reply_receipt(reply))
             }
             Ok(
                 WorkbenchCancellationOutcome::Expired { reply, .. }
                 | WorkbenchCancellationOutcome::PublicationSettled { reply, .. },
-            ) => {
-                let result = reply
-                    .map_err(ResidentToolError::Invocation)
-                    .and_then(|response| {
-                        serde_json::to_value(response).map_err(ResidentToolError::Encoding)
-                    })
-                    .map_err(provider_tool_error)
-                    .map_err(ProviderError::into_tool_failure);
-                CancellationAcknowledgment::Completed(result)
-            }
+            ) => CancellationAcknowledgment::Completed(workbench_reply_receipt(reply)),
             Ok(outcome) => CancellationAcknowledgment::Unconfirmed(format!("{outcome:?}")),
             Err(error) => CancellationAcknowledgment::Unconfirmed(error.to_string()),
         }
     }
 }
+
+fn workbench_reply_receipt(
+    reply: exomonad_actor::KernelWorkbenchReply,
+) -> Result<Value, ToolFailure> {
+    reply
+        .map_err(ResidentToolError::Invocation)
+        .and_then(|response| serde_json::to_value(response).map_err(ResidentToolError::Encoding))
+        .map_err(provider_tool_error)
+        .map_err(ProviderError::into_tool_failure)
+}
+
+#[cfg(test)]
+#[path = "embedded_cancel_receipt_tests.rs"]
+mod cancellation_receipt_tests;
 
 #[cfg(test)]
 mod round_control_tests {
@@ -980,7 +985,7 @@ mod tests {
     use super::*;
     use crate::actor_host::embedded_projection::{EmbeddedProjection, LifecycleState};
     use crate::actor_host::embedded_service::{
-        attach_actor, drive_conversation_with_transport, submit_browser_command, EmbeddedService,
+        EmbeddedService, attach_actor, drive_conversation_with_transport, submit_browser_command,
     };
     use crate::actor_host::test_campaign::TestCampaign;
     use async_trait::async_trait;
@@ -1119,7 +1124,8 @@ mod tests {
             asset_root: assets,
             browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
             session_secret_file: Some(secret_file),
-            codex_auth_file: auth_file,
+            provider: crate::exomonad::EmbeddedModelProvider::Codex,
+            credential_file: auth_file,
             context_capacity_tokens: 200_000,
             concurrent_jobs: 1,
         };
@@ -1135,23 +1141,27 @@ mod tests {
             incarnation: "wrong-incarnation".into(),
             ..identity.clone()
         };
-        assert!(service
-            .runtime
-            .attach(wrong, campaign.actor.clone(), installation.clone(), None)
-            .is_err());
+        assert!(
+            service
+                .runtime
+                .attach(wrong, campaign.actor.clone(), installation.clone(), None)
+                .is_err()
+        );
         let wrong_run = HostIdentity {
             run: "another-run".into(),
             ..identity.clone()
         };
-        assert!(service
-            .runtime
-            .attach(
-                wrong_run,
-                campaign.actor.clone(),
-                installation.clone(),
-                None
-            )
-            .is_err());
+        assert!(
+            service
+                .runtime
+                .attach(
+                    wrong_run,
+                    campaign.actor.clone(),
+                    installation.clone(),
+                    None
+                )
+                .is_err()
+        );
 
         let transport = ParkUntilInput {
             entered: Arc::new(tokio::sync::Notify::new()),

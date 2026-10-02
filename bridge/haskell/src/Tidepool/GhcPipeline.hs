@@ -3386,12 +3386,13 @@ data ExactExecutionPlan = ExactExecutionPlan
   , executionPackageRoots :: [PackageImportRoot]
   }
 
--- Hooks carry only a cycle's linker view. Restore them even when a source
--- refusal or cancellation prevents the final pipeline environment handoff.
+-- Linker hooks and diagnostic collectors belong to one cycle. Restore both
+-- even when refusal or cancellation prevents the final environment handoff.
 withCycleHooks :: Ghc a -> Ghc a
 withCycleHooks action = reifyGhc $ \session -> bracket
-  (reflectGhc (hsc_hooks <$> getSession) session)
-  (\hooks -> reflectGhc (getSession >>= \env -> setSession env {hsc_hooks=hooks}) session)
+  (reflectGhc ((\env -> (hsc_hooks env, hsc_logger env)) <$> getSession) session)
+  (\(hooks, logger) -> reflectGhc
+    (getSession >>= \env -> setSession env {hsc_hooks=hooks, hsc_logger=logger}) session)
   (const (reflectGhc action session))
 
 -- GHC's whole-module pipeline consults targets to choose bytecode generation.

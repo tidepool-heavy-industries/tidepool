@@ -251,7 +251,8 @@ async fn production_host_retains_http_haskell_commands_and_reconnects_without_re
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),
-        codex_auth_file: auth_file,
+        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        credential_file: auth_file,
         context_capacity_tokens: 2_000_000,
         concurrent_jobs: 1,
     };
@@ -510,7 +511,8 @@ async fn host_cancellation_stops_a_real_running_haskell_cell() {
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),
-        codex_auth_file: auth_file,
+        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        credential_file: auth_file,
         context_capacity_tokens: 2_000_000,
         concurrent_jobs: 1,
     };
@@ -677,7 +679,8 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),
-        codex_auth_file: auth_file,
+        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        credential_file: auth_file,
         context_capacity_tokens: 200_000,
         concurrent_jobs: 1,
     };
