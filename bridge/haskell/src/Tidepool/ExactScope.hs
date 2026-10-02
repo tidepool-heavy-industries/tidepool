@@ -42,7 +42,7 @@ import Tidepool.ExecutionSource
   , ExecutionSourceFailure(..), executionIdentityKey, executionSourceClosure, executionSourceOriginalNode
   , executionSourceOriginalClosure )
 import Tidepool.PackageWitness
-  ( PackageImportEvidence(..), readPackageImports, validatePackageImportRoot )
+  ( revalidatePackageImports )
 import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyModule(..), DependencyImport(..), DependencyResolution(..), renderDependencyEvidence
@@ -374,17 +374,13 @@ revalidateExactScope env scope = do
     result <- try (do
       bytes <- readBoundedFile (scopeManifestPath scope) (4 * 1024 * 1024)
       unless (digest bytes == scopeRequestSha256 scope) (fail "exact scope request changed")
-      mapM_ checkInterface (scopeInterfaces scope)
+      revalidatePackageImports env (scopeInterfaces scope) >>= either fail pure
       emitCount timing ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 scope) (fromIntegral (BS.length bytes))
       mapM_ (checkProduct timing) (scopeProducts scope)
       mapM_ (checkValue timing) (scopeValueInterfaces scope))
       :: IO (Either IOException ())
     pure $ either (Left . show) Right result
   where
-    checkInterface (iface, packages, packagesSha) = do
-      roots <- readPackageImports packages packagesSha iface
-      selected <- either fail pure roots
-      mapM_ (\root -> validatePackageImportRoot env root >>= either fail pure) (packageInterfaces selected)
     checkValue timing value = do
       bytes <- BS.readFile (exactPath value)
       unless (digest bytes == exactSha256 value) (fail "checked value interface changed")
