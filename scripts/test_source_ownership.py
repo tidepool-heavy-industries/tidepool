@@ -14,6 +14,9 @@ TEST_ONLY_SOURCES = {
         'tidepool/codegen/src/prepared_program/machine/literal_manifest_tests.rs',
     }),
     'tidepool': frozenset({
+        'bridge/facade/src/actor_host/native_prefix_publication_tests.rs',
+        'bridge/facade/src/actor_host/notebook_prefix_baseline.hs',
+        'bridge/facade/src/actor_host/notebook_prefix_failure.hs',
         'bridge/facade/src/exomonad/source/publication_fault_tests.rs',
         'bridge/facade/src/exomonad/source/publication_fault_driver.hs',
         'bridge/facade/src/actor_host/fixtures/browser_agent_spec.hs',
@@ -36,6 +39,7 @@ TEST_ONLY_SOURCES = {
         'exomonad/actor/src/resident_actor/owned_workbench/model_tests.rs',
     }),
     'tidepool-runtime': frozenset({
+        'tidepool/runtime/src/session/fixtures/unrelated-home-value.hs',
         'tidepool/runtime/src/session/exact_recovery_acceptance_tests.rs',
         'tidepool/runtime/src/session/fixtures/checked-failed-display-cell.hs',
         'tidepool/runtime/src/session/fixtures/checked-fold-outcome-template.hs',

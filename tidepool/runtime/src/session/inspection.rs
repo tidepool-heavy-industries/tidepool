@@ -1697,7 +1697,6 @@ mod tests {
                 "module Expr where\n",
                 "import Prelude\n",
                 "import qualified Tidepool.Effects.Core as LookupEffects\n",
-                "type ActorSurface = '[LookupEffects.AgentTools, LookupEffects.ContextReadWrite]\n",
             ),
             imports: "",
             include: &include,
