@@ -1690,6 +1690,8 @@ pub enum OuterEffect {
     Source,
     /// Model invocations owned by the admitted cell.
     Model,
+    /// The admitted cell's editable context document and next-model choice.
+    ContextReadWrite,
 }
 
 /// The extractor's per-verb call-site policy, for the few verbs it rewrites.

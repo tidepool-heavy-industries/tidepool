@@ -115,6 +115,7 @@ pub fn actor_generated_files() -> Vec<GeneratedFile> {
         effects::agent_tools::agent_tools(),
         effects::agent_session::agent_session(),
         effects::reflect::reflect(),
+        effects::context_read_write::context_read_write(),
     ]
     .into_iter()
     .filter(|effect| !effect.verbs.is_empty())
