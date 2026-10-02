@@ -60,7 +60,7 @@ import Tidepool.GhcPipeline
   , withResidentPipelineSelectedRequests, withExactInterfaceTransaction
   , CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
   , cellExpressionEvidence, cellCheckedBinderSignatures
-  , satisfiesCapturedConstraint, stripMonadHead, generatedScaffoldRecipe )
+  , satisfiesCapturedConstraint, stripMonadHead, generatedScaffoldRecipe, activationPreviewInputType )
 import Tidepool.ExecutionEncode (encodeWireProgram, encodeModuleProducts)
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelected, PreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedRootIdentity, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
@@ -102,11 +102,12 @@ import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), worker
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.ExactScope
   ( ExactCompilation(..), ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
-  , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
+  , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , readExactScope, revalidateExactScope, writeExactCompilation, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import GHC.Core.Type (splitFunTy_maybe)
-import Tidepool.CheckedCell (CheckedSignature(..), encodeCheckedSignature)
+import Tidepool.CheckedCell (CheckedSignature(..), encodeCheckedSignature
+  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness)
 import Tidepool.PlannedDeclaration
   ( PlannedDeclaration, PlannedDeclarationRejection(..), PlannedDeclarationInventory, plannedExports, plannedSource, plannedCheckPlan, replaceTemplateModuleHeader
   , preparePlannedDeclaration, certifyPlannedDeclaration
@@ -125,7 +126,7 @@ import Tidepool.Metadata
   , wiredInDataCons )
 import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut)
 import Tidepool.Timing (readTimingEnabled, timePhase)
-import Tidepool.TurnSource (extractModuleName, spliceTemplate)
+import Tidepool.TurnSource (extractModuleName, spliceTemplate, replaceTemplateMarker)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencySource(..), DependencyImport(..), ProductAvailability(..)
   , renderDependencyEvidence, revalidateDependencyEvidence, selectedHomeRequirements )
@@ -297,10 +298,17 @@ dispatch compiler caches timing args = do
           && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
           && not (requestCertifyHomeProducts args) && not (requestActivationPreview args))
           (throwIO CheckedPurposeMismatch)
-      forM_ (scopeCheckedItem scope) $ \_ ->
+      forM_ (scopeCheckedItem scope) $ \admission -> do
+        let previewPurpose = case itemPurpose admission of
+              AuthoredCheckedItem -> not (requestActivationPreview args)
+              HostActivationInput -> requestActivationPreview args
+                && length (requestFiles args) == 1
+                && not (requestCellPlan args) && not (requestCheckSource args)
+                && not (requestHarnessProfile args) && not (requestCellFoldTurn args)
+                && null (requestTargets args)
         unless (requestTurn args && not (requestCell args) && not (requestClassify args)
           && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
-          && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
+          && not (requestCertifyHomeProducts args) && previewPurpose
           && not (isJust (requestTurnPin args)) && not (isJust (requestTarget args)))
           (throwIO CheckedPurposeMismatch)
   case admitted of
@@ -754,7 +762,11 @@ prepareArtifacts caches input hscEnv interfaces modules targets@(firstTarget : _
           , site <- pmYieldSites preparedModule'
           , Tidepool.EffectSchema.ysSite site `Set.member` admitted
           ]
-    pure (PreparedArtifact target program bytes constructors yieldSites)
+    sealedSites <- forM yieldSites $ \site -> do
+      witnesses <- forM (Tidepool.EffectSchema.ysInputTypeWitnesses site) $ \witness ->
+        maybe (pure Nothing) (sealCheckedTypeWitness hscEnv interfaces) witness
+      pure site { Tidepool.EffectSchema.ysInputTypeWitnesses = witnesses }
+    pure (PreparedArtifact target program bytes constructors sealedSites)
   pure (artifacts, Just products)
 
 -- A failed unrelated group is an explicit product miss, never a newly fatal
@@ -1039,6 +1051,10 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           unless (any (\(kind,file) -> file == path
               && lookup kind expected == Just (shaHex (TE.encodeUtf8 (T.pack captured)))) templates)
             (fail "generated scaffold template differs from its protected offer")
+        basePurpose = case (display, admitted) of
+          (Just authority, Nothing) -> CheckedItemCompile [] (displayPlannedDeclaration authority) (displayCompletedValues authority)
+          (Nothing, Just authority) -> checkedItemCompilePurpose authority
+          _ -> GeneralCompile
         -- Splice @tmplFile@ against the turn text, write the spliced module
         -- to a scratch file under 'outDir', and return it alongside the
         -- module name derived from its own @module X where@ header. The
@@ -1069,38 +1085,44 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           withProgram <- if null programImports then pure withOriginal else
             replaceRecipeMarker "default (Int, Double, Text)\n"
               (concatMap (\owner -> "import " ++ owner ++ "\n") programImports ++ "default (Int, Double, Text)\n") withOriginal
-          tmplWithImports <- insertCheckedTypeImports typeImports withProgram
-          spliced <- case (display, admitted) of
-            (Just admission, Nothing) -> if requestCell args
-              then checkedProgramDisplayRecipe admission tmplWithImports
-              else checkedDisplayRecipe admission tmplWithImports
-            (Nothing, Nothing) -> pure (spliceTemplate tmplWithImports turnSrc bindersStr)
-            (Just _, Just _) -> fail "display and item authority cannot share one recipe"
-            (Nothing, Just admission) -> do
-              withPrefix <- if null (itemValueImports admission) then pure tmplWithImports else
-                replaceRecipeMarker "default (Int, Double, Text)\n"
-                  (concatMap (\(moduleName',names) -> "import " ++ moduleName' ++ " (" ++ intercalate ", " (map renderProgramBinder names) ++ ")\n")
-                    (itemValueImports admission) ++ "default (Int, Double, Text)\n") tmplWithImports
-              checkedRecipeSource admission withPrefix turnSrc
+          let renderRecipe preview = do
+                -- Replace only the protected scaffold marker, before inserting
+                -- the admitted statement or checked signature declarations.
+                withPreview <- maybe (pure withProgram)
+                  (\body -> replaceRecipeMarker "{{ACTIVATION_PREVIEW}}" body withProgram) preview
+                tmplWithImports <- insertCheckedTypeImports typeImports withPreview
+                case (display, admitted) of
+                  (Just admission, Nothing) -> if requestCell args
+                    then checkedProgramDisplayRecipe admission tmplWithImports
+                    else checkedDisplayRecipe admission tmplWithImports
+                  (Nothing, Nothing) -> pure (spliceTemplate tmplWithImports turnSrc bindersStr)
+                  (Just _, Just _) -> fail "display and item authority cannot share one recipe"
+                  (Nothing, Just admission) -> do
+                    withPrefix <- if null (itemValueImports admission) then pure tmplWithImports else
+                      replaceRecipeMarker "default (Int, Double, Text)\n"
+                        (concatMap (\(moduleName',names) -> "import " ++ moduleName' ++ " (" ++ intercalate ", " (map renderProgramBinder names) ++ ")\n")
+                          (itemValueImports admission) ++ "default (Int, Double, Text)\n") tmplWithImports
+                    checkedRecipeSource admission withPrefix turnSrc
           rendered <- if requestActivationPreview args
             then do
-              let replace body = T.unpack (T.replace (T.pack "{{ACTIVATION_PREVIEW}}") (T.pack body) (T.pack spliced))
-                  opaque = "(TidepoolScaffoldText.pack \"<opaque value>\\nUse the input type to select fields or apply sessionInput.\", False)"
-              (checkSource, checkModule, checkPath) <- writeSplicedModule outDir lastAttempt (replace opaque)
+              let opaque = "(TidepoolScaffoldText.pack \"<opaque value>\\nUse the input type to select fields or apply sessionInput.\", False)"
+              checkSource <- renderRecipe (Just opaque)
+              (_, checkModule, checkPath) <- writeSplicedModule outDir lastAttempt checkSource
               checkPurpose <- case protectedTemplates of
-                Nothing -> pure GeneralCompile
+                Nothing -> pure basePurpose
                 Just _ -> do
                   recipe <- generatedScaffoldRecipe originalTemplate checkSource checkPath checkModule >>= either fail pure
-                  pure (GeneratedScaffoldCompile recipe GeneralCompile)
+                  pure (GeneratedScaffoldCompile recipe basePurpose)
               checked <- compiler CheckedEnvironment Set.empty checkPurpose
                 (Just (scopeFromWorkerRequest args)) checkPath (requestIncludes args) (requestBuildProductsDir args)
               inputType <- maybe (fail "activation is missing its checked input type") (pure . stripMonadHead) (crResultType checked)
               rendered <- satisfiesCapturedConstraint (crHscEnv checked) (crTargetTcGblEnv checked)
                 "__tidepoolActivationConstraint" inputType
-              writeSplicedModule outDir lastAttempt (replace (if rendered
+              finalSource <- renderRecipe (Just (if rendered
                 then "TidepoolInspection.workbenchActivationDisplay __activationBudget __activationInput"
                 else opaque))
-            else writeSplicedModule outDir lastAttempt spliced
+              writeSplicedModule outDir lastAttempt finalSource
+            else renderRecipe Nothing >>= writeSplicedModule outDir lastAttempt
           let (source,moduleName',modulePath) = rendered
           pure (originalTemplate,source,moduleName',modulePath)
     -- Four-shape selection (protocol note, "the verdict space has four
@@ -1120,10 +1142,6 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
         -- A prepared turn uses one compiler pass for the checked metadata
         -- and the prepared modules.
         compileTurn protected spliced modName modulePath = do
-          let basePurpose = case (display, admitted) of
-                (Just authority, Nothing) -> CheckedItemCompile [] (displayPlannedDeclaration authority) (displayCompletedValues authority)
-                (Nothing, Just authority) -> CheckedItemCompile (checkedRecipeAnnotations authority) (itemPlannedDeclaration authority) (itemCompletedValues authority)
-                _ -> GeneralCompile
           purpose <- case protectedTemplates of
             Nothing -> pure basePurpose
             Just _ -> do
@@ -1164,6 +1182,14 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
     (preparedArtifacts, productContext) <- prepareArtifacts caches compiledPath hscEnv (pprProductInterfaces prepared) preparedModules
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
       (requestRetainedGenerations args) (pprAcceptedCandidates prepared) (compilationScope <$> pprExactCompilation prepared)
+    when (maybe False ((== HostActivationInput) . itemPurpose) admitted) $ do
+      input <- either fail pure (activationPreviewInputType (prTargetTcGblEnv result))
+      witness <- maybe (fail "activation input type has no complete canonical witness") pure
+        (captureCheckedTypeWitness hscEnv input)
+      sealed <- sealCheckedTypeWitness hscEnv (pprProductInterfaces prepared) witness
+        >>= maybe (fail "activation input type lacks an original owner interface seal") pure
+      encoded <- maybe (fail "activation input type witness is unsealed") pure (encodeCheckedTypeWitness sealed)
+      BS.writeFile (outDir </> "activation-type.cbor") (toStrictByteString encoded)
     let asksSites = concatMap paYieldSites preparedArtifacts
     timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
@@ -1506,7 +1532,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
           expression = case [value | value <- programExpressions state, expressionPlanKey value `elem` keys] of
             [value] -> Just value
             _ -> Nothing
-          itemAdmission = CheckedItemAdmission (checkedAdmissionDigest admission) (checkedAdmissionDigest admission)
+          itemAdmission = CheckedItemAdmission AuthoredCheckedItem (checkedAdmissionDigest admission) (checkedAdmissionDigest admission)
             (fromIntegral index) (shaHex (TE.encodeUtf8 (T.pack source)))
             (if sbKind verdict == KBind then "bind" else "expr") (sbBinders verdict)
             (checkedTurnTemplates admission) (map exactModule (scopeValues scope)) signatures
@@ -2119,6 +2145,15 @@ checkedRecipeAnnotations admission =
   [("__tidepool_checked_annotation_" ++ show index,signature)
   | (index,signature) <- zip [(0::Int)..] (itemSignatures admission)]
 
+checkedItemCompilePurpose :: CheckedItemAdmission -> CompilePurpose
+checkedItemCompilePurpose admission = case itemPurpose admission of
+  AuthoredCheckedItem -> CheckedItemCompile annotations original values
+  HostActivationInput -> HostActivationInputCompile annotations original values
+  where
+    annotations = checkedRecipeAnnotations admission
+    original = itemPlannedDeclaration admission
+    values = itemCompletedValues admission
+
 -- The admitted template is a versioned recipe input. Transform its markers
 -- before inserting authored bytes, so authored syntax is never rescanned.
 checkedRecipeSource :: CheckedItemAdmission -> String -> String -> IO String
@@ -2152,20 +2187,23 @@ checkedRecipeSource admission template source = case itemKind admission of
 
 replaceRecipeMarker :: String -> String -> String -> IO String
 replaceRecipeMarker marker replacement template =
-  let (before,after) = T.breakOn (T.pack marker) (T.pack template)
-      remaining = T.drop (length marker) after
-  in if T.null after || T.pack marker `T.isInfixOf` remaining
-    then fail "checked recipe marker is missing or duplicated"
-    else pure (T.unpack before ++ replacement ++ T.unpack remaining)
+  either fail pure (replaceTemplateMarker marker replacement template)
 
 writeCheckedItemReceipt :: FilePath -> ExactScope -> CheckedItemAdmission -> String -> IO ()
 writeCheckedItemReceipt root scope admission source = do
-  let text = encodeString . T.pack
-      receipt = encodeListLen 8 <> text "TPEXACTITEM" <> text "1"
+  let (file,magic,profile) = case itemPurpose admission of
+        AuthoredCheckedItem -> ("checked-item.cbor","TPEXACTITEM","tidepool-checked-recipe-2")
+        HostActivationInput -> ("activation-input.cbor","TPEXACTACTIVATIONINPUT2","tidepool-host-activation-input-2")
+      text = encodeString . T.pack
+      receipt = encodeListLen (if itemPurpose admission == HostActivationInput then 9 else 8) <> text magic
+        <> text (if itemPurpose admission == HostActivationInput then "2" else "1")
         <> text (scopeRequestSha256 scope) <> text (itemAdmissionDigest admission)
         <> text (itemCellReceiptDigest admission) <> encodeWord64 (itemIndex admission)
-        <> text (shaHex (TE.encodeUtf8 (T.pack source))) <> text "tidepool-checked-recipe-2"
-  BS.writeFile (root </> "checked-item.cbor") (toStrictByteString receipt)
+        <> text (shaHex (TE.encodeUtf8 (T.pack source))) <> text profile
+  witness <- case itemPurpose admission of
+    AuthoredCheckedItem -> pure mempty
+    HostActivationInput -> encodeBytes <$> BS.readFile (root </> "activation-type.cbor")
+  BS.writeFile (root </> file) (toStrictByteString (receipt <> witness))
 
 -- Fold eligibility and attempted compilation are separate from whole-cell
 -- checking. An expression or declaration is a successful ineligible outcome.
@@ -2233,7 +2271,7 @@ attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled admitt
               _ -> fail "fold has no unique binder signature authority"
             receipt <- BS.readFile (outDir </> "checked-cell.cbor")
             generation <- requireArg "--bind-gen" (requestBindGen args)
-            let admission = CheckedItemAdmission (checkedAdmissionDigest cellAdmission) (shaHex receipt) 0
+            let admission = CheckedItemAdmission AuthoredCheckedItem (checkedAdmissionDigest cellAdmission) (shaHex receipt) 0
                   (shaHex (TE.encodeUtf8 (T.pack turnSrc))) "bind" (sbBinders sb)
                   (checkedTurnTemplates cellAdmission) (checkedInjectedModules cellAdmission)
                   signatures Nothing Nothing generation (checkedAdmissionDigest cellAdmission) [] Nothing Nothing [] (checkedValueInterfaces cellAdmission)

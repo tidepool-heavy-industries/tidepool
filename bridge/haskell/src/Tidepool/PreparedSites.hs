@@ -62,6 +62,7 @@ import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Unit.External (ExternalPackageState(eps_inst_env))
 import GHC.Tc.Utils.Monad (initIfaceLoad)
 import GHC.Types.Unique (getKey)
+import Tidepool.CheckedCell (captureCheckedTypeWitness)
 import Tidepool.SiteClassifier
 import Tidepool.EffectSchema
 import Tidepool.Identity (binderQualName)
@@ -191,9 +192,9 @@ data SiteRejection = SiteRejection
 -- site argument, preserving the sibling's returning behavior. OPAQUE prevents
 -- inlining but not demand analysis: a whole-body error would mark callers as
 -- bottoming before this pass replaces the call.
-elaboratePreparedSites :: SiteAuthority -> Map String Id -> [CoreBind]
+elaboratePreparedSites :: HscEnv -> SiteAuthority -> Map String Id -> [CoreBind]
   -> IO ([CoreBind], [YieldSite], [PreparedSite], TypeGraph, [SiteRejection])
-elaboratePreparedSites authority siblings bindings = do
+elaboratePreparedSites env authority siblings bindings = do
   uniques <- mkSplitUniqSupply 's'
   let (bindings', final) = runState (traverse rewriteBind bindings)
         (ElaborationState uniques mempty [] [] emptyTypeGraphBuilder [])
@@ -260,7 +261,8 @@ elaboratePreparedSites authority siblings bindings = do
                 Right (wireType, siteInputs) -> do
                   missing <- traverse freshEvidence (spMissingEvidence plan)
                   ordinal <- nextOrdinal originName
-                  let site = buildYieldSite spec originName ordinal (spAnswer plan) siteInputs
+                  let site = (buildYieldSite spec originName ordinal (spAnswer plan) siteInputs)
+                        { ysInputTypeWitnesses = map (captureCheckedTypeWitness env) siteInputs }
                       literal = mkCoreConApps intDataCon
                         [Lit (LitNumber LitNumInt (fromIntegral (ysSite site)))]
                   current <- get
@@ -395,7 +397,7 @@ buildYieldSite spec origin ordinal answer inputs =
   let answerSite = siteType (vsListAnswer spec) answer
       inputSites = map (siteType False) inputs
       identity = siteIdentity spec origin ordinal answerSite inputSites
-  in YieldSite identity origin ordinal answerSite inputSites
+  in YieldSite identity origin ordinal answerSite inputSites (replicate (length inputSites) Nothing)
       (replyDeclaration answer)
 
 siteIdentity :: VerbSpec -> T.Text -> Word64 -> SiteType -> [SiteType] -> Word64

@@ -12,7 +12,7 @@ module Tidepool.GhcPipeline
   , splitTupleType
   , CellDisplayPass(..), cellDisplayDeclarations
   , cellExpressionPlans, cellExpressionEvidence, cellCheckedBinderSignatures, satisfiesCapturedConstraint
-  , checkCellInstances
+  , checkCellInstances, activationPreviewInputType
     -- * Resident session
   , withResidentPipelineSelected
   , withResidentPipelineSelectedRequests
@@ -82,7 +82,7 @@ import GHC.Core.Type
   , mkInvisFunTys
   , splitAppTy_maybe
   , splitTyConApp_maybe
-  , splitFunTy_maybe
+  , splitFunTy_maybe, splitFunTys
   , isLiftedTypeKind, mkTyVarTy, typeKind, isTauTy, tyCoVarsOfType
   )
 import GHC.Core.TyCo.Compare (eqType)
@@ -181,7 +181,7 @@ import Tidepool.ExactHydration
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactCompilation(..), readExactScope, revalidateExactScope, scopeValueInterfaces
+  ( ExactScope(..), ExactCompilation(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation, scopeExecutionNativeOwners )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceNode(..), ExecutionSourceIdentity(..)
@@ -381,6 +381,22 @@ cellExpressionEvidence result = forM expressionIds $ \identifier -> do
       , let occurrence = occNameString (nameOccName (idName identifier))
       , "__tidepool_cell_expr_" `isPrefixOf` occurrence
       ]
+
+-- The input witness comes from the independently typechecked preview binder,
+-- rather than the placeholder result or a supplied rendered type.
+activationPreviewInputType :: TcGblEnv -> Either String Type
+activationPreviewInputType environment = do
+  preview <- unique "__activationPreview"
+  checked <- unique "__result"
+  case splitFunTys preview of
+    ([Scaled _ input], _) | eqType input (stripMonadHead checked) -> Right input
+    ([Scaled _ _], _) -> Left "activation preview input differs from its checked binder type"
+    _ -> Left "activation preview has no single monomorphic input argument"
+  where
+    unique name = case [idType identifier | identifier <- collectDataIds (tcg_binds environment)
+      , occNameString (nameOccName (idName identifier)) == name] of
+      [ty] -> Right ty
+      _ -> Left ("activation preview has no unique checked binder: " ++ name)
 
 cellCheckedBinderSignatures :: CheckedEnvironmentResult -> IO [CheckedSignature]
 cellCheckedBinderSignatures result = forM identifiers $ \identifier -> do
@@ -713,6 +729,7 @@ residentStateOrigin selection variant
 
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
   | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
+  | HostActivationInputCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
   | ProgramItemCompile Bool [(String,CheckedSignature)] [((String,String),String)] [CompletedValueImport]
   | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
   | CellProgramCompile CompilePurpose ExactScope
@@ -745,6 +762,8 @@ transformFor (CheckedItemCompile annotations original _) target env summary
           inventory <- hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure
           transformPlannedDeclarationImports inventory env annotated
   | otherwise = pure
+transformFor (HostActivationInputCompile annotations original values) target env summary =
+  transformFor (CheckedItemCompile annotations original values) target env summary
 transformFor (ProgramItemCompile _ annotations originals _) target env summary
   | ms_mod_name summary == target = \parsed -> do
       annotated <- rewriteCheckedAnnotations env annotations parsed
@@ -762,6 +781,8 @@ transformWithCompletedValues :: Maybe CompletedValueImports -> CompilePurpose ->
 transformWithCompletedValues captured purpose target env summary = case purpose of
   CellProgramCompile inner _ -> transformWithCompletedValues captured inner target env summary
   GeneratedScaffoldCompile _ inner -> transformWithCompletedValues captured inner target env summary
+  HostActivationInputCompile annotations original requested ->
+    transformWithCompletedValues captured (CheckedItemCompile annotations original requested) target env summary
   CheckedItemCompile annotations original requested
     | ms_mod_name summary == target && not (null requested) -> \parsed -> do
         values <- maybe (fail "completed value interfaces were not installed in this request") pure captured
@@ -1805,7 +1826,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                   siteAuthority <- timePhase timing "prepared_site_authority" $ liftIO
                     (resolveSiteAuthority (mfHscEnv mf) (tcg_insts (mfTcGblEnv mf)))
                   (elaboratedBindings, yieldSites, preparedSites, typeGraph, rejections) <- timePhase timing "prepared_sites" $ liftIO $
-                    elaboratePreparedSites siteAuthority siblings (cg_binds cgGuts)
+                    elaboratePreparedSites (mfHscEnv mf) siteAuthority siblings (cg_binds cgGuts)
                   let elaboration = PreparedElaboration
                         { peGuts = cgGuts
                         , peBindings = elaboratedBindings
@@ -3345,6 +3366,9 @@ installPreparedInterface name hmi = do
 -- tier. Everything else is 'runCompile'.
 normalVariant :: CompilePurpose -> FilePath -> IO PipelineVariant
 normalVariant purpose path = do
+  case originalPurpose purpose of
+    HostActivationInputCompile {} -> fail "host activation input requires its sealed session admission"
+    _ -> pure ()
   targetModName' <- targetModuleNameFor path
   pure PipelineVariant
    { pvLabel = "runPipeline"
@@ -3643,6 +3667,7 @@ sessionVariant purpose scope path = do
   let effectivePurpose = originalPurpose purpose
       completedValues = case effectivePurpose of
         CheckedItemCompile _ _ values -> values
+        HostActivationInputCompile _ _ values -> values
         ProgramItemCompile _ _ _ values -> values
         _ -> []
   capturedExact <- traverse (\manifest -> readExactScope manifest >>= either (ioError . userError) pure)
@@ -3651,6 +3676,12 @@ sessionVariant purpose scope path = do
         PlannedDeclarationCheck _ admitted -> Just admitted
         CellProgramCompile _ admitted -> Just admitted
         _ -> capturedExact
+  let hostPurpose = case effectivePurpose of
+        HostActivationInputCompile {} -> True
+        _ -> False
+      hostAdmission = maybe False ((== Just HostActivationInput) . fmap itemPurpose . scopeCheckedItem) exact
+  unless (hostPurpose == hostAdmission)
+    (fail "host activation input has another compiler purpose")
   forM_ exact $ \admitted -> case capturedExact of
     Just original | scopeRequestSha256 original == scopeRequestSha256 admitted -> pure ()
     _ -> ioError (userError "planned declaration leaves its original compiler offer")

@@ -20,6 +20,12 @@ import Data.Text qualified as T
 import GHC (runGhc, setSession, ms_mod_name, ms_hsc_src, parseModule, typecheckModule, Target(..))
 import GHC.Core qualified as Core
 import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy)
+import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
+import GHC.Builtin.Types (liftedTypeKind)
+import GHC.Types.Var (mkTyVar)
+import GHC.Types.Name.Occurrence (mkTyVarOcc)
+import GHC.Types.SrcLoc (noSrcSpan)
+import Language.Haskell.Syntax.Specificity (ForAllTyFlag(..), Specificity(..))
 import GHC.Types.Id (idName, setIdName)
 import GHC.Types.Literal (Literal(..), LitNumType(..))
 import GHC.Types.Name (getOccString, nameOccName, nameSrcSpan, mkExternalName, mkInternalName)
@@ -91,7 +97,7 @@ import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..), CheckedEnvironmentResult(..)
-  , renderType, generatedScaffoldRecipe
+  , renderType, generatedScaffoldRecipe, activationPreviewInputType
   , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
   , readModuleCandidates, candidateExecutionSources, candidateOriginalIdentity)
@@ -101,8 +107,11 @@ import Tidepool.FatIface (readExactInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
 import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule)
 import Tidepool.Session (sessionHiPath)
-import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), CheckedCellAdmission(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
+import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
+import Tidepool.CheckedCell (CheckedSignature(..), captureCheckedSignature, encodeCheckedSignature
+  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness)
+import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
 import Tidepool.Binders (BoundBinder(..))
 import Tidepool.ExecutionSource
   ( ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
@@ -121,6 +130,8 @@ main = getArgs >>= \case
   ["--generated-scaffold-retained",scope,seal] -> generatedScaffoldRetained scope seal
   ["--hydrated-site-siblings"] -> hydratedSiteSiblings
   ["--fresh-execution-recipe"] -> freshExecutionRecipeTest
+  ["--host-activation-purpose"] -> hostActivationPurposeTest Nothing
+  ["--host-activation-purpose", destination] -> hostActivationPurposeTest (Just destination)
   ["--candidate-execution-sources"] -> candidateExecutionSourcesTest
   ["--candidate-execution-wire", path] -> candidateExecutionWire path
   ["--checked-value-type-closure", effects] -> checkedValueTypeClosure effects
@@ -1399,6 +1410,117 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
 
 -- Pure issuer and scope-budget controls; the runtime suite separately drives
 -- cold parser -> whole checked program -> per-item original certification.
+hostActivationPurposeTest :: Maybe FilePath -> IO ()
+hostActivationPurposeTest destination = withScratch $ \work -> do
+  let previewMarker = "{{ACTIVATION_PREVIEW}}"
+      template = "preview = " ++ previewMarker ++ "\n__result = do {\n{{TURN_STMT}}\n}\n"
+      literalInput = "sessionInput <- pure \"" ++ previewMarker ++ "\""
+  replaced <- either fail pure (replaceTemplateMarker previewMarker "opaque" template)
+  unless (literalInput `isInfixOf` spliceTemplate replaced literalInput "sessionInput"
+      && case replaceTemplateMarker previewMarker "opaque" (template ++ previewMarker) of
+        Left _ -> True; Right _ -> False) $
+    fail "preview replacement rescanned input text or accepted duplicated protected markers"
+  let sha = TString (T.replicate 64 "a")
+      empty = TList []
+      text = TString . T.pack
+      signature = TList [text "__tidepool_cell_pin_0_sessionInput",text "Int",empty]
+      authorization = [text "host-activation-input1",sha,sha,TInt 0,sha,text "bind"
+        ,TList [text "sessionInput"],TList [TList [text "bind",sha]],empty,TList [signature]
+        ,TNull,TInt 1,sha,empty,TNull,TNull,empty,empty,TList [text work]]
+      hostManifest auth = TList [text "TPEXACTSCOPE",text "5",sha,sha,empty,empty,empty
+        ,TList [empty,empty],TList auth]
+      path = work </> "host-scope.cbor"
+      decode auth = BS.writeFile path (toStrictByteString (encodeTerm (hostManifest auth))) >> readExactScope path
+      replace index value fields = [if ordinal == index then value else field | (ordinal,field) <- zip [0::Int ..] fields]
+  admitted <- decode authorization >>= either fail pure
+  unless (fmap itemPurpose (scopeCheckedItem admitted) == Just HostActivationInput) $
+    fail "host purpose lost its sealed role"
+  authored <- decode (replace 0 (text "checked-item2") authorization) >>= either fail pure
+  unless (fmap itemPurpose (scopeCheckedItem authored) == Just AuthoredCheckedItem) $
+    fail "ordinary purpose acquired host authority"
+  forM_ [(0,text "host-activation-input2"),(3,TInt 1),(5,text "expr")
+      ,(6,TList [text "other"]),(7,TList [TList [text "expr",sha]])
+      ,(9,empty),(11,TInt 0),(12,TString (T.replicate 64 "0"))] $ \(index,value) -> do
+    refused <- decode (replace index value authorization)
+    unless (case refused of Left _ -> True; Right _ -> False) $
+      fail ("invalid host purpose field was admitted: " ++ show index)
+  _ <- decode authorization >>= either fail pure
+  let sourcePath = work </> "HostActivationInput.hs"
+  inputTemplate <- readFile "test-source-boot/fixtures/HostActivationInput.hs"
+  originalSource <- either fail pure (replaceTemplateMarker "{{CHECKED_TYPE}}" "Int" inputTemplate)
+  writeFile sourcePath originalSource
+  original <- runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile Nothing sourcePath [work] Nothing
+  inputType <- maybe (fail "host input fixture has no inferred type") pure (crResultType original)
+  let checkedSignature = captureCheckedSignature (crHscEnv original) "__tidepool_cell_pin_0_sessionInput" inputType
+  encodedSignature <- either (fail . show) (pure . snd)
+    (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString (encodeCheckedSignature checkedSignature))))
+  _ <- decode (replace 9 (TList [encodedSignature]) authorization) >>= either fail pure
+  checkedSource <- either fail pure (replaceTemplateMarker "{{CHECKED_TYPE}}" (signatureType checkedSignature) inputTemplate)
+  writeFile sourcePath checkedSource
+  let session = emptySessionScope {ssRoot=work,ssExactScope=Just path}
+      purpose = HostActivationInputCompile [("__tidepool_checked_annotation_0",
+        checkedSignature)] Nothing []
+      reject action = do
+        refused <- try (void action) :: IO (Either SomeException ())
+        unless (case refused of Left reason -> "host activation input" `isInfixOf` show reason; Right _ -> False) $
+          fail "host input compiled through an unsealed or general purpose"
+  reject (runPipelineSessionSelected CheckedEnvironment Set.empty purpose Nothing sourcePath [work] Nothing)
+  reject (runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile (Just session) sourcePath [work] Nothing)
+  checked <- runPipelineSessionSelected CheckedEnvironment Set.empty purpose (Just session) sourcePath [work] Nothing
+  unless (fmap renderType (crResultType checked) == Just "Int") $
+    fail "host checked annotation changed the inferred input"
+  actualInput <- either fail pure (activationPreviewInputType (crTargetTcGblEnv checked))
+  let witness ty = maybe (fail "complete fixture type has no canonical witness") pure
+        (captureCheckedTypeWitness (crHscEnv checked) ty)
+      sealedBytes ty = do
+        raw <- witness ty
+        sealed <- sealCheckedTypeWitness (crHscEnv checked) Map.empty raw
+          >>= maybe (fail "fixture type witness has no original interface") pure
+        maybe (fail "fixture type witness is unsealed") (pure . toStrictByteString) (encodeCheckedTypeWitness sealed)
+  mismatchedSource <- either fail pure (replaceTemplateMarker "__activationPreview :: Int" "__activationPreview :: Bool" originalSource)
+  writeFile sourcePath mismatchedSource
+  mismatched <- runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile Nothing sourcePath [work] Nothing
+  unless (case activationPreviewInputType (crTargetTcGblEnv mismatched) of Left _ -> True; Right _ -> False) $
+    fail "host preview admitted another type than its checked Val binder"
+  writeFile sourcePath checkedSource
+  originalBytes <- sealedBytes inputType
+  actualBytes <- sealedBytes actualInput
+  forward <- sealedBytes (mkVisFunTyMany intTy boolTy)
+  backward <- sealedBytes (mkVisFunTyMany boolTy intTy)
+  supply <- mkSplitUniqSupply 'w'
+  let (firstUnique, remaining) = takeUniqFromSupply supply
+      (secondUnique, _) = takeUniqFromSupply remaining
+      alphaVariable unique name = mkTyVar (mkInternalName unique (mkTyVarOcc name) noSrcSpan) liftedTypeKind
+      firstVariable = alphaVariable firstUnique "a"
+      secondVariable = alphaVariable secondUnique "renamed"
+      alphaType variable = mkForAllTy variable (Invisible SpecifiedSpec)
+        (mkVisFunTyMany (mkTyVarTy variable) (mkTyVarTy variable))
+  alphaFirst <- sealedBytes (alphaType firstVariable)
+  alphaSecond <- sealedBytes (alphaType secondVariable)
+  unless (isNothing (captureCheckedTypeWitness (crHscEnv checked) (mkTyVarTy firstVariable))) $
+    fail "canonical type witness admitted a free type variable"
+  let ownerPath = work </> "HostActivationOwner.hs"
+      ownerWitness fixture = do
+        copyFile ("test-source-boot/fixtures" </> fixture) ownerPath
+        produced <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile Nothing ownerPath [work] Nothing
+        let pipeline = pprPipelineResult produced
+        ty <- maybe (fail "owner fixture has no input type") pure (prResultType pipeline)
+        raw <- maybe (fail "owner fixture has no canonical witness") pure (captureCheckedTypeWitness (prHscEnv pipeline) ty)
+        sealed <- sealCheckedTypeWitness (prHscEnv pipeline) (pprProductInterfaces produced) raw
+          >>= maybe (fail "owner fixture lacks its original interface") pure
+        maybe (fail "owner witness is unsealed") (pure . toStrictByteString) (encodeCheckedTypeWitness sealed)
+  originalOwner <- ownerWitness "HostActivationOwnerOriginal.hs"
+  changedOwner <- ownerWitness "HostActivationOwnerChanged.hs"
+  unless (originalOwner /= changedOwner) $ fail "same original Name ignored changed owner interface"
+  forM_ destination $ \directory -> do
+    createDirectoryIfMissing True directory
+    forM_ [("original-input.cbor",originalBytes),("preview-input.cbor",actualBytes)
+      ,("forward-function.cbor",forward),("backward-function.cbor",backward),("alpha-first.cbor",alphaFirst),("alpha-second.cbor",alphaSecond),("original-owner.cbor",originalOwner),("changed-owner.cbor",changedOwner)] $ \(name,bytes) ->
+      BS.writeFile (directory </> name) bytes
+  unless (originalBytes == actualBytes && forward /= backward) $
+    fail "canonical input witness lost original correspondence or function argument/result order"
+  putStrLn "host activation purpose: sealed payload, checked type pass and ordinary/unsealed refusals passed"
+
 freshExecutionRecipeTest :: IO ()
 freshExecutionRecipeTest = withScratch $ \work -> do
   let source = "module Expr where\nanswer = 42\n"

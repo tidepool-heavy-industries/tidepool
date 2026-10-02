@@ -2,7 +2,7 @@
 
 module Tidepool.ExactScope
   ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..)
-  , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..)
+  , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..)
   , PlannedCellAdmission(..), PlannedCellSlot(..)
   , readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation
@@ -104,8 +104,12 @@ data PlannedCellAdmission = PlannedCellAdmission
   , plannedSlots :: [PlannedCellSlot]
   } deriving (Eq, Show)
 
+data CheckedItemPurpose = AuthoredCheckedItem | HostActivationInput
+  deriving (Eq, Show)
+
 data CheckedItemAdmission = CheckedItemAdmission
-  { itemAdmissionDigest :: String
+  { itemPurpose :: CheckedItemPurpose
+  , itemAdmissionDigest :: String
   , itemCellReceiptDigest :: String
   , itemIndex :: Word64
   , itemSourceDigest :: String
@@ -447,7 +451,7 @@ decodeScope = do
         validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         paths <- includePaths
         pure (Just admission,Nothing,Nothing,Just paths)
-      "checked-item2" -> do
+      tag | tag == "checked-item2" || tag == "host-activation-input1" -> do
         unless (authCount == 19) (fail "invalid checked-item admission")
         admissionDigest <- digestField
         receiptDigest <- digestField
@@ -489,8 +493,17 @@ decodeScope = do
         valueInputs <- valueInterfaces
         validateInterfaces injected valueInputs
         validateValues valueImports values
+        let role = if tag == "host-activation-input1" then HostActivationInput else AuthoredCheckedItem
+        when (role == HostActivationInput) $
+          unless (index == 0 && kind == "bind" && binders == ["sessionInput"]
+              && generation > 0
+              && all (/= replicate 64 '0') [admissionDigest,receiptDigest,prefix]
+              && map fst templates == ["bind"]
+              && map signatureKey signatures == ["__tidepool_cell_pin_0_sessionInput"]
+              && liftPlan == Nothing && presentation == Nothing && observation == Nothing)
+            (fail "invalid host activation input admission")
         paths <- includePaths
-        pure (Nothing, Just (CheckedItemAdmission admissionDigest receiptDigest index sourceDigest kind binders
+        pure (Nothing, Just (CheckedItemAdmission role admissionDigest receiptDigest index sourceDigest kind binders
           templates injected signatures liftPlan presentation generation prefix valueImports observation planned values valueInputs), Nothing, Just paths)
       "checked-display2" -> do
         unless (authCount == 18) (fail "invalid checked-display admission")

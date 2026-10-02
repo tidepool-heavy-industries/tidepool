@@ -55,9 +55,9 @@ fn decode_string_array(v: &CborValue, what: &str) -> Result<Vec<String>, Compile
 
 fn decode_yield_site(v: &CborValue) -> Result<YieldSite, CompileError> {
     let arr = cbor_expect_array(v, "typed suspension site")?;
-    if arr.len() != 7 && arr.len() != 8 {
+    if !matches!(arr.len(), 7..=9) {
         return Err(CompileError::ExtractFailed(format!(
-            "TurnOut CBOR: expected typed suspension site with 7 or 8 fields, got {}",
+            "TurnOut CBOR: expected typed suspension site with 7, 8 or 9 fields, got {}",
             arr.len()
         )));
     }
@@ -82,6 +82,31 @@ fn decode_yield_site(v: &CborValue) -> Result<YieldSite, CompileError> {
             })
         })
         .collect::<Result<Vec<_>, CompileError>>()?;
+    let input_type_witnesses = match arr.get(8) {
+        None => Vec::new(),
+        Some(value) => {
+            let values = cbor_expect_array(value, "canonical input type witnesses")?;
+            if values.len() != inputs.len() {
+                return Err(CompileError::ExtractFailed(
+                    "typed site input witness arity".into(),
+                ));
+            }
+            values
+                .iter()
+                .map(|value| match value {
+                    CborValue::Null => Ok(None),
+                    CborValue::Bytes(bytes) => {
+                        crate::checked_cell::CanonicalInputTypeWitness::from_bytes(bytes).map(Some)
+                    }
+                    _ => Err(cbor_shape_error(
+                        "canonical input type witness",
+                        "bytes or null",
+                        value,
+                    )),
+                })
+                .collect::<Result<Vec<_>, CompileError>>()?
+        }
+    };
     Ok(YieldSite {
         reply_declaration,
         site,
@@ -91,6 +116,7 @@ fn decode_yield_site(v: &CborValue) -> Result<YieldSite, CompileError> {
         modules,
         heads,
         inputs,
+        input_type_witnesses,
     })
 }
 
@@ -145,7 +171,20 @@ mod tests {
             ])]),
             CborValue::Text("data Report = Report Int".into()),
         ]);
-        let sites = decode_turn_yield_sites(&CborValue::Array(vec![site])).unwrap();
+        let sites = decode_turn_yield_sites(&CborValue::Array(vec![site.clone()])).unwrap();
+        assert!(sites[0].input_type_witnesses.is_empty());
+        let CborValue::Array(mut fields) = site else {
+            unreachable!()
+        };
+        fields.push(CborValue::Array(vec![CborValue::Null]));
+        let current =
+            decode_turn_yield_sites(&CborValue::Array(vec![CborValue::Array(fields.clone())]))
+                .unwrap();
+        assert_eq!(current[0].input_type_witnesses, vec![None]);
+        fields[8] = CborValue::Array(vec![]);
+        assert!(
+            decode_turn_yield_sites(&CborValue::Array(vec![CborValue::Array(fields)])).is_err()
+        );
         assert_eq!(sites.len(), 1);
         assert_eq!(sites[0].site, 7);
         assert_eq!(sites[0].heads[0].unit, "owner-unit");

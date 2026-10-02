@@ -107,8 +107,83 @@ pub struct YieldSite {
     pub modules: Vec<String>,
     pub heads: Vec<NominalHead>,
     pub inputs: Vec<SiteType>,
+    // Legacy sidecars have no companion. Host activation must refuse that
+    // absence; ordinary site identity and servicing remain unchanged.
+    #[serde(default)]
+    pub input_type_witnesses: Vec<Option<crate::checked_cell::CanonicalInputTypeWitness>>,
     #[serde(default)]
     pub reply_declaration: Option<String>,
+}
+
+impl YieldSite {
+    pub(crate) fn metadata_digest(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        fn text(hasher: &mut Sha256, value: &str) {
+            hasher.update((value.len() as u64).to_le_bytes());
+            hasher.update(value.as_bytes());
+        }
+        fn ty(hasher: &mut Sha256, value: &str, modules: &[String], heads: &[NominalHead]) {
+            text(hasher, value);
+            hasher.update((modules.len() as u64).to_le_bytes());
+            for module in modules {
+                text(hasher, module);
+            }
+            hasher.update((heads.len() as u64).to_le_bytes());
+            for head in heads {
+                for value in [&head.unit, &head.module, &head.name] {
+                    text(hasher, value);
+                }
+            }
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"tidepool-typed-site-metadata-1");
+        hasher.update(self.site.to_le_bytes());
+        text(&mut hasher, &self.origin);
+        hasher.update(self.ordinal.to_le_bytes());
+        ty(&mut hasher, &self.ty, &self.modules, &self.heads);
+        hasher.update((self.inputs.len() as u64).to_le_bytes());
+        for input in &self.inputs {
+            ty(&mut hasher, &input.ty, &input.modules, &input.heads);
+        }
+        hasher.update([u8::from(self.reply_declaration.is_some())]);
+        if let Some(value) = &self.reply_declaration {
+            text(&mut hasher, value);
+        }
+        hasher.update((self.input_type_witnesses.len() as u64).to_le_bytes());
+        for witness in &self.input_type_witnesses {
+            hasher.update([u8::from(witness.is_some())]);
+            if let Some(witness) = witness {
+                hasher.update(witness.metadata_digest());
+            }
+        }
+        hasher.finalize().into()
+    }
+}
+
+// The site map owns metadata identity. Normalize its existing duplicate/id
+// semantics once; every opaque bundle proof uses this same complete digest.
+pub(crate) fn yield_sites_metadata_digest(sites: &[YieldSite]) -> Result<[u8; 32], CompileError> {
+    use sha2::{Digest, Sha256};
+    let mut entries = std::collections::BTreeMap::new();
+    for site in sites {
+        let digest = site.metadata_digest();
+        if entries
+            .insert(site.site, digest)
+            .is_some_and(|prior| prior != digest)
+        {
+            return Err(CompileError::ExtractFailed(
+                "typed-site metadata collision".into(),
+            ));
+        }
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"tidepool-typed-site-map-1");
+    hasher.update((entries.len() as u64).to_le_bytes());
+    for (site, digest) in entries {
+        hasher.update(site.to_le_bytes());
+        hasher.update(digest);
+    }
+    Ok(hasher.finalize().into())
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -161,6 +236,7 @@ impl YieldSites {
                             modules: Vec::new(),
                             heads: Vec::new(),
                             inputs: Vec::new(),
+                            input_type_witnesses: Vec::new(),
                         },
                     )
                 })
@@ -186,6 +262,7 @@ impl YieldSites {
                             modules,
                             heads: Vec::new(),
                             inputs: Vec::new(),
+                            input_type_witnesses: Vec::new(),
                         },
                     )
                 })
@@ -198,7 +275,7 @@ impl YieldSites {
         let mut by_site: HashMap<u64, YieldSite> = HashMap::new();
         for site in sites {
             match by_site.get(&site.site) {
-                Some(previous) if previous != &site => {
+                Some(previous) if previous.metadata_digest() != site.metadata_digest() => {
                     return Err(YieldSiteCollision {
                         site: site.site,
                         first: Box::new(previous.clone()),
@@ -330,6 +407,7 @@ pub struct ModuleCandidateOffer {
 enum CheckedPurpose {
     Cell,
     Item,
+    HostActivationInput,
     Display,
 }
 
@@ -364,6 +442,7 @@ fn checked_search_authorization(
         match purpose {
             CheckedPurpose::Cell => "cell-check2",
             CheckedPurpose::Item => "checked-item2",
+            CheckedPurpose::HostActivationInput => "host-activation-input1",
             CheckedPurpose::Display => "checked-display2",
         }
         .into(),
@@ -773,9 +852,80 @@ impl ModuleCandidateOffer {
             u64,
         )>,
     ) -> Result<Self, CompileError> {
+        Self::select_checked_item_for_purpose(
+            producer,
+            include,
+            scratch,
+            context,
+            item,
+            prefix,
+            runtime_prefix_digest,
+            generation,
+            observation_name,
+            templates,
+            settled_bindings,
+            crate::checked_cell::CheckedItemPurpose::Authored,
+        )
+    }
+
+    /// Compile the protected input interface and preview without issuing an
+    /// authored execution item. The runtime owns the affine input admission.
+    pub fn select_checked_activation_item(
+        producer: &[u8],
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        item: crate::checked_cell::ExactCheckedItem,
+        prefix: crate::checked_cell::ExactCompiledPrefix,
+        runtime_prefix_digest: [u8; 32],
+        generation: u64,
+        templates: &[(String, String)],
+        settled_bindings: Vec<(
+            String,
+            tidepool_repr::execution_schema::SymbolIdentity,
+            u64,
+            u64,
+        )>,
+    ) -> Result<Self, CompileError> {
+        Self::select_checked_item_for_purpose(
+            producer,
+            include,
+            scratch,
+            context,
+            item,
+            prefix,
+            runtime_prefix_digest,
+            generation,
+            None,
+            templates,
+            settled_bindings,
+            crate::checked_cell::CheckedItemPurpose::HostActivationInput,
+        )
+    }
+
+    fn select_checked_item_for_purpose(
+        producer: &[u8],
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        item: crate::checked_cell::ExactCheckedItem,
+        prefix: crate::checked_cell::ExactCompiledPrefix,
+        runtime_prefix_digest: [u8; 32],
+        generation: u64,
+        observation_name: Option<&str>,
+        templates: &[(String, String)],
+        settled_bindings: Vec<(
+            String,
+            tidepool_repr::execution_schema::SymbolIdentity,
+            u64,
+            u64,
+        )>,
+        purpose: crate::checked_cell::CheckedItemPurpose,
+    ) -> Result<Self, CompileError> {
         let context = checked_offer_context(context)?;
         let settled_values = prefix.select_settled_values(settled_bindings)?;
         let checked_item = crate::checked_cell::CheckedItemOffer {
+            purpose,
             item,
             prefix,
             runtime_prefix_digest,
@@ -787,13 +937,21 @@ impl ModuleCandidateOffer {
         };
         checked_item.validate_templates(templates)?;
         checked_item.validate_include(include)?;
+        if purpose == crate::checked_cell::CheckedItemPurpose::HostActivationInput {
+            checked_item.validate_activation_input()?;
+        }
         let mut selected = None;
         let exact = context.prepare_compilation_authorizing(
             &scratch.join("exact-scope"),
             producer,
             |semantic_sha256| {
                 let authorization = checked_search_authorization(
-                    CheckedPurpose::Item,
+                    match purpose {
+                        crate::checked_cell::CheckedItemPurpose::Authored => CheckedPurpose::Item,
+                        crate::checked_cell::CheckedItemPurpose::HostActivationInput => {
+                            CheckedPurpose::HostActivationInput
+                        }
+                    },
                     checked_item.authorization(producer, semantic_sha256)?,
                     include,
                 )?;
@@ -1248,6 +1406,7 @@ impl ModuleCandidateOffer {
                 }
             };
             let native = checked_cell::CheckedItemOffer {
+                purpose: checked_cell::CheckedItemPurpose::Authored,
                 item: item.clone(),
                 prefix: completed.clone(),
                 runtime_prefix_digest: cell.admission_digest(),
@@ -1727,6 +1886,7 @@ pub struct SealedTurnProducts {
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     pub package_interfaces: certified_products::CertifiedTargetPackageInterfaces,
     pub checked_execution: Option<Arc<crate::checked_cell::ExactCompiledItem>>,
+    pub checked_activation_input: Option<Arc<crate::checked_cell::ExactCompiledActivationInput>>,
     pub checked_display: Option<Arc<crate::checked_cell::ExactCompiledDisplay>>,
 }
 
@@ -2039,6 +2199,7 @@ fn seal_turn_outputs_inner(
         checked_execution: offer
             .checked_item
             .as_ref()
+            .filter(|item| item.purpose == crate::checked_cell::CheckedItemPurpose::Authored)
             .map(|item| {
                 item.seal(
                     output_dir,
@@ -2046,6 +2207,25 @@ fn seal_turn_outputs_inner(
                         .exact
                         .as_ref()
                         .expect("checked offer has exact scope")
+                        .request_sha256,
+                    source,
+                    prepared,
+                )
+            })
+            .transpose()?,
+        checked_activation_input: offer
+            .checked_item
+            .as_ref()
+            .filter(|item| {
+                item.purpose == crate::checked_cell::CheckedItemPurpose::HostActivationInput
+            })
+            .map(|item| {
+                item.seal_activation_input(
+                    output_dir,
+                    &offer
+                        .exact
+                        .as_ref()
+                        .expect("host activation has exact scope")
                         .request_sha256,
                     source,
                     prepared,
@@ -3555,6 +3735,7 @@ mod typed_site_tests {
             modules: Vec::new(),
             heads: Vec::new(),
             inputs: Vec::new(),
+            input_type_witnesses: Vec::new(),
         }
     }
 

@@ -3,23 +3,39 @@
 module Tidepool.CheckedCell
   ( CheckedSignature(..), CheckedSignatureName(..)
   , captureCheckedSignature, encodeCheckedSignature
+  , CheckedTypeWitness, captureCheckedTypeWitness, sealCheckedTypeWitness
+  , encodeCheckedTypeWitness, renderCheckedTypeWitness
   , rewriteCheckedAnnotations
   ) where
 
-import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeString)
+import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeString, encodeBytes, encodeInt)
+import Codec.CBOR.Write (toStrictByteString)
+import Control.Monad.State.Strict (StateT, evalStateT, get, put, lift)
+import qualified Data.ByteString as BS
+import qualified Data.Map.Strict as Map
+import Data.Maybe (catMaybes)
+import Numeric (showHex)
 import Control.Monad (forM, unless)
 import Data.IORef
-import Data.List (find, nubBy, sortOn)
+import Data.List (elemIndex, find, nubBy, sortOn)
 import qualified Data.Text as T
 import Data.Generics (everywhereM, mkM)
 import GHC
-import GHC.Core.Type (tyConsOfType)
-import GHC.Core.TyCon (tyConName)
-import GHC.Driver.Env (lookupType, hsc_home_unit)
+import GHC.Core.Type (tyConsOfType, coreView)
+import GHC.Core.TyCo.Rep (Type(..), TyLit(..))
+import GHC.Data.FastString (unpackFS)
+import GHC.Types.Var (VarBndr(..), ForAllTyFlag(..), Specificity(..), FunTyFlag(..), isTyVar)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
+import GHC.Unit.Module.ModIface (mi_module, mi_iface_hash, mi_final_exts)
+import GHC.Unit.External (ExternalPackageState(eps_PIT))
+import GHC.Unit.Module.Env (lookupModuleEnv)
+import Tidepool.TypePolicy (stabilizeEffectRows)
+import GHC.Core.TyCon (tyConName, isFamilyTyCon)
+import GHC.Driver.Env (lookupType, hsc_home_unit, hsc_HPT, hscEPS)
 import GHC.Driver.Env.Types (hsc_unit_env)
 import GHC.Iface.Env (lookupOrig)
-import GHC.Iface.Load (importDecl)
-import GHC.Tc.Utils.Monad (initIfaceLoad)
+import GHC.Iface.Load (importDecl, loadInterface, WhereFrom(ImportBySystem))
+import GHC.Tc.Utils.Monad (initIfaceCheck, initIfaceLoad)
 import qualified GHC.Data.Maybe as MErr
 import GHC.Types.Name (nameModule_maybe, nameOccName, wiredInNameTyThing_maybe)
 import GHC.Types.Name.Occurrence
@@ -142,3 +158,121 @@ rewriteCheckedAnnotations env annotations parsed = do
         _ -> fail "generated checked annotation has ambiguous Name authority"
       _ -> pure ty
     rewriteType _ ty = pure ty
+
+
+-- The parser rendering is useful presentation, but equality is the complete
+-- ordered GHC type structure and the interfaces of its exact original Names.
+-- Unsealed witnesses remain transaction-local until product publication.
+data CheckedTypeWitness = CheckedTypeWitness
+  { witnessSignature :: CheckedSignature
+  , witnessStructure :: BS.ByteString
+  , witnessOwners :: [Module]
+  , witnessInterfaces :: Maybe [(Module, String)]
+  } deriving (Eq, Show)
+
+captureCheckedTypeWitness :: HscEnv -> Type -> Maybe CheckedTypeWitness
+captureCheckedTypeWitness env original = case evalStateT (shape 0 [] stable) (0 :: Int) of
+  Left _ -> Nothing
+  Right (encoded, owners) ->
+    let bytes = toStrictByteString encoded
+    in if BS.length bytes > 4 * 1024 * 1024 then Nothing else Just
+      (CheckedTypeWitness (captureCheckedSignature env "activation-input" stable) bytes
+        (Map.elems (Map.fromList [(ownerIdentity owner, owner) | owner <- owners])) Nothing)
+  where
+    stable = stabilizeEffectRows original
+    ownerIdentity owner = (unitString (moduleUnit owner), moduleNameString (moduleName owner))
+    text = encodeString . T.pack
+    node :: Int -> Either String ()
+    node depth = if depth > 128 then Left "type witness depth" else Right ()
+    shape :: Int -> [TyVar] -> Type -> StateT Int (Either String) (Encoding, [Module])
+    shape depth bound ty = do
+      lift (node depth)
+      count <- get
+      if count >= 65536 then lift (Left "type witness node count") else put (count + 1)
+      case coreView ty of
+        Just expanded -> shape (depth + 1) bound expanded
+        Nothing -> case ty of
+          TyVarTy variable -> case elemIndex variable bound of
+            Just index | isTyVar variable -> pure (encodeListLen 2 <> text "bound" <> encodeInt index, [])
+            _ -> lift (Left "type witness free variable")
+          TyConApp constructor arguments
+            | isFamilyTyCon constructor -> lift (Left "type witness unresolved family")
+            | Just owner <- nameModule_maybe (tyConName constructor) -> do
+                children <- traverse (shape (depth + 1) bound) arguments
+                let name = tyConName constructor
+                    namespace = if isDataOcc (nameOccName name) then "data" else "type"
+                pure (encodeListLen 3 <> text "con"
+                  <> encodeListLen 4 <> text (unitString (moduleUnit owner))
+                  <> text (moduleNameString (moduleName owner)) <> text namespace
+                  <> text (occNameString (nameOccName name))
+                  <> encodeListLen (fromIntegral (length children)) <> foldMap fst children,
+                  owner : concatMap snd children)
+            | otherwise -> lift (Left "type witness local type Name")
+          AppTy function argument -> binary "app" [function, argument]
+          FunTy flag multiplicity argument result -> do
+            children <- traverse (shape (depth + 1) bound) [multiplicity, argument, result]
+            let tag = case flag of FTF_T_T -> 0; FTF_T_C -> 1; FTF_C_T -> 2; FTF_C_C -> 3
+            pure (encodeListLen 5 <> text "fun" <> encodeInt tag <> foldMap fst children,
+              concatMap snd children)
+          ForAllTy (Bndr variable visibility) body
+            | isTyVar variable -> do
+                (kind, kindOwners) <- shape (depth + 1) bound (varType variable)
+                (bodyShape, bodyOwners) <- shape (depth + 1) (variable : bound) body
+                let tag = case visibility of Required -> 0; Invisible SpecifiedSpec -> 1; Invisible InferredSpec -> 2
+                pure (encodeListLen 4 <> text "forall" <> encodeInt tag <> kind <> bodyShape,
+                  kindOwners ++ bodyOwners)
+            | otherwise -> lift (Left "type witness coercion binder")
+          LitTy literal -> pure (encodeListLen 3 <> text "literal" <> (case literal of
+            NumTyLit value -> text "nat" <> text (show value)
+            StrTyLit value -> text "symbol" <> text (unpackFS value)
+            CharTyLit value -> text "char" <> encodeInt (fromEnum value)), [])
+          CastTy{} -> lift (Left "type witness cast")
+          CoercionTy{} -> lift (Left "type witness coercion")
+      where
+        binary tag types = do
+          children <- traverse (shape (depth + 1) bound) types
+          pure (encodeListLen (fromIntegral (1 + length children)) <> text tag <> foldMap fst children,
+            concatMap snd children)
+
+-- Bind interfaces from this completed transaction's original products and
+-- admitted home/package interface environment. Never infer a seal from source.
+sealCheckedTypeWitness :: HscEnv -> Map.Map ModuleName ModIface -> CheckedTypeWitness
+  -> IO (Maybe CheckedTypeWitness)
+sealCheckedTypeWitness env originals witness = do
+  seals <- mapM seal (witnessOwners witness)
+  pure $ if length (catMaybes seals) == length seals
+    then Just witness { witnessInterfaces = Just (catMaybes seals) } else Nothing
+  where
+    seal owner = do
+      external <- hscEPS env
+      let matches interface = if mi_module interface == owner then Just interface else Nothing
+          productInterface = Map.lookup (moduleName owner) originals >>= matches
+          homeInterface = lookupHpt (hsc_HPT env) (moduleName owner) >>= matches . hm_iface
+          packageInterface = lookupModuleEnv (eps_PIT external) owner >>= matches
+          selected = case productInterface of
+            Just value -> Just value
+            Nothing -> case homeInterface of Just value -> Just value; Nothing -> packageInterface
+      found <- case selected of
+        Just interface -> pure (Just interface)
+        Nothing | isHomeUnit (hsc_home_unit env) (moduleUnit owner) -> pure Nothing
+        Nothing -> do
+          loaded <- initIfaceCheck (ppr (moduleName owner)) env
+            (loadInterface (ppr (moduleName owner)) owner ImportBySystem)
+          pure $ case loaded of MErr.Succeeded interface -> matches interface; MErr.Failed _ -> Nothing
+      pure ((\interface -> (owner, show (mi_iface_hash (mi_final_exts interface)))) <$> found)
+
+encodeCheckedTypeWitness :: CheckedTypeWitness -> Maybe Encoding
+encodeCheckedTypeWitness witness = do
+  interfaces <- witnessInterfaces witness
+  pure (encodeListLen 5 <> text "TPCANONICALINPUTTYPE1" <> text "1"
+    <> encodeCheckedSignature (witnessSignature witness) <> encodeBytes (witnessStructure witness)
+    <> encodeListLen (fromIntegral (length interfaces)) <> foldMap seal interfaces)
+  where
+    text = encodeString . T.pack
+    seal (owner, fingerprint) = encodeListLen 3 <> text (unitString (moduleUnit owner))
+      <> text (moduleNameString (moduleName owner)) <> text fingerprint
+
+renderCheckedTypeWitness :: CheckedTypeWitness -> Maybe String
+renderCheckedTypeWitness witness = hex . toStrictByteString <$> encodeCheckedTypeWitness witness
+  where
+    hex = concatMap (\byte -> let value = showHex byte "" in if length value == 1 then '0' : value else value) . BS.unpack

@@ -59,14 +59,10 @@ impl SealedCompileInputIdentity {
 }
 
 fn same_sites(left: &[YieldSite], right: &[YieldSite]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut left: Vec<_> = left.iter().collect();
-    let mut right: Vec<_> = right.iter().collect();
-    left.sort_by_key(|site| site.site);
-    right.sort_by_key(|site| site.site);
-    left == right
+    crate::artifacts::yield_sites_metadata_digest(left)
+        .ok()
+        .zip(crate::artifacts::yield_sites_metadata_digest(right).ok())
+        .is_some_and(|(left, right)| left == right)
 }
 
 /// Failure to authenticate the compiler's complete consumed package inputs.
