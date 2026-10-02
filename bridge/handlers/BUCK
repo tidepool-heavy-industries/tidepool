@@ -57,6 +57,7 @@ tidepool_rust_library(
         "//bridge/mcp:tidepool_mcp",
         "//exomonad/agent:exomonad_agent",
         "//exomonad/node:exomonad_node",
+        "//exomonad/tool:exomonad_tool",
         "//exomonad/worktree:exomonad_worktree",
         "//third-party/rust:blake3",
         "//third-party/rust:camino",
