@@ -69,9 +69,13 @@ pub fn check_source(request: &SourceCheckRequest<'_>) -> Result<(), CompileError
     if let Some(manifest) = offer.manifest_path() {
         command.module_candidates(manifest);
     }
-    let run = endpoint
-        .execute(&command)
-        .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
+    let run = endpoint.execute(&command).map_err(|error| {
+        offer.retain_execution_failure(
+            directory.path(),
+            &command,
+            CompileError::Io(extract_spawn_error(error.source)),
+        )
+    })?;
     diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
         .map(|_| ())
         .map_err(|error| offer.retain_failure(directory.path(), &run.output.stderr, error))
@@ -540,9 +544,13 @@ impl ModuleCandidateOffer {
         }
         let directory = tempfile::tempdir()?;
         command.relocate_turn_outputs(directory.path());
-        let run = endpoint
-            .execute(&command)
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let run = endpoint.execute(&command).map_err(|error| {
+            self.retain_execution_failure(
+                directory.path(),
+                &command,
+                CompileError::ExtractFailed(error.to_string()),
+            )
+        })?;
         let (turn, native) = if run.success()
             && diag::decode_extract_result(true, &run.output.stdout, &run.output.stderr).is_ok()
         {
@@ -1009,7 +1017,18 @@ impl ModuleCandidateOffer {
         stderr: &[u8],
         error: CompileError,
     ) -> CompileError {
-        retain_compiler_failure_inner(directory, stderr, error, Some(self))
+        retain_compiler_failure_inner(directory, stderr, error, Some(self), None)
+    }
+
+    /// Preserve the typed request and selected inputs when transport fails
+    /// before compiler diagnostics can be returned. Evidence grants no authority.
+    pub fn retain_execution_failure(
+        &self,
+        directory: &Path,
+        command: &ExtractCmd,
+        error: CompileError,
+    ) -> CompileError {
+        retain_compiler_failure_inner(directory, &[], error, Some(self), Some(command))
     }
 
     fn retain_checked_inputs(&self, destination: &Path) -> std::io::Result<()> {
@@ -2852,7 +2871,7 @@ pub fn retain_compiler_failure(
     stderr: &[u8],
     error: CompileError,
 ) -> CompileError {
-    retain_compiler_failure_inner(directory, stderr, error, None)
+    retain_compiler_failure_inner(directory, stderr, error, None, None)
 }
 
 fn retain_compiler_failure_inner(
@@ -2860,11 +2879,12 @@ fn retain_compiler_failure_inner(
     stderr: &[u8],
     error: CompileError,
     offer: Option<&ModuleCandidateOffer>,
+    command: Option<&ExtractCmd>,
 ) -> CompileError {
     if std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() != Ok("1") {
         return error;
     }
-    match retain_failed_compiler_artifacts(directory, offer) {
+    match retain_failed_compiler_artifacts(directory, offer, command) {
         Ok(retained) => {
             if let Err(failure) = std::fs::write(retained.join("compiler.stderr"), stderr) {
                 tracing::warn!(%failure, "could not retain compiler stderr");
@@ -2892,6 +2912,7 @@ fn retain_compiler_failure_inner(
 fn retain_failed_compiler_artifacts(
     directory: &Path,
     offer: Option<&ModuleCandidateOffer>,
+    command: Option<&ExtractCmd>,
 ) -> std::io::Result<PathBuf> {
     let retained_root = match std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
         Some(root) => PathBuf::from(root),
@@ -2955,6 +2976,18 @@ fn retain_failed_compiler_artifacts(
             )?;
         }
     }
+    if let Some(command) = command {
+        std::fs::write(
+            retained.path().join("compiler-request.bin"),
+            command.request_bytes(),
+        )?;
+        // Compiler transport uses the caller's CWD; Rust compilation owners
+        // do not change process CWD while a request is outstanding.
+        std::fs::write(
+            retained.path().join("compiler-cwd.bin"),
+            std::env::current_dir()?.as_os_str().as_encoded_bytes(),
+        )?;
+    }
     Ok(retained.keep())
 }
 
@@ -3011,7 +3044,57 @@ fn retain_program_compile_diagnostics(source: &Path, destination: &Path) -> std:
         }
         Ok(())
     }
+    fn copy_scope(
+        source: &Path,
+        destination: &Path,
+        remaining: &mut u64,
+        entries_left: &mut usize,
+        depth: usize,
+    ) -> std::io::Result<()> {
+        if depth > 16 {
+            return Err(std::io::Error::other(
+                "exact scope diagnostics exceed depth bound",
+            ));
+        }
+        let children = entries(source)?;
+        *entries_left = entries_left
+            .checked_sub(children.len())
+            .ok_or_else(|| std::io::Error::other("exact scope diagnostics exceed entry bound"))?;
+        std::fs::create_dir_all(destination)?;
+        for entry in children {
+            let kind = entry.file_type()?;
+            if kind.is_file() {
+                let length = entry.metadata()?.len();
+                if length > *remaining {
+                    return Err(std::io::Error::other(
+                        "program diagnostics exceed byte bound",
+                    ));
+                }
+                *remaining -= length;
+                std::fs::copy(entry.path(), destination.join(entry.file_name()))?;
+            } else if kind.is_dir() {
+                copy_scope(
+                    &entry.path(),
+                    &destination.join(entry.file_name()),
+                    remaining,
+                    entries_left,
+                    depth + 1,
+                )?;
+            }
+        }
+        Ok(())
+    }
     let mut remaining = 128 * 1024 * 1024;
+    let exact_scope = source.join("exact-scope");
+    if std::fs::symlink_metadata(&exact_scope).is_ok_and(|metadata| metadata.file_type().is_dir()) {
+        copy_scope(
+            &exact_scope,
+            &destination.join("exact-scope"),
+            &mut remaining,
+            &mut 4096,
+            0,
+        )?;
+    }
     let mut admitted = 0;
     for entry in entries(source)? {
         let name = entry.file_name();
@@ -3864,6 +3947,45 @@ mod module_product_tests {
     use std::io::Write;
 
     #[test]
+    fn failed_execution_diagnostics_preserve_typed_request_after_scratch_cleanup() {
+        let scratch = tempfile::tempdir().unwrap();
+        let input = scratch.path().join("CellCheck.hs");
+        let source = b"module CellCheck where\nvalue = 41 :: Int\n";
+        std::fs::write(&input, source).unwrap();
+        let mut command = ExtractCmd::with_bin(
+            tidepool_extract_cmd::ResolvedExtractBin::assume_resolved("missing-worker"),
+        );
+        command
+            .input(&input)
+            .output_dir(scratch.path())
+            .check_source();
+        let request = command.request_bytes();
+        let retained =
+            retain_failed_compiler_artifacts(scratch.path(), None, Some(&command)).unwrap();
+        drop(scratch);
+        let captured = std::fs::read(retained.join("compiler-request.bin")).unwrap();
+        assert_eq!(captured, request);
+        assert_eq!(
+            tidepool_extract_cmd::ExtractRequest::decode(&captured)
+                .unwrap()
+                .encode(),
+            request
+        );
+        assert_eq!(
+            std::fs::read(retained.join("CellCheck.hs")).unwrap(),
+            source
+        );
+        assert_eq!(
+            std::fs::read(retained.join("compiler-cwd.bin")).unwrap(),
+            std::env::current_dir()
+                .unwrap()
+                .as_os_str()
+                .as_encoded_bytes()
+        );
+        std::fs::remove_dir_all(retained).unwrap();
+    }
+
+    #[test]
     fn program_failure_diagnostics_retain_nested_receipts_without_following_links() {
         use std::os::unix::fs::symlink;
         let source = tempfile::tempdir().unwrap();
@@ -3885,7 +4007,25 @@ mod module_product_tests {
         symlink(&planned, source.path().join("segment-1")).unwrap();
         std::fs::create_dir(source.path().join("unrelated")).unwrap();
         std::fs::write(source.path().join("unrelated/secret"), b"unrelated").unwrap();
+        let exact = source.path().join("exact-scope/artifacts/owner");
+        std::fs::create_dir_all(&exact).unwrap();
+        std::fs::write(exact.join("scope.cbor"), b"exact scope").unwrap();
+        std::fs::write(exact.join("original.hi"), b"interface bytes").unwrap();
+        symlink(source.path().join("unrelated"), exact.join("foreign-root")).unwrap();
         retain_program_compile_diagnostics(source.path(), destination.path()).unwrap();
+        assert_eq!(
+            std::fs::read(
+                destination
+                    .path()
+                    .join("exact-scope/artifacts/owner/original.hi")
+            )
+            .unwrap(),
+            b"interface bytes"
+        );
+        assert!(!destination
+            .path()
+            .join("exact-scope/artifacts/owner/foreign-root")
+            .exists());
         assert_eq!(
             std::fs::read(
                 destination
