@@ -13,6 +13,7 @@ import Codec.CBOR.Write (toStrictByteString)
 import Control.Monad.State.Strict (StateT, evalStateT, get, put, lift)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
+import Tidepool.ExactHydration (OriginalInterfaceArtifacts, originalInterfaceSha256)
 import Data.Maybe (catMaybes)
 import Numeric (showHex)
 import Control.Monad (forM, unless)
@@ -25,17 +26,13 @@ import GHC.Core.Type (tyConsOfType, coreView)
 import GHC.Core.TyCo.Rep (Type(..), TyLit(..))
 import GHC.Data.FastString (unpackFS)
 import GHC.Types.Var (VarBndr(..), ForAllTyFlag(..), Specificity(..), FunTyFlag(..), isTyVar)
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
-import GHC.Unit.Module.ModIface (mi_module, mi_iface_hash, mi_final_exts)
-import GHC.Unit.External (ExternalPackageState(eps_PIT))
-import GHC.Unit.Module.Env (lookupModuleEnv)
 import Tidepool.TypePolicy (stabilizeEffectRows)
 import GHC.Core.TyCon (tyConName, isFamilyTyCon)
-import GHC.Driver.Env (lookupType, hsc_home_unit, hsc_HPT, hscEPS)
+import GHC.Driver.Env (lookupType, hsc_home_unit)
 import GHC.Driver.Env.Types (hsc_unit_env)
 import GHC.Iface.Env (lookupOrig)
-import GHC.Iface.Load (importDecl, loadInterface, WhereFrom(ImportBySystem))
-import GHC.Tc.Utils.Monad (initIfaceCheck, initIfaceLoad)
+import GHC.Iface.Load (importDecl)
+import GHC.Tc.Utils.Monad (initIfaceLoad)
 import qualified GHC.Data.Maybe as MErr
 import GHC.Types.Name (nameModule_maybe, nameOccName, wiredInNameTyThing_maybe)
 import GHC.Types.Name.Occurrence
@@ -236,30 +233,13 @@ captureCheckedTypeWitness env original = case evalStateT (shape 0 [] stable) (0 
 
 -- Bind interfaces from this completed transaction's original products and
 -- admitted home/package interface environment. Never infer a seal from source.
-sealCheckedTypeWitness :: HscEnv -> Map.Map ModuleName ModIface -> CheckedTypeWitness
+sealCheckedTypeWitness :: OriginalInterfaceArtifacts -> CheckedTypeWitness
   -> IO (Maybe CheckedTypeWitness)
-sealCheckedTypeWitness env originals witness = do
-  seals <- mapM seal (witnessOwners witness)
+sealCheckedTypeWitness artifacts witness = do
+  seals <- mapM (\owner -> fmap ((,) owner) <$> originalInterfaceSha256 artifacts owner)
+    (witnessOwners witness)
   pure $ if length (catMaybes seals) == length seals
     then Just witness { witnessInterfaces = Just (catMaybes seals) } else Nothing
-  where
-    seal owner = do
-      external <- hscEPS env
-      let matches interface = if mi_module interface == owner then Just interface else Nothing
-          productInterface = Map.lookup (moduleName owner) originals >>= matches
-          homeInterface = lookupHpt (hsc_HPT env) (moduleName owner) >>= matches . hm_iface
-          packageInterface = lookupModuleEnv (eps_PIT external) owner >>= matches
-          selected = case productInterface of
-            Just value -> Just value
-            Nothing -> case homeInterface of Just value -> Just value; Nothing -> packageInterface
-      found <- case selected of
-        Just interface -> pure (Just interface)
-        Nothing | isHomeUnit (hsc_home_unit env) (moduleUnit owner) -> pure Nothing
-        Nothing -> do
-          loaded <- initIfaceCheck (ppr (moduleName owner)) env
-            (loadInterface (ppr (moduleName owner)) owner ImportBySystem)
-          pure $ case loaded of MErr.Succeeded interface -> matches interface; MErr.Failed _ -> Nothing
-      pure ((\interface -> (owner, show (mi_iface_hash (mi_final_exts interface)))) <$> found)
 
 encodeCheckedTypeWitness :: CheckedTypeWitness -> Maybe Encoding
 encodeCheckedTypeWitness witness = do
@@ -269,8 +249,8 @@ encodeCheckedTypeWitness witness = do
     <> encodeListLen (fromIntegral (length interfaces)) <> foldMap seal interfaces)
   where
     text = encodeString . T.pack
-    seal (owner, fingerprint) = encodeListLen 3 <> text (unitString (moduleUnit owner))
-      <> text (moduleNameString (moduleName owner)) <> text fingerprint
+    seal (owner, digest) = encodeListLen 3 <> text (unitString (moduleUnit owner))
+      <> text (moduleNameString (moduleName owner)) <> text digest
 
 renderCheckedTypeWitness :: CheckedTypeWitness -> Maybe String
 renderCheckedTypeWitness witness = hex . toStrictByteString <$> encodeCheckedTypeWitness witness

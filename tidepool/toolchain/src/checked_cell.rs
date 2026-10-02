@@ -151,7 +151,7 @@ impl CanonicalInputTypeWitness {
                 let fingerprint = string(&fields[2])?.to_owned();
                 if unit.is_empty()
                     || module.is_empty()
-                    || fingerprint.len() != 32
+                    || fingerprint.len() != 64
                     || !fingerprint
                         .bytes()
                         .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
@@ -2949,22 +2949,22 @@ mod tests {
         };
         let forward = CanonicalInputTypeWitness::from_bytes(&witness_bytes(
             fun(con("A"), con("B")),
-            &"a".repeat(32),
+            &"a".repeat(64),
         ))
         .unwrap();
         let same = CanonicalInputTypeWitness::from_bytes(&witness_bytes(
             fun(con("A"), con("B")),
-            &"a".repeat(32),
+            &"a".repeat(64),
         ))
         .unwrap();
         let swapped = CanonicalInputTypeWitness::from_bytes(&witness_bytes(
             fun(con("B"), con("A")),
-            &"a".repeat(32),
+            &"a".repeat(64),
         ))
         .unwrap();
         let changed_interface = CanonicalInputTypeWitness::from_bytes(&witness_bytes(
             fun(con("A"), con("B")),
-            &"b".repeat(32),
+            &"b".repeat(64),
         ))
         .unwrap();
         assert_eq!(forward, same);
@@ -2987,11 +2987,11 @@ mod tests {
             array([text("unconstructible"), text("function"), text("A -> B")]),
         ] {
             assert!(
-                CanonicalInputTypeWitness::from_bytes(&witness_bytes(shape, &"a".repeat(32)))
+                CanonicalInputTypeWitness::from_bytes(&witness_bytes(shape, &"a".repeat(64)))
                     .is_err()
             );
         }
-        let mut wire = decode(&witness_bytes(con("A"), &"a".repeat(32))).unwrap();
+        let mut wire = decode(&witness_bytes(con("A"), &"a".repeat(64))).unwrap();
         let Value::Array(fields) = &mut wire else {
             unreachable!()
         };

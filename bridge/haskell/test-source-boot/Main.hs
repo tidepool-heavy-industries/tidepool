@@ -89,7 +89,7 @@ import Tidepool.DependencyEvidence
   , DependencyResolution(..), ProductAvailability(..), DependencySource(..), sourceEvidence
   , selectedHomeRequirements, renderDependencyEvidence )
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
+  ( newOriginalInterfaceArtifacts, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
   , readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified )
@@ -1470,11 +1470,12 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   unless (fmap renderType (crResultType checked) == Just "Int") $
     fail "host checked annotation changed the inferred input"
   actualInput <- either fail pure (activationPreviewInputType (crTargetTcGblEnv checked))
+  originalInterfaces <- newOriginalInterfaceArtifacts (crHscEnv checked) Map.empty work
   let witness ty = maybe (fail "complete fixture type has no canonical witness") pure
         (captureCheckedTypeWitness (crHscEnv checked) ty)
       sealedBytes ty = do
         raw <- witness ty
-        sealed <- sealCheckedTypeWitness (crHscEnv checked) Map.empty raw
+        sealed <- sealCheckedTypeWitness originalInterfaces raw
           >>= maybe (fail "fixture type witness has no original interface") pure
         maybe (fail "fixture type witness is unsealed") (pure . toStrictByteString) (encodeCheckedTypeWitness sealed)
   mismatchedSource <- either fail pure (replaceTemplateMarker "__activationPreview :: Int" "__activationPreview :: Bool" originalSource)
@@ -1506,7 +1507,8 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
         let pipeline = pprPipelineResult produced
         ty <- maybe (fail "owner fixture has no input type") pure (prResultType pipeline)
         raw <- maybe (fail "owner fixture has no canonical witness") pure (captureCheckedTypeWitness (prHscEnv pipeline) ty)
-        sealed <- sealCheckedTypeWitness (prHscEnv pipeline) (pprProductInterfaces produced) raw
+        artifacts <- newOriginalInterfaceArtifacts (prHscEnv pipeline) (pprProductInterfaces produced) work
+        sealed <- sealCheckedTypeWitness artifacts raw
           >>= maybe (fail "owner fixture lacks its original interface") pure
         maybe (fail "owner witness is unsealed") (pure . toStrictByteString) (encodeCheckedTypeWitness sealed)
   originalOwner <- ownerWitness "HostActivationOwnerOriginal.hs"

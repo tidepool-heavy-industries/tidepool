@@ -2,7 +2,9 @@
 {-# LANGUAGE TypeApplications #-}
 
 module Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..)
+  ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts
+  , originalInterfaceBytes, originalInterfaceSha256
+  , ExactIfaceArtifact(..)
   , freshExactState
   , readExactIfaceArtifacts
   , hydrateExactScope
@@ -31,20 +33,24 @@ import Data.Maybe (isJust)
 import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA256
 import GHC.Driver.Env
-  ( HscEnv(..), hscUpdateHPT_lazy, hsc_home_unit, hsc_HPT, discardIC )
+  ( HscEnv(..), hscUpdateHPT_lazy, hsc_home_unit, hsc_HPT, hscEPS, discardIC )
 import qualified GHC.Linker.Loader as Linker
 import GHC.Unit.Env (UnitEnv(..), HomeUnitEnv(..))
-import GHC.Unit.External (initExternalUnitCache)
+import GHC.Unit.External (initExternalUnitCache, ExternalPackageState(eps_PIT))
+import GHC.Unit.Module.Env (lookupModuleEnv)
 import GHC.Unit.Finder (initFinderCache)
 import GHC.Unit.Finder (addHomeModuleToFinder)
 import GHC.Driver.Env.KnotVars (emptyKnotVars)
 import GHC.Unit.Home.ModInfo
   ( HomeModInfo(..), emptyHomeModInfoLinkable, emptyHomePackageTable, addToHpt
   , lookupHpt )
-import GHC.Iface.Load (readIface)
+import GHC.Iface.Load (readIface, loadInterface, WhereFrom(ImportBySystem))
+import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
+import GHC.Driver.Session (targetProfile)
+import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
 import GHC.IfaceToCore (typecheckIface)
 import GHC.Tc.Utils.Monad (initIfaceCheck)
-import GHC.Unit.Module (Module, moduleName, moduleUnit, moduleNameString, mkModule, mkModuleName)
+import GHC.Unit.Module (Module, ModuleName, moduleName, moduleUnit, moduleNameString, mkModule, mkModuleName)
 import GHC.Unit.Module.Graph
   ( ModuleGraph, ModuleGraphNode(..), NodeKey(..), ModNodeKeyWithUid(..)
   , mgModSummaries', mkModuleGraph )
@@ -74,7 +80,7 @@ import GHC.Utils.Fingerprint (fingerprintByteString)
 import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps)
 import GHC.Unit.Types (unitString, stringToUnit)
 import qualified GHC.Data.Maybe as MErr
-import GHC.Utils.Outputable (text)
+import GHC.Utils.Outputable (text, ppr)
 import Numeric (showHex)
 import System.Directory (getTemporaryDirectory, removeFile, canonicalizePath)
 import GHC.Fingerprint.Type (Fingerprint)
@@ -371,6 +377,61 @@ readOne env artifact = do
             | isJust (mi_extra_decls iface) ->
                 Left ("interface contains defining Core: " ++ exactModule artifact)
             | otherwise -> Right (artifact, iface)
+
+-- Original product publication and type witnesses share the same serializer
+-- and immutable bytes. This cache belongs only to the completed transaction;
+-- it neither consults source nor survives in a worker-global map.
+data OriginalInterfaceArtifacts = OriginalInterfaceArtifacts
+  HscEnv (Map.Map ModuleName ModIface) FilePath
+  (IORef (Map.Map Module (Maybe (BS.ByteString, String))))
+
+newOriginalInterfaceArtifacts :: HscEnv -> Map.Map ModuleName ModIface -> FilePath
+  -> IO OriginalInterfaceArtifacts
+newOriginalInterfaceArtifacts env originals directory =
+  OriginalInterfaceArtifacts env originals directory <$> newIORef Map.empty
+
+originalInterfaceBytes :: OriginalInterfaceArtifacts -> Module -> IO (Maybe BS.ByteString)
+originalInterfaceBytes artifacts owner = fmap fst <$> originalInterfaceArtifact artifacts owner
+
+originalInterfaceSha256 :: OriginalInterfaceArtifacts -> Module -> IO (Maybe String)
+originalInterfaceSha256 artifacts owner = fmap snd <$> originalInterfaceArtifact artifacts owner
+
+originalInterfaceArtifact :: OriginalInterfaceArtifacts -> Module
+  -> IO (Maybe (BS.ByteString, String))
+originalInterfaceArtifact (OriginalInterfaceArtifacts env originals directory captured) owner = do
+  known <- Map.lookup owner <$> readIORef captured
+  case known of
+    Just artifact -> pure artifact
+    Nothing -> do
+      external <- hscEPS env
+      let matches interface = if mi_module interface == owner then Just interface else Nothing
+          productInterface = Map.lookup (moduleName owner) originals >>= matches
+          homeInterface = lookupHpt (hsc_HPT env) (moduleName owner) >>= matches . hm_iface
+          packageInterface = lookupModuleEnv (eps_PIT external) owner >>= matches
+          selected = case productInterface of
+            Just value -> Just value
+            Nothing -> case homeInterface of Just value -> Just value; Nothing -> packageInterface
+      found <- case selected of
+        Just interface -> pure (Just interface)
+        Nothing | isHomeUnit (hsc_home_unit env) (moduleUnit owner) -> pure Nothing
+        Nothing -> do
+          loaded <- initIfaceCheck (ppr (moduleName owner)) env
+            (loadInterface (ppr (moduleName owner)) owner ImportBySystem)
+          pure $ case loaded of MErr.Succeeded interface -> matches interface; MErr.Failed _ -> Nothing
+      artifact <- case found of
+        Nothing -> pure Nothing
+        Just interface -> bracket (openBinaryTempFile directory "module-product.hi")
+          (\(path, handle) -> do
+            closed <- hIsClosed handle
+            unless closed (hClose handle)
+            removeFile path)
+          (\(path, handle) -> do
+            hClose handle
+            writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression path interface
+            bytes <- BS.readFile path
+            pure (Just (bytes, hexBytes (SHA256.hash bytes))))
+      modifyIORef' captured (Map.insert owner artifact)
+      pure artifact
 
 withCapturedIface :: Bool -> String -> BS.ByteString -> (FilePath -> IO a) -> IO a
 withCapturedIface timing owner bytes consume = do

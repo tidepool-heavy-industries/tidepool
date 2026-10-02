@@ -4,7 +4,7 @@ module Main where
 
 import System.Environment (getArgs)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, normalise, (</>))
-import System.Directory (createDirectoryIfMissing, removeFile, setCurrentDirectory, makeAbsolute, canonicalizePath, doesPathExist)
+import System.Directory (createDirectoryIfMissing, setCurrentDirectory, makeAbsolute, canonicalizePath, doesPathExist)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Codec.CBOR.Decoding as CD
@@ -14,7 +14,7 @@ import Codec.CBOR.Write (toStrictByteString)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Exception
-  ( evaluate, try, finally, throwIO, SomeAsyncException, SomeException, Exception
+  ( evaluate, try, throwIO, SomeAsyncException, SomeException, Exception
   , fromException, toException, IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (intercalate, nub, isInfixOf, isPrefixOf, stripPrefix)
@@ -23,14 +23,12 @@ import Data.Word (Word64)
 import Data.Bits (shiftR)
 import Control.Monad (replicateM, foldM, forM, forM_, when, unless, void)
 import System.Exit (ExitCode(..), exitWith)
-import System.IO (hClose, hPutStrLn, openBinaryTempFile, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
+import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
 import qualified System.Info as SystemInfo
 
 import GHC.Types.SourceError (SourceError)
 import GHC (Module, ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName)
-import GHC.Driver.Env (HscEnv, hsc_dflags)
-import GHC.Driver.Session (targetProfile)
-import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
+import GHC.Driver.Env (HscEnv)
 import GHC.Unit.Module.ModIface (ModIface, mi_module)
 import GHC.Unit.Types (unitString)
 import GHC.Core (Bind(..), CoreBind)
@@ -80,7 +78,8 @@ import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), Candi
 import Tidepool.CompileInput (writeCompileInputProof)
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), OriginalInterfaceArtifacts
+  , newOriginalInterfaceArtifacts, originalInterfaceBytes)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports)
 import Tidepool.ExecutionSource
   ( ExecutionSourceRecipe(..), ExecutionSourceGraph(..), ExecutionSourceIdentity(..)
@@ -574,7 +573,8 @@ processFile compiler caches timing args path = do
     let preparedTargets = case requestTargets args of
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
-    (preparedArtifacts, productContext) <- prepareArtifacts caches path hscEnv (pprProductInterfaces prepared) (pprModules prepared) preparedTargets
+    originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprProductInterfaces prepared) outDir
+    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces caches path hscEnv (pprProductInterfaces prepared) (pprModules prepared) preparedTargets
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args) (pprAcceptedCandidates prepared) (compilationScope <$> pprExactCompilation prepared)
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
@@ -582,15 +582,15 @@ processFile compiler caches timing args path = do
 
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     timePhase timing "module_products" $
-      writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts
+      writeCertifiedProducts originalInterfaces outDir hscEnv prepared productContext preparedArtifacts
 
   reportDiags res
 
 writeCertifiedProducts
-  :: FilePath -> HscEnv -> PreparedPipelineResult -> Maybe PreparedModuleProducts
+  :: OriginalInterfaceArtifacts -> FilePath -> HscEnv -> PreparedPipelineResult -> Maybe PreparedModuleProducts
   -> [PreparedArtifact] -> IO ()
-writeCertifiedProducts outDir hscEnv prepared productContext preparedArtifacts =
-  void (writeCertifiedProductsKeeping outDir hscEnv prepared productContext preparedArtifacts)
+writeCertifiedProducts originalInterfaces outDir hscEnv prepared productContext preparedArtifacts =
+  void (writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productContext preparedArtifacts)
 
 data CertifiedOriginalProducts = CertifiedOriginalProducts
   { certifiedOriginalDependencies :: DependencyEvidence
@@ -598,10 +598,10 @@ data CertifiedOriginalProducts = CertifiedOriginalProducts
   }
 
 writeCertifiedProductsKeeping
-  :: FilePath -> HscEnv -> PreparedPipelineResult -> Maybe PreparedModuleProducts
+  :: OriginalInterfaceArtifacts -> FilePath -> HscEnv -> PreparedPipelineResult -> Maybe PreparedModuleProducts
   -> [PreparedArtifact] -> IO CertifiedOriginalProducts
-writeCertifiedProductsKeeping outDir hscEnv prepared productContext preparedArtifacts = do
-    (availability, freshProducts) <- writeModuleProducts outDir hscEnv
+writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productContext preparedArtifacts = do
+    (availability, freshProducts) <- writeModuleProducts originalInterfaces outDir
       productContext (pprProductInterfaces prepared)
       (pprPackageImports prepared)
     let dependencies = pprDependencies prepared
@@ -657,12 +657,12 @@ data PreparedArtifact = PreparedArtifact
 
 -- Project before writing artifacts so the shared constructor
 -- table includes exactly the GHC constructors admitted by prepared execution.
-prepareArtifacts :: RecoveryCaches -> FilePath -> HscEnv -> Map.Map ModuleName ModIface
+prepareArtifacts :: OriginalInterfaceArtifacts -> RecoveryCaches -> FilePath -> HscEnv -> Map.Map ModuleName ModIface
   -> [PreparedModule] -> [String] -> [String]
   -> Map.Map SymbolIdentity Word64 -> [ModuleCandidate] -> Maybe ExactScope
   -> IO ([PreparedArtifact], Maybe PreparedModuleProducts)
-prepareArtifacts _ _ _ _ _ [] _ _ _ _ = pure ([], Nothing)
-prepareArtifacts caches input hscEnv interfaces modules targets@(firstTarget : _) auxiliaryRoots retainedGenerations candidates exactScope = do
+prepareArtifacts _ _ _ _ _ _ [] _ _ _ _ = pure ([], Nothing)
+prepareArtifacts originalInterfaces caches input hscEnv interfaces modules targets@(firstTarget : _) auxiliaryRoots retainedGenerations candidates exactScope = do
   timing <- readTimingEnabled
   formattingAuthority <- timePhase timing "formatting_authority" $ resolveFormattingAuthority hscEnv
   timeAuthority <- timePhase timing "time_authority" $ resolveTimeAuthority hscEnv
@@ -764,7 +764,7 @@ prepareArtifacts caches input hscEnv interfaces modules targets@(firstTarget : _
           ]
     sealedSites <- forM yieldSites $ \site -> do
       witnesses <- forM (Tidepool.EffectSchema.ysInputTypeWitnesses site) $ \witness ->
-        maybe (pure Nothing) (sealCheckedTypeWitness hscEnv interfaces) witness
+        maybe (pure Nothing) (sealCheckedTypeWitness originalInterfaces) witness
       pure site { Tidepool.EffectSchema.ysInputTypeWitnesses = witnesses }
     pure (PreparedArtifact target program bytes constructors sealedSites)
   pure (artifacts, Just products)
@@ -772,13 +772,13 @@ prepareArtifacts caches input hscEnv interfaces modules targets@(firstTarget : _
 -- A failed unrelated group is an explicit product miss, never a newly fatal
 -- target compile. A complete product pairs every admitted group with the
 -- skinny interface emitted by the same GHC transaction.
-writeModuleProducts :: FilePath -> HscEnv -> Maybe PreparedModuleProducts
+writeModuleProducts :: OriginalInterfaceArtifacts -> FilePath -> Maybe PreparedModuleProducts
   -> Map.Map ModuleName ModIface
   -> Map.Map ModuleName PackageImportEvidence
   -> IO (Map.Map (String, String) ProductAvailability,
          [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])])
 writeModuleProducts _ _ Nothing _ _ = pure (Map.empty, [])
-writeModuleProducts outDir hscEnv (Just inventory) interfaces packageRoots = do
+writeModuleProducts originalInterfaces outDir (Just inventory) interfaces packageRoots = do
   outcomes <- forM (preparedModuleProductOutcomes inventory) $ \(owner, outcome) -> do
     let name = moduleName owner
         key = (unitString (moduleUnit owner), moduleNameString name)
@@ -787,18 +787,14 @@ writeModuleProducts outDir hscEnv (Just inventory) interfaces packageRoots = do
       Nothing -> do
         hPutStrLn stderr ("module product unavailable: no interface for " ++ moduleNameString name)
         pure (key, ProductMissingInterface, Nothing, Nothing)
-      Just interface -> case outcome of
+      Just _ -> case outcome of
         Left reason -> do
           hPutStrLn stderr ("module product unavailable: " ++ moduleNameString name
             ++ ": " ++ show reason)
           pure (key, ProductProjectionRejected, Nothing, Nothing)
         Right groups -> do
-          (path, handle) <- openBinaryTempFile outDir "module-product.hi"
-          hClose handle
-          bytes <- (do
-            writeBinIface (targetProfile (hsc_dflags hscEnv)) QuietBinIFace
-              NormalCompression path interface
-            BS.readFile path) `finally` removeFile path
+          bytes <- originalInterfaceBytes originalInterfaces owner
+            >>= maybe (fail "original product interface lacks its captured artifact") pure
           roots <- case Map.lookup name packageRoots of
             Nothing -> ioError (userError
               ("resolved direct package import inventory missing for " ++ moduleNameString name))
@@ -1179,14 +1175,15 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
         warnTexts   = map T.pack (prWarnings result)
     -- Projection remains outside compileVariants. Its entry is the settled
     -- scaffold, and its constructors join the shared metadata before write.
-    (preparedArtifacts, productContext) <- prepareArtifacts caches compiledPath hscEnv (pprProductInterfaces prepared) preparedModules
+    originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprProductInterfaces prepared) outDir
+    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces caches compiledPath hscEnv (pprProductInterfaces prepared) preparedModules
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
       (requestRetainedGenerations args) (pprAcceptedCandidates prepared) (compilationScope <$> pprExactCompilation prepared)
     when (maybe False ((== HostActivationInput) . itemPurpose) admitted) $ do
       input <- either fail pure (activationPreviewInputType (prTargetTcGblEnv result))
       witness <- maybe (fail "activation input type has no complete canonical witness") pure
         (captureCheckedTypeWitness hscEnv input)
-      sealed <- sealCheckedTypeWitness hscEnv (pprProductInterfaces prepared) witness
+      sealed <- sealCheckedTypeWitness originalInterfaces witness
         >>= maybe (fail "activation input type lacks an original owner interface seal") pure
       encoded <- maybe (fail "activation input type witness is unsealed") pure (encodeCheckedTypeWitness sealed)
       BS.writeFile (outDir </> "activation-type.cbor") (toStrictByteString encoded)
@@ -1194,7 +1191,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
     timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     originalProducts <- timePhase timing "module_products" $
-      writeCertifiedProductsKeeping outDir hscEnv prepared productContext preparedArtifacts
+      writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productContext preparedArtifacts
     when (not (requestCell args) && not (requestActivationPreview args)
         && null (requestInjectVals args) && not (isJust (requestSessionArtifacts args))
         && Map.null (requestRetainedGenerations args)) $
@@ -1727,13 +1724,14 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       environment = prHscEnv result
       binds = prBinds result
   inventory <- certifyPlannedDeclaration original environment >>= either fail pure
-  (artifacts, productContext) <- prepareArtifacts caches sourcePath environment (pprProductInterfaces prepared) (pprModules prepared)
+  originalInterfaces <- newOriginalInterfaceArtifacts environment (pprProductInterfaces prepared) directory
+  (artifacts, productContext) <- prepareArtifacts originalInterfaces caches sourcePath environment (pprProductInterfaces prepared) (pprModules prepared)
     ["__result"] [] (requestRetainedGenerations args) (pprAcceptedCandidates prepared)
     (compilationScope <$> pprExactCompilation prepared)
   writePreparedSidecars SeparateYieldSites directory binds (prTyCons result)
     Nothing (map T.pack (prWarnings result)) artifacts
   writePreparedArtifacts directory artifacts
-  certified <- writeCertifiedProductsKeeping directory environment prepared productContext artifacts
+  certified <- writeCertifiedProductsKeeping originalInterfaces directory environment prepared productContext artifacts
   let products = certifiedOriginalProducts certified
   supportScope <- retainProgramProducts (requestIncludes args) directory prepared certified reserved exact
   (unit, interfaceBytes) <- case
