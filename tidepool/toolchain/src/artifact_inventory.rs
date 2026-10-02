@@ -498,7 +498,12 @@ impl ArtifactInventory {
             state
                 .admission_owner_lookups
                 .fetch_add(2, Ordering::Relaxed);
-            if state.owners.contains_key(&entry.descriptor.owner) {
+            if let Some(existing_id) = state.owners.get(&entry.descriptor.owner) {
+                tracing::warn!(
+                    existing = ?state.payloads[existing_id].descriptor,
+                    incoming = ?entry.descriptor,
+                    "refusing different artifacts for one exact original owner",
+                );
                 return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
                     owner: entry.descriptor.owner.clone(),
                 }));
