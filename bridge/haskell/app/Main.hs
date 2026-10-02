@@ -43,11 +43,11 @@ import qualified Data.Text.Encoding as TE
 
 import Tidepool.Binders
   ( extractBindersNamed
-  , extractStmtBinders, classifyBlock, exportItemName
+  , classifyWithFlags, classifyBlock, exportItemName, defaultParserDynFlags
   , analyzeCell, analyzeOrderedCell, cellInferenceSegments, renderCellCheckSource, CellSplitError(..), CellSourceSpan(..)
   , CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), BoundBinder(..),
     SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ExpressionLiftPlan(..), ExpressionPresentation(..), installCellDisplayDeclarations
-  , declarationSourceWithTemplate, renderDeclarationForTemplate
+  , declarationSourceWithTemplateFlags, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
   , StmtBinders(..), TurnOut(..), renderAskJson, renderVerdictsJson
@@ -56,7 +56,7 @@ import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..)
   , withResidentPipelineSelectedRequests, withExactInterfaceTransaction
-  , CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
+  , cellDisplayDeclarations, checkCellInstances
   , cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, stripMonadHead, generatedScaffoldRecipe, activationPreviewInputType )
 import Tidepool.ExecutionEncode
@@ -75,7 +75,8 @@ import Tidepool.PreparedStg
   ( PreparedModule(..), PreparedBodyCache, newPreparedBodyCache
   , evictPreparedBodyMatching )
 import Tidepool.PreparedRecovery
-  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots )
+  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots
+  , preparedRecoveryClosure, growPreparedRecovery )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
 import Tidepool.CompileInput (writeCompileInputProof)
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
@@ -721,9 +722,8 @@ prepareArtifacts originalInterfaces caches input hscEnv interfaces modules targe
         | (owner, outcome) <- preparedModuleProductOutcomes products]
       originalPackageGlobals = requiredOriginalPackageGlobalsWithRetained
         originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
-      recovery roots = newPreparedRecoveryWithPackageRoots hscEnv (rcFatIface caches) (rcOwnerIface caches)
-        (rcPreparedBodies caches) certifiedHomes (contextFor firstTarget) modules roots
-  recover <- recovery []
+  recover <- newPreparedRecoveryWithPackageRoots hscEnv (rcFatIface caches) (rcOwnerIface caches)
+    (rcPreparedBodies caches) certifiedHomes (contextFor firstTarget) modules []
   artifacts <- forM targets $ \target -> do
     let context = contextFor target
     -- Package roots grow only from the finite exact original-group inventory.
@@ -731,8 +731,9 @@ prepareArtifacts originalInterfaces caches input hscEnv interfaces modules targe
     -- projected target before admitting the final executable closure.
     initial <- timePhase timing "prepared_recover"
       (recover (projectionEntry context))
-    let closePackages roots recovered = do
-          let finalContext = context
+    let closePackages roots recoveryState = do
+          let recovered = preparedRecoveryClosure recoveryState
+              finalContext = context
                 { projectionAuxiliaryRoots = projectionAuxiliaryRoots context ++ roots }
           selected <- timePhase timing "prepared_project" $
             requireProjection (prepareProjectionWithReachability finalContext
@@ -749,9 +750,8 @@ prepareArtifacts originalInterfaces caches input hscEnv interfaces modules targe
                 when (preparedRootIdentity identifier /= identity) $
                   ioError (userError "package recovery root differs from canonical original global")
                 pure identifier
-              withPackages <- recovery packageRoots
               next <- timePhase timing "prepared_recover_original_packages"
-                (withPackages (projectionEntry context))
+                (growPreparedRecovery recoveryState packageRoots)
               closePackages nextRoots next
     (recovered, program, constructors, roots) <- closePackages [] initial
     reportRecoveryResiduals target (closureFailures recovered)
@@ -930,8 +930,7 @@ reportRecoveryResiduals target failures =
 -- 'mkBoundBinders', no thin-iface write): it runs for effect and discards,
 -- so it reaches 'TBind' with empty binders and an empty bound-binder list,
 -- same shape a caller already handles for any other zero-binder bind.
-runTurnMode
-  :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
+runTurnMode :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
 runTurnMode compiler caches args path = do
   timing <- readTimingEnabled
   hPutStrLn stderr $ "Processing (turn): " ++ path
@@ -940,12 +939,21 @@ runTurnMode compiler caches args path = do
     turnSrc   <- readFile path
     let templates = requestTurnTemplates args
     mVerdict  <- traverse parseTurnVerdictArg (requestTurnVerdict args)
-    -- 'extractStmtBinders' emits no phases of its own. This mode times it as
-    -- the single @classify@ phase, emitted
+    -- The parse emits no phases of its own. This mode times it as the single
+    -- @classify@ phase, emitted
     -- only on the branch that actually classifies. With @--turn-verdict@
     -- supplied nothing is parsed, and an absent @classify@ row is the
     -- honest report rather than a phantom 0ms line.
-    sb        <- maybe (timePhase timing "classify" (extractStmtBinders turnSrc)) return mVerdict
+    (parserFlags, sb) <- case mVerdict of
+      Just verdict@(StmtBinders { sbKind = KDecl }) -> do
+        flags <- defaultParserDynFlags
+        pure (Just flags, verdict)
+      Just verdict -> pure (Nothing, verdict)
+      Nothing -> do
+        flags <- defaultParserDynFlags
+        classified <- timePhase timing "classify"
+          (evaluate (classifyWithFlags flags turnSrc))
+        pure (Just flags, classified)
     exact <- traverse (\manifest -> readExactScope manifest >>= either fail pure) (requestSessionArtifacts args)
     let admittedItem = exact >>= scopeCheckedItem
     forM_ admittedItem $ \admission -> validateCheckedItemAdmission args admission turnSrc sb
@@ -964,7 +972,8 @@ runTurnMode compiler caches args path = do
           Just f  -> return f
           Nothing -> error "--turn: no --turn-template for kind decl"
         tmplSrc <- readFile tmplFile
-        declarationSource <- declarationSourceWithTemplate tmplSrc turnSrc
+        flags <- maybe defaultParserDynFlags pure parserFlags
+        declarationSource <- declarationSourceWithTemplateFlags flags tmplSrc turnSrc
           >>= either throwCellSplitError pure
         spliced <- either fail pure (renderDeclarationForTemplate tmplSrc declarationSource)
         (_spliced, modName, modulePath) <- writeSplicedModule outDir lastAttempt spliced
@@ -1342,12 +1351,7 @@ runLegacyCellMode compiler caches args cellPath = do
     (finalPlan, finalSource, compiled) <- if isJust preparedDeclaration || null (cellPlanDisplayTargets analyzed)
       then pure (analyzed, checkedSource, provisional)
       else do
-        contextDeclarations <- cellDisplayDeclarations DisplayInstanceContexts provisional analyzed
-        let contextual = installCellDisplayDeclarations contextDeclarations analyzed
-        contextualSource <- either fail pure (renderCellCheckSource checkingTemplate contextual)
-        writeFile modulePath contextualSource
-        contextChecked <- compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)) Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
-        declarations <- cellDisplayDeclarations DisplayInstanceFields contextChecked analyzed
+        declarations <- cellDisplayDeclarations provisional analyzed
         let finalized = installCellDisplayDeclarations declarations analyzed
         finalizedSource <- either fail pure (renderCellCheckSource checkingTemplate finalized)
         writeFile modulePath finalizedSource
@@ -1727,10 +1731,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
   createDirectoryIfMissing True directory
   (analyzed, provisional) <- checkCellInstances checkOriginal initial
   finalized <- if null (cellPlanDisplayTargets analyzed) then pure analyzed else do
-    contexts <- cellDisplayDeclarations DisplayInstanceContexts provisional analyzed
-    contextual <- pure (installCellDisplayDeclarations contexts analyzed)
-    contextChecked <- checkOriginal contextual
-    fields <- cellDisplayDeclarations DisplayInstanceFields contextChecked analyzed
+    fields <- cellDisplayDeclarations provisional analyzed
     pure (installCellDisplayDeclarations fields analyzed)
   original <- writeOriginal finalized
   prepared <- compiler (PreparedProducts (requestModuleCandidates args)) (Map.keysSet (requestRetainedGenerations args))
@@ -2357,7 +2358,7 @@ renderPinnedBinders binders pins
       ++ intercalate ", " [ checkedPinType pin | Just pin <- pins ] ++ ")" )
 
 -- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same
--- 'StmtBinders' shape 'extractStmtBinders' would have produced, so the rest of
+-- 'StmtBinders' shape 'classifyWithFlags' would have produced, so the rest of
 -- 'runTurnMode' never has to distinguish a supplied verdict from a parsed one.
 -- @kind@ goes through 'parseTurnKind', which fails loudly (caught by this
 -- mode's surrounding @try@, same as any other extraction failure) on

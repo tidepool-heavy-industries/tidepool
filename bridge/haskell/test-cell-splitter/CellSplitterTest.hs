@@ -4,18 +4,23 @@
 module Main where
 
 import Control.Monad (forM_, unless, when)
-import Control.Exception (SomeException, bracket, finally, throwIO, try)
+import Control.Exception (SomeException, bracket, finally, fromException, throwIO, try)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, tails)
 import Data.Char (isDigit)
 import Data.Data (Data, Typeable, cast, gmapQ)
+import qualified Data.ByteString as BS
 import qualified Data.Text as Text
+import Codec.CBOR.Encoding (encodeListLen, encodeString)
+import Codec.CBOR.Write (toStrictByteString)
 import GHC
 import GHC.Builtin.Types (intTy)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
-import GHC.Tc.Types (tcg_rn_decls)
+import GHC.Tc.Types (tcg_rn_decls, tcg_insts, tcg_used_gres, tcg_keep, tcg_safe_infer, tcg_safe_infer_reasons)
+import GHC.Core.TyCo.Compare (eqType)
+import GHC.Types.Name.Set (nameSetElemsStable)
 import GHC.Types.SourceText (il_value)
 import GHC.Types.Fixity (Fixity(..))
 import GHC.Driver.Session (parseDynamicFilePragma)
@@ -30,7 +35,7 @@ import Tidepool.Agent.Assignment.Internal (NameError (..), renderNameError)
 import Tidepool.Binders
 import Tidepool.TurnSource (spliceTemplate)
 import Tidepool.SessionArtifacts (mkBoundBinders)
-import Tidepool.DiagJson (Diag (..), DiagSeverity(..), DependencyLoadFailure(..))
+import Tidepool.DiagJson (Diag (..), DiagSeverity(..), DependencyLoadFailure(..), diagsFromSourceError)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
@@ -65,6 +70,9 @@ main = getArgs >>= \case
   ["--function-value-iface"] -> functionValueInterfaceCompilation >> putStrLn "function value interface: 1 passed"
   ["--session-fixities"] -> sessionFixitiesCompilation >> putStrLn "session fixities: 1 passed"
   ["--unreachable-compile-time"] -> unreachableCompileTimeCompilation >> putStrLn "unreachable compile-time: 1 passed"
+  ["--checked-load-boundary"] -> checkedLoadBoundaryCompilation >> putStrLn "checked load boundary: 4 passed"
+  ["--structural-display", effectsRoot] -> structuralDisplayCompilation OrdinaryDisplayTest effectsRoot >> putStrLn "structural display: 1 passed"
+  ["--structural-display-exact", effectsRoot] -> structuralDisplayCompilation ExactDisplayTest effectsRoot >> putStrLn "exact structural display: 1 passed"
   _ -> runAllTests
 
 runAllTests :: IO ()
@@ -88,6 +96,7 @@ runAllTests = do
       noStandaloneDerivingLeavesCellUntouched flags
       danglingOperatorCells flags
       multilineLetPlacement flags
+  requestOwnedParserDefaults
   orderedInferenceSegments
   interfaceMeasurementDiagnostics
   multilineLetCompilation
@@ -103,8 +112,17 @@ runAllTests = do
     ["--pin-imports"] -> pinnedTypeImportsCompilation
     ["--path-insensitive-witness"] -> pathInsensitiveWitnessCompilation
     ["--memo-lifecycle"] -> memoLifecycleCompilation
-    ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
     _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --pin-imports, --path-insensitive-witness, --memo-lifecycle, or --structural-display EFFECTS_INCLUDE"
+
+requestOwnedParserDefaults :: IO ()
+requestOwnedParserDefaults = do
+  flags <- defaultParserDynFlags
+  declaration <- declarationSourceWithTemplateFlags flags checkTemplate
+    "import Data.List\nanswer = sort []\n"
+  case declaration of
+    Right source -> assertEqual "request-owned parser defaults imports" 1
+      (length (prologueImports (declarationPrologue source)))
+    Left failure -> fail ("request-owned parser defaults: " ++ renderCellSplitError failure)
 
 functionValueInterfaceCompilation :: IO ()
 functionValueInterfaceCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
@@ -1083,6 +1101,68 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
       createDirectory path
       pure path
 
+-- CHECK targets keep typed source failures while dependencies retain their
+-- own failure boundary, including when either participates in a boot cycle.
+checkedLoadBoundaryCompilation :: IO ()
+checkedLoadBoundaryCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let target = root </> "CheckedLoadTarget.hs"
+      dependency = root </> "CheckedLoadDependency.hs"
+      cycleA = root </> "CheckedLoadCycleA.hs"
+      cycleB = root </> "CheckedLoadCycleB.hs"
+      compile path = runPipelineSelected CheckedEnvironment path [root]
+      expectTargetFailure label path = do
+        result <- try (compile path) :: IO (Either SomeException CheckedEnvironmentResult)
+        case result of
+          Left failure | Just (_ :: SourceError) <- fromException failure -> pure ()
+          Left failure -> fail (label ++ " lost its typed target error: " ++ show failure)
+          Right _ -> fail (label ++ " accepted an authored duplicate instance")
+  writeFile target $ unlines
+    [ "module CheckedLoadTarget where"
+    , "data Custom = Custom"
+    , "instance Show Custom where show _ = \"first\""
+    , "instance Show Custom where show _ = \"second\""
+    ]
+  expectTargetFailure "leaf CHECK" target
+  writeFile dependency "module CheckedLoadDependency where\nvalue = missingDependencyName\n"
+  writeFile target "module CheckedLoadTarget where\nimport CheckedLoadDependency\nvalue' = value\n"
+  result <- try (compile target) :: IO (Either SomeException CheckedEnvironmentResult)
+  case result of
+    Left failure | Just (DependencySourceFailure _) <- fromException failure -> pure ()
+    Left failure -> fail ("dependency error changed ownership: " ++ show failure)
+    Right _ -> fail "CHECK accepted an invalid dependency"
+  writeFile (root </> "CheckedLoadCycleA.hs-boot")
+    "module CheckedLoadCycleA where\nvalue :: Int\n"
+  writeFile cycleB $ unlines
+    [ "module CheckedLoadCycleB where"
+    , "import {-# SOURCE #-} CheckedLoadCycleA (value)"
+    , "helper :: Int"
+    , "helper = value"
+    ]
+  let validCycle = unlines
+        [ "module CheckedLoadCycleA where"
+        , "import CheckedLoadCycleB (helper)"
+        , "value :: Int"
+        , "value = helper"
+        ]
+  writeFile cycleA (validCycle ++ unlines
+    [ "data Custom = Custom"
+    , "instance Show Custom where show _ = \"first\""
+    , "instance Show Custom where show _ = \"second\""
+    ])
+  expectTargetFailure "boot-cycle CHECK" cycleA
+  writeFile cycleA validCycle
+  writeFile target "module CheckedLoadTarget where\nimport CheckedLoadCycleA (value)\nresult = value\n"
+  _ <- compile target
+  pure ()
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-checked-load-boundary"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
 -- Metadata compilation must not enter the target's executable pipeline.
 -- A changed dependency must still be checked on the following request.
 metadataCompilation :: IO ()
@@ -1234,18 +1314,28 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
       createDirectory path
       pure path
 
-structuralDisplayCompilation :: FilePath -> IO ()
-structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecursive $ \root -> do
-  requestMemoLifecycle root
+data DisplayTestScope = OrdinaryDisplayTest | ExactDisplayTest
+
+structuralDisplayCompilation :: DisplayTestScope -> FilePath -> IO ()
+structuralDisplayCompilation selectedScope effectsRoot = bracket temporary removeDirectoryRecursive $ \root -> do
   source <- readFile "test-cell-splitter/DisplayFields.cell.hs"
   plan <- analyzeCell template source >>= either (fail . renderCellSplitError) pure
+  scope <- case selectedScope of
+    OrdinaryDisplayTest -> pure Nothing
+    ExactDisplayTest -> do
+      let path = root </> "exact-scope.cbor"
+      BS.writeFile path (toStrictByteString (encodeListLen 7
+        <> encodeString "TPEXACTSCOPE" <> encodeString "2"
+        <> foldMap encodeString (replicate 2 (Text.replicate 64 "0"))
+        <> encodeListLen 0 <> encodeListLen 0 <> encodeListLen 0))
+      pure (Just (SessionScope root [] (Just path) Nothing))
   let includes = ["lib", "test-cell-splitter", effectsRoot]
   withResidentPipelineSelectedRequests includes (const (pure ())) $ \runRequest -> runRequest $ \compiler -> do
     let compile current = do
           rendered <- either fail pure (renderCellCheckSource template current)
           let path = root </> "CellCheck.hs"
           writeFile path rendered
-          compiler CheckedEnvironment mempty GeneralCompile Nothing path includes Nothing
+          compiler CheckedEnvironment mempty GeneralCompile scope path includes Nothing
     (accepted, provisional) <- checkCellInstances compile plan
     assertEqual "resolved authored Display instances retained" False
       (any (`elem` map displayTargetName (cellPlanDisplayTargets accepted)) ["Custom", "Reexported"])
@@ -1262,10 +1352,31 @@ structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecu
       ("Presented" `elem` map genericDeclarationTarget (cellPlanGenericDeclarations accepted))
     assertEqual "unsupported automatic Generic derivations omitted" False
       (any ((`elem` ["Poly", "HiddenPoly", "Unboxed"]) . genericDeclarationTarget) (cellPlanGenericDeclarations accepted))
-    contextual <- cellDisplayDeclarations DisplayInstanceContexts provisional accepted
+    let environment = crTargetTcGblEnv provisional
+        dictionaries = map (idType . instanceDFunId) (tcg_insts environment)
+        probeState = do
+          used <- readIORef (tcg_used_gres environment)
+          keep <- readIORef (tcg_keep environment)
+          safe <- readIORef (tcg_safe_infer environment)
+          reasons <- readIORef (tcg_safe_infer_reasons environment)
+          pure (length used, nameSetElemsStable keep, safe, showSDocUnsafe (ppr reasons))
+    stateBefore <- probeState
+    direct <- cellDisplayDeclarations provisional accepted
+    stateAfter <- probeState
+    assertEqual "Display probe leaves checked module references unchanged" True (stateBefore == stateAfter)
+    unless (and (zipWith eqType dictionaries (map (idType . instanceDFunId) (tcg_insts environment)))) $
+      fail "Display probe changed an authoritative dictionary type"
+    -- Recreate the retired contextual CHECK in the oracle, using the exact
+    -- generated heads but opaque methods. Only this test recompiles that view.
+    let qualifier = cellPlanDisplayAlias accepted
+        contextual = concat
+          [ "\n" ++ header ++ "\n  displayTree _ = " ++ qualifier ++ ".TextLeaf ("
+            ++ qualifier ++ "Text.pack \"<opaque>\")\n"
+          | header <- lines direct, "instance " `isPrefixOf` header ]
     assertContains "parameter context" "Display a) =>" contextual
     typed <- compile (installCellDisplayDeclarations contextual accepted)
-    finalized <- cellDisplayDeclarations DisplayInstanceFields typed accepted
+    finalized <- cellDisplayDeclarations typed accepted
+    assertEqual "disposable Display contexts match canonical contextual compilation" finalized direct
     assertContains "unsupported imported field is not evaluated"
       "displayTree (Fields __tidepoolDisplayField0 _ __tidepoolDisplayField2 __tidepoolDisplayField3)" finalized
     assertContains "unsupported field remains named" "unknown = " finalized
@@ -1279,6 +1390,12 @@ structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecu
       ".precedenceParens __tidepoolPrecedence" finalized
     assertContains "infix constructor precedence pattern" "(:+:) {} -> " finalized
     assertContains "higher-kinded unsupported field is not evaluated" "displayTree (Higher _)" finalized
+    assertContains "mutual recursion requires the other generated instance's context" "displayTree (Mutual _)" finalized
+    assertContains "mutual recursive supported fields remain displayable"
+      "displayTree (Partner __tidepoolDisplayField0 __tidepoolDisplayField1 __tidepoolDisplayField2)" finalized
+    assertContains "inferred non-lifted kind variables remain opaque" "displayTree (Kinded _)" finalized
+    assertContains "unresolved family field remains opaque" "displayTree (FamilyField _)" finalized
+    assertContains "reduced family field remains displayable" "displayTree (ClosedFamily __tidepoolDisplayField0)" finalized
     assertContains "symbolic datatype instance head" ".Display ((:+:) a b)" finalized
     assertContains "rank-n field remains opaque" "displayTree (Poly _)" finalized
     assertContains "alias-hidden rank-n field remains opaque" "displayTree (HiddenPoly _)" finalized
@@ -1473,9 +1590,8 @@ renderNameErrorTeachesGroupPaths = do
 -- to do. 'Tidepool.DiagJson.envelopeToDiag' appends one line naming every
 -- candidate in copyable, fully-qualified form plus the two fixes: qualify
 -- the use, or hide one import. This compiles a genuine two-import ambiguity
--- through the typed dependency-load diagnostic path that failed GHC loads
--- render through (see @app/Main.hs@'s @reportDiags@) and checks the
--- rendered message names both qualified candidates and both fixes.
+-- through the typed target diagnostic path and checks the same renderer
+-- used by @app/Main.hs@'s @reportDiags@: both qualified candidates and fixes.
 ambiguousOccurrenceHintCompilation :: IO ()
 ambiguousOccurrenceHintCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
   let reviewPath = root </> "Review.hs"
@@ -1501,11 +1617,11 @@ ambiguousOccurrenceHintCompilation = bracket temporary removeDirectoryRecursive 
   withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
     rejected <- try (runRequest $ \compiler ->
         compiler CheckedEnvironment mempty GeneralCompile Nothing targetPath [root] Nothing)
-      :: IO (Either DependencyLoadFailure CheckedEnvironmentResult)
+      :: IO (Either SourceError CheckedEnvironmentResult)
     case rejected of
       Right _ -> fail "ambiguous candidateSummary occurrence unexpectedly compiled"
-      Left DependencyWorkerFailure -> fail "ambiguous occurrence became a worker failure"
-      Left (DependencySourceFailure diagnostics) -> do
+      Left sourceError -> do
+        let diagnostics = diagsFromSourceError sourceError
         unless (any ((/= Nothing) . dFile) diagnostics) $
           fail "ambiguous occurrence lost its source span"
         let rendered = intercalate "\n" (map dMessage diagnostics)

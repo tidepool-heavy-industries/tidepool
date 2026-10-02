@@ -131,6 +131,7 @@ test-suite cell-splitter-test
     ghc >= 9.12 && < 9.13,
     directory,
     bytestring,
+    cborg,
     containers,
     filepath,
     text,
