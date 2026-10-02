@@ -49,7 +49,9 @@ before the invocation settles. This makes `unfoldDeferred` useful for a
 parent-curates-then-delegates workflow: the parent can store its edit and
 finish the invocation, after which its actor-owned children inherit the
 committed transcript and the same Haskell bindings. The child can choose the
-model for its next request with `setNextModel`.
+model for its next request with `setNextModel "executor"`. The argument is
+`Text`: the host resolves a configured alias first, then treats an unmatched
+value as a literal model identifier.
 
 Keep curation in ordinary Haskell. For a compact semantic choice, `J.each`
 can examine packets while the author retains the exact original text and

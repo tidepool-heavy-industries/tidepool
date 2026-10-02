@@ -20,6 +20,24 @@ it, e.g. `error "..." :: Text`. If a statement fails at runtime, its
 earlier bindings and completed effects remain committed and the suffix is marked
 not run. Inspect that receipt before deciding whether a new cell is new intent.
 
+The `haskell` tool schedules cells asynchronously by default, and an
+asynchronous-only host may expose no synchronous alternative. When a typed
+agent spec declares `haskell_sync`, that cell waits for completion before its
+caller continues to the next inference. The pause applies to that caller; it
+does not wait for actor-owned deferred children. Only the synchronous typed
+effect row includes `ContextReadWrite` and `setNextModel`.
+
+Context and next-model edits staged by a synchronous cell commit together only
+when the whole cell succeeds. A failed cell does not commit those edits, but it
+cannot undo external effects already issued, such as a command or provider
+request. For parent curation followed by delegation, finish the synchronous
+parent invocation with `unfoldDeferred`; its actor-owned children then start
+from the committed context. Do not await those children inside the invocation
+that creates them. `bridge/haskell/examples/model-turns/ContextWorkflow.hs`
+contains compiled examples of this workflow. `setNextModel` takes `Text`: the
+host resolves a configured alias first, then treats an unmatched value as a
+literal model identifier.
+
 Imports persist for later cells. Leading `LANGUAGE` and `OPTIONS_GHC` pragmas are
 normalized by GHC and apply only to this cell. Put neither pragmas nor imports
 after executable source. CPP and custom preprocessors are unavailable. Cells do
