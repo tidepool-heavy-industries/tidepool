@@ -122,7 +122,14 @@ to their parent. Flat phases measured through `timePhase` have a corresponding
 resource detail. Manually accumulated flat phases have no inferred resource
 span. An action that throws before completion has no completed span; missing
 phases are unmeasured, not zero. `allocated_bytes` follows RTS accounting and
-can lag until GC; these counters do not force collection or measure live heap.
+can lag until GC; these counters do not force collection. `major_gcs` and
+`minor_gcs` distinguish collection counts, but do not split GC CPU by generation.
+`last_gc_*_before` and `last_gc_*_after` are snapshots of the last completed
+collection, not instantaneous heap measurements. Equal epochs mean no newer
+collection; epoch zero has no heap details. A minor collection's live estimate
+includes uncollected generations. `process_highwater_*` describes process-lifetime
+RTS maxima, not phase peaks or native RSS. The live maximum updates at major
+collections. Keep these gauges separate from the sampled RSS and cgroup limits.
 Enabled package measurements force the validation verdict and digests before
 closing the span, so lazy hashing is charged to its owner. This diagnostic
 forcing can change evaluation order on rejection paths. Hash byte counters
