@@ -173,7 +173,7 @@ tidepool_rust_library(
         "//tidepool/toolchain:tidepool_toolchain",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -303,7 +303,7 @@ tidepool_rust_binary(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -433,7 +433,7 @@ tidepool_rust_binary(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -563,7 +563,7 @@ tidepool_rust_binary(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -693,7 +693,7 @@ tidepool_rust_binary(
         ":tidepool",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     visibility = ["PUBLIC"],
@@ -734,7 +734,9 @@ rust_filegroup(
         "src/actor_host/embedded_projection.rs": "bridge/facade/src/actor_host/embedded_projection.rs",
         "src/actor_host/embedded_recovery.rs": "bridge/facade/src/actor_host/embedded_recovery.rs",
         "src/actor_host/embedded_recovery_tests.rs": "bridge/facade/src/actor_host/embedded_recovery_tests.rs",
+        "src/actor_host/embedded_restart_driver_tests.rs": "bridge/facade/src/actor_host/embedded_restart_driver_tests.rs",
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
+        "src/actor_host/embedded_shutdown_tests.rs": "bridge/facade/src/actor_host/embedded_shutdown_tests.rs",
         "src/actor_host/fixtures/browser_agent_spec.hs": "bridge/facade/src/actor_host/fixtures/browser_agent_spec.hs",
         "src/actor_host/fixtures/cell_model.hs": "bridge/facade/src/actor_host/fixtures/cell_model.hs",
         "src/actor_host/fixtures/embedded_cold_declaration.hs": "bridge/facade/src/actor_host/fixtures/embedded_cold_declaration.hs",
@@ -753,6 +755,7 @@ rust_filegroup(
         "src/actor_host/m1_browser_runner.rs": "bridge/facade/src/actor_host/m1_browser_runner.rs",
         "src/actor_host/m1_cancel_cell.hs": "bridge/facade/src/actor_host/m1_cancel_cell.hs",
         "src/actor_host/m1_cancel_performance.rs": "bridge/facade/src/actor_host/m1_cancel_performance.rs",
+        "src/actor_host/m1_compiler_attribution_tests.rs": "bridge/facade/src/actor_host/m1_compiler_attribution_tests.rs",
         "src/actor_host/m1_eight_actor_launch.hs": "bridge/facade/src/actor_host/m1_eight_actor_launch.hs",
         "src/actor_host/m1_eight_actor_performance.rs": "bridge/facade/src/actor_host/m1_eight_actor_performance.rs",
         "src/actor_host/m1_host_fixture.rs": "bridge/facade/src/actor_host/m1_host_fixture.rs",
@@ -869,7 +872,7 @@ tidepool_rust_binary(
         "//tidepool/toolchain:tidepool_toolchain",
     ],
     named_deps = {
-        "harness": "//third-party/rust:harness-0.1",
+        "harness": "//third-party/rust:harness",
     },
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     rustc_flags = ["--test"],
