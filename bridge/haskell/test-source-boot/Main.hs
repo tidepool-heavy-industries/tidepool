@@ -101,12 +101,13 @@ import Tidepool.FatIface (readExactInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
 import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule)
 import Tidepool.Session (sessionHiPath)
-import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), CheckedCellAdmission(..), readExactScope, extendExactExecutionSources, scopeExecutionNativeOwners)
+import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), CheckedCellAdmission(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.Binders (BoundBinder(..))
 import Tidepool.ExecutionSource
   ( ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
-  , executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure, executionIdentityKey )
+  , executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure, executionIdentityKey
+  , ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences )
 
 main :: IO ()
 main = getArgs >>= \case
@@ -119,6 +120,7 @@ main = getArgs >>= \case
   ["--generated-scaffold-imports"] -> generatedScaffoldImports
   ["--generated-scaffold-retained",scope,seal] -> generatedScaffoldRetained scope seal
   ["--hydrated-site-siblings"] -> hydratedSiteSiblings
+  ["--fresh-execution-recipe"] -> freshExecutionRecipeTest
   ["--candidate-execution-sources"] -> candidateExecutionSourcesTest
   ["--candidate-execution-wire", path] -> candidateExecutionWire path
   ["--checked-value-type-closure", effects] -> checkedValueTypeClosure effects
@@ -1394,6 +1396,66 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
                  , isJust (homeMod_bytecode linkable) || isJust (homeMod_object linkable) -> pure ()
         _ -> fail "native candidate retention discarded its actual GHC executable"
   putStrLn "candidate GHC load: original native reuse, actual quoter execution and source A/B/A passed"
+
+-- Pure issuer and scope-budget controls; the runtime suite separately drives
+-- cold parser -> whole checked program -> per-item original certification.
+freshExecutionRecipeTest :: IO ()
+freshExecutionRecipeTest = withScratch $ \work -> do
+  let source = "module Expr where\nanswer = 42\n"
+      supportSource = "module Support where\nvalue = 42\n"
+      supportPath = work </> "Support.hs"
+      sha = replicate 64 'a'
+      identity name = ExecutionSourceIdentity "main" name sha sha sha
+      support = identity "Support"
+      target = identity "Expr"
+      evidence = DependencyEvidence True True
+        [DependencySource "@generated-source" (digest (BSC.pack source)),
+         DependencySource supportPath (digest (BSC.pack supportSource))]
+        [] [] [DependencyModule "main" "Expr" False "@generated-source" [] ProductReady,
+               DependencyModule "main" "Support" False supportPath [] ProductReady]
+      recipe = ExecutionSourceRecipe sha (Just sha) [work] (work </> "Expr.hs",source)
+        evidence [ExecutionSourceOwner target True Nothing,ExecutionSourceOwner support True Nothing]
+        [] []
+      issue value = either (fail . show) (maybe (fail "supported recipe was withheld") pure)
+        (issueExecutionSourceRecipe value)
+      refused value = case issueExecutionSourceRecipe value of Left _ -> True; _ -> False
+  BS.writeFile supportPath (BSC.pack supportSource)
+  graph <- issue recipe
+  let reference = ExecutionSourceRef support (executionGraphSha256 graph)
+  selected <- either (fail . show) pure (executionSourceProspectiveReferences [graph] [] [reference])
+  unless (selected == [reference]) $ fail "fresh supported recipe did not issue exact original"
+  unless (refused recipe {recipeProducer=replicate 64 '0'}
+      && refused recipe {recipeOwners=[ExecutionSourceOwner support True Nothing]}
+      && refused recipe {recipeExactImports=[(("main","Absent"),[])]}
+      && refused recipe {recipeEvidence=evidence {dependencySources=[]}}) $
+    fail "issuer admitted an incomplete owner/generated/producer/exact-import proof"
+  let legacyRecipe = recipe {recipeOwners=[ExecutionSourceOwner target True Nothing,
+        ExecutionSourceOwner support False Nothing]}
+  legacy <- issue legacyRecipe
+  unavailable <- either (fail . show) pure (executionSourceProspectiveReferences [legacy] []
+    [reference {executionRefGraph=executionGraphSha256 legacy}])
+  unless (null unavailable) $ fail "source-free legacy owner acquired a current-source recipe"
+  promised <- issue legacyRecipe {recipeOwners=[ExecutionSourceOwner target True Nothing,
+    ExecutionSourceOwner support False (Just (replicate 64 'b'))]}
+  unless (case executionSourceProspectiveReferences [promised] []
+      [reference {executionRefGraph=executionGraphSha256 promised}] of Left _ -> True; _ -> False) $
+    fail "missing promised original graph became optional unavailability"
+  unless (case executionSourceProspectiveReferences [legacy]
+      [reference {executionRefGraph=replicate 64 'b'}] [] of Left _ -> True; _ -> False) $
+    fail "unsupported prospective recipe hid corrupt inherited advertised proof"
+  let original = ExactProduct "main" "Support" sha sha sha "" []
+      scope = ExactScope "" sha sha sha
+        [(ExactIfaceArtifact "main" "Support" "" sha [],"",sha)] [] [original]
+        [] [] Nothing Nothing Nothing Nothing
+      oversized = graph {executionGraphBytes=BS.replicate (4*1024*1024+1) 0}
+  bounded <- either (fail . show) pure
+    (extendExactExecutionSourcesWithinBudget [oversized] [reference] scope)
+  unless (isNothing bounded && case extendExactExecutionSources [oversized] [reference] scope of
+      Left _ -> True; _ -> False) $ fail "optional/advertised aggregate budget policies diverged"
+  unless (case extendExactExecutionSourcesWithinBudget [oversized]
+      [reference {executionRefGraph=replicate 64 'b'}] scope of Left _ -> True; _ -> False) $
+    fail "aggregate budget withholding hid corrupt advertised graph"
+  putStrLn "fresh execution recipe: issuer, original lineage and strict/optional budget controls passed"
 
 candidateExecutionSourcesTest :: IO ()
 candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do

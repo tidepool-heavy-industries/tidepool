@@ -6,7 +6,7 @@ module Tidepool.ExactScope
   , PlannedCellAdmission(..), PlannedCellSlot(..)
   , readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation
-  , extendExactExecutionSources
+  , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeExecutionNativeOwners
   ) where
 
@@ -143,6 +143,14 @@ data ExactOriginalGroup = ExactOriginalGroup
 extendExactExecutionSources :: [ExecutionSourceGraph] -> [ExecutionSourceRef]
   -> ExactScope -> Either ExecutionSourceFailure ExactScope
 extendExactExecutionSources offeredGraphs offeredRefs scope = do
+  admitted <- extendExactExecutionSourcesWithinBudget offeredGraphs offeredRefs scope
+  maybe (Left (ExecutionSourceIncomplete ("","candidate execution parcel"))) Right admitted
+
+-- Fresh transaction recipes are optional until demanded by a splice. Validate
+-- all advertised originals before withholding a recipe at the parcel budget.
+extendExactExecutionSourcesWithinBudget :: [ExecutionSourceGraph] -> [ExecutionSourceRef]
+  -> ExactScope -> Either ExecutionSourceFailure (Maybe ExactScope)
+extendExactExecutionSourcesWithinBudget offeredGraphs offeredRefs scope = do
   graphMap <- foldM insertGraph Map.empty (scopeExecutionGraphs scope ++ offeredGraphs)
   references <- foldM insertReference Map.empty (scopeExecutionOwners scope ++ offeredRefs)
   mapM_ (validateReference graphMap) (Map.elems references)
@@ -167,10 +175,10 @@ extendExactExecutionSources offeredGraphs offeredRefs scope = do
   retainedReferences <- foldM insertReference Map.empty (scopeExecutionOwners scope ++ map fst available)
   let kept = Set.union (Set.map snd needed) (Set.fromList (map executionGraphSha256 (scopeExecutionGraphs scope)))
       graphs = [graph | (sha,graph) <- Map.toAscList graphMap, sha `Set.member` kept]
-  unless (length graphs <= 4096 && Map.size references <= 4096
-      && sum (map (BS.length . executionGraphBytes) graphs) <= 4 * 1024 * 1024)
-    (Left (ExecutionSourceIncomplete ("","candidate execution parcel")))
-  pure scope {scopeExecutionGraphs=graphs,scopeExecutionOwners=Map.elems retainedReferences}
+  if length graphs <= 4096 && Map.size references <= 4096
+      && sum (map (BS.length . executionGraphBytes) graphs) <= 4 * 1024 * 1024
+    then pure (Just scope {scopeExecutionGraphs=graphs,scopeExecutionOwners=Map.elems retainedReferences})
+    else pure Nothing
   where
     insertGraph selected graph = do
       unless (executionGraphProducer graph == scopeProducerSha256 scope)
