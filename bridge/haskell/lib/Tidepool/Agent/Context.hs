@@ -15,6 +15,8 @@ module Tidepool.Agent.Context
   , ContextReference
   , ContextRole (..)
   , ContextNativeKind (..)
+  , ContextTextSelector (..)
+  , ContextVisibleText (..)
   , ContextBlockKind (..)
   , ContextProvenance (..)
   , Effort
@@ -22,6 +24,7 @@ module Tidepool.Agent.Context
   , contextBlocks
   , editableTexts
   , visibleTexts
+  , trimText
   , blockKind
   , blockProvenance
   , toNotes
@@ -37,13 +40,17 @@ where
 import Control.Lens (Fold, Lens', Traversal', folding, lens)
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Prelude
 
 import Tidepool.Inspection.Display (Display (..), displayRecord)
+import Tidepool.Inspection.Tree (treeParts)
 import Tidepool.Effects.Core
   ( ContextBlock (..)
   , ContextDocument (..)
   , ContextNativeKind (..)
+  , ContextTextSelector (..)
+  , ContextVisibleText (..)
   , ContextReadWrite (..)
   , ForkEffort (..)
   , ContextReference
@@ -53,12 +60,30 @@ import Tidepool.Effects.Core
 -- | A transcript copy with no capability-bearing operations or constructor.
 newtype Context = Context ContextDocument
 
--- | A bounded structural view of the editable transcript and safe native
--- previews. References and provenance are data only; this view adds no access
--- to the items they identify.
+-- | A bounded structural view of the visible transcript. References and
+-- provenance are data only; this view adds no access to the items they identify.
 instance Display Context where
   displayTree (Context (ContextDocument contextBlocksValue)) =
-    displayRecord 0 "Context" [("blocks", displayTree contextBlocksValue)]
+    displayRecord 0 "Context" [("blocks", treeParts "[" "]" (map displayBlock contextBlocksValue))]
+    where
+      displayBlock (Text _ role body _) =
+        displayRecord 0 "Text" [("role", displayTree role), ("body", displayTree body)]
+      displayBlock (Native _ kind preview protected texts) =
+        displayRecord
+          0
+          "Native"
+          [ ("kind", displayTree kind)
+          , ("preview", displayTree preview)
+          , ("protected", displayTree protected)
+          , ("texts", treeParts "[" "]" (map displayVisibleText texts))
+          ]
+      displayVisibleText visibleText =
+        displayRecord
+          0
+          "ContextVisibleText"
+          [ ("selector", displayTree (contextVisibleTextSelector visibleText))
+          , ("editable", displayTree (contextVisibleTextEditable visibleText))
+          ]
 
 data ContextBlockKind
   = AuthoredText ContextRole
@@ -78,30 +103,43 @@ contextBlocks = lens getBlocks setBlocks
     getBlocks (Context document) = blocks document
     setBlocks (Context document) value = Context (document {blocks = value})
 
--- | Traverse authored text while preserving its role and provenance.
+-- | Traverse authored text and full native visible fields marked editable.
+-- Native previews, selectors, references, and non-editable fields are kept.
 editableTexts :: Traversal' Context Text
 editableTexts action (Context document) =
   (\updated -> Context (document {blocks = updated})) <$> traverse edit (blocks document)
   where
     edit (Text reference role body sources) =
       (\updated -> Text reference role updated sources) <$> action body
-    edit native@Native {} = pure native
+    edit (Native reference kind preview protected texts) =
+      (\updated -> Native reference kind preview protected updated)
+        <$> traverse editVisible texts
+    editVisible visibleText
+      | contextVisibleTextEditable visibleText =
+          (\updated -> visibleText {contextVisibleTextText = updated})
+            <$> action (contextVisibleTextText visibleText)
+      | otherwise = pure visibleText
 
--- | Visible authored text and safe native previews in transcript order.
+-- | Visible authored text and full visible native fields in transcript order.
 visibleTexts :: Fold Context Text
-visibleTexts = folding (map visible . blocks . unwrap)
+visibleTexts = folding (concatMap visible . blocks . unwrap)
   where
     unwrap (Context document) = document
-    visible (Text _ _ body _) = body
-    visible (Native _ _ preview _) = preview
+    visible (Text _ _ body _) = [body]
+    visible (Native _ _ _ _ texts) = map contextVisibleTextText texts
+
+-- | Mark retained context text with a short, author-supplied explanation.
+-- The marker is ordinary text and has no runtime control meaning.
+trimText :: Text -> Text -> Text
+trimText reason retained = "[Trimmed: " <> reason <> "]\n" <> retained
 
 blockKind :: ContextBlock -> ContextBlockKind
 blockKind (Text _ role _ _) = AuthoredText role
-blockKind (Native _ kind _ _) = NativeEvidence kind
+blockKind (Native _ kind _ _ _) = NativeEvidence kind
 
 blockProvenance :: ContextBlock -> ContextProvenance
 blockProvenance (Text reference _ _ sources) = AuthoredProvenance reference sources
-blockProvenance (Native reference _ _ _) = NativeProvenance reference
+blockProvenance (Native reference _ _ _ _) = NativeProvenance reference
 
 -- | Replace selected, editable completed exchanges with authored notes. Each
 -- note cites the exchange it preserves. Pending, opaque, and protected native
@@ -110,10 +148,16 @@ toNotes :: [ContextReference] -> Context -> Context
 toNotes selected (Context document) =
   Context (document {blocks = map asNote (blocks document)})
   where
-    asNote block@(Native reference CompletedExchange preview protected)
-      | reference `elem` selected && not protected =
-          Text Nothing User preview [reference]
+    asNote block@(Native reference CompletedExchange _ protected texts)
+      | reference `elem` selected && not protected && any contextVisibleTextEditable texts =
+          Text Nothing User (Text.intercalate "\n" retainedTexts) [reference]
       | otherwise = block
+      where
+        retainedTexts =
+          [ contextVisibleTextText visibleText
+          | visibleText <- texts
+          , contextVisibleTextEditable visibleText
+          ]
     asNote block = block
 
 getContext :: Member ContextReadWrite effects => Eff effects Context

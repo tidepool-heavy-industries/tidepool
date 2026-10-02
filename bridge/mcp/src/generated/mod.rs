@@ -334,6 +334,8 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "ContextReference",
             "ContextRole",
             "ContextNativeKind",
+            "ContextTextSelector",
+            "ContextVisibleText",
             "ContextBlock",
             "ContextDocument",
             "GetContextWith",

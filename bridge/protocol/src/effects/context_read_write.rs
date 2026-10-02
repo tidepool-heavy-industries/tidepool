@@ -138,8 +138,60 @@ fn type_defs() -> Vec<TypeDef> {
         sum(
             "ContextNativeKind",
             &["CompletedExchange", "Opaque", "Pending"],
-            &["Host classification for a read-only native context block."],
+            &["Host classification of native evidence; each visible text field carries its own editability."],
         ),
+        TypeDef {
+            name: "ContextTextSelector",
+            wire_rust: Some("ContextTextSelector"),
+            haskell_module: None,
+            shape: TypeShape::Sum {
+                variants: vec![
+                    SumVariant {
+                        ctor: "MessageText",
+                        fields: VariantFields::Named(vec![field(
+                            "contextMessagePart",
+                            "part",
+                            HsType::Int,
+                        )]),
+                        doc: &["A visible message body identified by its position in the exchange."],
+                    },
+                    SumVariant {
+                        ctor: "ToolResultText",
+                        fields: VariantFields::Positional(vec![]),
+                        doc: &["The visible text of a completed tool result."],
+                    },
+                ],
+            },
+            json: JsonInstance::None,
+            derives: WIRE,
+            domain: None,
+            doc: &["Selects one visible text field within native context evidence."],
+        },
+        TypeDef {
+            name: "ContextVisibleText",
+            wire_rust: Some("ContextVisibleText"),
+            haskell_module: None,
+            shape: TypeShape::Record {
+                fields: vec![
+                    field(
+                        "contextVisibleTextReference",
+                        "reference",
+                        HsType::Named("ContextReference"),
+                    ),
+                    field(
+                        "contextVisibleTextSelector",
+                        "selector",
+                        HsType::Named("ContextTextSelector"),
+                    ),
+                    field("contextVisibleTextText", "text", HsType::Text),
+                    field("contextVisibleTextEditable", "editable", HsType::Bool),
+                ],
+            },
+            json: JsonInstance::None,
+            derives: WIRE,
+            domain: None,
+            doc: &["A full visible native text field with its exact selector and editability."],
+        },
         TypeDef {
             name: "ContextBlock",
             wire_rust: Some("ContextBlock"),
@@ -179,8 +231,13 @@ fn type_defs() -> Vec<TypeDef> {
                             ),
                             field("contextNativePreview", "preview", HsType::Text),
                             field("contextNativeProtected", "protected", HsType::Bool),
+                            field(
+                                "contextNativeTexts",
+                                "texts",
+                                HsType::list(HsType::Named("ContextVisibleText")),
+                            ),
                         ]),
-                        doc: &["Read-only native evidence whose content remains host-owned."],
+                        doc: &["Host-owned native evidence with bounded preview and full visible text fields."],
                     },
                 ],
             },

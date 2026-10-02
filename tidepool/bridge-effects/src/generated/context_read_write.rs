@@ -15,12 +15,30 @@ pub enum ContextRole {
     Assistant,
 }
 
-/// Host classification for a read-only native context block.
+/// Host classification of native evidence; each visible text field carries its own editability.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum ContextNativeKind {
     CompletedExchange,
     Opaque,
     Pending,
+}
+
+/// Selects one visible text field within native context evidence.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum ContextTextSelector {
+    /// A visible message body identified by its position in the exchange.
+    MessageText { part: i64 },
+    /// The visible text of a completed tool result.
+    ToolResultText,
+}
+
+/// A full visible native text field with its exact selector and editability.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub struct ContextVisibleText {
+    pub reference: ContextReference,
+    pub selector: ContextTextSelector,
+    pub text: String,
+    pub editable: bool,
 }
 
 /// One editable text block or host-owned native evidence block.
@@ -33,12 +51,13 @@ pub enum ContextBlock {
         text: String,
         sources: Vec<ContextReference>,
     },
-    /// Read-only native evidence whose content remains host-owned.
+    /// Host-owned native evidence with bounded preview and full visible text fields.
     Native {
         reference: ContextReference,
         kind: ContextNativeKind,
         preview: String,
         protected: bool,
+        texts: Vec<ContextVisibleText>,
     },
 }
 
