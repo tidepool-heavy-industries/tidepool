@@ -147,8 +147,10 @@ modifyContextM update = do
 setNextModel :: Member ContextReadWrite effects => Text -> Eff effects ()
 setNextModel = send . SetNextModelWith
 
--- | Select the reasoning effort for the actor's next provider request.
+-- | Existing reasoning-effort levels used for provider requests.
 type Effort = ForkEffort
 
+-- | Stage the actor's reasoning effort for its next request. It is committed
+-- only when the whole synchronous cell succeeds.
 setNextEffort :: Member ContextReadWrite effects => Effort -> Eff effects ()
 setNextEffort = send . SetNextEffortWith
