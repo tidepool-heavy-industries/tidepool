@@ -124,3 +124,13 @@ pub fn revision_to_wire(
             .collect(),
     }
 }
+
+impl tidepool_mcp::InstalledEffectSupport for SourceHandler {
+    fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+        if self.service.is_some() {
+            vec![exomonad_tool::ActorEffectKey::Source.into()]
+        } else {
+            Vec::new()
+        }
+    }
+}

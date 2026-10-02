@@ -2074,3 +2074,25 @@ mod tests {
         }
     }
 }
+
+macro_rules! installed_worktree_support {
+    ($handler:ty, $key:ident) => {
+        impl tidepool_mcp::InstalledEffectSupport for $handler {
+            fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+                vec![exomonad_tool::ActorEffectKey::$key.into()]
+            }
+        }
+    };
+}
+installed_worktree_support!(ActorBoundWorktreeHandler, BoundWorktree);
+installed_worktree_support!(ActorWorktreeRegistryHandler, WorktreeRegistry);
+installed_worktree_support!(ActorWorktreeAllocationHandler, WorktreeAllocation);
+installed_worktree_support!(ActorWorktreeIntegrationHandler, WorktreeIntegration);
+
+// This umbrella handler backs the narrow facades above. It grants no
+// additional actor-authored family of its own.
+impl tidepool_mcp::InstalledEffectSupport for ActorWorktreeHandler {
+    fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+        Vec::new()
+    }
+}

@@ -236,6 +236,45 @@ where
     }
 }
 
+/// Support emitted by an installed interpreter instance, independent of the
+/// authored row and the caller's authority. Inert or unavailable instances
+/// return no keys even when their static Haskell vocabulary exists.
+pub trait InstalledEffectSupport {
+    fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey>;
+}
+
+impl InstalledEffectSupport for frunk::HNil {
+    fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+        Vec::new()
+    }
+}
+
+impl<H: InstalledEffectSupport, T: InstalledEffectSupport> InstalledEffectSupport
+    for frunk::HCons<H, T>
+{
+    fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+        let mut keys = self.head.installed_effect_support();
+        for key in self.tail.installed_effect_support() {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        keys
+    }
+}
+
+impl<H: InstalledEffectSupport> InstalledEffectSupport for std::sync::Arc<H> {
+    fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+        (**self).installed_effect_support()
+    }
+}
+
+impl<H: InstalledEffectSupport> InstalledEffectSupport for parking_lot::Mutex<H> {
+    fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+        self.lock().installed_effect_support()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Standard effect declarations
 // ---------------------------------------------------------------------------
