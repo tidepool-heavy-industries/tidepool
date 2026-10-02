@@ -237,13 +237,29 @@ async fn start_with_spec(
         let mut configuration =
             "[defaults]\nmodel='test-model'\n[models]\nexecutor='gpt-6.1-sol'\n".to_owned();
         if let Some(spec) = spec {
+            let package = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../exomonad/examples/workspace")
+                .canonicalize()
+                .expect("the shipped workspace package");
             std::fs::write(authored.join("AgentSpec.hs"), spec).unwrap();
             std::fs::write(
                 authored.join("ContextWorkflow.hs"),
                 include_str!("../../../haskell/examples/model-turns/ContextWorkflow.hs"),
             )
             .unwrap();
-            configuration.push_str("[haskell]\nsource_roots=['.']\nspec='AgentSpec.agentSpec'\n");
+            // ContextWorkflow imports Jev.Operators and Jev.Tidepool. Keep the
+            // same workspace-owned front and pinned core source that projects
+            // receive, so the compiled acceptance fixture has real provenance.
+            let operators = authored.join("Jev/Operators.hs");
+            std::fs::create_dir_all(operators.parent().unwrap()).unwrap();
+            std::fs::copy(package.join(".exomonad/Jev/Operators.hs"), operators).unwrap();
+            for name in ["flake.nix", "flake.lock"] {
+                std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
+            }
+            configuration.push_str(
+                "[haskell]\nsource_roots=['.']\nspec='AgentSpec.agentSpec'\n\
+                 \n[haskell.flake_sources]\njev-dsl=['core']\n",
+            );
         }
         std::fs::write(authored.join("config.toml"), configuration).unwrap();
         test_campaign::commit_workspace(&config.workspace);
