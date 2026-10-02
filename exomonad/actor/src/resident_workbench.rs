@@ -3679,7 +3679,7 @@ where
                 )
             })?;
             let mut installer = ResidentActorWorkbench {
-                access: self.access.clone(),
+                access: self.access.sharing(),
                 response: None,
                 request: None,
                 type_modules: Arc::from([]),
@@ -18951,7 +18951,17 @@ mod request_tests {
                     template_source: template.clone(),
                     turn_templates: templates
                         .iter()
-                        .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                        .map(|template| {
+                            let kind = match template.kind {
+                                tidepool_runtime::session::TemplateSelector::Decl => "decl",
+                                tidepool_runtime::session::TemplateSelector::Bind => "bind",
+                                tidepool_runtime::session::TemplateSelector::BindDiscard => {
+                                    "binddiscard"
+                                }
+                                tidepool_runtime::session::TemplateSelector::Expr => "expr",
+                            };
+                            (kind.to_owned(), template.source.clone())
+                        })
                         .collect(),
                     injected_modules: prepared.injected.clone(),
                     reserved_declaration_modules: Vec::new(),
@@ -18994,7 +19004,15 @@ mod request_tests {
             template_source: template,
             turn_templates: templates
                 .iter()
-                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                .map(|template| {
+                    let kind = match template.kind {
+                        tidepool_runtime::session::TemplateSelector::Decl => "decl",
+                        tidepool_runtime::session::TemplateSelector::Bind => "bind",
+                        tidepool_runtime::session::TemplateSelector::BindDiscard => "binddiscard",
+                        tidepool_runtime::session::TemplateSelector::Expr => "expr",
+                    };
+                    (kind.to_owned(), template.source.clone())
+                })
                 .collect(),
             injected_modules: prepared.injected,
             reserved_declaration_modules: Vec::new(),
