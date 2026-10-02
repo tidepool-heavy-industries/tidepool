@@ -841,6 +841,7 @@ impl CompilerTransaction {
     }
 
     fn close(&mut self) -> Result<(), SpawnError> {
+        let close_started = self.transport.as_ref().map(|_| Instant::now());
         let result = match self.transport.take() {
             None => Ok(()),
             Some(mut transport) => match &mut transport {
@@ -893,6 +894,14 @@ impl CompilerTransaction {
         };
         if let Some(cancellation) = self.cancellation.take() {
             cancellation.disarm();
+        }
+        if let Some(started) = close_started {
+            tracing::debug!(
+                phase = "compiler_transaction_close",
+                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                success = result.is_ok(),
+                "compiler transaction closed"
+            );
         }
         result
     }
