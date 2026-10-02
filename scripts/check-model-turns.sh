@@ -30,6 +30,7 @@ ghc -O0 -i"$check_root" -i./bridge/haskell/lib \
   -o "$check_root/model-contract"
 "$check_root/model-contract"
 ghc -fno-code -i"$check_root" -i./bridge/haskell/lib -i./bridge/haskell/actors \
+  -i./exomonad/examples/workspace/.exomonad \
   -i"$jev_core" \
   -outputdir "$check_root/examples" \
   bridge/haskell/examples/model-turns/Coordination.hs \

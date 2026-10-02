@@ -1,6 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeOperators #-}
+{-# OPTIONS_GHC -Wno-simplifiable-class-constraints #-}
 
 -- | Read and curate the current actor's retained transcript.
 --

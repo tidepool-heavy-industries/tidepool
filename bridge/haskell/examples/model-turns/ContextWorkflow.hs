@@ -6,6 +6,7 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
+{-# OPTIONS_GHC -Wno-simplifiable-class-constraints #-}
 
 -- | Seed for synchronous transcript curation followed by inherited-context
 -- delegation. The runtime commits the synchronous invocation before deferred
@@ -17,7 +18,7 @@ import Control.Lens (over)
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Jev.Core as J
+import qualified Jev.Operators as J
 import Jev.Tidepool ()
 
 import Tidepool.Actors.Exomonad
@@ -62,13 +63,16 @@ selectOriginalSlices
   => [(Int, Text)]
   -> Eff effects [Text]
 selectOriginalSlices originalSlices = do
-  let packet = #selected := J.each fst
-        (\(offset, original) -> #keep := J.noul
+  let packet = #selected J.:= J.each (\(offset, _) -> T.pack (show offset))
+        (\(offset, original) -> #keep J.:= J.noul
           ("Keep this exact original slice at offset " <> T.pack (show offset) <> "?\n" <> original))
         originalSlices
-  answer <- J.ask (J.state (#purpose := ("Select relevant source slices." :: Text))) packet
-  pure
-    [ original
-    | ((_, original), decision) <- answer.selected
-    , decision.keep.yes
-    ]
+  result <- J.ask (J.state (#purpose J.:= ("Select relevant source slices." :: Text))) packet
+  case result of
+    Left _ -> pure (map snd originalSlices)
+    Right answer ->
+      pure
+        [ original
+        | ((_, original), decision) <- answer.selected
+        , J.holds J.careful decision.keep
+        ]
