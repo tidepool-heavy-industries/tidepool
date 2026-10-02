@@ -717,6 +717,8 @@ prepareArtifacts originalInterfaces caches input hscEnv interfaces modules targe
         [(unitString (moduleUnit owner), moduleNameString (moduleName owner),
           either (Left . show) Right outcome)
         | (owner, outcome) <- preparedModuleProductOutcomes products]
+      originalPackageGlobals = requiredOriginalPackageGlobalsWithRetained
+        originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
       recovery roots = newPreparedRecoveryWithPackageRoots hscEnv (rcFatIface caches) (rcOwnerIface caches)
         (rcPreparedBodies caches) certifiedHomes (contextFor firstTarget) modules roots
   recover <- recovery []
@@ -735,8 +737,7 @@ prepareArtifacts originalInterfaces caches input hscEnv interfaces modules targe
               (closureModules recovered) (closureReachability recovered))
           (program, constructors) <- requireProjection (projectSelected selected)
           required <- either (ioError . userError) pure
-            (requiredOriginalPackageGlobalsWithRetained originalProducts candidates exactOriginals
-              (Map.keysSet (projectionRetainedGenerations context)) (programGlobals program))
+            (originalPackageGlobals (programGlobals program))
           let nextRoots = Set.toAscList (Set.fromList (roots ++ required))
           if nextRoots == roots
             then pure (recovered, program, constructors, roots)

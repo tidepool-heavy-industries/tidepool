@@ -49,14 +49,18 @@ requiredOriginalPackageGlobalsWithRetained
   :: [(String, String, Either String [ProjectedGroup])] -> [ModuleCandidate]
   -> [(String, String, [(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])])]
   -> Set.Set SymbolIdentity -> [GlobalDecl] -> Either String [SymbolIdentity]
-requiredOriginalPackageGlobalsWithRetained fresh cached exact retained target = do
-  indexed <- foldM insert Map.empty groups
-  Set.toAscList <$> walk indexed Set.empty Set.empty
-    [globalIdentity global | global <- target
-      , globalRequiredGeneration global == Nothing
-      , globalIdentity global `Set.notMember` retained
-      , (symbolUnit (globalIdentity global), symbolModule (globalIdentity global))
-          `Set.member` owners]
+requiredOriginalPackageGlobalsWithRetained fresh cached exact retained =
+  -- The original inventory is immutable across target and recovery passes.
+  -- Partially applying this function retains its validated binder index;
+  -- each target still starts a fresh traversal of that inventory.
+  case foldM insert Map.empty groups of
+    Left reason -> const (Left reason)
+    Right indexed -> \target -> Set.toAscList <$> walk indexed Set.empty Set.empty
+      [globalIdentity global | global <- target
+        , globalRequiredGeneration global == Nothing
+        , globalIdentity global `Set.notMember` retained
+        , (symbolUnit (globalIdentity global), symbolModule (globalIdentity global))
+            `Set.member` owners]
   where
     groups =
       [ ((unit, name, fromIntegral (projectedOriginalOrdinal group)),
