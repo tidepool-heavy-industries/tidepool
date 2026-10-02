@@ -34,7 +34,9 @@ import Control.Monad.State.Strict
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.IntMap.Strict qualified as IntMap
-import Data.List (find)
+import Data.Foldable (toList)
+import Data.Sequence (Seq, (|>))
+import Data.Sequence qualified as Seq
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Tidepool.PreparedBuiltins
   ( DeferredFunction(..), deferredFunction, wiredInErrorKind )
@@ -149,11 +151,17 @@ data PState = PState
   , topSymbols :: VarEnv SymbolIdentity, topValues :: Map SymbolIdentity ValueId
   , implicitTops :: [TopBinding]
   , implicitValues :: Map SymbolIdentity ValueId
-  , globals :: VarEnv GlobalId, globalDecls :: [GlobalDecl]
-  , constructors :: [(DataCon, ConstructorId)], constructorDecls :: [ConstructorDecl]
-  , operations :: [(Schema.OperationIdentity, Signature, OperationId)]
-  , operationDecls :: [OperationDecl]
-  , signatures :: [(Signature, SignatureId)]
+  -- Tables retain first-encounter order; each ID is its declaration position.
+  -- Lookup indexes and counters share the projection's representation rollback.
+  , nextGlobal :: !Word32, nextConstructor :: !Word32
+  , nextOperation :: !Word32, nextSignature :: !Word32
+  , globals :: VarEnv GlobalId, globalDecls :: Seq GlobalDecl
+  , constructors :: Seq (DataCon, ConstructorId), constructorDecls :: Seq ConstructorDecl
+  , constructorIndex :: Map SymbolIdentity (ConstructorId, ConstructorDecl)
+  , operations :: Map (Schema.OperationIdentity, SignatureId) OperationId
+  , operationDecls :: Seq OperationDecl
+  , signatures :: Seq Signature
+  , signatureIndex :: Map ([RuntimeRep], ResultContract) SignatureId
   , target :: TargetDescriptor
   , retainedGenerations :: Map SymbolIdentity Word64
   , homeModules :: Set (Text, Text)
@@ -204,7 +212,9 @@ resolveTextPackageUnit hscEnv =
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
-  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty Nothing Nothing Nothing Nothing Set.empty ExecutableTarget)
+  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty
+    0 0 0 0 emptyVarEnv Seq.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
+    machine Map.empty Set.empty Nothing Nothing Nothing Nothing Set.empty ExecutableTarget)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
@@ -296,7 +306,7 @@ projectPreparedModuleGroupsFor purpose context prepared selection = traverse pro
       let onlyGroup = prepared { pmBindings = [item] }
           outside = allSymbols `Set.difference` Set.fromList binders
           initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv identities
-            Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] []
+            Map.empty [] Map.empty 0 0 0 0 emptyVarEnv Seq.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
             (projectionTarget context) (projectionRetainedGenerations context)
             (if pmCoverage prepared == CompleteSourceModule
               then Set.singleton owner else Set.empty)
@@ -318,10 +328,10 @@ projectPreparedModuleGroupsFor purpose context prepared selection = traverse pro
             { projectedEnvelope = ProgramEnvelope schemaVersion
                 (projectionProfile context) (projectionToolchain context)
                 executionAbiVersion (projectionTarget context)
-            , projectedSignatures = map fst (signatures final)
-            , projectedGlobals = globalDecls final
-            , projectedConstructors = constructorDecls final
-            , projectedOperations = operationDecls final
+            , projectedSignatures = toList (signatures final)
+            , projectedGlobals = toList (globalDecls final)
+            , projectedConstructors = toList (constructorDecls final)
+            , projectedOperations = toList (operationDecls final)
             , projectedBindings = map NonRecursive (reverse (implicitTops final)) ++ groups
             , projectedTypes = types
             , projectedSites = sites
@@ -350,7 +360,7 @@ projectPreparedWithTopSymbols :: ProjectionContext -> [PreparedModule]
   -> VarEnv SymbolIdentity -> Either ProjectionError (WireProgram, [DataCon])
 projectPreparedWithTopSymbols context modules topIdentityMap = do
   let initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv topIdentityMap Map.empty [] Map.empty
-        emptyVarEnv [] [] [] [] [] [] (projectionTarget context)
+        0 0 0 0 emptyVarEnv Seq.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty (projectionTarget context)
         (projectionRetainedGenerations context) (Set.fromList
           [ (Text.pack (unitString (moduleUnit (pmModule prepared))),
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
@@ -379,17 +389,18 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
       TopBinding _ entryBinding = entryTop
   case heapBindingRhs entryBinding of
     Function signature _ _ _
-      | lookup signature [(identity, signatureResults contract)
-          | (contract, identity) <- signatures final] == Just CallerResult ->
+      | SignatureId index <- signature
+      , (signatureResults <$> Seq.lookup (fromIntegral index) (signatures final))
+          == Just CallerResult ->
           Left (InvalidPreparedRepresentation "program entry requires a concrete result contract")
     _ -> pure ()
   let program = WireProgram
         { programEnvelope = ProgramEnvelope schemaVersion (projectionProfile context)
             (projectionToolchain context) executionAbiVersion (projectionTarget context)
-        , programSignatures = map fst (signatures final)
-        , programGlobals = globalDecls final
-        , programConstructors = constructorDecls final
-        , programOperations = operationDecls final
+        , programSignatures = toList (signatures final)
+        , programGlobals = toList (globalDecls final)
+        , programConstructors = toList (constructorDecls final)
+        , programOperations = toList (operationDecls final)
         , programBindings = map NonRecursive (reverse (implicitTops final)) ++ bindingGroups
         , programEntry = entry
         , programTypes = programTypes
@@ -397,7 +408,7 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
         , programVerbSites = programVerbSites
         , programJsonLayout = programJsonLayout
         }
-  pure (program, map fst (constructors final))
+  pure (program, map fst (toList (constructors final)))
   where
     topValue (TopBinding _ binding) = heapBindingId binding
     findTop = foldr findGroup Nothing
@@ -1048,7 +1059,7 @@ auxiliaryRootTypeGraph context modules = do
 -- (ordinary data constructors such as (:|) can have that shape too).
 lowerVerbEvidence :: Set Word64 -> Int -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
 lowerVerbEvidence effectRequestTypeIds base = do
-  known <- gets constructors
+  known <- gets (toList . constructors)
   let candidates =
         [ (identity, qualified, index)
         | (constructor, identity) <- known
@@ -1188,8 +1199,8 @@ lowerTypeNode nodes rebase (TypePolicy.TypeNodeId raw) = case IntMap.lookup (fro
         -- not only the type graph's DataCon. Evidence reached through another
         -- DataCon object for the same constructor must not borrow that
         -- declaration with a different field shape.
-        declared <- gets (fmap constructorFieldReps . listToMaybe
-          . drop (fromIntegral index) . constructorDecls)
+        declared <- gets (fmap constructorFieldReps
+          . Seq.lookup (fromIntegral index) . constructorDecls)
         unless (declared == Just sourceReps)
           (failLayout "prepared type constructor declaration differs from its source fields")
         CtorRow identity <$> traverse rebase fields
@@ -1995,11 +2006,11 @@ internGlobal binder = do
             _ -> failRepresentation "global value has more than one representation component"
           (entry, evaluated) <- importedEntry externalBinder
           signature <- traverse internSignature entry
-          existing <- gets globalDecls
+          next <- gets nextGlobal
           generations <- gets retainedGenerations
           names <- gets topSymbols
           purpose <- gets projectionPurpose
-          let identity = GlobalId (fromIntegral (length existing))
+          let identity = GlobalId next
               symbol = fromMaybe (idSymbol "value" externalBinder)
                 (lookupVarEnv names externalBinder)
               retainedGeneration = case purpose of
@@ -2011,17 +2022,23 @@ internGlobal binder = do
                 retainedGeneration
           modify' (\current -> current
             { globals = extendVarEnv (globals current) externalBinder identity
-            , globalDecls = globalDecls current <> [declaration] })
+            , nextGlobal = next + 1
+            , globalDecls = globalDecls current |> declaration })
           pure identity
 
 internSignature :: Signature -> P SignatureId
 internSignature signature = do
-  known <- gets signatures
-  case find ((== signature) . fst) known of
-    Just (_, identity) -> pure identity
+  let key = (signatureArguments signature, signatureResults signature)
+  known <- gets signatureIndex
+  case Map.lookup key known of
+    Just identity -> pure identity
     Nothing -> do
-      let identity = SignatureId (fromIntegral (length known))
-      modify' (\current -> current { signatures = signatures current <> [(signature, identity)] })
+      next <- gets nextSignature
+      let identity = SignatureId next
+      modify' (\current -> current
+        { nextSignature = next + 1
+        , signatures = signatures current |> signature
+        , signatureIndex = Map.insert key identity (signatureIndex current) })
       pure identity
 
 constructorDeclaration :: DataCon -> P ConstructorDecl
@@ -2067,31 +2084,24 @@ validateConstructorEvidence = mapM_ validateOne
 
 internConstructor :: DataCon -> P ConstructorId
 internConstructor con = do
+  -- Validate each incoming GHC declaration before nominal reuse: equal names
+  -- and uniques do not prove equal physical declarations or layout authority.
   declaration <- constructorDeclaration con
-  prior <- gets constructorDecls
+  known <- gets constructorIndex
   let nominal = constructorIdentity declaration
-      -- 'DataCon' equality follows a GHC object, not its durable nominal
-      -- identity. The same source can therefore reach this boundary via a
-      -- separately loaded interface. Only one physical declaration may be
-      -- published for that nominal constructor.
-      priorNominal =
-        [ (ConstructorId (fromIntegral index), existing)
-        | (index, existing) <- zip [0 :: Int ..] prior
-        , constructorIdentity existing == nominal
-        ]
-  case priorNominal of
-    [] -> do
-      let identity = ConstructorId (fromIntegral (length prior))
+  case Map.lookup nominal known of
+    Nothing -> do
+      next <- gets nextConstructor
+      let identity = ConstructorId next
       modify' (\current -> current
-        { constructors = constructors current <> [(con, identity)]
-        , constructorDecls = constructorDecls current <> [declaration] })
+        { nextConstructor = next + 1
+        , constructors = constructors current |> (con, identity)
+        , constructorDecls = constructorDecls current |> declaration
+        , constructorIndex = Map.insert nominal (identity, declaration) (constructorIndex current) })
       pure identity
-    [(identity, existing)]
+    Just (identity, existing)
       | existing == declaration -> pure identity
       | otherwise -> failConstructorConflict existing declaration
-    _ -> lift . Left . InvalidPreparedIdentity $
-      ("nominal constructor has multiple declarations before interning: "
-        <> symbolText nominal)
 
 failConstructorConflict :: ConstructorDecl -> ConstructorDecl -> P a
 failConstructorConflict existing incoming =
@@ -2213,27 +2223,27 @@ internOperation op signature = do
 
 internSyntheticOperation :: Schema.OperationIdentity -> SignatureId -> P OperationId
 internSyntheticOperation operationIdentity signature = do
-  operationSignature <- signatureForId signature
+  -- Interned signature IDs are canonical; validate the reference before reuse.
+  _ <- signatureForId signature
   known <- gets operations
-  case find (matches operationIdentity operationSignature) known of
-    Just (_, _, identity) -> pure identity
+  let key = (operationIdentity, signature)
+  case Map.lookup key known of
+    Just identity -> pure identity
     Nothing -> do
-      prior <- gets operationDecls
-      let identity = OperationId (fromIntegral (length prior))
+      next <- gets nextOperation
+      let identity = OperationId next
           declaration = OperationDecl operationIdentity signature
       modify' (\current -> current
-        { operations = operations current <> [(operationIdentity, operationSignature, identity)]
-        , operationDecls = operationDecls current <> [declaration] })
+        { nextOperation = next + 1
+        , operations = Map.insert key identity (operations current)
+        , operationDecls = operationDecls current |> declaration })
       pure identity
-  where
-    matches wantedIdentity wantedSignature (knownIdentity, knownSignature, _) =
-      wantedIdentity == knownIdentity && wantedSignature == knownSignature
 
 signatureForId :: SignatureId -> P Signature
-signatureForId identity = do
+signatureForId (SignatureId index) = do
   known <- gets signatures
-  case find ((== identity) . snd) known of
-    Just (signature, _) -> pure signature
+  case Seq.lookup (fromIntegral index) known of
+    Just signature -> pure signature
     Nothing -> failIdentity "operation refers to an unknown signature"
 
 signatureFor :: [Id] -> ResultContract -> P Signature

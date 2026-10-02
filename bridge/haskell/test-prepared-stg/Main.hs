@@ -2,6 +2,7 @@ module Main (main) where
 
 import Control.Exception (SomeException, bracket, evaluate, try)
 import Control.Monad (unless)
+import Data.ByteString qualified as BS
 import Data.List (isInfixOf, nub, sort)
 import Data.String (fromString)
 import Data.Text qualified as Text
@@ -39,6 +40,7 @@ import qualified Tidepool.TypePolicy as TypePolicy
 import Tidepool.EffectSchema
   ( SiteDelivery(..), SiteType(..), SiteWireSource(..), YieldSite(..)
   , sitedVerbs, vsDelivery, vsName, vsWireSource )
+import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionIR
   ( LiteralInventory(..), PreparedFact(..), PreparedInventory(..), PreparedSupport(..), inventoryPreparedModule
   , renderPreparedInventory )
@@ -233,20 +235,43 @@ verifyPreparedPrivateImports = do
     assert (preparedShape cold == preparedShape warm)
       "warm private TH dependency changed prepared module shape"
 
--- | TH's bytecode provisioning must not change a constructor declared by an
--- unchanged home module.  The graph checks run after metadata preparation and
--- before projection or execution; the executable checks then compare the
--- declarations a shared prepared machine receives from ordinary and quoted
--- source.
-verifyConstructorRepresentations :: FilePath -> IO ()
-verifyConstructorRepresentations dir = do
+verifyProjectionInterning :: FilePath -> FilePath -> IO ()
+verifyProjectionInterning dir output = do
+  vertical <- runPipelineSelected PreparedStg "test-prepared-stg/M3Vertical.hs"
+    ["test-prepared-stg"]
+  let context = Projection.ProjectionContext
+        { Projection.projectionProfile = "ghc-9.12-prepared-stg"
+        , Projection.projectionToolchain = "ghc-9.12.2"
+        , Projection.projectionTarget =
+            Schema.TargetDescriptor Schema.X86_64 Schema.LittleEndian 64 64 "sysv64" []
+        , Projection.projectionRetainedGenerations = mempty
+        , Projection.projectionEntry = Schema.SymbolIdentity "main" "M3Vertical" "value" "result" Nothing
+        , Projection.projectionAuxiliaryRoots = []
+        , Projection.projectionFormattingAuthority = Nothing
+        , Projection.projectionTimeAuthority = Nothing
+        , Projection.projectionJsonAuthority = Nothing
+        , Projection.projectionTextUnit = Nothing
+        }
+      project = Projection.projectPrepared context (pprModules vertical)
+  program <- either (ioError . userError . show) pure project
+  assert (length (Schema.programSignatures program) > 1
+    && length (Schema.programGlobals program) > 1
+    && length (Schema.programConstructors program) > 1
+    && length (Schema.programOperations program) > 1)
+    "interning fixture does not exercise distinct table insertions"
+  BS.writeFile output (encodeWireProgram program)
+  putStrLn ("interned table sizes (signatures/globals/constructors/operations): "
+    ++ show (length (Schema.programSignatures program), length (Schema.programGlobals program),
+      length (Schema.programConstructors program), length (Schema.programOperations program)))
+  strictPlain <- writePlainConstructorEvidenceFixture dir
+  strictPlainResult <- runPipelineSelected PreparedStg strictPlain [dir, "lib"]
+  verifyRepeatedConstructorEvidence strictPlainResult
+  putStrLn "projection interning: deterministic bytes and 16 constructor-conflict paths passed"
+
+writePlainConstructorEvidenceFixture :: FilePath -> IO FilePath
+writePlainConstructorEvidenceFixture dir = do
   let strictOwned = dir </> "StrictOwned.hs"
       strictPlain = dir </> "StrictPlainMetadata.hs"
-      strictQuoted = dir </> "StrictQuotedMetadata.hs"
-      scientificPlain = dir </> "ScientificPlain.hs"
-      scientificQuoted = dir </> "ScientificQuoted.hs"
-      scientificMetadataPlain = dir </> "ScientificMetadataPlain.hs"
-      scientificMetadataQuoted = dir </> "ScientificMetadataQuoted.hs"
   writeFile strictOwned (unlines
     [ "{-# OPTIONS_GHC -O0 #-}"
     , "module StrictOwned where"
@@ -255,6 +280,49 @@ verifyConstructorRepresentations dir = do
     , "data ExplicitUnpack = ExplicitUnpack {-# UNPACK #-} !Int"
     ])
   writeFile strictPlain (strictMetadataSource "StrictPlainMetadata" False)
+  pure strictPlain
+
+strictMetadataSource :: String -> Bool -> String
+strictMetadataSource modul quoted = unlines $
+  [ "{-# LANGUAGE TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
+  [ "module " ++ modul ++ " where"
+  , "import StrictOwned"
+  , "import Tidepool.Effects.Core"
+  ] ++ quasiquoteBindings quoted ++
+  [ "automatic :: Maybe Automatic"
+  , "automatic = runLLMTurn @Automatic \"automatic\""
+  , "noUnpack :: Maybe NoUnpack"
+  , "noUnpack = runLLMTurn @NoUnpack \"nounpack\""
+  , "explicitUnpack :: Maybe ExplicitUnpack"
+  , "explicitUnpack = runLLMTurn @ExplicitUnpack \"unpack\""
+  ]
+
+quasiquoteLanguage :: Bool -> [String]
+quasiquoteLanguage False = []
+quasiquoteLanguage True = ["{-# LANGUAGE QuasiQuotes #-}"]
+
+quasiquoteBindings :: Bool -> [String]
+quasiquoteBindings False = []
+quasiquoteBindings True =
+  [ "import Tidepool.Aeson.Value (Value)"
+  , "import Tidepool.QQ (j)"
+  , "quotedValue :: Value"
+  , "quotedValue = [j|42|]"
+  ]
+
+-- | TH's bytecode provisioning must not change a constructor declared by an
+-- unchanged home module.  The graph checks run after metadata preparation and
+-- before projection or execution; the executable checks then compare the
+-- declarations a shared prepared machine receives from ordinary and quoted
+-- source.
+verifyConstructorRepresentations :: FilePath -> IO ()
+verifyConstructorRepresentations dir = do
+  strictPlain <- writePlainConstructorEvidenceFixture dir
+  let strictQuoted = dir </> "StrictQuotedMetadata.hs"
+      scientificPlain = dir </> "ScientificPlain.hs"
+      scientificQuoted = dir </> "ScientificQuoted.hs"
+      scientificMetadataPlain = dir </> "ScientificMetadataPlain.hs"
+      scientificMetadataQuoted = dir </> "ScientificMetadataQuoted.hs"
   writeFile strictQuoted (strictMetadataSource "StrictQuotedMetadata" True)
   writeFile scientificPlain (unlines
     [ "module ScientificPlain where"
@@ -299,19 +367,6 @@ verifyConstructorRepresentations dir = do
     ("Scientific did not retain the canonical physical representation: "
       ++ show (Schema.constructorFieldReps plainDecl))
  where
-  strictMetadataSource modul quoted = unlines $
-    [ "{-# LANGUAGE TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
-    [ "module " ++ modul ++ " where"
-    , "import StrictOwned"
-    , "import Tidepool.Effects.Core"
-    ] ++ quasiquoteBindings quoted ++
-    [ "automatic :: Maybe Automatic"
-    , "automatic = runLLMTurn @Automatic \"automatic\""
-    , "noUnpack :: Maybe NoUnpack"
-    , "noUnpack = runLLMTurn @NoUnpack \"nounpack\""
-    , "explicitUnpack :: Maybe ExplicitUnpack"
-    , "explicitUnpack = runLLMTurn @ExplicitUnpack \"unpack\""
-    ]
   scientificMetadataSource modul quoted = unlines $
     [ "{-# LANGUAGE TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
     [ "module " ++ modul ++ " where"
@@ -320,15 +375,6 @@ verifyConstructorRepresentations dir = do
     ] ++ quasiquoteBindings quoted ++
     [ "result :: Maybe Value"
     , "result = runLLMTurn @Value \"scientific\""
-    ]
-  quasiquoteLanguage False = []
-  quasiquoteLanguage True = ["{-# LANGUAGE QuasiQuotes #-}"]
-  quasiquoteBindings False = []
-  quasiquoteBindings True =
-    [ "import Tidepool.Aeson.Value (Value)"
-    , "import Tidepool.QQ (j)"
-    , "quotedValue :: Value"
-    , "quotedValue = [j|42|]"
     ]
   assertMetadataReps occurrence plain quoted expected = do
     let plainReps = typeGraphReps occurrence plain
@@ -461,8 +507,11 @@ verifyRepeatedConstructorEvidence result = do
         outcome -> ioError (userError
           ("conflicting constructor evidence in separate graphs was not rejected: "
             ++ either show (const "accepted") outcome))
-  assertProjects "identical constructor provenance"
+  canonical <- either (ioError . userError . show) pure (project [original, original])
+  repeated <- either (ioError . userError . show) pure
     (project [original, clone otherName fields runtimeFields])
+  assert (encodeWireProgram repeated == encodeWireProgram canonical)
+    "equivalent constructor provenance changed IDs, table order or encoded bytes"
   mapM_ (\changed -> do
     rejects [original, changed]
     rejects [changed, original]
@@ -513,6 +562,13 @@ main = do
         (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
         removePathForcibly
         $ \dir -> verifyCompilerReuse dir >> verifyPreparedScope dir
+    ["--projection-interning", output] -> do
+      tmp <- getTemporaryDirectory
+      let work = tmp </> "tidepool-projection-interning-test"
+      bracket
+        (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
+        removePathForcibly
+        (\dir -> verifyProjectionInterning dir output)
     ["--module-product-roundtrip"] -> do
       tmp <- getTemporaryDirectory
       let work = tmp </> "tidepool-module-product-roundtrip-test"
