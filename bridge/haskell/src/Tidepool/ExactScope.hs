@@ -8,6 +8,7 @@ module Tidepool.ExactScope
   , writeExactCompilation
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeExecutionNativeOwners
+  , originalGroupFromProjected, originalGroupFromCandidate
   ) where
 
 import Codec.CBOR.Decoding
@@ -35,7 +36,9 @@ import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), CheckedSignatureName(..))
-import Tidepool.ExecutionSchema (SymbolIdentity(..))
+import Tidepool.ExecutionSchema
+  ( SymbolIdentity(..), ProjectedGroup(..), ProjectedGroupBody(..), GlobalDecl(..) )
+import Tidepool.ModuleCandidates (CandidateGroup(..), CandidateGlobal(..))
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
   , ExecutionSourceRef(..), ExecutionSourceNode(..), decodeExecutionSourceGraph, decodeExecutionSourceReferences
@@ -136,8 +139,21 @@ data ExactProduct = ExactProduct
 
 data ExactOriginalGroup = ExactOriginalGroup
   { originalOrdinal :: Word, originalBinders :: [SymbolIdentity]
+  -- True imports need executable recovery; retained generations are boundaries.
   , originalGlobals :: [(SymbolIdentity, Bool)]
   } deriving (Eq, Show)
+
+originalGroupFromProjected :: ProjectedGroup -> ExactOriginalGroup
+originalGroupFromProjected group = ExactOriginalGroup
+  (fromIntegral (projectedOriginalOrdinal group)) (projectedBinders group)
+  [(globalIdentity global, globalRequiredGeneration global == Nothing)
+   | global <- projectedGlobals (projectedBody group)]
+
+originalGroupFromCandidate :: CandidateGroup -> ExactOriginalGroup
+originalGroupFromCandidate group = ExactOriginalGroup
+  (candidateGroupOrdinal group) (candidateGroupBinders group)
+  [(candidateGlobalIdentity global, candidateGlobalGeneration global == Nothing)
+   | global <- candidateGroupGlobals group]
 
 -- Attach provenance after native originals have been promoted. Recipes can
 -- supplement execution only for the exact native inventory already present;

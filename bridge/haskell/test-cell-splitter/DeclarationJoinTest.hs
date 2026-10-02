@@ -11,6 +11,8 @@ import Data.String (fromString)
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobals, requiredOriginalPackageGlobalsWithRetained)
 import qualified Tidepool.ExecutionSchema as Execution
 import Tidepool.ModuleCandidates
+import Tidepool.ExactScope
+  ( ExactOriginalGroup(..), originalGroupFromProjected, originalGroupFromCandidate )
 import GHC
 import GHC.Builtin.Types (doubleTy)
 import GHC.Core.InstEnv (instEnvElts, is_dfun_name, is_tys)
@@ -430,4 +432,26 @@ originalProductRootsProof = do
         [global caller, global newlyReached]
   unless (first == Right [package] && second == Right (sort [package, unused]))
     (fail "recovery-induced source global did not extend exact package roots")
-  putStrLn "original-product-roots: PASS (demanded parser, whole group, unrelated omission, exact unit, retained boundary, duplicate refusal, failed home owner, recovery-induced source root)"
+  let dictionary = identity "main" "Tidepool.Aeson.FromJSON" "dictionary"
+      envelope = Execution.ProgramEnvelope 14 (fromString "ghc-9.12-prepared-stg") (fromString "ghc-9.12.2") 8
+        (Execution.TargetDescriptor Execution.X86_64 Execution.LittleEndian 64 64 (fromString "sysv64") [])
+      projected ordinal binders globals = Execution.ProjectedGroup ordinal binders
+        (Execution.ProjectedGroupBody envelope [] globals [] [] [] [] [] [] Nothing)
+      dictionaryGlobals = [global package, (global unused)
+        { Execution.globalRequiredEvaluated = True, Execution.globalRequiredGeneration = Just 4 }]
+      freshOutlines =
+        [originalGroupFromProjected (projected 137 [source] [global dictionary])
+        ,originalGroupFromProjected (projected 138 [dictionary] dictionaryGlobals)]
+      cachedOutlines =
+        [originalGroupFromCandidate (CandidateGroup 137 [source] [imported dictionary Nothing])
+        ,originalGroupFromCandidate (CandidateGroup 138 [dictionary]
+          [imported package Nothing, (imported unused (Just 4)) {candidateGlobalEvaluated = True}])]
+      exactRoots outlines = requiredOriginalPackageGlobalsWithRetained [] []
+        [("main", "Tidepool.Aeson.FromJSON",
+          [(originalOrdinal group, originalBinders group, originalGlobals group) | group <- outlines])]
+        Set.empty [global source]
+  unless (exactRoots freshOutlines == Right [package])
+    (fail "fresh exact outline dropped unevaluated dictionary/package imports or reopened retained code")
+  unless (exactRoots cachedOutlines == Right [package])
+    (fail "cached exact outline dropped unevaluated dictionary/package imports or reopened retained code")
+  putStrLn "original-product-roots: PASS (demanded parser, whole group, unrelated omission, exact unit, retained boundary, duplicate refusal, failed home owner, recovery-induced source root, fresh/cached exact outlines)"

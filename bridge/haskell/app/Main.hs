@@ -68,7 +68,7 @@ import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..)
-  , WireProgram(..), ProjectedGroup(..), SiteRow(..), ProjectedGroupBody(..), GlobalDecl(..) )
+  , WireProgram(..), ProjectedGroup(..), SiteRow(..) )
 import qualified Tidepool.ExecutionSchema as Execution
 import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
@@ -76,7 +76,7 @@ import Tidepool.PreparedStg
   , evictPreparedBodyMatching )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots )
-import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..), candidateExecutionSources)
+import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
 import Tidepool.CompileInput (writeCompileInputProof)
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
@@ -102,6 +102,7 @@ import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), worker
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.ExactScope
   ( ExactCompilation(..), ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
+  , originalGroupFromProjected, originalGroupFromCandidate
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , readExactScope, revalidateExactScope, writeExactCompilation, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
@@ -1741,10 +1742,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       originalProduct = ExactProduct unit reserved
         (exactProgramProductVersion exact unit reserved (plannedSource original) interfaceBytes originalBytes packageBytes)
         (shaHex interfaceBytes) (shaHex originalBytes) productPath
-        [ExactOriginalGroup (fromIntegral (Execution.projectedOriginalOrdinal group))
-            (Execution.projectedBinders group)
-            [(globalIdentity global, globalRequiredEvaluated global) | global <- projectedGlobals (Execution.projectedBody group)]
-        | group <- originalGroups']
+        (map originalGroupFromProjected originalGroups')
       extended = supportScope
         { scopeProducts = scopeProducts supportScope ++ [originalProduct]
         , scopeInterfaces = scopeInterfaces supportScope ++ [(interface, packagesPath, shaHex packageBytes)]
@@ -1798,11 +1796,7 @@ retainProgramProducts includes directory prepared certified target initial = do
         fail "accepted cached supporting original changed before retention"
       requirements <- programInterfaceRequirements prepared unit owner
       lexicalRequirements <- programLexicalRequirements scope supportOwners requirements
-      let groups = [ExactOriginalGroup (candidateGroupOrdinal group)
-              (candidateGroupBinders group)
-              [(candidateGlobalIdentity global,candidateGlobalEvaluated global)
-              | global <- candidateGroupGlobals group]
-            | group <- candidateGroups candidate]
+      let groups = map originalGroupFromCandidate (candidateGroups candidate)
           existingInterfaces = [(artifact,packages,sha)
             | (artifact,packages,sha) <- scopeInterfaces scope
             , (exactUnit artifact,exactModule artifact) == key]
@@ -1869,10 +1863,7 @@ retainProgramProducts includes directory prepared certified target initial = do
           original = ExactProduct unit owner
             (exactProgramProductVersionFromDigest scope unit owner sourceDigest interfaceBytes productBytes packageBytes)
             (shaHex interfaceBytes) (shaHex productBytes) productPath
-            [ExactOriginalGroup (fromIntegral (Execution.projectedOriginalOrdinal group))
-              (Execution.projectedBinders group)
-              [(globalIdentity global, globalRequiredEvaluated global)
-                | global <- projectedGlobals (Execution.projectedBody group)] | group <- groups]
+            (map originalGroupFromProjected groups)
       BS.writeFile interfacePath interfaceBytes
       BS.writeFile packagesPath packageBytes
       BS.writeFile productPath productBytes
