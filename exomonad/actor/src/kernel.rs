@@ -132,6 +132,14 @@ pub enum KernelInvocationFailure {
     Failed { actor: ActorRef, detail: String },
     #[error("actor {actor} invocation cleanup remains unconfirmed: {detail}")]
     CleanupUnconfirmed { actor: ActorRef, detail: String },
+    #[error(
+        "actor {actor} accepted request {request:?}, but its terminal transfer failed: {source}"
+    )]
+    TerminalTransferFailed {
+        actor: ActorRef,
+        request: crate::RequestId,
+        source: Box<KernelInvocationFailure>,
+    },
     #[error(transparent)]
     Workbench(#[from] KernelWorkbenchFailure),
 }

@@ -2488,7 +2488,16 @@ async fn complete_actor_task<B: KernelBehavior>(
                     .await;
                 }
                 Err(TaskApplyFailure::Invocation(error)) => {
-                    settle_pending_workbench(pending, Err(error))
+                    let retire = matches!(
+                        &error,
+                        KernelInvocationFailure::TerminalTransferFailed { .. }
+                    );
+                    let detail = error.to_string();
+                    settle_pending_workbench(pending, Err(error));
+                    if retire {
+                        fail_actor(myself, state, detail).await;
+                        return;
+                    }
                 }
                 Err(TaskApplyFailure::Unconfirmed(detail)) => {
                     fail_unconfirmed_task(
@@ -2514,7 +2523,16 @@ async fn complete_actor_task<B: KernelBehavior>(
                     .await;
                 }
                 Err(TaskApplyFailure::Invocation(error)) => {
+                    let retire = matches!(
+                        &error,
+                        KernelInvocationFailure::TerminalTransferFailed { .. }
+                    );
+                    let detail = error.to_string();
                     settle_pending_tool(pending, Err(error));
+                    if retire {
+                        fail_actor(myself, state, detail).await;
+                        return;
+                    }
                 }
                 Err(TaskApplyFailure::Unconfirmed(detail)) => {
                     fail_unconfirmed_task(myself, state, PendingActorTask::Tool(pending), detail);
@@ -6951,3 +6969,7 @@ mod tests {
         successor_task.await.unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "local_actor/terminal_transfer_tests.rs"]
+mod terminal_transfer_tests;

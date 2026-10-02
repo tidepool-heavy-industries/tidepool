@@ -104,6 +104,7 @@ fn execution(model: Arc<ModelOwner>) -> OwnedExecution<frunk::HNil, tidepool_mcp
                 invocation_work,
                 publication: ForkPublication::Resident,
                 after_tool_active: false,
+                terminal_transfer: None,
             },
             request: WorkbenchRequest::from_cell_input("pure ()"),
             replay_request: None,

@@ -775,6 +775,7 @@ where
                         capture,
                     },
                     after_tool_active: false,
+                    terminal_transfer: None,
                 },
                 request,
                 replay_request,
@@ -1975,27 +1976,54 @@ where
                 })
             },
             |behavior, _kernel, mut owned, result| {
-                let result = behavior.complete_workbench_finalization(&mut owned.state, result);
-                let outcome = match &result {
-                    Ok(
-                        KernelStep::Continue(response)
-                        | KernelStep::ContinueLater(response)
-                        | KernelStep::Stop {
-                            output: response, ..
+                let (result, notifications) =
+                    behavior.complete_workbench_finalization(&mut owned.state, result);
+                if !notifications.is_empty() {
+                    let environment = behavior.environment.clone();
+                    return Ok(WorkbenchAdvance::Park(Self::owned_step_task(
+                        owned,
+                        move |_owned| {
+                            Box::pin(async move {
+                                publish_request_notifications(
+                                    &environment.requests,
+                                    &environment.deployments,
+                                    notifications,
+                                )
+                                .await;
+                            })
                         },
-                    ) => format!("{:?}", response.status),
-                    Err(_) => "error".into(),
-                };
-                owned
-                    .timing
-                    .take()
-                    .expect("one terminal timing owner")
-                    .finish(&outcome);
-                // Exact resources and continuation custody cross the last fence.
-                let _owned = owned;
-                result.map(WorkbenchAdvance::Complete)
+                        move |_behavior, _kernel, owned, ()| {
+                            Self::complete_owned_finalization(owned, result)
+                        },
+                    )));
+                }
+                Self::complete_owned_finalization(owned, result)
             },
         )
+    }
+
+    fn complete_owned_finalization(
+        mut owned: OwnedExecution<H, O>,
+        result: Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
+    ) -> Result<WorkbenchAdvance<Self>, KernelInvocationFailure> {
+        let outcome = match &result {
+            Ok(
+                KernelStep::Continue(response)
+                | KernelStep::ContinueLater(response)
+                | KernelStep::Stop {
+                    output: response, ..
+                },
+            ) => format!("{:?}", response.status),
+            Err(_) => "error".into(),
+        };
+        owned
+            .timing
+            .take()
+            .expect("one terminal timing owner")
+            .finish(&outcome);
+        // Exact resources and continuation custody cross the last fence.
+        let _owned = owned;
+        result.map(WorkbenchAdvance::Complete)
     }
 }
 

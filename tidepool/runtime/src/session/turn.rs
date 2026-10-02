@@ -2645,9 +2645,9 @@ fn validate_cell_admitted_request(
     admission: &super::RuntimeCellAdmission,
 ) -> Result<(), CellCheckFailure> {
     let view = admission.view();
-    if admission.private_execution().is_none() {
+    if admission.private_execution().is_none() && !admission.is_native_setup() {
         return Err(CompileError::ExtractFailed(
-            "checked execution requires its owning private admission".into(),
+            "checked execution requires its owning private or native setup admission".into(),
         )
         .into());
     }

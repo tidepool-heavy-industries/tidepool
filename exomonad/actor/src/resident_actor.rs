@@ -13,6 +13,8 @@ mod capture_workspace_tests;
 mod captured_commit;
 pub(crate) mod child_initialization;
 mod child_launch;
+#[cfg(test)]
+mod terminal_transfer_tests;
 pub use child_initialization::ForkChildRelease;
 mod clock_wait;
 mod command_presentation;
@@ -935,7 +937,21 @@ struct SuspendedCast {
     cleanup: Option<crate::resident_workbench::ParkedHoleAbortGuard>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum AcceptedTerminalKind {
+    Reply,
+    Cancellation,
+}
+
+#[derive(Debug)]
+struct AcceptedTerminalTransfer {
+    request: crate::RequestId,
+    kind: AcceptedTerminalKind,
+    owner: RequestReservationOwner,
+}
+
 struct PendingActorProgram {
+    transfer: Option<Arc<AcceptedTerminalTransfer>>,
     outcome: ResidentOutcome,
     cleanup: Option<crate::resident_workbench::ParkedHoleAbortGuard>,
 }
@@ -1495,6 +1511,7 @@ struct WorkbenchEffectState {
     publication: ForkPublication,
     /// The nested slot borrows this execution and cannot recursively invoke itself.
     after_tool_active: bool,
+    terminal_transfer: Option<Arc<AcceptedTerminalTransfer>>,
 }
 
 struct WorkbenchCursor {
@@ -3582,6 +3599,7 @@ where
         carried_preview: Option<String>,
         boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
         invocation: Option<&InvocationWork>,
+        effects: Option<&mut WorkbenchEffectState>,
     ) -> Result<(), ResidentActorWorkbenchError> {
         let settled = async {
             if self.has_incomplete_groups(context.actor, boundary) {
@@ -3676,17 +3694,21 @@ where
             // bindings, whatever `standing` now reads while the resumed
             // program is stabilized.
             self.outstanding_interactive = None;
+            self.pending_program = Some(PendingActorProgram { transfer: None, outcome, cleanup: None });
+            self.pending_reply = Some(request);
+            self.pending_reply_preview = reply_preview;
+            if let Some(effects) = effects {
+                self.record_terminal_transfer(effects, request, AcceptedTerminalKind::Reply);
+            }
             let cleanup = self.environment.runner.handoff_actor_continuation(
-                context.clone(), &outcome,
+                context.clone(), &self.pending_program.as_ref().expect("native reply pending").outcome,
             )?;
+            self.pending_program.as_mut().expect("native reply pending").cleanup = cleanup;
             if let Some(suspended) = &mut self.suspended_cast {
                 // The previous Interactive hole was consumed by resume_live;
                 // its successor now has the pending program's exact guard.
                 suspended.cleanup.take();
             }
-            self.pending_program = Some(PendingActorProgram { outcome, cleanup });
-            self.pending_reply = Some(request);
-            self.pending_reply_preview = reply_preview;
             Ok(())
         }
         .await;
@@ -6209,9 +6231,21 @@ where
         })?;
         self.spec_installs = 1;
         let prepare_started = std::time::Instant::now();
-        let application_workbench = self.environment.runner.application_workbench();
+        let source = self.freeze_installed_source(context.actor)?;
+        let (compile_context, authority) = WorkbenchCompilationAuthority::admit(
+            context.clone(),
+            source.clone(),
+            None,
+            self.environment.source_layers.as_ref(),
+        )
+        .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let application_workbench = self
+            .environment
+            .runner
+            .application_workbench()
+            .with_compilation_authority(authority);
         let compiled_tools = application_workbench
-            .prepare_tools(context.clone(), self.spec_installs)
+            .prepare_tools(compile_context, self.spec_installs)
             .await;
         tracing::info!(
             actor = %context.actor,
@@ -6223,7 +6257,6 @@ where
         );
         let compiled_tools = Arc::new(compiled_tools?);
         let declarations = compiled_tools.declarations.clone();
-        let source = self.freeze_installed_source(context.actor)?;
         self.installed_tools.publish(crate::InstalledToolLease::new(
             context.actor,
             source,
@@ -6718,6 +6751,27 @@ where
     }
 
     async fn initialize(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        boot: ResidentBoot,
+    ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
+        let workbench = self.environment.runner.application_workbench();
+        let guard = workbench.actor_initialization_cleanup(context.clone());
+        let registration = guard.registration();
+        let result = registration
+            .scope(self.initialize_inner(kernel, context, boot))
+            .await;
+        if result.is_ok() {
+            workbench
+                .settle_initialization_custody(context.clone(), registration)
+                .await?;
+            guard.disarm();
+        }
+        result
+    }
+
+    async fn initialize_inner(
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
@@ -8895,14 +8949,17 @@ where
                         result,
                         preview,
                     } => {
+                        let publication_boundary = effects.publication.boundary().cloned();
+                        let invocation_work = effects.invocation_work.clone();
                         self.stage_request_reply(
                             kernel,
                             context,
                             request_id,
                             result,
                             preview,
-                            effects.publication.boundary(),
-                            Some(effects.invocation_work.as_ref()),
+                            publication_boundary.as_ref(),
+                            Some(invocation_work.as_ref()),
+                            Some(&mut *effects),
                         )
                         .await
                         .map_err(|error| {
@@ -9076,10 +9133,28 @@ where
                         // The cancellation landed: this request no longer owes
                         // `respond` bindings.
                         self.outstanding_interactive = None;
+                        self.pending_program = Some(PendingActorProgram {
+                            transfer: None,
+                            outcome,
+                            cleanup: None,
+                        });
+                        self.pending_cancellation = Some(request_id);
+                        self.record_terminal_transfer(
+                            effects,
+                            request_id,
+                            AcceptedTerminalKind::Cancellation,
+                        );
                         let cleanup = self
                             .environment
                             .runner
-                            .handoff_actor_continuation(context.clone(), &outcome)
+                            .handoff_actor_continuation(
+                                context.clone(),
+                                &self
+                                    .pending_program
+                                    .as_ref()
+                                    .expect("native cancellation pending")
+                                    .outcome,
+                            )
                             .map_err(|error| {
                                 workbench_failure_after_operations(
                                     &cursor.receipts,
@@ -9089,8 +9164,10 @@ where
                                     cursor.unit.operations.clone(),
                                 )
                             })?;
-                        self.pending_program = Some(PendingActorProgram { outcome, cleanup });
-                        self.pending_cancellation = Some(request_id);
+                        self.pending_program
+                            .as_mut()
+                            .expect("native cancellation pending")
+                            .cleanup = cleanup;
                         cursor.receipts.push(WorkbenchItemReceipt {
                             diagnostics: Vec::new(),
                             index: cursor.index,
@@ -9227,11 +9304,75 @@ where
         }
     }
 
+    fn record_terminal_transfer(
+        &mut self,
+        effects: &mut WorkbenchEffectState,
+        request: crate::RequestId,
+        kind: AcceptedTerminalKind,
+    ) {
+        let transfer = Arc::new(AcceptedTerminalTransfer {
+            request,
+            kind,
+            owner: effects.reservation_owner.clone(),
+        });
+        self.pending_program
+            .as_mut()
+            .expect("accepted transfer owns its pending program")
+            .transfer = Some(transfer.clone());
+        effects.terminal_transfer = Some(transfer);
+    }
+
     fn complete_workbench_finalization(
         &mut self,
         execution_state: &mut WorkbenchExecutionState,
         result: Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
-    ) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> {
+    ) -> (
+        Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
+        Vec<crate::request::WatchNotification>,
+    ) {
+        let mut notifications = Vec::new();
+        let result = match (result, execution_state.effects.terminal_transfer.take()) {
+            (Err(source), Some(transfer)) => {
+                // Only this admitted attempt may settle its transferred program.
+                if transfer.owner == execution_state.effects.reservation_owner
+                    && self
+                        .pending_program
+                        .as_ref()
+                        .and_then(|program| program.transfer.as_ref())
+                        .is_some_and(|pending| Arc::ptr_eq(pending, &transfer))
+                {
+                    self.pending_program.take();
+                    match transfer.kind {
+                        AcceptedTerminalKind::Reply => {
+                            if self.pending_reply == Some(transfer.request) {
+                                self.pending_reply.take();
+                                self.pending_reply_preview.take();
+                            }
+                            notifications = self
+                                .environment
+                                .requests
+                                .fail_reply_settlement(transfer.request, source.to_string());
+                        }
+                        AcceptedTerminalKind::Cancellation => {
+                            if self.pending_cancellation == Some(transfer.request) {
+                                self.pending_cancellation.take();
+                            }
+                            self.environment
+                                .requests
+                                .rollback_cancellation_acknowledgement(transfer.request);
+                        }
+                    }
+                }
+                // Native reply/cancellation consumed the previous standing;
+                // an ordinary invocation error cannot leave this actor reusable.
+                Err(KernelInvocationFailure::TerminalTransferFailed {
+                    actor: execution_state.effects.context.actor,
+                    request: transfer.request,
+                    source: Box::new(source),
+                })
+            }
+            (result, _) => result,
+        };
         let execution = execution_state.request.execution_id().cloned();
         if let (Some(execution), Some(request)) = (execution, execution_state.replay_request.take())
         {
@@ -9259,7 +9400,7 @@ where
                 execution_state.invocation.as_ref(),
             );
         }
-        result
+        (result, notifications)
     }
 
     // Builtin and unconverted ingress retain their serial driver until their
@@ -9272,7 +9413,9 @@ where
     ) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> {
         let finalization = self.begin_workbench_finalization(execution_state, kernel, result);
         let result = settle_workbench_finalization(self.environment.clone(), finalization).await;
-        self.complete_workbench_finalization(execution_state, result)
+        let (result, notifications) = self.complete_workbench_finalization(execution_state, result);
+        self.publish_watch_notifications(notifications).await;
+        result
     }
 
     async fn abort_unpublished_groups(
@@ -10537,6 +10680,7 @@ where
                         capture,
                     },
                     after_tool_active: false,
+                    terminal_transfer: None,
                 },
                 request,
                 replay_request: retained_request,
@@ -10668,6 +10812,7 @@ where
                                         attempt.result,
                                         attempt.preview,
                                         publication_boundary.as_ref(),
+                                        None,
                                         None,
                                     )
                                     .await?;
@@ -10837,12 +10982,14 @@ where
                 return Ok(KernelStep::Continue(()));
             }
             let context = self.context(kernel.identity());
-            let PendingActorProgram { outcome, cleanup } =
-                self.pending_program
-                    .take()
-                    .ok_or_else(|| KernelBehaviorError {
-                        detail: "resident actor resumed without a pending Haskell action".into(),
-                    })?;
+            let PendingActorProgram {
+                outcome, cleanup, ..
+            } = self
+                .pending_program
+                .take()
+                .ok_or_else(|| KernelBehaviorError {
+                    detail: "resident actor resumed without a pending Haskell action".into(),
+                })?;
             let mut handler = self.suspended_cast.take();
             if let Some(handler) = &mut handler {
                 handler.cleanup.take();

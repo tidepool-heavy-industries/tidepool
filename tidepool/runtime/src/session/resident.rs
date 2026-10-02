@@ -2475,6 +2475,26 @@ where
         self.state.begin_cell_program(admission, program)
     }
 
+    pub fn admit_native_setup_cell_in(
+        &mut self,
+        scope: ScopeId,
+        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
+        specification: Arc<dyn std::any::Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.admit_native_setup_cell_in(
+            scope,
+            plan,
+            specification,
+            specification_digest,
+            authority_digest,
+            include_paths,
+        )
+    }
+
     pub fn admit_planned_cell_for_execution(
         &mut self,
         execution: Arc<super::PrivateExecutionAdmission>,
@@ -3064,10 +3084,13 @@ where
     /// disposable workbench fragments without trusting request payload data.
     #[must_use]
     pub fn parked_realm(&self, hole: &ResidentHole) -> Option<RealmId> {
-        let entry = self
-            .parked
-            .iter()
-            .find(|entry| entry.name == hole.cont_id())?;
+        self.parked_realm_named(hole.cont_id())
+    }
+
+    /// Read the realm of an already registered frame without minting a resume token.
+    #[must_use]
+    pub fn parked_realm_named(&self, cont_id: &str) -> Option<RealmId> {
+        let entry = self.parked.iter().find(|entry| entry.name == cont_id)?;
         self.state.parked_realm(entry.id)
     }
 

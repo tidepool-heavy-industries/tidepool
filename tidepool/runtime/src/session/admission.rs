@@ -71,6 +71,7 @@ pub struct RuntimeCellAdmission {
     owner: Arc<RuntimeAdmissionOwner>,
     owner_epoch: u64,
     private_execution: Option<Arc<PrivateExecutionAdmission>>,
+    native_setup: Option<NativeSetupAdmission>,
     _retained_scope: Arc<RuntimeLexicalScopeLease>,
     prefix_started: std::sync::atomic::AtomicBool,
     view: SessionCompileView,
@@ -88,6 +89,10 @@ pub struct RuntimeCellAdmission {
     include_paths: Vec<PathBuf>,
     digest: [u8; 32],
 }
+
+/// Runtime-issued purpose for one parser-certified binderless setup action.
+/// It never authorizes authored private writes or declarations.
+struct NativeSetupAdmission;
 
 /// An admission lifetime exists before the lazy machine bootstrap and is
 /// distinct from recoverable source-session IDs and per-store counters.
@@ -1159,6 +1164,10 @@ impl RuntimeCellAdmission {
     pub fn private_execution(&self) -> Option<&Arc<PrivateExecutionAdmission>> {
         self.private_execution.as_ref()
     }
+
+    pub(super) fn is_native_setup(&self) -> bool {
+        self.native_setup.is_some()
+    }
     pub fn view(&self) -> &SessionCompileView {
         &self.view
     }
@@ -1935,6 +1944,38 @@ impl PersistentSession {
             include_paths,
             None,
             None,
+            None,
+        )
+    }
+
+    /// Admit trusted setup under its existing scope with the same ordered
+    /// parser and exact environment seals used by private authored execution.
+    pub fn admit_native_setup_cell_in(
+        &mut self,
+        scope: ScopeId,
+        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
+        specification: Arc<dyn Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
+    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
+        if plan.items().len() != 1
+            || plan.items()[0].kind() != Kind::Bind
+            || !plan.items()[0].binders().is_empty()
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        self.admit_cell_with_plan(
+            scope,
+            0,
+            specification,
+            specification_digest,
+            authority_digest,
+            include_paths,
+            Some(plan),
+            None,
+            Some(NativeSetupAdmission),
         )
     }
 
@@ -1948,6 +1989,7 @@ impl PersistentSession {
         include_paths: Vec<PathBuf>,
         plan: Option<Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>>,
         private_execution: Option<Arc<PrivateExecutionAdmission>>,
+        native_setup: Option<NativeSetupAdmission>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.reap_admission_leases();
         let view = self
@@ -2222,6 +2264,9 @@ impl PersistentSession {
                 frame(parent.as_bytes());
             }
         }
+        if native_setup.is_some() {
+            frame(b"TidepoolNativeSetupAdmission1");
+        }
         let digest = *digest.finalize().as_bytes();
         let planned = planned.map(|mut planned| {
             Arc::get_mut(&mut planned)
@@ -2233,6 +2278,7 @@ impl PersistentSession {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
             private_execution,
+            native_setup,
             _retained_scope: retained_scope,
             prefix_started: std::sync::atomic::AtomicBool::new(false),
             view,
@@ -2453,6 +2499,7 @@ impl PersistentSession {
             include_paths,
             Some(plan),
             Some(execution),
+            None,
         )
     }
 
