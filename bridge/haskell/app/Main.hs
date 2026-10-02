@@ -56,7 +56,7 @@ import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..)
   , withResidentPipelineSelectedRequests, withExactInterfaceTransaction
-  , CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
+  , cellDisplayDeclarations, checkCellInstances
   , cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, stripMonadHead, generatedScaffoldRecipe, activationPreviewInputType )
 import Tidepool.ExecutionEncode
@@ -1351,12 +1351,7 @@ runLegacyCellMode compiler caches args cellPath = do
     (finalPlan, finalSource, compiled) <- if isJust preparedDeclaration || null (cellPlanDisplayTargets analyzed)
       then pure (analyzed, checkedSource, provisional)
       else do
-        contextDeclarations <- cellDisplayDeclarations DisplayInstanceContexts provisional analyzed
-        let contextual = installCellDisplayDeclarations contextDeclarations analyzed
-        contextualSource <- either fail pure (renderCellCheckSource checkingTemplate contextual)
-        writeFile modulePath contextualSource
-        contextChecked <- compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)) Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
-        declarations <- cellDisplayDeclarations DisplayInstanceFields contextChecked analyzed
+        declarations <- cellDisplayDeclarations provisional analyzed
         let finalized = installCellDisplayDeclarations declarations analyzed
         finalizedSource <- either fail pure (renderCellCheckSource checkingTemplate finalized)
         writeFile modulePath finalizedSource
@@ -1736,10 +1731,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
   createDirectoryIfMissing True directory
   (analyzed, provisional) <- checkCellInstances checkOriginal initial
   finalized <- if null (cellPlanDisplayTargets analyzed) then pure analyzed else do
-    contexts <- cellDisplayDeclarations DisplayInstanceContexts provisional analyzed
-    contextual <- pure (installCellDisplayDeclarations contexts analyzed)
-    contextChecked <- checkOriginal contextual
-    fields <- cellDisplayDeclarations DisplayInstanceFields contextChecked analyzed
+    fields <- cellDisplayDeclarations provisional analyzed
     pure (installCellDisplayDeclarations fields analyzed)
   original <- writeOriginal finalized
   prepared <- compiler (PreparedProducts (requestModuleCandidates args)) (Map.keysSet (requestRetainedGenerations args))

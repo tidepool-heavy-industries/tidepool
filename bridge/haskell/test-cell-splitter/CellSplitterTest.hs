@@ -10,12 +10,17 @@ import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, tails)
 import Data.Char (isDigit)
 import Data.Data (Data, Typeable, cast, gmapQ)
+import qualified Data.ByteString as BS
 import qualified Data.Text as Text
+import Codec.CBOR.Encoding (encodeListLen, encodeString)
+import Codec.CBOR.Write (toStrictByteString)
 import GHC
 import GHC.Builtin.Types (intTy)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
-import GHC.Tc.Types (tcg_rn_decls)
+import GHC.Tc.Types (tcg_rn_decls, tcg_insts, tcg_used_gres, tcg_keep, tcg_safe_infer, tcg_safe_infer_reasons)
+import GHC.Core.TyCo.Compare (eqType)
+import GHC.Types.Name.Set (nameSetElemsStable)
 import GHC.Types.SourceText (il_value)
 import GHC.Types.Fixity (Fixity(..))
 import GHC.Driver.Session (parseDynamicFilePragma)
@@ -66,6 +71,8 @@ main = getArgs >>= \case
   ["--session-fixities"] -> sessionFixitiesCompilation >> putStrLn "session fixities: 1 passed"
   ["--unreachable-compile-time"] -> unreachableCompileTimeCompilation >> putStrLn "unreachable compile-time: 1 passed"
   ["--checked-load-boundary"] -> checkedLoadBoundaryCompilation >> putStrLn "checked load boundary: 4 passed"
+  ["--structural-display", effectsRoot] -> structuralDisplayCompilation OrdinaryDisplayTest effectsRoot >> putStrLn "structural display: 1 passed"
+  ["--structural-display-exact", effectsRoot] -> structuralDisplayCompilation ExactDisplayTest effectsRoot >> putStrLn "exact structural display: 1 passed"
   _ -> runAllTests
 
 runAllTests :: IO ()
@@ -105,7 +112,6 @@ runAllTests = do
     ["--pin-imports"] -> pinnedTypeImportsCompilation
     ["--path-insensitive-witness"] -> pathInsensitiveWitnessCompilation
     ["--memo-lifecycle"] -> memoLifecycleCompilation
-    ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
     _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --pin-imports, --path-insensitive-witness, --memo-lifecycle, or --structural-display EFFECTS_INCLUDE"
 
 requestOwnedParserDefaults :: IO ()
@@ -1308,18 +1314,28 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
       createDirectory path
       pure path
 
-structuralDisplayCompilation :: FilePath -> IO ()
-structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecursive $ \root -> do
-  requestMemoLifecycle root
+data DisplayTestScope = OrdinaryDisplayTest | ExactDisplayTest
+
+structuralDisplayCompilation :: DisplayTestScope -> FilePath -> IO ()
+structuralDisplayCompilation selectedScope effectsRoot = bracket temporary removeDirectoryRecursive $ \root -> do
   source <- readFile "test-cell-splitter/DisplayFields.cell.hs"
   plan <- analyzeCell template source >>= either (fail . renderCellSplitError) pure
+  scope <- case selectedScope of
+    OrdinaryDisplayTest -> pure Nothing
+    ExactDisplayTest -> do
+      let path = root </> "exact-scope.cbor"
+      BS.writeFile path (toStrictByteString (encodeListLen 7
+        <> encodeString "TPEXACTSCOPE" <> encodeString "2"
+        <> foldMap encodeString (replicate 2 (Text.replicate 64 "0"))
+        <> encodeListLen 0 <> encodeListLen 0 <> encodeListLen 0))
+      pure (Just (SessionScope root [] (Just path) Nothing))
   let includes = ["lib", "test-cell-splitter", effectsRoot]
   withResidentPipelineSelectedRequests includes (const (pure ())) $ \runRequest -> runRequest $ \compiler -> do
     let compile current = do
           rendered <- either fail pure (renderCellCheckSource template current)
           let path = root </> "CellCheck.hs"
           writeFile path rendered
-          compiler CheckedEnvironment mempty GeneralCompile Nothing path includes Nothing
+          compiler CheckedEnvironment mempty GeneralCompile scope path includes Nothing
     (accepted, provisional) <- checkCellInstances compile plan
     assertEqual "resolved authored Display instances retained" False
       (any (`elem` map displayTargetName (cellPlanDisplayTargets accepted)) ["Custom", "Reexported"])
@@ -1336,10 +1352,31 @@ structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecu
       ("Presented" `elem` map genericDeclarationTarget (cellPlanGenericDeclarations accepted))
     assertEqual "unsupported automatic Generic derivations omitted" False
       (any ((`elem` ["Poly", "HiddenPoly", "Unboxed"]) . genericDeclarationTarget) (cellPlanGenericDeclarations accepted))
-    contextual <- cellDisplayDeclarations DisplayInstanceContexts provisional accepted
+    let environment = crTargetTcGblEnv provisional
+        dictionaries = map (idType . instanceDFunId) (tcg_insts environment)
+        probeState = do
+          used <- readIORef (tcg_used_gres environment)
+          keep <- readIORef (tcg_keep environment)
+          safe <- readIORef (tcg_safe_infer environment)
+          reasons <- readIORef (tcg_safe_infer_reasons environment)
+          pure (length used, nameSetElemsStable keep, safe, showSDocUnsafe (ppr reasons))
+    stateBefore <- probeState
+    direct <- cellDisplayDeclarations provisional accepted
+    stateAfter <- probeState
+    assertEqual "Display probe leaves checked module references unchanged" True (stateBefore == stateAfter)
+    unless (and (zipWith eqType dictionaries (map (idType . instanceDFunId) (tcg_insts environment)))) $
+      fail "Display probe changed an authoritative dictionary type"
+    -- Recreate the retired contextual CHECK in the oracle, using the exact
+    -- generated heads but opaque methods. Only this test recompiles that view.
+    let qualifier = cellPlanDisplayAlias accepted
+        contextual = concat
+          [ "\n" ++ header ++ "\n  displayTree _ = " ++ qualifier ++ ".TextLeaf ("
+            ++ qualifier ++ "Text.pack \"<opaque>\")\n"
+          | header <- lines direct, "instance " `isPrefixOf` header ]
     assertContains "parameter context" "Display a) =>" contextual
     typed <- compile (installCellDisplayDeclarations contextual accepted)
-    finalized <- cellDisplayDeclarations DisplayInstanceFields typed accepted
+    finalized <- cellDisplayDeclarations typed accepted
+    assertEqual "disposable Display contexts match canonical contextual compilation" finalized direct
     assertContains "unsupported imported field is not evaluated"
       "displayTree (Fields __tidepoolDisplayField0 _ __tidepoolDisplayField2 __tidepoolDisplayField3)" finalized
     assertContains "unsupported field remains named" "unknown = " finalized
@@ -1353,6 +1390,12 @@ structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecu
       ".precedenceParens __tidepoolPrecedence" finalized
     assertContains "infix constructor precedence pattern" "(:+:) {} -> " finalized
     assertContains "higher-kinded unsupported field is not evaluated" "displayTree (Higher _)" finalized
+    assertContains "mutual recursion requires the other generated instance's context" "displayTree (Mutual _)" finalized
+    assertContains "mutual recursive supported fields remain displayable"
+      "displayTree (Partner __tidepoolDisplayField0 __tidepoolDisplayField1 __tidepoolDisplayField2)" finalized
+    assertContains "inferred non-lifted kind variables remain opaque" "displayTree (Kinded _)" finalized
+    assertContains "unresolved family field remains opaque" "displayTree (FamilyField _)" finalized
+    assertContains "reduced family field remains displayable" "displayTree (ClosedFamily __tidepoolDisplayField0)" finalized
     assertContains "symbolic datatype instance head" ".Display ((:+:) a b)" finalized
     assertContains "rank-n field remains opaque" "displayTree (Poly _)" finalized
     assertContains "alias-hidden rank-n field remains opaque" "displayTree (HiddenPoly _)" finalized

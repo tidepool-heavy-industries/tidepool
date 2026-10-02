@@ -10,7 +10,7 @@ module Tidepool.GhcPipeline
     -- * Bound-value type analysis
   , stripMonadHead, isClosureType, renderType
   , splitTupleType
-  , CellDisplayPass(..), cellDisplayDeclarations
+  , cellDisplayDeclarations
   , cellExpressionPlans, cellExpressionEvidence, cellCheckedBinderSignatures, satisfiesCapturedConstraint
   , checkCellInstances, activationPreviewInputType
     -- * Resident session
@@ -78,21 +78,22 @@ import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable
   ( renderWithContext, defaultSDocContext, ppr, SDocContext(..)
   , mkUserStyle, NamePprCtx(..), QualifyName(..), Depth(..), PromotionTickContext(..) )
-import GHC.Types.Id (idName, setIdExported)
+import GHC.Types.Id (idName, setIdExported, setIdType)
 import GHC.Core.Type
   ( mkInvisForAllTys
   , mkInvisFunTys
   , splitAppTy_maybe
   , splitTyConApp_maybe
   , splitFunTy_maybe, splitFunTys
-  , isLiftedTypeKind, mkTyVarTy, typeKind, isTauTy, tyCoVarsOfType
+  , isLiftedTypeKind, mkTyVarTy, typeKind, isTauTy, tyCoVarsOfType, getTyVar_maybe
   )
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCo.FVs (scopedSort, tyConsOfType)
 import GHC.Core.TyCon (isTupleTyCon, tyConDataCons_maybe, unwrapNewTyCon_maybe, tyConUnique, tyConName, tyConVisibleTyVars)
 import GHC.Types.SrcLoc (mkRealSrcSpan, mkRealSrcLoc)
 import GHC.Core.Class (className)
-import GHC.Core.InstEnv (is_cls, is_tys)
+import GHC.Core.InstEnv (is_cls, is_tys, is_flag, is_dfun_name, instanceSig, updateClsInstDFun, mapInstEnv)
+import GHC.Types.Basic (OverlapFlag(..), OverlapMode(..))
 import GHC.Core.FamInstEnv (fi_fam, fi_tys)
 import GHC.Core.Predicate (mkClassPred, getClassPredTys_maybe)
 import GHC.Builtin.Names (gHC_PRIM, fUNTyConKey, unrestrictedFunTyConKey, genClassKey, repTyConKey)
@@ -107,10 +108,10 @@ import GHC.Tc.Utils.Monad (initTcWithGbl)
 import GHC.Tc.Utils.TcMType (newEvVars)
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, nonDetEltsUniqSet)
-import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
+import GHC.Tc.Utils.TcType (tcSplitSigmaTy, tcMkDFunSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds, typeEnvTyCons)
 import GHC.LanguageExtensions.Type qualified as LangExt
-import GHC.Tc.Types (TcGblEnv, tcg_dependent_files, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_insts, tcg_imports, tcg_keep)
+import GHC.Tc.Types (TcGblEnv, tcg_dependent_files, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_insts, tcg_inst_env, tcg_imports, tcg_keep, tcg_used_gres, tcg_safe_infer, tcg_safe_infer_reasons)
 import GHC.Types.Name.Set (extendNameSetList)
 import GHC.Types.Name.Reader (GlobalRdrEnv, rdrNameOcc)
 import GHC.Types.Name.Ppr (mkNamePprCtx)
@@ -313,12 +314,6 @@ data PipelineResult = PipelineResult
   , prTargetRdrEnv :: GlobalRdrEnv
   , prTargetTcGblEnv :: TcGblEnv
   }
-
--- | The first pass installs the final instance contexts with opaque bodies.
--- The second solves field predicates against those same instance heads. Only
--- the final generated source is extracted and published by the cell owner.
-data CellDisplayPass = DisplayInstanceContexts | DisplayInstanceFields
-  deriving (Eq, Show)
 
 checkCellInstances
   :: (CellSourcePlan -> IO CheckedEnvironmentResult)
@@ -548,8 +543,10 @@ isDisplayClass cls =
    in occNameString (nameOccName name) == "Display"
       && fmap (moduleNameString . moduleName) (nameModule_maybe name) == Just "Tidepool.Inspection.Display"
 
-cellDisplayDeclarations :: CellDisplayPass -> CheckedEnvironmentResult -> CellSourcePlan -> IO String
-cellDisplayDeclarations pass result plan = do
+-- | Select fields under the final generated instance contexts. The solver view
+-- is disposable; the cell owner must compile the returned canonical source.
+cellDisplayDeclarations :: CheckedEnvironmentResult -> CellSourcePlan -> IO String
+cellDisplayDeclarations result plan = do
   displayClass <- case
       [ is_cls instance'
       | instance' <- tcg_insts environment
@@ -557,12 +554,70 @@ cellDisplayDeclarations pass result plan = do
       ] of
     found : _ -> pure found
     [] -> fail "cell display preparation has no compiler-qualified Display instance"
-  fmap concat $ forM (cellPlanDisplayTargets plan) $ \target -> do
+  targets <- forM (cellPlanDisplayTargets plan) $ \target -> do
     constructor <- case
         [ tycon | tycon <- typeEnvTyCons (tcg_type_env environment)
         , occNameString (nameOccName (tyConName tycon)) == displayTargetName target ] of
-      found : _ -> pure found
-      [] -> fail "cell display target missing from its checked type environment"
+      [found] -> pure found
+      _ -> fail "cell display target missing or ambiguous in its checked type environment"
+    pure (target, constructor)
+  solverEnvironment <- do
+    -- GHC's solver may mark newtype constructors as used and update Safe
+    -- Haskell inference. Its evidence, worklist, and errors are fresh under
+    -- initTcWithGbl; these module-level references also need private copies.
+    used <- readIORef (tcg_used_gres environment) >>= newIORef
+    keep <- readIORef (tcg_keep environment) >>= newIORef
+    safe <- readIORef (tcg_safe_infer environment) >>= newIORef
+    reasons <- readIORef (tcg_safe_infer_reasons environment) >>= newIORef
+    replacements <- forM targets $ \(_, constructor) -> do
+      -- A surviving generated candidate has a compiler-checked, fully
+      -- generic head. Specialized authored instances remain untouched.
+      (instance', binders, existing, cls, arguments, variables) <- case
+          [ (candidate, binders, existing, cls, arguments, variables)
+          | candidate <- tcg_insts environment
+          , is_cls candidate == displayClass
+          -- Cached matching variables may be alpha-renamed independently of
+          -- the DFun. Its new predicates must use the DFun's own binders.
+          , let (binders, existing, cls, arguments) = instanceSig candidate
+          , cls == displayClass
+          , [headType] <- [arguments]
+          , Just (headConstructor, headArguments) <- [splitTyConApp_maybe headType]
+          , headConstructor == constructor
+          , Just variables <- [mapM getTyVar_maybe headArguments]
+          , length variables == length (tyConTyVars constructor)
+          , length (nub variables) == length variables
+          ] of
+        [found] -> pure found
+        _ -> fail "cell display target has no unique compiler-generated generic instance"
+      unless (case overlapMode (is_flag instance') of Overlappable{} -> True; _ -> False) $
+        fail "cell display candidate does not have its generated overlap mode"
+      let visible = [ variable
+                    | (parameter, variable) <- zip (tyConTyVars constructor) variables
+                    , parameter `elem` tyConVisibleTyVars constructor
+                    , isLiftedTypeKind (tyVarKind variable) ]
+          predicates = map (mkClassPred displayClass . pure . mkTyVarTy) visible
+      unless (null existing || length existing == length predicates
+          && and (zipWith eqType existing predicates)) $
+        fail "cell display candidate has unexpected dictionary constraints"
+      let original = instanceDFunId instance'
+          replacement = if null existing
+            then setIdType original (tcMkDFunSigmaTy binders predicates (mkClassPred cls arguments))
+            else original
+      pure (idName original, replacement)
+    let replace candidate = case lookup (is_dfun_name candidate) replacements of
+          Nothing -> candidate
+          Just replacement -> updateClsInstDFun (const replacement) candidate
+    -- Only instance contexts differ. No evidence from this view is returned
+    -- or installed into the checked environment, interfaces, or native code.
+    pure environment
+      { tcg_inst_env = mapInstEnv replace (tcg_inst_env environment)
+      , tcg_insts = map replace (tcg_insts environment)
+      , tcg_used_gres = used
+      , tcg_keep = keep
+      , tcg_safe_infer = safe
+      , tcg_safe_infer_reasons = reasons
+      }
+  fmap concat $ forM targets $ \(target, constructor) -> do
     let variables = filter (isLiftedTypeKind . tyVarKind) (tyConVisibleTyVars constructor)
         predicates = map (mkClassPred displayClass . pure . mkTyVarTy) variables
         context = case variables of
@@ -572,56 +627,53 @@ cellDisplayDeclarations pass result plan = do
             | variable <- variables ] ++ ") => "
         header = "\ninstance {-# OVERLAPPABLE #-} " ++ context ++ qualifier ++ ".Display "
           ++ displayTargetApplication target ++ " where\n"
-    if pass == DisplayInstanceContexts
-      then pure (header ++ "  displayTree _ = " ++ qualifier ++ ".TextLeaf " ++ textLiteral "<opaque>" ++ "\n")
-      else do
-        constructors <- maybe (fail "cell display target is not an algebraic datatype") pure
-          (tyConDataCons_maybe constructor)
-        methods <- forM constructors $ \dataConstructor -> do
-          let fields = [ ty | Scaled _ ty <- dataConOrigArgTys dataConstructor ]
-              labels = map (unpackFS . field_label . flLabel) (dataConFieldLabels dataConstructor)
-              constructorName = occNameString (nameOccName (dataConName dataConstructor))
-              names = [ "__tidepoolDisplayField" ++ show index | index <- [0 :: Int .. length fields - 1] ]
-          (_, checked) <- initTcWithGbl (crHscEnv result) environment
-            (mkRealSrcSpan (mkRealSrcLoc (mkFastString "<cell display>") 1 1)
-              (mkRealSrcLoc (mkFastString "<cell display>") 1 1)) $ do
-              givens <- newEvVars predicates
-              inert <- tcCheckGivens emptyInert (listToBag givens)
-              case inert of
-                Nothing -> fail "generated Display instance has contradictory givens"
-                Just solved -> mapM (\ty -> if isTauTy ty && isLiftedTypeKind (typeKind ty)
-                    then tcCheckWanteds solved [mkClassPred displayClass [ty]]
-                    else pure False) fields
-          selections <- maybe (fail "cell display field solver failed") pure checked
-          let renderField index name supported =
-                let method = if null labels then ".displayTreePrec 11 " else ".displayTree "
-                    value = if supported then qualifier ++ method ++ name
-                      else qualifier ++ ".TextLeaf " ++ textLiteral "<opaque>"
-                 in case drop index labels of
-                   label : _ -> qualifier ++ ".Concat [" ++ qualifier ++ ".TextLeaf "
-                     ++ textLiteral (label ++ " = ") ++ ", " ++ value ++ "]"
-                   [] -> value
-              rendered = [ renderField index name supported
-                         | (index, (name, supported)) <- zip [0..] (zip names selections) ]
-              opening = constructorName ++ if null names then "" else if null labels then " " else " {"
-              closing = if null labels then ("" :: String) else "}"
-              patternName = case constructorName of
-                ':' : _ -> "(" ++ constructorName ++ ")"
-                _ -> constructorName
-              patternFields = zipWith (\name supported -> if supported then name else "_") names selections
-          pure ( "  displayTree (" ++ unwords (patternName : patternFields) ++ ") = "
-                   ++ qualifier ++ ".treeParts " ++ textLiteral opening ++ " " ++ textLiteral closing
-                   ++ " [" ++ intercalate ", " rendered ++ "]\n"
-               , "    " ++ patternName ++ " {} -> "
-                   ++ (if null names then "" else qualifier ++ ".precedenceParens __tidepoolPrecedence ")
-                   ++ "(" ++ qualifier ++ ".displayTree __tidepoolValue)\n" )
-        -- An applied constructor is parenthesized as an argument, as derived
-        -- Show does. The method names nothing from the cell's own scope.
-        let precedence = "  displayTreePrec __tidepoolPrecedence __tidepoolValue = case __tidepoolValue of\n"
-              ++ concatMap snd methods
-        pure (header ++ if null methods
-          then "  displayTree _ = " ++ qualifier ++ ".TextLeaf " ++ textLiteral "<empty>" ++ "\n"
-          else concatMap fst methods ++ precedence)
+    constructors <- maybe (fail "cell display target is not an algebraic datatype") pure
+      (tyConDataCons_maybe constructor)
+    methods <- forM constructors $ \dataConstructor -> do
+      let fields = [ ty | Scaled _ ty <- dataConOrigArgTys dataConstructor ]
+          labels = map (unpackFS . field_label . flLabel) (dataConFieldLabels dataConstructor)
+          constructorName = occNameString (nameOccName (dataConName dataConstructor))
+          names = [ "__tidepoolDisplayField" ++ show index | index <- [0 :: Int .. length fields - 1] ]
+      (_, checked) <- initTcWithGbl (crHscEnv result) solverEnvironment
+        (mkRealSrcSpan (mkRealSrcLoc (mkFastString "<cell display>") 1 1)
+          (mkRealSrcLoc (mkFastString "<cell display>") 1 1)) $ do
+          givens <- newEvVars predicates
+          inert <- tcCheckGivens emptyInert (listToBag givens)
+          case inert of
+            Nothing -> fail "generated Display instance has contradictory givens"
+            Just solved -> mapM (\ty -> if isTauTy ty && isLiftedTypeKind (typeKind ty)
+                then tcCheckWanteds solved [mkClassPred displayClass [ty]]
+                else pure False) fields
+      selections <- maybe (fail "cell display field solver failed") pure checked
+      let renderField index name supported =
+            let method = if null labels then ".displayTreePrec 11 " else ".displayTree "
+                value = if supported then qualifier ++ method ++ name
+                  else qualifier ++ ".TextLeaf " ++ textLiteral "<opaque>"
+             in case drop index labels of
+               label : _ -> qualifier ++ ".Concat [" ++ qualifier ++ ".TextLeaf "
+                 ++ textLiteral (label ++ " = ") ++ ", " ++ value ++ "]"
+               [] -> value
+          rendered = [ renderField index name supported
+                     | (index, (name, supported)) <- zip [0..] (zip names selections) ]
+          opening = constructorName ++ if null names then "" else if null labels then " " else " {"
+          closing = if null labels then ("" :: String) else "}"
+          patternName = case constructorName of
+            ':' : _ -> "(" ++ constructorName ++ ")"
+            _ -> constructorName
+          patternFields = zipWith (\name supported -> if supported then name else "_") names selections
+      pure ( "  displayTree (" ++ unwords (patternName : patternFields) ++ ") = "
+               ++ qualifier ++ ".treeParts " ++ textLiteral opening ++ " " ++ textLiteral closing
+               ++ " [" ++ intercalate ", " rendered ++ "]\n"
+           , "    " ++ patternName ++ " {} -> "
+               ++ (if null names then "" else qualifier ++ ".precedenceParens __tidepoolPrecedence ")
+               ++ "(" ++ qualifier ++ ".displayTree __tidepoolValue)\n" )
+    -- An applied constructor is parenthesized as an argument, as derived
+    -- Show does. The method names nothing from the cell's own scope.
+    let precedence = "  displayTreePrec __tidepoolPrecedence __tidepoolValue = case __tidepoolValue of\n"
+          ++ concatMap snd methods
+    pure (header ++ if null methods
+      then "  displayTree _ = " ++ qualifier ++ ".TextLeaf " ++ textLiteral "<empty>" ++ "\n"
+      else concatMap fst methods ++ precedence)
   where
     environment = crTargetTcGblEnv result
     qualifier = cellPlanDisplayAlias plan
