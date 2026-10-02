@@ -6,4 +6,4 @@ import Tidepool.Effects
 import qualified Tidepool.Effects as Effects
 
 result :: Effects.M ()
-result = say "selected effect"
+result = getContext >> pure ()
