@@ -344,7 +344,7 @@ executionSourceOriginalNodeWith :: Bool -> [ExecutionSourceGraph] -> ExecutionSo
 executionSourceOriginalNodeWith prospective graphs = originalNode prospective Set.empty
   where
     graphMap = Map.fromList [(executionGraphSha256 graph,graph) | graph <- graphs]
-    originalNode optional seen original sha
+    originalNode allowUnavailable seen original sha
       | sha `Set.member` seen = Left (ExecutionSourceConflicting key)
       | otherwise = do
           graph <- maybe (Left (ExecutionSourceMissing key)) Right (Map.lookup sha graphMap)
@@ -352,7 +352,7 @@ executionSourceOriginalNodeWith prospective graphs = originalNode prospective Se
             , executionOwnerIdentity owner' == original]
           case (executionOwnerFresh owner', executionOwnerOriginalGraph owner') of
             (False, Just retained) -> originalNode False (Set.insert sha seen) original retained
-            (False, Nothing) | optional -> Left (ExecutionSourceUnavailable key)
+            (False, Nothing) | allowUnavailable -> Left (ExecutionSourceUnavailable key)
             (False, Nothing) -> Left (ExecutionSourceMissing key)
             (True, Just _) -> Left (ExecutionSourceConflicting key)
             (True, Nothing) -> do
