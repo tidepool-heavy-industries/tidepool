@@ -676,6 +676,25 @@ impl ExactSourceAdmission {
 }
 
 impl ExactCompilationRequest {
+    pub(crate) fn apply_to(
+        &self,
+        command: &mut tidepool_extract_cmd::ExtractCmd,
+    ) -> Result<(), CompileError> {
+        let request = tidepool_extract_cmd::ExtractRequest::decode(&command.request_bytes())
+            .map_err(failure)?;
+        let retained = certified_retained_generation_tags(
+            request.retained_generations(),
+            self.groups.iter().flat_map(PendingCertifiedGroup::imports),
+        )?;
+        // These authenticated tags keep original native demands intact through
+        // projection. They grant neither lexical imports nor live heap roots.
+        for (identity, generation) in retained {
+            command.retained_generation(identity, generation);
+        }
+        command.session_artifacts(&self.manifest);
+        Ok(())
+    }
+
     pub(crate) fn with_checked_value_imports(
         mut self,
         authority: crate::checked_cell::CheckedValueImportAuthority,
@@ -1216,6 +1235,41 @@ fn bounded_read(path: &Path, limit: u64) -> Result<Vec<u8>, CompileError> {
         return Err(failure("exact artifact exceeds byte bound"));
     }
     Ok(bytes)
+}
+
+fn certified_retained_generation_tags<'a>(
+    mut retained: BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>,
+    imports: impl Iterator<Item = &'a crate::certified_products::PendingImportOwner>,
+) -> Result<BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>, CompileError> {
+    use crate::certified_products::PendingImportOwner;
+    for import in imports {
+        let (identity, generation) = match import {
+            PendingImportOwner::Retained {
+                identity,
+                generation,
+            } => (identity, generation),
+            PendingImportOwner::RetainedPackage {
+                binder, generation, ..
+            } => (binder, generation),
+            PendingImportOwner::Source { .. } | PendingImportOwner::Package { .. } => continue,
+        };
+        let identity = tidepool_extract_cmd::SymbolIdentity {
+            unit: identity.unit.clone(),
+            module: identity.module.clone(),
+            namespace: identity.namespace.clone(),
+            occurrence: identity.occurrence.clone(),
+            record_parent: identity.record_parent.clone(),
+        };
+        if retained
+            .insert(identity, *generation)
+            .is_some_and(|old| old != *generation)
+        {
+            return Err(failure(
+                "certified native demand has conflicting retained generations",
+            ));
+        }
+    }
+    Ok(retained)
 }
 fn row(value: &Value, length: usize) -> Result<&[Value], CompileError> {
     let values = list(value, length)?;
@@ -2193,6 +2247,62 @@ fn sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn certified_demand_tags_preserve_full_identity_and_refuse_generation_conflicts() {
+        use crate::certified_products::PendingImportOwner;
+        let identity = tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "main".into(),
+            module: "Tidepool.Session.Val.G1".into(),
+            namespace: "value".into(),
+            occurrence: "x".into(),
+            record_parent: None,
+        };
+        let retained = PendingImportOwner::Retained {
+            identity: identity.clone(),
+            generation: 1,
+        };
+        let mut package_identity = identity.clone();
+        package_identity.unit = "package".into();
+        package_identity.module = "PackageModule".into();
+        let package = PendingImportOwner::RetainedPackage {
+            unit: package_identity.unit.clone(),
+            module: package_identity.module.clone(),
+            binder: package_identity,
+            generation: 3,
+            interface_digest: [4; 32],
+        };
+        let tags =
+            certified_retained_generation_tags(BTreeMap::new(), [&retained, &package].into_iter())
+                .unwrap();
+        assert_eq!(tags.len(), 2);
+        assert!(certified_retained_generation_tags(tags.clone(), [&retained].into_iter()).is_ok());
+        let conflict = PendingImportOwner::Retained {
+            identity: identity.clone(),
+            generation: 2,
+        };
+        assert!(certified_retained_generation_tags(tags, [&conflict].into_iter()).is_err());
+        assert!(certified_retained_generation_tags(
+            BTreeMap::new(),
+            [&retained, &conflict].into_iter(),
+        )
+        .is_err());
+        let mut distinct = identity;
+        distinct.record_parent = Some("Record".into());
+        let distinct = PendingImportOwner::Retained {
+            identity: distinct,
+            generation: 2,
+        };
+        assert_eq!(
+            certified_retained_generation_tags(
+                BTreeMap::new(),
+                [&retained, &distinct].into_iter(),
+            )
+            .unwrap()
+            .len(),
+            2,
+        );
+    }
     use sha2::{Digest, Sha256};
     use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
 

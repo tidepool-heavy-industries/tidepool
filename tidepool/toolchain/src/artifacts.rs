@@ -1663,6 +1663,18 @@ impl ModuleCandidateOffer {
             .map(|request| request.manifest.as_path())
     }
 
+    /// Attach this offer's exact compiler inputs and original native demand
+    /// tags. Runtime live-value admission remains a separate authority.
+    pub fn apply_to(&self, command: &mut ExtractCmd) -> Result<(), CompileError> {
+        if let Some(exact) = &self.exact {
+            exact.apply_to(command)?;
+        }
+        if let Some(manifest) = self.manifest_path() {
+            command.module_candidates(manifest);
+        }
+        Ok(())
+    }
+
     /// Validate successful source transactions under one actual source parent.
     /// A request using several source directories validates each directory.
     pub fn validate_exact_outputs(
@@ -2354,7 +2366,7 @@ fn compile_invocation_inner(
             &temp_dir.path().join("exact-scope"),
             endpoint.identity().producer_bytes(),
         )?;
-        cmd.session_artifacts(&request.manifest);
+        request.apply_to(&mut cmd)?;
         Some(request)
     } else {
         None

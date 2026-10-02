@@ -2775,12 +2775,7 @@ pub fn compile_cell_program_admitted(
     if let Some(root) = offer.checked_value_root() {
         command.session_root(root);
     }
-    if let Some(manifest) = offer.exact_scope_path() {
-        command.session_artifacts(manifest);
-    }
-    if let Some(manifest) = offer.manifest_path() {
-        command.module_candidates(manifest);
-    }
+    offer.apply_to(&mut command)?;
     crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
     let run = endpoint.execute(&command).map_err(map_notfound)?;
     let report =
@@ -2905,12 +2900,7 @@ fn check_cell_impl(
     if let Some(root) = offer.checked_value_root() {
         cmd.session_root(root);
     }
-    if let Some(manifest) = offer.exact_scope_path() {
-        cmd.session_artifacts(manifest);
-    }
-    if let Some(manifest) = offer.manifest_path() {
-        cmd.module_candidates(manifest);
-    }
+    offer.apply_to(&mut cmd)?;
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
     let run = endpoint.execute(&cmd).map_err(map_notfound)?;
     let output = &run.output;
@@ -3627,12 +3617,7 @@ fn run_turn_with_pin(
     if let Some(root) = offer.checked_value_root() {
         cmd.session_root(root);
     }
-    if let Some(manifest) = offer.exact_scope_path() {
-        cmd.session_artifacts(manifest);
-    }
-    if let Some(manifest) = offer.manifest_path() {
-        cmd.module_candidates(manifest);
-    }
+    offer.apply_to(&mut cmd)?;
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
     let ordinary_admitted = req.exact_context.is_none() && checked.is_none() && display.is_none();
     enum TurnCompilerOutput {

@@ -513,9 +513,7 @@ fn run_inspections_with_policy(
         temp.path(),
         request.exact_context.clone(),
     )?;
-    if let Some(manifest) = offer.exact_scope_path() {
-        command.session_artifacts(manifest);
-    }
+    offer.apply_to(&mut command)?;
     crate::paths::apply_build_products_dir(&mut command, &endpoint);
     let run = endpoint.execute(&command).map_err(map_spawn)?;
     timing::record_stage(
