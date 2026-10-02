@@ -1978,7 +1978,9 @@ where
             |behavior, _kernel, mut owned, result| {
                 let (result, notifications) =
                     behavior.complete_workbench_finalization(&mut owned.state, result);
-                if !notifications.is_empty() {
+                if !notifications.is_empty()
+                    || behavior.environment.requests.has_settlement_notifications()
+                {
                     let environment = behavior.environment.clone();
                     return Ok(WorkbenchAdvance::Park(Self::owned_step_task(
                         owned,
