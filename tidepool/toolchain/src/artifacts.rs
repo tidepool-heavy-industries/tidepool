@@ -970,7 +970,7 @@ impl ModuleCandidateOffer {
         )>,
         purpose: crate::checked_cell::CheckedItemPurpose,
     ) -> Result<Self, CompileError> {
-        let context = checked_offer_context(context)?;
+        let context = prefix.with_initial_value_context(checked_offer_context(context)?)?;
         let settled_values = prefix.select_settled_values(settled_bindings)?;
         let checked_item = crate::checked_cell::CheckedItemOffer {
             purpose,
@@ -1068,7 +1068,7 @@ impl ModuleCandidateOffer {
             u64,
         )>,
     ) -> Result<Self, CompileError> {
-        let context = checked_offer_context(context)?;
+        let context = prefix.with_initial_value_context(checked_offer_context(context)?)?;
         if !crate::checked_cell::same_include_paths(include, capture.item().cell_include()) {
             return Err(CompileError::ExtractFailed(
                 "checked display include search order changed".into(),

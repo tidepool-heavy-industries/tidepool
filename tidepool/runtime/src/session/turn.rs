@@ -5912,7 +5912,7 @@ mod tests {
         let following = CheckedCellSpecification {
             admission_digest: [2; 32],
             cell_source: "let alias = home".into(),
-            template_source: template,
+            template_source: template.clone(),
             turn_templates: vec![],
             injected_modules: vec![artifact.owner().module_name()],
             reserved_declaration_modules: vec![],
@@ -5928,6 +5928,91 @@ mod tests {
         )
         .unwrap();
         assert!(offer.exact_scope_path().unwrap().is_file());
+        // A later checked item starts from the runtime's raw declaration
+        // view, while its cell already owns the exact retained value closure.
+        let selected_import = format!("import {} (home)", artifact.owner().module_name());
+        let next_template = template.replace("import qualified CheckedHomeValue", &selected_import);
+        let next_templates = templates
+            .iter()
+            .map(|template| {
+                (
+                    template.kind.wire_name().to_owned(),
+                    template
+                        .source
+                        .replace("import qualified CheckedHomeValue", &selected_import),
+                )
+            })
+            .collect::<Vec<_>>();
+        let next_specification = CheckedCellSpecification {
+            admission_digest: [4; 32],
+            cell_source: "let alias = home".into(),
+            template_source: next_template.clone(),
+            turn_templates: next_templates.clone(),
+            injected_modules: vec![artifact.owner().module_name()],
+            reserved_declaration_modules: vec![],
+        };
+        let next_scratch = tempfile::tempdir().unwrap();
+        let next_offer = ModuleCandidateOffer::select_checked_cell(
+            endpoint.identity().producer_bytes(),
+            admission.include_paths(),
+            next_scratch.path(),
+            None,
+            next_specification,
+            vec![(artifact.owner(), artifact.bytes_owned().clone())],
+            std::slice::from_ref(&artifact),
+        )
+        .unwrap();
+        let cell_source = next_scratch.path().join("cell.txt");
+        let template_path = next_scratch.path().join("CellCheckTemplate.hs");
+        std::fs::write(&cell_source, "let alias = home").unwrap();
+        std::fs::write(&template_path, next_template).unwrap();
+        let include = admission
+            .include_paths()
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let mut command = extract_cmd().unwrap();
+        command
+            .input(&cell_source)
+            .cell()
+            .cell_template(&template_path)
+            .cell_out(next_scratch.path().join("cell.cbor"))
+            .output_dir(next_scratch.path())
+            .includes(&include)
+            .inject_vals(&[artifact.owner().module_name()])
+            .session_root(next_offer.checked_value_root().unwrap());
+        for (index, (kind, source)) in next_templates.iter().enumerate() {
+            let path = next_scratch.path().join(format!("template-{index}.hs"));
+            std::fs::write(&path, source).unwrap();
+            command.turn_template(kind, &path);
+        }
+        next_offer.apply_to(&mut command).unwrap();
+        let run = command.bind().unwrap().execute(&command).unwrap();
+        crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}",
+                    next_offer.retain_failure(next_scratch.path(), &run.output.stderr, error)
+                )
+            });
+        let cell = next_offer.admit_checked_cell(next_scratch.path()).unwrap();
+        let item = cell.item(0).unwrap();
+        let prefix = item.initial_prefix().unwrap();
+        let item_scratch = tempfile::tempdir().unwrap();
+        ModuleCandidateOffer::select_checked_item(
+            endpoint.identity().producer_bytes(),
+            admission.include_paths(),
+            item_scratch.path(),
+            None,
+            item,
+            prefix,
+            [5; 32],
+            artifact.owner().gen().0 + 1,
+            None,
+            &next_templates,
+            vec![],
+        )
+        .expect("later item must reuse its sealed initial value context");
         assert!(
             ModuleCandidateOffer::select_checked_cell(
                 endpoint.identity().producer_bytes(),

@@ -1643,6 +1643,22 @@ impl ExactCompiledItem {
 }
 
 impl ExactCompiledPrefix {
+    pub(crate) fn with_initial_value_context(
+        &self,
+        current: Arc<crate::declaration_context::ExactDeclarationContext>,
+    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        Ok(Arc::new(
+            (*current).clone().extend_checked_value_input_context(
+                &self.cell.declaration_context,
+                self.cell
+                    .value_inputs
+                    .baseline
+                    .iter()
+                    .map(|artifact| (artifact.owner, artifact.bytes.as_ref())),
+            )?,
+        ))
+    }
+
     fn planned_authorization(&self) -> Value {
         self.completed_declaration(0)
             .and_then(|item| item.cell.planned_declaration.as_ref())
