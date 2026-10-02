@@ -59,6 +59,17 @@ async fn hosted_lookup_uses_actual_actor_row_for_constraint_availability() {
         "{matches}"
     );
 
+    let type_search = dispatch_lookup(policy, &[":: Int -> Int"]).await;
+    assert_eq!(type_search["status"], "committed", "{type_search:?}");
+    let type_output = type_search["items"][0]["output"].as_str().unwrap();
+    assert!(
+        type_output.contains(":: Int -> Int")
+            && (type_output.contains("[available]") || type_output.contains("[polymorphic]"))
+            && !type_output.contains("no match:")
+            && !type_output.contains("error:"),
+        "the hosted type-search query must return matches through the captured compiler Id: {type_output}"
+    );
+
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

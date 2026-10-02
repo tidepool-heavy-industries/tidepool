@@ -282,8 +282,15 @@ pub(crate) fn strip_generated_query_locations(diagnostic: &str) -> String {
         .join("\n")
 }
 
-fn strip_generated_query_location(line: &str) -> &str {
+pub(crate) fn is_generated_query_file(path: &str) -> bool {
     const ANCHOR: &str = "Expr.hs";
+    path == ANCHOR
+        || (path.ends_with(ANCHOR)
+            && path.len() > ANCHOR.len()
+            && matches!(path.as_bytes()[path.len() - ANCHOR.len() - 1], b'/' | b'\\'))
+}
+
+fn strip_generated_query_location(line: &str) -> &str {
     let Some((head, message)) = line.split_once(": ") else {
         return line;
     };
@@ -297,11 +304,7 @@ fn strip_generated_query_location(line: &str) -> &str {
     }
     // The anchor must end a path component, never be an embedded suffix, so
     // a real `SomeExpr.hs` in the workspace keeps its location.
-    let matches_anchor = path == ANCHOR
-        || (path.ends_with(ANCHOR)
-            && path.len() > ANCHOR.len()
-            && matches!(path.as_bytes()[path.len() - ANCHOR.len() - 1], b'/' | b'\\'));
-    if matches_anchor {
+    if is_generated_query_file(path) {
         message
     } else {
         line

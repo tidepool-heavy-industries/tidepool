@@ -5074,7 +5074,7 @@ where
                             queries,
                             effects: Some(&context.haskell_effects_alias),
                         })
-                        .map_err(|error| error.to_string())
+                        .map_err(crate::lookup::LookupInspectionError::Compiler)
                     },
                 );
                 if !request_pending {

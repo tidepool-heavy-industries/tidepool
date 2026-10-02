@@ -4155,8 +4155,9 @@ capturedBindingDisplay occurrence tcg =
 -- interface registration, even though it accepted their typed syntax. The
 -- typechecked source is the exact owner of those local generated binders;
 -- retain only their Ids for the immediate inspection request. This includes
--- the effect-row sentinel as well as @:type@ probes: both are target-local and
--- must not be resolved back through an intentionally elided target interface.
+-- the effect-row sentinel, @:type@ probes, and the lookup type-search binder:
+-- all are target-local and must not be resolved back through an intentionally
+-- elided target interface.
 capturedInspectionProbes :: TypecheckedModule -> TcGblEnv -> Map.Map String Id
 capturedInspectionProbes typed tcg = Map.fromList
   [ (occurrence, identifier)
@@ -4165,6 +4166,7 @@ capturedInspectionProbes typed tcg = Map.fromList
       ++ collectDataIds (tm_typechecked_source typed)
   , let occurrence = occNameString (nameOccName (idName identifier))
   , occurrence == "__tidepool_lookup_row"
+      || occurrence == "__tidepool_lookup_query"
       || "__tidepool_inspect_" `isPrefixOf` occurrence
   ]
 
