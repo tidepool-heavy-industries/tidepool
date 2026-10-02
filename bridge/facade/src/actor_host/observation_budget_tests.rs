@@ -18,12 +18,6 @@
 //! name and shown through the ordinary `cellDisplay` paging, with the view
 //! marked as a selection that names the binding holding the rest.
 //!
-//! The tests below are drawn from cells that failed in a live session on
-//! 2026-09-17; the originals are preserved under
-//! `plans/jev-lab/observation-limit/`. One lost 45 committed operations
-//! (10 Jev calls, 35 command jobs). The other was `reflect 3`, which cannot
-//! bind at all when three turns of conversation exceed 100 KB — as they
-//! routinely do.
 
 use super::command_jobs_tests::backend_request;
 use super::command_test_support::TestCommands;

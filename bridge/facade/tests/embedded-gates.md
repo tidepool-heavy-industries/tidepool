@@ -141,6 +141,29 @@ and stops its owned daemon using the existing lifecycle recipe, then runs
 measurements remain separate fixtures; this warm run alone does not establish
 all performance targets.
 
+## Reporting retained measurements
+
+After the owning runner and compiler have exited and flushed their logs, report
+samples against the same frozen frontend, worker, host, and source revision:
+
+```sh
+python3 scripts/resident-performance-report.py \
+  --samples /path/to/runner.log \
+  --compiler-trace /path/to/compiler.jsonl \
+  --manifest /path/to/manifest.json \
+  --output /path/to/report.json
+```
+
+The runner log supplies `resident-performance` JSON records; the manifest binds
+exact runner commands, executed counts, binary hashes, compiler producer, and
+retained Rust/GHC build packets. Repeat `--compiler-trace` for separate compiler
+epochs. The reporter validates those inputs and source provenance before counting
+samples, reports missing evidence separately, and exits nonzero for incomplete
+or unmet product gates. `--actor-samples`, `--durable-samples`, and
+`--package-cold-report` supply independent retained evidence; private-session
+measurements do not establish the Engine/Store product gate. Consult `--help`
+and the owning reporter validators for the accepted schemas.
+
 ## Active cancellation measurement
 
 The ignored cancellation fixture reuses the same production host and owned

@@ -8,8 +8,7 @@ providers, scheduling, resources, persistence, and argument parsing.
 ## Start here
 
 1. Read this file, then `docs/GLOSSARY.md` for names. `README.md` says what the
-   system is for; `plans/README.md` lists open design questions and retained
-   evidence.
+   system is for.
 2. Before editing a subsystem, read the nearest nested `AGENTS.md` or
    `CLAUDE.md`. They state that crate's boundaries and invariants.
 3. Build and test through the `justfile`, which enters the Nix shell itself.
@@ -126,9 +125,10 @@ redesigns, and distinguish structural savings from measured speedups.
 - `exomonad-worktree`: managed coding checkouts and repository observation.
 
 Read the nearest nested `AGENTS.md` before editing a subsystem. Use
-`docs/GLOSSARY.md` for names, especially model-facing text. `plans/README.md`
-lists current design work; plan documents are temporary scaffolding, not
-standing architecture. The root `CLAUDE.md` is a short repository overview;
+`docs/GLOSSARY.md` for names, especially model-facing text. Keep plans focused
+on open decisions and actionable work, verified against source and execution
+evidence. Remove completed handoffs and checkpoint history; Git retains them.
+The root `CLAUDE.md` is a short repository overview;
 this file owns contributor rules and the cross-crate ownership map. A nested
 `CLAUDE.md` governs its own crate. Verify architectural claims against owning
 source and production consumers.

@@ -217,10 +217,6 @@ Give validated, advertised automations at least three waves of actual prompt
 exposure before judging non-use. Distinguish absent opportunities, discovery
 problems, setup failures and poor utility; fix confirmed defects immediately.
 
-The first post-wave15 experiment applies this target to Bash followed by waiting
-and diagnostic reads: make the tool own routine continuation, with bounded
-Jev-assisted follow-ups where useful, then evaluate against the recorded sequences.
-
 ## 1. Orient and choose
 
 The supervisor reads the previous run's artifacts and interviews, verifies
@@ -386,6 +382,5 @@ verdicts, remaining blockers, newly possible workflows and the next proposed
 experiment. Keep the README's purpose stable and iteration details in the active
 plan. Do not call the loop complete merely because a model turn ends.
 
-This pattern was extracted during early RSI preparation. Retained experiment
-reports record its observations; its effectiveness remains subject to the same
-observation and revision as the orchestration policies it evaluates.
+The method remains subject to the same observation and revision as the
+orchestration policies it evaluates.

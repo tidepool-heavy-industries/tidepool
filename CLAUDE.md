@@ -17,9 +17,8 @@ the nearest crate guide.
   mechanism instead of copying it.
 - Root decisions govern cross-crate architecture. A crate's `CLAUDE.md` governs
   its local boundaries and invariants.
-- `plans/README.md` lists open design questions and retained evidence. Plans
-  are temporary and are not
-  standing architecture.
+- Plans describe open decisions and actionable work. Remove completed handoffs
+  and checkpoint history; Git retains them.
 - Use the vocabulary in `docs/GLOSSARY.md`, especially in model-facing text.
 - Keep history in git. Standing documentation describes the current system,
   not the sequence of changes that produced it.
@@ -48,10 +47,9 @@ the nearest crate guide.
 | `exomonad-agent` | Typed coding-agent backend boundary |
 | `exomonad-worktree` | Managed coding checkouts, repository observation, and journal |
 | `tidepool` | Public facade and composition-root binaries |
-| `exomonad/harness-dogfooding/` | Authored harnesses, including the Haskell devswarm |
 
-The retained `exomonad/harness/` and `exomonad/web/` source trees are historical
-reference material and are excluded from the supported Cargo workspace.
+The harness runtime and browser assets come from the pinned external
+`exomonad-harness` source; `Cargo.toml` and `flake.nix` own those dependencies.
 
 Small support crates have short local charters describing their exact scope.
 

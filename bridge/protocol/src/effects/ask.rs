@@ -5,43 +5,13 @@
 //! malformed `AskUserWith` degrades to (handled by the harness, not
 //! here — see the runtime's decoder contract).
 //!
-//! Hand-carried Haskell decl: `bridge/mcp/src/effect_defs.rs`'s `AskWith`
-//! verb. NOT in [`crate::effects::all`] — see
-//! [`crate::effects::suspension_roster`].
+//! The raw `askRaw` wrapper is supplied by `ask_effect_def!` in
+//! `bridge/mcp/src/effect_defs.rs`. This decode-only description is listed in
+//! [`crate::effects::suspension_roster`], outside [`crate::effects::all`].
 //!
-//! **Why this effect stays hand-carried while Fork/Finalize/RunLLMTurn/Green
-//! (the rest of #20's deferred five) all flipped.** Those four shared one
-//! representable shape — OPAQUE call-forwarding to a `*Sited` sibling,
-//! `unsafeCoerce`-marshaling a `send` result — which
-//! [`crate::schema::HelperBody::OpaqueForward`]/`OpaqueSited` now express as
-//! reviewed, bounded data. `Ask`'s own helpers are a DIFFERENT kind of thing
-//! entirely: `ask` builds its payload by calling `schemaToValue` (not a bare
-//! `send (Ctor …)`), and `isOpt`/`innerSchema`/`schemaToValue` are ordinary
-//! multi-equation pure Haskell functions recursing over the `Schema` sum —
-//! no verb, no `send`, no site id, no OPAQUE pragma. They are exactly the
-//! case `crate::schema::Helper`'s own doc names: "a helper that is neither
-//! [a verb-wrapper] [nor a projection] is not representable, and stays
-//! hand-written OUTSIDE the contract until its lane makes it a deliberate
-//! schema feature." Modeling arbitrary pattern-matching function bodies as
-//! schema data would mean a general-purpose "Haskell expression as data"
-//! mechanism — not a bounded extension sized to a handful of real uses, and
-//! exactly the raw-hatch-by-another-name this schema's no-raw-hatch rule
-//! exists to refuse.
-//!
-//! **This was the concrete motivating case for #24's first act** (stdlib-vs-
-//! generator ownership, `plans/README.md`'s carried-forward list):
-//! `isOpt`/`innerSchema`/`schemaToValue`/`data Schema` were STDLIB-shaped
-//! code (pure functions over a schema type), not DECL-shaped code (a thin
-//! verb surface) — they have since migrated to `bridge/haskell/lib/Tidepool/Form/
-//! Schema.hs`, auto-imported via `extra_imports_for!(Ask)`
-//! (`bridge/mcp/src/effect_defs.rs`), the same relocation Worktree's/
-//! RepoEvent's own non-representable helpers already took (see
-//! `worktree.rs`/`event.rs`'s module docs). `Ask`'s decl block is now just
-//! `ask`'s own thin verb wrapper — but that wrapper still calls
-//! `schemaToValue` directly (not a bare `send (Ctor …)`), so it remains
-//! unrepresentable by `HelperBody`'s reviewed shapes and this effect stays
-//! hand-carried in `effect_defs.rs`, same as before the stdlib move; the
-//! generator was never the blocker for the stdlib relocation.
+//! `Tidepool.Form.Schema` owns `Schema`, its JSON conversion, and the composed
+//! `ask` function. These authored Haskell definitions stay outside the generated
+//! effect module, which cannot import authored library code.
 
 use crate::hs::HsType;
 use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb};
@@ -87,13 +57,8 @@ pub fn ask() -> Effect {
         }],
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
-        // No real `tidepool-handlers` handler (harness/server machinery
-        // services it directly — see the module doc), but its real helper
-        // surface (`ask`/`isOpt`/`innerSchema`/`schemaToValue`, real Haskell
-        // logic, not thin `send` wrappers) is not yet representable by
-        // `HelperBody`'s reviewed shapes; deferred alongside Fork/RunLlmTurn/
-        // Finalize/Green rather than flipped with a wrong or raw-hatch
-        // rendering.
+        // The harness services this suspension directly; there is no
+        // tidepool-handlers implementation to generate.
         generated_handler: false,
         handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: false,

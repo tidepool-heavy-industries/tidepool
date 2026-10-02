@@ -98,9 +98,7 @@ actions supplied through the test environment, without becoming Rust link inputs
 A Buck test result is evidence only for its selected target; all
 other packages retain their existing `just` checks until migrated and accepted.
 
-Additional focused native gates are recorded in
-[`engine-harness-completion-evidence.md`](../plans/engine-harness-completion-evidence.md).
-Current execution targets include:
+Additional focused execution targets include:
 
 | Target | Execution boundary |
 | --- | --- |

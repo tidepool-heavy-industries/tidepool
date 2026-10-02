@@ -1,16 +1,6 @@
-//! The Event effect — typed repository events, the second effect to retire a
-//! `Wt*`/`Ev*`-family hand-written wire block (Worktree was the first).
-//!
-//! **The motivating bug lives here.** `RepoEventAwait` was added to registry 1
-//! (`bridge/mcp/src/effect_defs.rs`) and missed in registry 4
-//! (`exomonad/harness/src/engine.rs`'s `classify_hole`) — the defect this
-//! schema exists to make structurally impossible. `classify_hole` already
-//! covers all seven Event verbs; every verb below carries
-//! `HandlingClass::OuterDispatch(OuterEffect::RepoEvent)`, the SAME class
-//! `RepoEventAwait` and its six siblings already share at the hand-routed call
-//! site — this is what makes a future eighth verb fail GENERATION rather than
-//! reaching `SuspensionRouting` unclassified (`classify_hole` now refuses an
-//! unknown constructor loudly) if its class is forgotten.
+//! Typed repository events. Every verb declares
+//! `HandlingClass::OuterDispatch(OuterEffect::RepoEvent)` so generation rejects
+//! a verb with a missing handling class.
 //!
 //! **Two things Event needed that Worktree did not, both because
 //! `EventWatch`/`HeadChangeKind`/`HeadChangeReceipt`/`CommitReceipt` name Worktree's
@@ -655,12 +645,7 @@ fn subscription_arg() -> Arg {
     }
 }
 
-/// All seven verbs share ONE handling class: the same `OuterDispatch(RepoEvent)`
-/// `RepoEventAwait` and its siblings already reach through the hand-routed
-/// `classify_hole` match arm (`exomonad/harness/src/engine.rs`) — this is what
-/// makes an eighth verb without a class fail GENERATION rather than reach
-/// `classify_hole` unrecognized (a loud `SuspensionRouting` refusal today;
-/// the historical `RepoEventAwait` bug rode the old silent-Ask fallback).
+/// Every repository-event verb dispatches through the same outer handler.
 fn verbs() -> Vec<Verb> {
     vec![
         Verb {

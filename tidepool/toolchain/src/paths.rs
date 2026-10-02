@@ -90,8 +90,7 @@ pub fn persistent_compile_daemon_socket() -> PathBuf {
 /// memo. That split is only sound because the memo is content-addressed: two
 /// writers reach the same entry only when every input that can reach the
 /// output bytes is identical, in which case they are the same compilation and
-/// are entitled to the same bytes. `exomonad/harness/tests/support`'s
-/// `isolate_cache` is the caller that wants exactly this.
+/// are entitled to the same bytes.
 pub fn compile_cache_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("TIDEPOOL_COMPILE_CACHE_DIR") {
         return PathBuf::from(d);

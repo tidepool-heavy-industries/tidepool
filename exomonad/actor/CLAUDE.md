@@ -82,5 +82,4 @@ values; a generic runtime status must not certify them.
 
 Live values belong to the resident machine's custody graph, not the producing
 actor's liveness. Actor retirement must release its roots without freeing code
-reachable from another actor's closures, fork tips, or watch snapshots. See
-`plans/actor-model/jit-memory-lifetime.md` for remaining live-machine reclamation.
+reachable from another actor's closures, fork tips, or watch snapshots.

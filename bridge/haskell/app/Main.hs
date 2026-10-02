@@ -244,7 +244,7 @@ runParsedInvocation
 runParsedInvocation compiler caches parsedWorkerRequest = do
   -- Read once per invocation (see Tidepool.Timing) and thread down;
   -- TIDEPOOL_TIMING is diagnostic-only and never touches stdout/the emitted
-  -- files — see the module doc there and exomonad/harness/src/timing.rs.
+  -- files — see the module doc there.
   timing <- readTimingEnabled
   -- Apply the harness language profile by rewriting a scratch copy:
   -- rewrite the target to a pragma-prepended scratch copy BEFORE any mode

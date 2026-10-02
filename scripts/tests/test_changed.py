@@ -147,6 +147,10 @@ class Selection(unittest.TestCase):
         retired = (
             "exomonad/harness/Cargo.toml", "exomonad/harness/src/engine.rs",
             "exomonad/web/src/lib.rs",
+            "exomonad/harness-dogfooding/devswarm/Main.hs",
+            "exomonad/examples/harness/Example.hs",
+            "codex-handoff/luna6-vibe-bugs/cell.hs",
+            ".tidepool/attic/MechDemo.hs",
         )
         self.assertEqual(self.select(*retired), ({}, {}, set(), set()))
         selection, checks, _, reasons = self.select(

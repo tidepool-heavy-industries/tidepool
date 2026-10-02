@@ -16,12 +16,9 @@
 //! - `tidepool_mcp::standard_decls()` -- the ordinary MCP eval/session
 //!   surface (`ResidentSession`'s own Notebook-shaped tests build their
 //!   preamble/effect-stack from this).
-//! - `tidepool_mcp::all_decls()` -- the WIDER surface Exomonad's actor host
-//!   actually compiles against (`exomonad/harness/src/engine.rs`'s
-//!   `agent_decls()` is `standard_decls()` plus `Fork`/`Finalize`; `all_decls`
-//!   is that plus every other schema-owned effect --
-//!   `bridge/mcp/src/generated/mod.rs`'s `schema_decls()`: `Journal`,
-//!   `Worktree`, repo/agent events, `Actor*`, `Sleep`, `Green`, and more).
+//! - `tidepool_mcp::all_decls()` -- every schema-owned effect from
+//!   `bridge/mcp/src/generated/mod.rs`: `Journal`, `Worktree`, repo/agent
+//!   events, `Actor*`, `Sleep`, `Green`, and more.
 //!
 //! Each verb is mentioned, never RUN: the compiled turn expression is `do {
 //! _ <- verb1 arg; _ <- verb2 arg arg; ...; pure () }`, but this test only
