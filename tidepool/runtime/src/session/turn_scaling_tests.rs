@@ -1253,6 +1253,13 @@ fn following_declaration_retains_original_native_binding_inventory() {
 
 #[test]
 fn following_declaration_publishes_current_source_selected_originals() {
+    let subscriber = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "tidepool_toolchain::planned_source_admission=debug",
+        ))
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
     tidepool_testing::eval_harness::require_extract();
     let root = tempfile::tempdir().unwrap();
     std::fs::write(
