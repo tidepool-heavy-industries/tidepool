@@ -348,24 +348,31 @@ fn w5_a5_incomplete_promotion_integrity_failure_is_terminal_and_gated() {
 
     let error = invocation.promote_result(0).unwrap_err();
     assert_scope_clear(&invocation);
-    assert!(matches!(
-        error,
-        ExecutionError::Runtime(failure)
-            if matches!(failure.cause, RuntimeError::IncompletePromotion(_))
-    ));
+    let ExecutionError::Runtime(failure) = error else {
+        panic!("terminal runtime failure")
+    };
+    let RuntimeError::IncompletePromotion(diagnostic) = &failure.cause else {
+        panic!("incomplete promotion")
+    };
+    assert_eq!(
+        diagnostic.promotion.phase,
+        tidepool_heap::gc::promotion::PromotionPhase::SelectedGraph
+    );
+    assert!(matches!(diagnostic.promotion.origin,
+        Some(tidepool_heap::gc::raw::CopyFailureOrigin {
+            edge: tidepool_heap::gc::raw::CopyEdge::ObjectField { descriptor, offset, .. }, ..
+        }) if descriptor == header && offset == field as usize - parent as usize));
     let observe = invocation.observe(10_000).unwrap_err();
     assert_scope_clear(&invocation);
     assert!(matches!(
         observe,
-        ExecutionError::Runtime(failure)
-            if matches!(failure.cause, RuntimeError::IncompletePromotion(_))
+        ExecutionError::Runtime(ref later) if later == &failure
     ));
     let retry = invocation.promote_result(0).unwrap_err();
     assert_scope_clear(&invocation);
     assert!(matches!(
         retry,
-        ExecutionError::Runtime(failure)
-            if matches!(failure.cause, RuntimeError::IncompletePromotion(_))
+        ExecutionError::Runtime(ref later) if later == &failure
     ));
 }
 
