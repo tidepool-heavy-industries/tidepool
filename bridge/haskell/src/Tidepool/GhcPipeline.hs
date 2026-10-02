@@ -1033,8 +1033,8 @@ homeDependencyDigests graph =
     -- 'memoHomeDependencies' above (home vs. package, or which of several
     -- home candidates was selected). Only the path *string* naming where
     -- those same bytes live on disk is dropped. The full witness (path
-    -- included) remains available on 'HomeDependencyWitness' itself and in
-    -- 'gmeDirectWitnesses' for 'TIDEPOOL_MEMO_TRACE' diagnostics; this
+    -- included) remains available on 'HomeDependencyWitness' itself and, when
+    -- tracing is enabled, in 'gmeDirectWitnesses'; this
     -- digest is the only place a path was folded into memo validity.
     ownFrame dependency = frame $ BS8.pack $
       moduleNameString name ++ "\0" ++ show kind ++ "\0" ++ show fingerprint
@@ -1293,13 +1293,14 @@ data GutsMemoEntry = GutsMemoEntry
     -- ^ Diagnostic only (TIDEPOOL_MEMO_TRACE): the compile-cycle id
     -- ('requestIdentity') that produced this entry. Never read by a
     -- validity check.
-  , gmeDirectWitnesses :: Map.Map HomeDependency HomeDependencyWitness
+  , gmeDirectWitnesses :: !(Map.Map HomeDependency HomeDependencyWitness)
     -- ^ Diagnostic only (TIDEPOOL_MEMO_TRACE): this module's direct
     -- dependency witnesses (selected path, content fingerprint) at the
     -- cycle that produced this entry. Retained so a later miss can report
     -- exactly which witness changed, and whether the change was in path,
     -- fingerprint, or both. Validity itself continues to compare
-    -- 'memoHomeDependencies' (an opaque digest), never this map.
+    -- 'memoHomeDependencies' (an opaque digest), never this map. Empty when
+    -- tracing was disabled for the cycle that stored the entry.
   }
 
 data ModuleObservation
@@ -1892,6 +1893,11 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
               -- name exactly which dependency's witness changed.
               directWitnesses modSum = Map.restrictKeys summaryFingerprints
                 (directDependencyKeys modSum)
+              -- The strict memo field must not retain a thunk over the graph
+              -- when this cycle did not opt in to witness diagnostics.
+              memoDiagnosticWitnesses modSum
+                | memoTrace = directWitnesses modSum
+                | otherwise = Map.empty
               dependencyEdgeCount = sum
                 [ length children | (_, children) <- Map.elems dependencyGraph ]
           when timing $ liftIO $ hPutStrLn stderr $
@@ -2149,7 +2155,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                                 incarnation)
                               (ExecutableProduct moduleProduct)
                               requestIdentity
-                              (directWitnesses modSum))))
+                              (memoDiagnosticWitnesses modSum))))
                           Nothing  -> pure ()
                         pure (FreshObservation mf, Just r, prepared)
               pure ([observation | (observation, _, _) <- pairs], [r | (_, Just r, _) <- pairs],
@@ -2228,7 +2234,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                               incarnation)
                             (ExecutableProduct moduleProduct)
                             requestIdentity
-                            (directWitnesses modSum))))
+                            (memoDiagnosticWitnesses modSum))))
                       Nothing -> pure ()
                   compileReachable interfaceUse modSum moduleFacts = do
                     -- The reachability pass ran against load's interfaces. Recheck
@@ -2250,7 +2256,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                               incarnation)
                             (ValidationOnly moduleFacts)
                             requestIdentity
-                            (directWitnesses modSum))))
+                            (memoDiagnosticWitnesses modSum))))
                       Nothing -> pure ()
               rs <- fmap concat $ forM (zip3 observations' facts interfaceUses) $ \(observation, moduleFacts, interfaceUse) -> do
                 let modSum = observationSummary observation
