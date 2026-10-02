@@ -462,7 +462,23 @@ fn retained_shared_evidence_inventory_measurement() {
             )),
         )
     });
-    let selection_owners = selection.as_ref().map(|selection| selection.by_owner.len());
+    let selection = selection.expect("bounded compact production inventory offer");
+    let selection_owners = selection.by_owner.len();
+    assert_eq!(
+        selection_owners, 70,
+        "all original production owners are offered"
+    );
+    let manifest_bytes = fs::read(&selection.manifest_path).unwrap();
+    assert!(manifest_bytes.len() <= MANIFEST_LIMIT);
+    let manifest: Value = ciborium::de::from_reader(manifest_bytes.as_slice()).unwrap();
+    let fields = manifest.as_array().unwrap();
+    assert_eq!(fields.len(), 6);
+    assert_eq!(fields[1].as_text(), Some("8"));
+    let symbol_rows = fields[2].as_array().unwrap().len();
+    let global_rows = fields[3].as_array().unwrap().len();
+    assert_eq!(symbol_rows, symbols.len());
+    assert_eq!(global_rows, globals.len());
+    assert_eq!(fields[4].as_array().unwrap().len(), selection_owners);
     let distinct_proof_bytes: usize = unique_proofs.values().sum();
     assert!(old_bytes > PAYLOAD_LIMIT);
     assert!(new_bytes + distinct_proof_bytes < PAYLOAD_LIMIT);
@@ -474,7 +490,10 @@ fn retained_shared_evidence_inventory_measurement() {
         "group_rows":groups.len(),"group_inventory_cbor_bytes":group_wire.len(),"unique_symbols":symbols.len(),"unique_full_globals":globals.len(),
         "binder_references":binder_references,"global_references":global_references,"unique_symbol_cbor_bytes":symbols.iter().map(Vec::len).sum::<usize>(),
         "unique_global_cbor_bytes":globals.iter().map(Vec::len).sum::<usize>(),"graph_files":graph_count,"graph_file_bytes":graph_bytes,"referenced_graphs":referenced_graphs.len(),"referenced_graph_bytes":referenced_graph_bytes,
-        "indexed_inventory_model_bytes":indexed_inventory_bytes,"owners":owners
+        "indexed_inventory_model_bytes":indexed_inventory_bytes,
+        "actual_manifest_version":8,"actual_manifest_bytes":manifest_bytes.len(),
+        "actual_shared_symbol_rows":symbol_rows,"actual_shared_global_rows":global_rows,
+        "manifest_limit":MANIFEST_LIMIT,"owners":owners
     })).unwrap()).unwrap();
 }
 

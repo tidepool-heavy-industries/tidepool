@@ -6,7 +6,7 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Data.ByteString.Lazy qualified as BSL
 import Control.Exception (SomeException, bracket, evaluate, finally, try)
-import Control.Monad (forM, unless, void)
+import Control.Monad (foldM, forM, forM_, unless, void)
 import GHC.Clock (getMonotonicTimeNSec)
 import Data.Word (Word64)
 import Crypto.Hash.SHA256 qualified as SHA
@@ -93,7 +93,8 @@ import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..), CheckedEnvironmentResult(..)
   , renderType, generatedScaffoldRecipe
   , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected )
-import Tidepool.ModuleCandidates (ModuleCandidate(..), readModuleCandidates, candidateExecutionSources, candidateOriginalIdentity)
+import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
+  , readModuleCandidates, candidateExecutionSources, candidateOriginalIdentity)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports)
 import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
 import Tidepool.FatIface (readExactInterface)
@@ -113,6 +114,7 @@ main = getArgs >>= \case
   ["--original-package-cohort", coreRoot, output] -> originalPackageCohort coreRoot output
   ["--original-projection-products"] -> originalProjectionProducts
   ["--candidate-manifest-products", path] -> candidateManifestProducts path
+  ["--candidate-compact-inventory"] -> candidateCompactInventory
   ["--candidate-ghc-load"] -> candidateGhcLoad
   ["--generated-scaffold-imports"] -> generatedScaffoldImports
   ["--generated-scaffold-retained",scope,seal] -> generatedScaffoldRetained scope seal
@@ -1185,11 +1187,12 @@ candidateManifestProducts path = withScratch $ \work -> do
     _ -> fail "production candidate manifest lost the actual 6037-group Core product"
   bytes <- BS.readFile path
   term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
-  (magic, version, fields) <- case term of
-    TList [magic, version, TList [TList fields]] | length fields == 14 -> pure (magic, version, fields)
+  (magic, version, symbols, globals, fields, execution) <- case term of
+    TList [magic, version, symbols, globals, TList [TList fields], execution]
+      | length fields == 14 -> pure (magic, version, symbols, globals, fields, execution)
     _ -> fail "actual production emitter lost the single candidate row"
-  let changedAt index value = TList [magic, version, TList
-        [TList (take index fields ++ [value] ++ drop (index + 1) fields)]]
+  let changedAt index value = TList [magic, version, symbols, globals, TList
+        [TList (take index fields ++ [value] ++ drop (index + 1) fields)], execution]
       tooMany = TList (replicate 65537 (TList [TInt 0, TList [], TList []]))
   forM_ [("groups", changedAt 10 tooMany), ("digest", changedAt 5 (TString "invalid"))] $
     \(name, changed) -> do
@@ -1207,6 +1210,145 @@ candidateManifestProducts path = withScratch $ \work -> do
     unless (case refused of Left _ -> True; Right _ -> False) $
       fail "candidate reader accepted trailing or oversized bytes"
   putStrLn "candidate manifest products: actual Rust Core6037, group/digest/trailing/byte refusal bounds passed"
+
+-- The fixture encoder keys complete legacy values by their canonical CBOR.
+-- Its tables therefore preserve identity fields and every global requirement.
+data FixtureInventory = FixtureInventory
+  { fixtureSymbols :: Map.Map BS.ByteString Int
+  , fixtureSymbolRows :: [Term]
+  , fixtureGlobals :: Map.Map BS.ByteString Int
+  , fixtureGlobalRows :: [Term]
+  }
+
+compactInventoryRows :: [Term] -> Either String (Term,Term,[Term])
+compactInventoryRows rows = do
+  (inventory,compact) <- mapFixtureInventory compactRow empty rows
+  pure (TList (reverse (fixtureSymbolRows inventory)),TList (reverse (fixtureGlobalRows inventory)),compact)
+  where
+    empty = FixtureInventory Map.empty [] Map.empty []
+    compactRow inventory (TList fields) | length fields == 14 = case drop 10 fields of
+      TList groups:_ -> do
+        (next,compact) <- mapFixtureInventory compactGroup inventory groups
+        pure (next,TList (take 10 fields ++ [TList compact] ++ drop 11 fields))
+      _ -> Left "fixture candidate lacks groups"
+    compactRow _ _ = Left "fixture candidate must have fourteen fields"
+    compactGroup inventory (TList [ordinal,TList binders,TList globals]) = do
+      (withBinders,binderRefs) <- mapFixtureInventory internFixtureSymbol inventory binders
+      (withGlobals,globalRefs) <- mapFixtureInventory internFixtureGlobal withBinders globals
+      pure (withGlobals,TList [ordinal,TList binderRefs,TList globalRefs])
+    compactGroup _ _ = Left "fixture original group must have three fields"
+
+mapFixtureInventory :: (FixtureInventory -> a -> Either String (FixtureInventory,b))
+  -> FixtureInventory -> [a] -> Either String (FixtureInventory,[b])
+mapFixtureInventory step initial values = do
+  (final,reversed) <- foldM (\(inventory,acc) value -> do
+    (next,result) <- step inventory value
+    pure (next,result:acc)) (initial,[]) values
+  pure (final,reverse reversed)
+
+internFixtureSymbol :: FixtureInventory -> Term -> Either String (FixtureInventory,Term)
+internFixtureSymbol inventory value@(TList [_,_,_,_,_]) =
+  let key = toStrictByteString (encodeTerm value)
+  in case Map.lookup key (fixtureSymbols inventory) of
+    Just index -> Right (inventory,TInt index)
+    Nothing ->
+      let index = Map.size (fixtureSymbols inventory)
+      in Right (inventory
+        { fixtureSymbols = Map.insert key index (fixtureSymbols inventory)
+        , fixtureSymbolRows = value:fixtureSymbolRows inventory },TInt index)
+internFixtureSymbol _ _ = Left "fixture symbol must have five fields"
+
+internFixtureGlobal :: FixtureInventory -> Term -> Either String (FixtureInventory,Term)
+internFixtureGlobal inventory value@(TList [identity,rep,signature,evaluated,generation]) =
+  let key = toStrictByteString (encodeTerm value)
+  in case Map.lookup key (fixtureGlobals inventory) of
+    Just index -> Right (inventory,TInt index)
+    Nothing -> do
+      (withSymbol,symbolRef) <- internFixtureSymbol inventory identity
+      let index = Map.size (fixtureGlobals withSymbol)
+      pure (withSymbol
+        { fixtureGlobals = Map.insert key index (fixtureGlobals withSymbol)
+        , fixtureGlobalRows = TList [symbolRef,rep,signature,evaluated,generation]:fixtureGlobalRows withSymbol },TInt index)
+internFixtureGlobal _ _ = Left "fixture global must have five fields"
+
+candidateCompactInventory :: IO ()
+candidateCompactInventory = withScratch $ \work -> do
+  let identity = SymbolIdentity "main" "Fixture" "value" "entry" Nothing
+      identities = [identity,identity {symbolRecordParent=Just "Parent"}
+        ,identity {symbolUnit="other"},identity {symbolModule="Other"}
+        ,identity {symbolNamespace="data"},identity {symbolOccurrence="other"}]
+      plain = CandidateGlobal identity LiftedRefRep Nothing False Nothing
+      globals = [plain,plain {candidateGlobalRep=IntRep 64}
+        ,plain {candidateGlobalSignature=Just (Signature [LiftedRefRep] (Returns [IntRep 64]))}
+        ,plain {candidateGlobalSignature=Just (Signature [AddressRep] (Returns [IntRep 64]))}
+        ,plain {candidateGlobalSignature=Just (Signature [LiftedRefRep] (Returns [WordRep 64]))}
+        ,plain {candidateGlobalSignature=Just (Signature [LiftedRefRep] NoSuccess)}
+        ,plain {candidateGlobalSignature=Just (Signature [LiftedRefRep] CallerResult)}
+        ,plain {candidateGlobalEvaluated=True},plain {candidateGlobalGeneration=Just 0}
+        ,plain {candidateGlobalGeneration=Just 7}]
+      groups = [CandidateGroup 91 identities globals,CandidateGroup 3 [identity] (reverse globals)]
+      legacyRows = [fixtureCandidate "Fixture" (map groupTerm groups)
+        ,fixtureCandidate "Other" (map groupTerm (reverse groups))]
+      emptyParcel = TList [TList [],TList []]
+      envelope symbols globalTable rows = TList
+        [TString "TPMCAN",TString "8",symbols,globalTable,TList rows,emptyParcel]
+      readFixture name value = do
+        let path = work </> (name ++ ".cbor")
+            bytes = toStrictByteString (encodeTerm value)
+        unless (BS.length bytes <= 4 * 1024 * 1024) (fail "decoder fixture exceeds wire bound")
+        BS.writeFile path bytes
+        readModuleCandidates path
+      refuse name expected value = readFixture name value >>= \case
+        Left reason | expected `isInfixOf` reason -> pure ()
+                    | otherwise -> fail (name ++ " failed at the wrong bound: " ++ reason)
+        Right _ -> fail ("candidate compact decoder accepted " ++ name)
+  (symbols,globalTable,rows) <- either fail pure (compactInventoryRows legacyRows)
+  case (symbols,globalTable) of
+    (TList symbolRows,TList globalRows) | length symbolRows == length identities
+      && length globalRows == length globals -> pure ()
+    _ -> fail "fixture encoder merged complete identities or global requirements"
+  decoded <- readFixture "exact" (envelope symbols globalTable rows) >>= either fail pure
+  unless (map candidateGroups decoded == [groups,reverse groups]) $
+    fail "compact inventory changed exact legacy values, order or ordinal"
+  let badGroup binders globalRefs = [fixtureCandidate "Fixture" [TList [TInt 91,TList binders,TList globalRefs]]]
+  refuse "unavailable-symbol" "unavailable" (envelope symbols globalTable (badGroup [TInt 65535] []))
+  refuse "unavailable-global" "unavailable" (envelope symbols globalTable (badGroup [] [TInt 65535]))
+  refuse "oversized-symbol-table" "table exceeds" (envelope (TList (replicate 65537 TNull)) globalTable rows)
+  refuse "oversized-global-table" "table exceeds" (envelope symbols (TList (replicate 65537 TNull)) rows)
+  let largeIdentity = identity {symbolOccurrence=T.replicate 2048 "x"}
+      expandedGroup = TList [TInt 0,TList (replicate 1536 (TInt 0)),TList []]
+      largeSymbols = TList [symbolTerm largeIdentity]
+      oneLarge = [fixtureCandidate "Fixture" [expandedGroup]]
+  readFixture "expanded-within-bound" (envelope largeSymbols (TList []) oneLarge) >>= either fail (const (pure ()))
+  refuse "expanded-aggregate" "expanded candidate inventory exceeds"
+    (envelope largeSymbols (TList []) (oneLarge ++ [fixtureCandidate "Other" [expandedGroup]]))
+  refuse "unsupported6" "unsupported" (TList [TString "TPMCAN",TString "6",TList legacyRows])
+  refuse "unsupported7" "unsupported" (TList [TString "TPMCAN",TString "7",TList legacyRows,emptyParcel])
+  putStrLn "candidate compact inventory: exact legacy values/order/ordinals, complete interning, unavailable indices, table/expanded bounds and unsupported6/7 passed"
+  where
+    fixtureCandidate name groups = TList
+      ([TString "main",TString name,TString "/fixture/source.hs",sha,TString "/fixture/interface.hi",sha,sha,sha,sha]
+        ++ [TList [],TList groups,TString "/fixture/packages",sha,TString "/fixture/products.tpmod"])
+      where sha = TString (T.replicate 64 "0")
+    groupTerm group = TList [TInt (fromIntegral (candidateGroupOrdinal group))
+      ,TList (map symbolTerm (candidateGroupBinders group)),TList (map globalTerm (candidateGroupGlobals group))]
+    globalTerm global = TList [symbolTerm (candidateGlobalIdentity global),repTerm (candidateGlobalRep global)
+      ,maybe TNull signatureTerm (candidateGlobalSignature global),TBool (candidateGlobalEvaluated global)
+      ,maybe TNull (TInt . fromIntegral) (candidateGlobalGeneration global)]
+    symbolTerm value = TList [TString (symbolUnit value),TString (symbolModule value),TString (symbolNamespace value)
+      ,TString (symbolOccurrence value),maybe TNull TString (symbolRecordParent value)]
+    repTerm value = TList $ case value of
+      VoidRep -> [TString "void",TInt 0]
+      LiftedRefRep -> [TString "lifted",TInt 0]
+      UnliftedRefRep -> [TString "unlifted",TInt 0]
+      AddressRep -> [TString "address",TInt 0]
+      IntRep width -> [TString "int",TInt (fromIntegral width)]
+      WordRep width -> [TString "word",TInt (fromIntegral width)]
+      FloatRep width -> [TString "float",TInt (fromIntegral width)]
+    signatureTerm value = TList [TList (map repTerm (signatureArguments value)),case signatureResults value of
+      Returns reps -> TList [TString "returns",TList (map repTerm reps)]
+      NoSuccess -> TList [TString "no_success",TList []]
+      CallerResult -> TList [TString "caller_result",TList []]]
 
 candidateGhcLoad :: IO ()
 candidateGhcLoad = withTiming $ withScratch $ \work -> do
@@ -1260,7 +1402,7 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   let owners = ["MetadataQuoteSupport","MetadataQuoter"]
   writeManifestFor owners work original
   descriptors <- readTerm candidatePath >>= \case
-    TList [_,_,TList rows] -> pure rows
+    TList [_,_,_,_,TList rows,_] -> pure rows
     _ -> fail "candidate fixture lacks source descriptors"
   rows <- forM descriptors $ \case
     TList fields@(TString _:TString name:_) -> do
@@ -1281,11 +1423,12 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
         13 -> TString (T.pack (originalProductPath product'))
         _ -> field | (index,field) <- zip [0::Int ..] fields])
     _ -> fail "candidate fixture has malformed descriptor"
+  (symbols,globals,compactRows) <- either fail pure (compactInventoryRows rows)
   let filteredParcel = case parcel of
         TList [graphs,TList refs] -> TList [graphs,TList [reference | reference@(TList (_:TString name:_)) <- refs
           , T.unpack name `elem` owners]]
         _ -> parcel
-      envelope value = TList [TString "TPMCAN",TString "7",TList rows,value]
+      envelope value = TList [TString "TPMCAN",TString "8",symbols,globals,TList compactRows,value]
       writeTerm path value = BS.writeFile path (toStrictByteString (encodeTerm value))
   writeTerm candidatePath (envelope filteredParcel)
   offered <- readModuleCandidates candidatePath >>= either fail pure
@@ -1501,7 +1644,7 @@ candidateExecutionWire path = do
     case executionSourceClosure graphs selected current quoter of
       Left _ -> pure ()
       Right _ -> fail "retained candidate execution admitted another current owner or graph digest"
-  putStrLn ("Rust TPMCAN7 decoder/retained closure: owners=" ++ show (map candidateModule candidates)
+  putStrLn ("Rust TPMCAN8 decoder/retained closure: owners=" ++ show (map candidateModule candidates)
     ++ " graphs=" ++ show (Set.size (Set.fromList (map executionGraphSha256 graphs)))
     ++ "; source/native/interface/package bytes match; owner/digest refusals passed (synthetic decoder fixture, not GHC admission)")
 hasIntResultLiteral :: Integer -> [Core.CoreBind] -> Bool
@@ -2345,8 +2488,10 @@ writeManifestFor names work cold = do
         <> text (maybe "" id (dependencyImportSelected imported))) imports
       <> encodeListLen 0 <> text packagePath <> text (digest packages) <> text productPath
   BS.writeFile (manifest work) (toStrictByteString
-    (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "6"
-      <> encodeListLen (fromIntegral (length candidates)) <> mconcat candidates))
+    (encodeListLen 6 <> encodeString "TPMCAN" <> encodeString "8"
+      <> encodeListLen 0 <> encodeListLen 0
+      <> encodeListLen (fromIntegral (length candidates)) <> mconcat candidates
+      <> encodeListLen 2 <> encodeListLen 0 <> encodeListLen 0))
 
 digest :: BS.ByteString -> String
 digest = concatMap (\byte -> let text = showHex byte ""

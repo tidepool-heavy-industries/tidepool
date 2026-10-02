@@ -8,6 +8,7 @@ mod candidate_diagnostics;
 #[cfg(test)]
 mod codec_measurement;
 pub(crate) mod deployment;
+mod inventory;
 mod shared_evidence;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -177,6 +178,7 @@ fn signature_value(signature: &Signature) -> Value {
     ])
 }
 
+#[cfg(test)]
 fn group_inventory(group: &ProjectedGroup) -> Value {
     let signatures = group.definitions();
     Value::Array(vec![
@@ -1582,6 +1584,11 @@ fn select_records_inner(
     if let Some(exclusions) = exclusions {
         retain_closed_disjoint(&mut validated, exclusions, &include);
     }
+    let mut inventory = inventory::InventoryTables::new(
+        validated
+            .values()
+            .flat_map(|(_, _, product, _)| product.groups.iter()),
+    )?;
     let mut by_owner = BTreeMap::new();
     let mut manifest = Vec::new();
     for (_, (record, origin, product, _)) in validated {
@@ -1675,13 +1682,7 @@ fn select_records_inner(
             Value::Text(hex(&product_sha)),
             Value::Text(evidence_sha),
             Value::Array(imports),
-            Value::Array(
-                selected_product
-                    .groups
-                    .iter()
-                    .map(group_inventory)
-                    .collect(),
-            ),
+            inventory.groups(&selected_product.groups)?,
             Value::Text(package_imports_path.to_string_lossy().into_owned()),
             Value::Text(sha(&record.package_imports)),
             Value::Text(product_path.to_string_lossy().into_owned()),
@@ -1704,9 +1705,12 @@ fn select_records_inner(
             graph_bytes, limit = MANIFEST_LIMIT, "candidate offer omitted because its execution provenance exceeds the manifest bound");
         return None;
     }
+    let (symbols, globals) = inventory.into_wire_tables();
     let value = Value::Array(vec![
         Value::Text("TPMCAN".into()),
-        Value::Text("7".into()),
+        Value::Text("8".into()),
+        symbols,
+        globals,
         Value::Array(manifest),
         Value::Array(vec![
             Value::Array(
@@ -2931,8 +2935,8 @@ mod tests {
         let manifest: Value =
             ciborium::de::from_reader(fs::File::open(&selected.manifest_path).unwrap()).unwrap();
         let fields = manifest.as_array().unwrap();
-        assert_eq!(fields[1].as_text(), Some("7"));
-        let row = fields[2].as_array().unwrap()[0].as_array().unwrap();
+        assert_eq!(fields[1].as_text(), Some("8"));
+        let row = fields[4].as_array().unwrap()[0].as_array().unwrap();
         assert_eq!(row.len(), 14);
         let original = fs::read(row[13].as_text().unwrap()).unwrap();
         let bundle = &selected.by_owner[&("u".into(), "D".into())];
@@ -3344,8 +3348,15 @@ mod tests {
             panic!("candidate manifest envelope")
         };
         assert_eq!(fields[0].as_text(), Some("TPMCAN"));
-        assert_eq!(fields[1].as_text(), Some("7"));
+        assert_eq!(fields[1].as_text(), Some("8"));
+        assert_eq!(fields.len(), 6);
         assert_eq!(fields[2], Value::Array(vec![]));
+        assert_eq!(fields[3], Value::Array(vec![]));
+        assert_eq!(fields[4], Value::Array(vec![]));
+        assert_eq!(
+            fields[5],
+            Value::Array(vec![Value::Array(vec![]), Value::Array(vec![])])
+        );
     }
 
     #[test]
@@ -3429,7 +3440,7 @@ mod tests {
             ciborium::de::from_reader(fs::read(&selected.manifest_path).unwrap().as_slice())
                 .unwrap();
         let fields = manifest.as_array().unwrap();
-        let candidate = fields[2].as_array().unwrap()[0].as_array().unwrap();
+        let candidate = fields[4].as_array().unwrap()[0].as_array().unwrap();
         let imported = candidate[9].as_array().unwrap()[0].as_array().unwrap();
         assert_eq!(imported[1].as_text(), Some("CacheEven"));
         assert_eq!(imported[2], Value::Bool(true));

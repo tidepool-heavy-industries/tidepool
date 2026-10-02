@@ -5954,7 +5954,7 @@ mod tests {
                 let manifest = std::fs::read(&fixture.manifest_path).unwrap();
                 std::fs::write(output.join("module-candidates.cbor"), &manifest).unwrap();
                 std::fs::write(output.join("fixture.json"), serde_json::to_vec_pretty(&serde_json::json!({
-                    "scope": "production Rust issuer/publication/record-selection/TPMCAN7 encoder; synthetic native/interface bytes; decoder-only cross-language fixture, not GHC semantic admission",
+                    "scope": "production Rust issuer/publication/record-selection/TPMCAN8 encoder; synthetic native/interface bytes; decoder-only cross-language fixture, not GHC semantic admission",
                     "raw_producer_hex": hex(&producer), "canonical_producer_sha256": hex(&crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer).sha256()),
                     "manifest_sha256": hex(&sha(&manifest)), "live_root": root.path(), "manifest_live_path": fixture.manifest_path,
                     "owners": fixture.by_owner.values().map(|bundle| serde_json::json!({
