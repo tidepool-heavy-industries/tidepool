@@ -308,16 +308,44 @@ fn native_json_parse_preserves_duplicate_policy_and_typed_failure() {
         .expect("extractor wrote JSON fixture");
     let requirements = tidepool_toolchain::prepared_artifact::production_requirements()
         .expect("artifact requirements");
-    let result = run_prepared_once_with_nursery(
-        &bytes,
-        &requirements,
-        DecodeLimits::default(),
-        MachineImports::default(),
-        Arc::new(AtomicBool::new(false)),
-        4096,
-    )
-    .expect("native JSON fixture runs");
+    let prepared = parse_program(&bytes, &requirements, DecodeLimits::default()).unwrap();
+    let entry = prepared.entry();
+    let linked = link_program(prepared, &MachineImports::default()).unwrap();
+    let image = Arc::new(CompiledProgram::compile(&linked).unwrap());
+    let image_weak = Arc::downgrade(&image);
+    let options = PreparedMachineOptions {
+        nursery_bytes: 4096,
+    };
+    let (mut first, first_program) =
+        PreparedMachine::new_shared(Arc::clone(&image), options).unwrap();
+    let (mut second, second_program) = PreparedMachine::new_shared(image, options).unwrap();
+    let pin = second.retain_top(second_program, entry).unwrap();
+    let result = first
+        .run_entry(first_program, entry, &[], call_options(true), RealmId::ROOT)
+        .expect("native JSON fixture runs in the first installation");
     assert_eq!(observed_int(&result.values[0]), 1);
+    drop(first);
+    let receipt = second.collect_major(second.quiesce().unwrap()).unwrap();
+    assert!(
+        receipt.programs.is_empty(),
+        "the unforced entry pins its image"
+    );
+    let result = second
+        .run_entry(
+            second_program,
+            entry,
+            &[],
+            call_options(true),
+            RealmId::ROOT,
+        )
+        .expect("the fresh installation retains its immutable JSON binding");
+    assert_eq!(observed_int(&result.values[0]), 1);
+    assert!(second.release(pin));
+    drop(second);
+    assert!(
+        image_weak.upgrade().is_none(),
+        "JSON metadata does not retain its image"
+    );
     let read_program = |target: &str| {
         let bytes = std::fs::read(output.path().join(format!("{target}.prepared.cbor"))).unwrap();
         parse_program(&bytes, &requirements, DecodeLimits::default()).unwrap()

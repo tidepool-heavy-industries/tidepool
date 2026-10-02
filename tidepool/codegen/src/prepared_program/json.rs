@@ -36,62 +36,47 @@ const MAX_JSON_VALUE_DEPTH: usize = 128;
 pub(super) const PARSE_JSON_HOST: &str = "prepared_parse_json";
 pub(super) const ENCODE_JSON_HOST: &str = "prepared_encode_json";
 
-/// The JIT-facing form of the one authenticated JSON payload layout. Each
-/// field is a constructor descriptor's header word: the interned descriptor's
-/// machine-wide identity. Generated code of any installed program may run
-/// inside another program's invocation, so a program-relative constructor
-/// index is never meaningful at the host boundary. Decode result
-/// constructors are deliberately not part of this object.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(super) struct JsonLayoutIds {
-    object: u64,
-    array: u64,
-    string: u64,
-    number: u64,
-    bool_: u64,
-    null: u64,
-    map_bin: u64,
-    map_tip: u64,
-    true_: u64,
-    false_: u64,
-    cons: u64,
-    nil: u64,
-    scientific: u64,
-    integer_small: u64,
-    integer_positive: u64,
-    integer_negative: u64,
-    text: u64,
-    int: u64,
+/// One image-owned binding of authenticated roles to descriptor and host views.
+/// Admission checks role identities and representations; the interner constructs
+/// their physical descriptors and install rejects conflicting declarations.
+/// Generated calls borrow this binding while their defining image stays pinned.
+pub(super) struct BoundJsonLayout {
+    descriptors: JsonLayout<Arc<ObjectDescriptor>>,
+    identities: JsonLayout<DataConId>,
 }
 
-impl JsonLayoutIds {
-    fn from_layout(
-        layout: JsonLayout,
-        constructors: &[Arc<ObjectDescriptor>],
-    ) -> Result<Self, super::CompileError> {
-        let header = |id| constructor_header(constructors, id);
-        Ok(Self {
-            object: header(layout.object)?,
-            array: header(layout.array)?,
-            string: header(layout.string)?,
-            number: header(layout.number)?,
-            bool_: header(layout.bool_)?,
-            null: header(layout.null)?,
-            map_bin: header(layout.map_bin)?,
-            map_tip: header(layout.map_tip)?,
-            true_: header(layout.true_)?,
-            false_: header(layout.false_)?,
-            cons: header(layout.cons)?,
-            nil: header(layout.nil)?,
-            scientific: header(layout.scientific)?,
-            integer_small: header(layout.integer_small)?,
-            integer_positive: header(layout.integer_positive)?,
-            integer_negative: header(layout.integer_negative)?,
-            text: header(layout.text)?,
-            int: header(layout.int)?,
-        })
+pub(super) fn bind_layout(
+    program: &tidepool_repr::execution_schema::DefinitionsView<'_>,
+    constructors: &[Arc<ObjectDescriptor>],
+) -> Result<Option<Box<BoundJsonLayout>>, super::CompileError> {
+    if !program.operations().iter().any(|operation| {
+        matches!(
+            operation.identity,
+            OperationIdentity::JsonDecode { .. } | OperationIdentity::JsonEncode
+        )
+    }) {
+        return Ok(None);
     }
+    let layout = program
+        .json_layout()
+        .ok_or(super::CompileError::MissingJsonLayout)?;
+    let descriptors = (*layout).try_map(|id| {
+        constructors
+            .get(id.0 as usize)
+            .cloned()
+            .ok_or(super::CompileError::UnknownJsonConstructor(id))
+    })?;
+    let identities = (*layout).try_map(|id| {
+        program
+            .constructors()
+            .get(id.0 as usize)
+            .map(|declaration| declaration.host_id)
+            .ok_or(super::CompileError::UnknownJsonConstructor(id))
+    })?;
+    Ok(Some(Box::new(BoundJsonLayout {
+        descriptors,
+        identities,
+    })))
 }
 
 /// The interned descriptor header for one of this program's constructors.
@@ -103,37 +88,6 @@ fn constructor_header(
         .get(id.0 as usize)
         .map(|descriptor| descriptor.initial_header_word() as u64)
         .ok_or(super::CompileError::UnknownJsonConstructor(id))
-}
-
-fn emit_layout_ids(builder: &mut FunctionBuilder<'_>, slot: ir::StackSlot, ids: JsonLayoutIds) {
-    macro_rules! store {
-        ($field:ident) => {{
-            let value = builder.ins().iconst(types::I64, ids.$field as i64);
-            builder.ins().stack_store(
-                value,
-                slot,
-                std::mem::offset_of!(JsonLayoutIds, $field) as i32,
-            );
-        }};
-    }
-    store!(object);
-    store!(array);
-    store!(string);
-    store!(number);
-    store!(bool_);
-    store!(null);
-    store!(map_bin);
-    store!(map_tip);
-    store!(true_);
-    store!(false_);
-    store!(cons);
-    store!(nil);
-    store!(scientific);
-    store!(integer_small);
-    store!(integer_positive);
-    store!(integer_negative);
-    store!(text);
-    store!(int);
 }
 
 pub(super) fn recognize(
@@ -173,7 +127,7 @@ pub(super) fn emit_parse_json(
     pipeline: &mut crate::pipeline::CodegenPipeline,
     vmctx: Value,
     descriptor: &ObjectDescriptor,
-    layout: JsonLayout,
+    layout: &BoundJsonLayout,
     result_constructors: (
         tidepool_repr::execution_schema::ConstructorId,
         tidepool_repr::execution_schema::ConstructorId,
@@ -182,7 +136,6 @@ pub(super) fn emit_parse_json(
     constructors: &[Arc<ObjectDescriptor>],
 ) -> Result<Vec<Value>, super::CompileError> {
     let (left, right) = result_constructors;
-    let ids = JsonLayoutIds::from_layout(layout, constructors)?;
     let left = constructor_header(constructors, left)?;
     let right = constructor_header(constructors, right)?;
     let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
@@ -194,13 +147,9 @@ pub(super) fn emit_parse_json(
         .map_err(|error| crate::pipeline::PipelineError::Declaration(error.to_string()))?;
     let host = pipeline.module.declare_func_in_func(host, builder.func);
     let output = super::arrays::output_slot(builder);
-    let layout_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
-        ir::StackSlotKind::ExplicitSlot,
-        std::mem::size_of::<JsonLayoutIds>() as u32,
-        2,
-    ));
-    emit_layout_ids(builder, layout_slot, ids);
-    let layout = builder.ins().stack_addr(types::I64, layout_slot, 0);
+    let layout = builder
+        .ins()
+        .iconst(types::I64, std::ptr::from_ref(layout) as usize as i64);
     let left = builder.ins().iconst(types::I64, left as i64);
     let right = builder.ins().iconst(types::I64, right as i64);
     let owner = builder
@@ -232,11 +181,9 @@ pub(super) fn emit_encode_json(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
     vmctx: Value,
-    layout: JsonLayout,
+    layout: &BoundJsonLayout,
     arguments: &[Value],
-    constructors: &[Arc<ObjectDescriptor>],
 ) -> Result<Vec<Value>, super::CompileError> {
-    let ids = JsonLayoutIds::from_layout(layout, constructors)?;
     let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
     signature.params = vec![AbiParam::new(types::I64); 4];
     signature.returns = vec![AbiParam::new(types::I32)];
@@ -245,13 +192,9 @@ pub(super) fn emit_encode_json(
         .declare_function(ENCODE_JSON_HOST, Linkage::Import, &signature)
         .map_err(|error| crate::pipeline::PipelineError::Declaration(error.to_string()))?;
     let host = pipeline.module.declare_func_in_func(host, builder.func);
-    let layout_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
-        ir::StackSlotKind::ExplicitSlot,
-        std::mem::size_of::<JsonLayoutIds>() as u32,
-        2,
-    ));
-    emit_layout_ids(builder, layout_slot, ids);
-    let layout = builder.ins().stack_addr(types::I64, layout_slot, 0);
+    let layout = builder
+        .ins()
+        .iconst(types::I64, std::ptr::from_ref(layout) as usize as i64);
     let output = super::arrays::output_slot(builder);
     builder.declare_value_needs_stack_map(arguments[0]);
     let call = builder
@@ -277,119 +220,9 @@ enum IntrinsicField {
     Bits([u8; 16]),
 }
 
-struct JsonDescriptors {
-    object: Arc<ObjectDescriptor>,
-    array: Arc<ObjectDescriptor>,
-    string: Arc<ObjectDescriptor>,
-    number: Arc<ObjectDescriptor>,
-    bool_: Arc<ObjectDescriptor>,
-    null: Arc<ObjectDescriptor>,
-    bin: Arc<ObjectDescriptor>,
-    tip: Arc<ObjectDescriptor>,
-    true_: Arc<ObjectDescriptor>,
-    false_: Arc<ObjectDescriptor>,
-    cons: Arc<ObjectDescriptor>,
-    nil: Arc<ObjectDescriptor>,
-    scientific: Arc<ObjectDescriptor>,
-    is: Arc<ObjectDescriptor>,
-    ip: Arc<ObjectDescriptor>,
-    in_: Arc<ObjectDescriptor>,
-    text: Arc<ObjectDescriptor>,
-    i_hash: Arc<ObjectDescriptor>,
-}
-
-impl JsonDescriptors {
-    fn resolve(
-        builder: &IntrinsicBuilder<'_>,
-        layout: *const JsonLayoutIds,
-    ) -> Result<Self, RuntimeError> {
-        let ids = unsafe { layout.as_ref() }.ok_or_else(|| crate::host_fns::bad_pointer())?;
-        let d = |id| builder.descriptor(id);
-        let resolved = Self {
-            object: d(ids.object)?,
-            array: d(ids.array)?,
-            string: d(ids.string)?,
-            number: d(ids.number)?,
-            bool_: d(ids.bool_)?,
-            null: d(ids.null)?,
-            bin: d(ids.map_bin)?,
-            tip: d(ids.map_tip)?,
-            true_: d(ids.true_)?,
-            false_: d(ids.false_)?,
-            cons: d(ids.cons)?,
-            nil: d(ids.nil)?,
-            scientific: d(ids.scientific)?,
-            is: d(ids.integer_small)?,
-            ip: d(ids.integer_positive)?,
-            in_: d(ids.integer_negative)?,
-            text: d(ids.text)?,
-            i_hash: d(ids.int)?,
-        };
-        let reps = descriptor_reps;
-        let lifted = RuntimeRep::LiftedRef;
-        let scalar = RuntimeRep::Int(64);
-        let unlifted = RuntimeRep::UnliftedRef;
-        for descriptor in [
-            &resolved.object,
-            &resolved.array,
-            &resolved.string,
-            &resolved.number,
-            &resolved.bool_,
-        ] {
-            if reps(descriptor) != [lifted] {
-                return Err(crate::host_fns::bad_pointer());
-            }
-        }
-        for descriptor in [
-            &resolved.null,
-            &resolved.tip,
-            &resolved.true_,
-            &resolved.false_,
-            &resolved.nil,
-        ] {
-            if !reps(descriptor).is_empty() {
-                return Err(crate::host_fns::bad_pointer());
-            }
-        }
-        if reps(&resolved.cons) != [lifted, lifted]
-            || reps(&resolved.text) != [unlifted, scalar, scalar]
-            || reps(&resolved.i_hash) != [scalar]
-            || reps(&resolved.is) != [scalar]
-            || reps(&resolved.ip) != [unlifted]
-            || reps(&resolved.in_) != [unlifted]
-        {
-            return Err(crate::host_fns::bad_pointer());
-        }
-        let scientific = reps(&resolved.scientific);
-        if scientific != [lifted, scalar] {
-            return Err(crate::host_fns::bad_pointer());
-        }
-        let bin = reps(&resolved.bin);
-        if bin != [lifted, lifted, lifted, lifted, lifted]
-            && bin != [scalar, lifted, lifted, lifted, lifted]
-        {
-            return Err(crate::host_fns::bad_pointer());
-        }
-        Ok(resolved)
-    }
-}
-
-fn descriptor_reps(descriptor: &ObjectDescriptor) -> Vec<RuntimeRep> {
-    descriptor
-        .payload()
-        .logical_to_stored()
-        .iter()
-        .map(|stored| {
-            stored
-                .and_then(|index| descriptor.payload().fields().get(index as usize))
-                .map_or(RuntimeRep::Void, |field| field.rep())
-        })
-        .collect()
-}
-
 struct JsonSink<'a, 'b> {
     builder: &'a mut IntrinsicBuilder<'b>,
-    d: JsonDescriptors,
+    d: &'a JsonLayout<Arc<ObjectDescriptor>>,
     failure: Option<RuntimeError>,
     left: Arc<ObjectDescriptor>,
     right: Arc<ObjectDescriptor>,
@@ -432,7 +265,7 @@ impl JsonSink<'_, '_> {
 
     fn integer(&mut self, coefficient: &str) -> Result<IntrinsicNode, RuntimeError> {
         if let Ok(value) = coefficient.parse::<i64>() {
-            let descriptor = Arc::clone(&self.d.is);
+            let descriptor = Arc::clone(&self.d.integer_small);
             return self.con(&descriptor, &[IntrinsicField::Bits(int_bits(value))]);
         }
         let negative = coefficient.starts_with('-');
@@ -482,7 +315,11 @@ impl JsonSink<'_, '_> {
             self.failure.get_or_insert_with(|| error.clone());
         }
         let payload = payload?;
-        let descriptor = Arc::clone(if negative { &self.d.in_ } else { &self.d.ip });
+        let descriptor = Arc::clone(if negative {
+            &self.d.integer_negative
+        } else {
+            &self.d.integer_positive
+        });
         self.con(&descriptor, &[IntrinsicField::Node(payload)])
     }
 
@@ -524,14 +361,14 @@ impl JsonSink<'_, '_> {
         entries: &[(String, IntrinsicNode)],
     ) -> Result<IntrinsicNode, RuntimeError> {
         if entries.is_empty() {
-            let tip = Arc::clone(&self.d.tip);
+            let tip = Arc::clone(&self.d.map_tip);
             return self.con(&tip, &[]);
         }
         let mid = entries.len() / 2;
         let key = self.text(&entries[mid].0)?;
         let left = self.map_slice(&entries[..mid])?;
         let right = self.map_slice(&entries[mid + 1..])?;
-        let bin = Arc::clone(&self.d.bin);
+        let bin = Arc::clone(&self.d.map_bin);
         let size = match bin
             .payload()
             .logical_to_stored()
@@ -542,7 +379,7 @@ impl JsonSink<'_, '_> {
         {
             Some(RuntimeRep::Int(64)) => IntrinsicField::Bits(int_bits(entries.len() as i64)),
             Some(RuntimeRep::LiftedRef) => {
-                let boxed = Arc::clone(&self.d.i_hash);
+                let boxed = Arc::clone(&self.d.int);
                 IntrinsicField::Node(self.con(
                     &boxed,
                     &[IntrinsicField::Bits(int_bits(entries.len() as i64))],
@@ -569,7 +406,7 @@ pub(super) unsafe extern "C" fn prepared_parse_json(
     descriptor: *const ObjectDescriptor,
     offset: i64,
     length: i64,
-    layout: *const JsonLayoutIds,
+    layout: *const std::ffi::c_void,
     left: u64,
     right: u64,
     output: *mut u64,
@@ -607,14 +444,11 @@ pub(super) unsafe extern "C" fn prepared_parse_json(
             .ok_or_else(|| crate::host_fns::bad_pointer())?;
         let input_range = input_start..input_end;
         let mut builder = unsafe { IntrinsicBuilder::active(machine, &mut *vmctx) }?;
-        let descriptors = JsonDescriptors::resolve(&builder, layout)?;
+        let layout = unsafe { layout.cast::<BoundJsonLayout>().as_ref() }
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
+        let descriptors = &layout.descriptors;
         let left = builder.descriptor(left)?;
         let right = builder.descriptor(right)?;
-        if descriptor_reps(&left) != [RuntimeRep::LiftedRef]
-            || descriptor_reps(&right) != [RuntimeRep::LiftedRef]
-        {
-            return Err(crate::host_fns::bad_pointer());
-        }
         let mut sink = JsonSink {
             builder: &mut builder,
             d: descriptors,
@@ -713,7 +547,7 @@ impl Read for PollingReader<'_> {
 pub(super) unsafe extern "C" fn prepared_encode_json(
     vmctx: *mut VMContext,
     reference: *mut u8,
-    layout: *const JsonLayoutIds,
+    layout: *const std::ffi::c_void,
     output: *mut u64,
 ) -> i32 {
     let machine = unsafe { crate::machine_state::machine_state(vmctx) };
@@ -725,8 +559,10 @@ pub(super) unsafe extern "C" fn prepared_encode_json(
             return Err(crate::host_fns::bad_pointer().into());
         }
         let mut builder = unsafe { IntrinsicBuilder::active(machine, &mut *vmctx) }?;
-        let descriptors = JsonDescriptors::resolve(&builder, layout)?;
-        let ids = EncoderIds::resolve(&builder, layout)?;
+        let layout = unsafe { layout.cast::<BoundJsonLayout>().as_ref() }
+            .ok_or_else(|| crate::host_fns::bad_pointer())?;
+        let descriptors = &layout.descriptors;
+        let ids = &layout.identities;
         let input = builder.push_root(reference as usize)?;
         let mut bytes = Vec::new();
         JsonEncoder {
@@ -775,61 +611,9 @@ impl From<CallStatus> for EncodeFailure {
     }
 }
 
-#[derive(Clone, Copy)]
-struct EncoderIds {
-    object: DataConId,
-    array: DataConId,
-    string: DataConId,
-    number: DataConId,
-    bool_: DataConId,
-    null: DataConId,
-    bin: DataConId,
-    tip: DataConId,
-    true_: DataConId,
-    false_: DataConId,
-    cons: DataConId,
-    nil: DataConId,
-    scientific: DataConId,
-    is: DataConId,
-    ip: DataConId,
-    in_: DataConId,
-    text: DataConId,
-    i_hash: DataConId,
-}
-
-impl EncoderIds {
-    fn resolve(
-        builder: &IntrinsicBuilder<'_>,
-        layout: *const JsonLayoutIds,
-    ) -> Result<Self, RuntimeError> {
-        let layout = unsafe { layout.as_ref() }.ok_or_else(|| crate::host_fns::bad_pointer())?;
-        let id = |header: u64| builder.constructor_identity(header);
-        Ok(Self {
-            object: id(layout.object)?,
-            array: id(layout.array)?,
-            string: id(layout.string)?,
-            number: id(layout.number)?,
-            bool_: id(layout.bool_)?,
-            null: id(layout.null)?,
-            bin: id(layout.map_bin)?,
-            tip: id(layout.map_tip)?,
-            true_: id(layout.true_)?,
-            false_: id(layout.false_)?,
-            cons: id(layout.cons)?,
-            nil: id(layout.nil)?,
-            scientific: id(layout.scientific)?,
-            is: id(layout.integer_small)?,
-            ip: id(layout.integer_positive)?,
-            in_: id(layout.integer_negative)?,
-            text: id(layout.text)?,
-            i_hash: id(layout.int)?,
-        })
-    }
-}
-
 struct JsonEncoder<'a, 'b> {
     builder: &'a mut IntrinsicBuilder<'b>,
-    ids: EncoderIds,
+    ids: &'a JsonLayout<DataConId>,
     ancestors: ValueAncestors,
     steps: usize,
     #[cfg(test)]
@@ -1330,13 +1114,13 @@ impl JsonEncoder<'_, '_> {
                                 return Err(error);
                             }
                         };
-                        if id == self.ids.tip && fields.is_empty() {
+                        if id == self.ids.map_tip && fields.is_empty() {
                             if owned {
                                 self.builder.release_node(node.0)?;
                             }
                             continue;
                         }
-                        if id != self.ids.bin || fields.len() != 5 {
+                        if id != self.ids.map_bin || fields.len() != 5 {
                             let result = self.finish_nodes(
                                 Err(crate::host_fns::bad_pointer().into()),
                                 fields.into_iter().map(|field| field.0),
@@ -1481,13 +1265,15 @@ impl JsonEncoder<'_, '_> {
     fn integer(&mut self, field: (IntrinsicNode, RuntimeRep)) -> Result<String, EncodeFailure> {
         let (id, fields) = self.constructor(field.0, field.1)?;
         let result = (|| {
-            if id == self.ids.is && fields.len() == 1 {
+            if id == self.ids.integer_small && fields.len() == 1 {
                 return Ok(self.int(fields[0])?.to_string());
             }
-            if (id == self.ids.ip || id == self.ids.in_) && fields.len() == 1 {
+            if (id == self.ids.integer_positive || id == self.ids.integer_negative)
+                && fields.len() == 1
+            {
                 let magnitude = self.bytes(fields[0])?;
                 let mut value = self.bignat_decimal(&magnitude)?;
-                if id == self.ids.in_ {
+                if id == self.ids.integer_negative {
                     value.insert(0, '-');
                 }
                 return Ok(value);
@@ -1503,7 +1289,7 @@ impl JsonEncoder<'_, '_> {
                 tidepool_repr::Literal::LitInt(v),
             )) => Ok(v),
             super::observe::ObservationFrame::Constructor(id, fields) => {
-                let result = if id == self.ids.i_hash && fields.len() == 1 {
+                let result = if id == self.ids.int && fields.len() == 1 {
                     self.int(fields[0])
                 } else {
                     Err(crate::host_fns::bad_pointer().into())
@@ -1847,11 +1633,6 @@ impl<'a> IntrinsicBuilder<'a> {
     fn descriptor(&self, header: u64) -> Result<Arc<ObjectDescriptor>, RuntimeError> {
         self.constructor_metadata(header)
             .map(|(metadata, _)| Arc::clone(&metadata.descriptor))
-    }
-
-    fn constructor_identity(&self, header: u64) -> Result<DataConId, RuntimeError> {
-        self.constructor_metadata(header)
-            .map(|(_, observation)| observation.identity)
     }
 
     fn constructor_metadata(
@@ -2265,25 +2046,25 @@ mod tests {
         let mut output = Vec::new();
         let mut encoder = JsonEncoder {
             builder: &mut builder,
-            ids: EncoderIds {
+            ids: &JsonLayout {
                 object: DataConId(u64::MAX),
                 array: DataConId(10_000),
                 string: DataConId(u64::MAX),
                 number: DataConId(u64::MAX),
                 bool_: DataConId(u64::MAX),
                 null: DataConId(10_001),
-                bin: DataConId(u64::MAX),
-                tip: DataConId(u64::MAX),
+                map_bin: DataConId(u64::MAX),
+                map_tip: DataConId(u64::MAX),
                 true_: DataConId(u64::MAX),
                 false_: DataConId(u64::MAX),
                 cons: DataConId(10_002),
                 nil: DataConId(10_003),
                 scientific: DataConId(u64::MAX),
-                is: DataConId(u64::MAX),
-                ip: DataConId(u64::MAX),
-                in_: DataConId(u64::MAX),
+                integer_small: DataConId(u64::MAX),
+                integer_positive: DataConId(u64::MAX),
+                integer_negative: DataConId(u64::MAX),
                 text: DataConId(u64::MAX),
-                i_hash: DataConId(u64::MAX),
+                int: DataConId(u64::MAX),
             },
             ancestors: ValueAncestors::default(),
             steps: 0,

@@ -479,7 +479,7 @@ fn emit_function_at(
                             &plan.boxed_array,
                             &plan.mut_var,
                             &plan.bytes_array,
-                            plan.program.json_layout(),
+                            plan.json_layout.as_deref(),
                             &plan.constructors,
                         )?;
                         match (output, signature.results.returned_reps()) {
