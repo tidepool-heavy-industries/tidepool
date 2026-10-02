@@ -13,9 +13,11 @@ import GHC.Core (Expr(..), bindersOf, flattenBinds)
 import GHC.Core.DataCon (dataConName, dataConRepArgTys)
 import GHC.Core.DataCon qualified as DC
 import GHC.Core.TyCon (PromDataConInfo(NoPromInfo))
+import GHC.Core.TyCon qualified as TC
+import GHC.Core.Type (mkTyConApp)
 import GHC.Builtin.Types.Prim (wordPrimTy)
 import GHC.Core.FVs (exprSomeFreeVarsList)
-import GHC.Core.TyCo.Rep (Scaled(..))
+import GHC.Core.TyCo.Rep (Scaled(..), Type(TyConApp))
 import GHC.Types.Id (idName)
 import GHC.Types.Name (nameOccName, setNameUnique)
 import GHC.Types.Unique (mkUnique)
@@ -171,6 +173,7 @@ verifyJsonDependencyAuthority dir = do
   trustedOwner <- maybe (ioError (userError "installed JSON owners did not resolve")) pure
     trustedAuthority
   verifyJsonLayoutDemand trustedOwner trusted
+  verifyNominalJsonConstructorDemand dir
   source <- readFile "lib/Tidepool/Aeson/Scientific.hs"
   let shadow = Text.replace "coefficient (Scientific c _) = c"
         "coefficient (Scientific c _) = c + 1" (Text.pack source)
@@ -285,6 +288,68 @@ verifyJsonLayoutDemand authority result = do
     Schema.JsonDecodeIdentity{} -> True
     Schema.JsonEncodeIdentity -> True
     _ -> False
+
+-- Separately loaded nominal evidence may use a different GHC Unique. The
+-- roles must survive while the canonical physical declarations still agree.
+verifyNominalJsonConstructorDemand :: FilePath -> IO ()
+verifyNominalJsonConstructorDemand dir = do
+  createDirectoryIfMissing True (dir </> "Tidepool" </> "Effects")
+  writeFile (dir </> "Tidepool" </> "Effects" </> "Core.hs") (unlines
+    [ "module Tidepool.Effects.Core where"
+    , "{-# OPAQUE runLLMTurn #-}"
+    , "runLLMTurn :: forall answer. String -> Maybe answer"
+    , "runLLMTurn _ = Nothing"
+    , "{-# OPAQUE runLLMTurnSited #-}"
+    , "runLLMTurnSited :: forall answer. Int -> String -> Maybe answer"
+    , "runLLMTurnSited _ _ = Nothing"
+    ])
+  let source = dir </> "JsonNominalAnswer.hs"
+  writeFile source (unlines
+    [ "{-# LANGUAGE TypeApplications #-}"
+    , "module JsonNominalAnswer where"
+    , "import Tidepool.Aeson.Value (Value)"
+    , "import Tidepool.Effects.Core"
+    , "answer :: Maybe Value"
+    , "answer = runLLMTurn @Value \"json\""
+    ])
+  result <- runPipelineSelected PreparedStg source [dir, "lib"]
+  authority <- resolveJsonAuthority (prHscEnv (pprPipelineResult result))
+    >>= maybe (ioError (userError "nominal JSON fixture lacks authority")) pure
+  let valueTyCons = [ tc | prepared <- pprModules result
+        , TypePolicy.DataG _ tc _ _ <- TypePolicy.tgNodes (pmTypeGraph prepared)
+        , occNameString (nameOccName (TC.tyConName tc)) == "Value" ]
+  valueTyCon <- case valueTyCons of
+    tc : _ -> pure tc
+    [] -> ioError (userError "nominal JSON fixture lacks Value type evidence")
+  let newUnique = mkUnique 'z' 54322
+      otherTyCon = valueTyCon
+        { TC.tyConUnique = newUnique
+        , TC.tyConName = setNameUnique (TC.tyConName valueTyCon) newUnique
+        , TC.tyConNullaryTy = TyConApp otherTyCon [] }
+      clone constructor = DC.mkDataCon (dataConName constructor) False
+        (dataConName constructor) (DC.dataConSrcBangs constructor)
+        [] [] [] (DC.dataConConcreteTyVars constructor) [] [] []
+        (DC.dataConOrigArgTys constructor) (mkTyConApp otherTyCon []) NoPromInfo
+        otherTyCon (DC.dataConTag constructor) [] (DC.dataConWorkId constructor)
+        (case DC.dataConBoxer constructor of
+          Nothing -> DC.NoDataConRep
+          Just boxer -> DC.DCR (DC.dataConWrapId constructor) boxer
+            (DC.dataConRepArgTys constructor) (DC.dataConRepStrictness constructor)
+            (DC.dataConImplBangs constructor))
+      replace prepared = prepared { pmTypeGraph = TypePolicy.TypeGraph
+        [ case node of
+            TypePolicy.DataG ty tc args rows | tc == valueTyCon ->
+              TypePolicy.DataG ty tc args [(clone con, children) | (con, children) <- rows]
+            _ -> node
+        | node <- TypePolicy.tgNodes (pmTypeGraph prepared) ] }
+      context = jsonProjectionContext authority "JsonNominalAnswer" "answer"
+      project modules = either (ioError . userError . show) pure
+        (Projection.projectPreparedTarget context modules)
+  assert (otherTyCon /= valueTyCon) "nominal JSON fixture did not change GHC identity"
+  original <- project (pprModules result)
+  separate <- project (map replace (pprModules result))
+  assert (Schema.programJsonLayout original /= Nothing && original == separate)
+    "equal nominal JSON constructor evidence lost canonical roles or declarations"
 
 -- An O0 bytecode interface exposes a private helper that the prepared O2 body
 -- removes. Importers must receive the prepared owner's interface, including on

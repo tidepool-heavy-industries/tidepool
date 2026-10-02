@@ -432,9 +432,10 @@ lowerJsonLayout modules = do
       emittedOperations <- gets operationDecls
       admittedConstructors <- gets constructors
       let layout = jsonAuthorityLayout owner
-          valueTyCon = dataConTyCon (jsonObject layout)
           needsOperations = any (isJsonOperation . operationIdentity) emittedOperations
-          needsConstructors = any ((== valueTyCon) . dataConTyCon . fst) admittedConstructors
+          needsConstructors = any
+            (isJust . jsonValueLayoutForType owner . dataConOrigResTy . fst)
+            admittedConstructors
           needsHostRoot = any (isValueResult owner)
             [ binder | prepared <- modules, (binding, _) <- pmBindings prepared
                      , binder <- topBinders binding ]
