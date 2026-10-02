@@ -8,10 +8,12 @@ that has one. Everything else on this page is what happens around those two.
 
 Linux, with Nix 2.27 or newer, systemd user services on cgroup v2, Bubblewrap and
 tmux. The embedded backend serves the root conversation in a browser and calls
-the provider through the harness. Its current authentication bridge reads an
-existing Codex credential file; authenticate that account before model work.
-The Codex compatibility backend uses the pinned Tidepool fork of the client.
-For Jev, put a TypeSafe key in `TYPESAFE_API_KEY` before launching.
+the selected provider through the harness. The default `codex` provider reads
+an existing Codex credential file; authenticate that account before model
+work. The `chatgpt_plan` provider has its own Exomonad credential setup, shown
+below. The Codex compatibility backend uses the pinned Tidepool fork of the
+client. For Jev, set `TYPESAFE_API_KEY` before launching when the workspace uses
+Jev.
 
 Agents run shell commands as you. Read
 [what Exomonad does not protect you from](../README.md#what-it-does-not-protect-you-from)
@@ -45,12 +47,14 @@ Pass `exomonad init` flags through the second recipe, for example
 locally built tools, use `just exomonad-init -- --workspace /path/to/project`.
 
 For an isolated distribution build, run `nix build .#exomonad` and use
-`./result/bin/exomonad`. There is no public binary cache yet, so the first
-build compiles everything, GHC-side and Rust-side, and takes a good while.
-Nix reuses outputs for identical inputs, while a source edit creates a new
-input hash and does not reuse this checkout's Cabal and Cargo incremental
-outputs. The wrapper selects the matched extractor and client itself; it does
-not replace `codex` on your `PATH`.
+`./result/bin/exomonad`. The flake configures the public Cachix binary cache;
+available artifacts depend on the revision. See the [binary cache guide](binary-cache.md)
+for setup and coverage details. If the revision has no cached outputs, Nix
+builds the GHC-side and Rust-side inputs from source. Nix reuses outputs for
+identical inputs, while a source edit creates a new input hash and does not
+reuse this checkout's Cabal and Cargo incremental outputs. The wrapper selects
+the matched extractor and client itself; it does not replace `codex` on your
+`PATH`.
 
 For Codex compatibility, the matched package uses its `local` Cargo profile:
 no LTO, no debug information, and unoptimized code with release runtime semantics. This reduces

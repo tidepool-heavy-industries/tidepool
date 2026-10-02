@@ -9,6 +9,7 @@ source scripts/lib-extract.sh
 DRY=0
 NO_EXTRACT=0
 NO_SERVERS=0
+STAMP_WRITTEN=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -111,15 +112,19 @@ if [ "$NO_SERVERS" -eq 0 ]; then
   # arrayref 0.3.x) and would silently deploy different dep versions than the
   # tree that passed the test suite.
   step "Step 3: cargo install tidepool (Exomonad + embedded Haskell)"
-  # Resolve the `tidepool` package's directory from the workspace metadata
-  # so a crate move cannot leave this pointing at a directory that is gone.
-  tidepool_dir="$(cargo metadata --no-deps --format-version 1 \
-    | python3 -c 'import json,os,sys; print(next(os.path.dirname(p["manifest_path"]) for p in json.load(sys.stdin)["packages"] if p["name"] == "tidepool"))')" \
-    || { echo "error: no package named tidepool in the workspace" >&2; exit 1; }
-  echo "  tidepool package: $tidepool_dir"
-  # --force: a deploy owns these binary names outright, including one an
-  # older package (a previous exomonad checkout) left in ~/.cargo/bin.
-  run env TIDEPOOL_EMBED_HASKELL=1 cargo install --locked --force --path "$tidepool_dir"
+  if [ "$DRY" -eq 1 ]; then
+    echo "  \$ env TIDEPOOL_EMBED_HASKELL=1 cargo install --locked --force --path <tidepool package directory>"
+  else
+    # Resolve the `tidepool` package's directory from workspace metadata so a
+    # crate move cannot leave this pointing at a directory that is gone.
+    tidepool_dir="$(cargo metadata --no-deps --format-version 1 \
+      | python3 -c 'import json,os,sys; print(next(os.path.dirname(p["manifest_path"]) for p in json.load(sys.stdin)["packages"] if p["name"] == "tidepool"))')" \
+      || { echo "error: no package named tidepool in the workspace" >&2; exit 1; }
+    echo "  tidepool package: $tidepool_dir"
+    # --force: a deploy owns these binary names outright, including one an
+    # older package (a previous exomonad checkout) left in ~/.cargo/bin.
+    run env TIDEPOOL_EMBED_HASKELL=1 cargo install --locked --force --path "$tidepool_dir"
+  fi
 else
   echo; echo "(skipped: --no-servers)"
 fi
@@ -162,11 +167,24 @@ else
       echo "       Deploy handshake section" >&2
       exit 1
     fi
+    STAMP_WRITTEN=1
   fi
 fi
 
 echo
 echo "================================================================"
-echo "done — deploy stamp written; now run /mcp reconnect in the Claude session"
-echo "(the server processes are stale until reconnect)"
+if [ "$DRY" -eq 1 ]; then
+  echo "dry run complete — no deployment changes or toolchain stamp were written"
+  if [ "$NO_SERVERS" -eq 1 ]; then
+    echo "server installation and stamp writing were skipped"
+  fi
+elif [ "$NO_SERVERS" -eq 1 ]; then
+  echo "deployment steps complete — server installation was skipped; no toolchain stamp was written"
+  echo "no server reconnect is needed for this invocation"
+elif [ "$STAMP_WRITTEN" -eq 1 ]; then
+  echo "deployment complete — toolchain stamp written; now run /mcp reconnect in the Claude session"
+  echo "the running server processes are stale until reconnect"
+else
+  echo "deployment complete — no toolchain stamp was written"
+fi
 echo "================================================================"

@@ -31,6 +31,8 @@ class DevShellTests(unittest.TestCase):
         # this test repo carries no vendor/codex, so stub it out. It is only
         # ever invoked for --exomonad, never for the default-shell tests.
         (self.repo / "scripts").mkdir()
+        cargo_target = self.repo / "scripts" / "cargo-target.py"
+        cargo_target.write_bytes((SCRIPT.parent / "cargo-target.py").read_bytes())
         preflight = self.repo / "scripts" / "codex-source-preflight.sh"
         preflight.write_text("#!/usr/bin/env bash\nexit 0\n")
         preflight.chmod(0o755)
@@ -70,7 +72,7 @@ class DevShellTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         selection = json.loads(result.stdout)
         # exomonad forces the codex path input, which needs the real worktree, so it stays pinned to HEAD.
-        self.assertEqual(selection["args"][:2], ["develop", f"git+file://{self.repo}/.git?rev={self.git('rev-parse', 'HEAD')}#exomonad"])
+        self.assertEqual(selection["args"][:2], ["develop", f"git+file://{self.repo}?rev={self.git('rev-parse', 'HEAD')}#exomonad"])
         self.assertEqual(selection["cwd"], str(self.repo))
 
     def test_default_shell_pins_toolchain_inputs_not_head(self):
@@ -79,7 +81,7 @@ class DevShellTests(unittest.TestCase):
         selection = json.loads(result.stdout)
         revision = self.synthetic_default_revision()
         self.assertNotEqual(revision, self.git("rev-parse", "HEAD"))
-        self.assertEqual(selection["args"][:2], ["develop", f"git+file://{self.repo}/.git?rev={revision}#default"])
+        self.assertEqual(selection["args"][:2], ["develop", f"git+file://{self.repo}?rev={revision}#default"])
         # Running it again reuses the same synthetic revision, and the ref persists.
         result2 = self.run_shell("ghc", "--version")
         selection2 = json.loads(result2.stdout)
@@ -111,7 +113,7 @@ class DevShellTests(unittest.TestCase):
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
         revision = self.synthetic_default_revision()
-        self.env.update(TIDEPOOL_DEV_SHELL=f"git+file://{self.repo}/.git?rev={revision}#default", TIDEPOOL_DEV_GHC=str(self.bin / "ghc"), TIDEPOOL_DEV_RUSTC=str(self.bin / "rustc"))
+        self.env.update(TIDEPOOL_DEV_SHELL=f"git+file://{self.repo}?rev={revision}#default", TIDEPOOL_DEV_GHC=str(self.bin / "ghc"), TIDEPOOL_DEV_RUSTC=str(self.bin / "rustc"))
         self.assertEqual(self.run_shell("printf", "reused").stdout, "reused")
         self.env["TIDEPOOL_DEV_GHC"] = "/stale/ghc"
         self.assertIn("develop", self.run_shell("true").stdout)

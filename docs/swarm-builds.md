@@ -1,58 +1,56 @@
 # Native Buck build migration
 
-## Author locally, execute on swarm-01
+## Approved local workflow on swarm-01
 
-The isolated project worker advertises its own platform identity. Copy that
-identity through authenticated SSH; the bootstrap worker's
-`/etc/swarm-build/platform` does not include the project's Rust/GHC closure.
-Keep the forwarding command running in another terminal:
+The current accepted workflow uses the checkout's pinned Nix toolchain and
+local Buck execution. NativeLink is running, but project closure, isolation and
+cache gates remain pending. Keep Buck remote execution disabled with
+`--local-only -c remote.enabled=false`; do not use the bootstrap platform file
+to configure the project worker.
+
+The checkout must be a provisioned Git checkout with `buck-out` bind-mounted to
+its own directory on `/srv/build`. Ask the infrastructure owner to provision a
+new mount for a new checkout; do not create a mount helper or replace an active
+output. Before any Buck invocation, run `findmnt --mountpoint "$PWD/buck-out"`
+and stop if it is not a mount. Run large work only in an admitted `build.slice`
+unit; an administrator launches the approved job as the unprivileged `swarm`
+user. The first Buck command, including metadata queries, must run inside that
+unit so the Buck daemon shares its admission boundary.
+
+Materialize the checkout's declared closure and configure from inside the
+admitted build environment:
 
 ```sh
-ssh -N -o ExitOnForwardFailure=yes \
-  -L 127.0.0.1:50071:127.0.0.1:50051 swarm-01
-ssh swarm-01 cat /home/inanna/remote-buck-infra/worker-result/platform \
-  > /tmp/tidepool-buck-platform
+nix build .#buck-toolchain-closure --no-link
+bash scripts/buck2-configure.sh
+export PATH="$(awk -F ' = ' '$1 == "action_path" {print $2}' .buckconfig.local):/run/current-system/sw/bin"
+buck2 build --local-only -c remote.enabled=false //tidepool/repr:tidepool_repr
 ```
 
-Each local checkout needs its own output directory and real bind mount. On
-Linux, an unprivileged mount namespace can supply it without changing the
-host's mounts. Run from the checkout root:
+Then retain the unit journal, exact command, source OID, selected and executed
+test counts, exit status and log before reporting. Building a `rust_test` target
+only links its executable; use an accepted focused runner to execute tests.
+Do not claim remote qualification from local results.
 
-```sh
-mkdir -p buck-out "$HOME/.cache/tidepool/buck-local"
-export TIDEPOOL_BUCK_OUTPUT_DIRECTORY="$HOME/.cache/tidepool/buck-local"
-unshare --user --map-root-user --mount bash -c '
-  set -euo pipefail
-  mount --bind "$TIDEPOOL_BUCK_OUTPUT_DIRECTORY" buck-out
-  export TIDEPOOL_BUCK_REMOTE=true
-  export TIDEPOOL_BUCK_PLATFORM_FILE=/tmp/tidepool-buck-platform
-  export TIDEPOOL_BUCK_REMOTE_ADDRESS=grpc://127.0.0.1:50071
-  bash scripts/buck2-configure.sh
-  bash scripts/buck2-run.sh build //bridge/atomic-write:tidepool_atomic_write
-  bash scripts/buck2-run.sh test --remote-only //bridge/atomic-write:tidepool_atomic_write_unit_tests
-  bash scripts/buck2-run.sh build //bridge/haskell:assignment_internal
-'
-```
+## Historical remote-execution evidence
 
-Choose a distinct output directory for every checkout. Later invocations still
-enter a mount namespace and mount the same owned directory before calling
-`buck2-run.sh`. The worker closure and local toolchain inputs must match.
-The client accepts a loopback endpoint and a platform file; both remain local
-configuration and are not committed. Editing source locally uploads changed
-inputs through Buck's CAS protocol.
+The following is retained as evidence for the exact 2026-09-30 revisions and
+environment only. It does not qualify the current checkout, broader targets,
+the current host admission path, or NativeLink's pending project isolation and
+cache gates.
 
-The focused readiness run on 2026-09-30 used Tidepool
+The focused run used Tidepool
 `d9d82f46ff5f702a16257c2dd9e42fe745e27265` and harness
 `814b1697226344e8fd16196666e41c184a73531d`, Rust 1.93.0 and GHC 9.12.2.
 Rust compilation executed 36 remote actions; the unit test target compiled with
-20 remote actions; the Haskell library executed two remote actions. All three
-builds had zero local actions. The default remote test profile then executed
-the test binary on the worker with `--remote-only`: all eight tests passed,
-and the worker journal records the binary's invocation. A second independent local checkout reused 36
-actions from cache. Changing its Rust source executed two new remote actions;
-restoring that source and requesting the Rust and Haskell libraries reused all
-four required actions from cache. This qualifies these focused targets; broader
-extractor, browser, runtime and cancellation gates remain separate.
+20 remote actions; the Haskell library executed two remote actions. Those builds
+had zero local actions. The remote test profile executed the test binary on the
+worker with `--remote-only`: all eight tests passed, and the worker journal
+records the invocation. A second independent local checkout reused 36 actions
+from cache. Changing its Rust source executed two new remote actions; restoring
+that source and requesting the Rust and Haskell libraries reused all four
+required actions from cache. This is historical evidence for those focused
+targets and revisions only.
 
 The Buck graph is being introduced alongside the existing `just` workflows.
 Cargo metadata and `Cargo.lock` remain authoritative for Rust package versions
@@ -275,24 +273,24 @@ closure, isolation, reuse, and cancellation checks pass.
 
 ## Daemon lifetime and cache reuse
 
-Keep this checkout's Buck daemon in a persistent user service within the admitted
-slice. A temporary build service stops its daemon when the client exits, losing
-the in-memory dependency graph. After confirming no daemon for this checkout is
-already owned elsewhere, launch the first metadata query as follows:
+Keep this checkout's Buck daemon inside the admitted `build.slice`. The first
+metadata query starts it, so launch that query from the same admitted service
+that owns the checkout's builds. An administrator can use this shape for an
+approved build unit; substitute the assigned unit name and checkout:
 
 ```sh
-systemd-run --user --collect --property=RemainAfterExit=yes \
-  --unit=tidepool-buck-daemon --slice=tidepool-completion-build.slice \
-  --working-directory="$PWD" \
-  /run/current-system/sw/bin/bash scripts/buck2-run.sh \
-  targets -c remote.enabled=false //bridge/atomic-write:
+sudo systemd-run --unit=tidepool-buck-daemon --collect \
+  --uid=swarm --gid=swarm --slice=build.slice \
+  --working-directory="$PWD" --setenv=HOME=/srv/swarm/home \
+  /run/current-system/sw/bin/bash -lc \
+  'bash scripts/buck2-run.sh targets -c remote.enabled=false //bridge/atomic-write:'
 ```
 
-Inspect the service cgroup and daemon PID before builds. Run build/test clients
-in the same admitted slice; they reuse the daemon. Do not restart a daemon with
-active work. The service is user-owned and does not change host configuration.
-Local execution is the default even if the host has a NativeLink endpoint;
-remote use requires explicit configuration after separate acceptance.
+Inspect the service cgroup and daemon PID before builds. Run build and test
+clients in the same admitted slice so they can reuse the daemon. Do not restart
+a daemon with active work; coordinate any restart of an idle daemon owned by
+this checkout. Local execution remains required while the NativeLink project
+closure, isolation and cache gates are pending.
 
 Codex is deprecated and excluded from this migration. Its existing build path
 is retained separately. Toolchain-only Nix evaluation uses the repository's
