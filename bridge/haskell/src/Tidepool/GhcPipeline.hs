@@ -2537,8 +2537,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           pure (pipelineResult, preparedModules, dependencies, productInterfaces, packageRoots)
     let compileChecked :: Ghc CheckedEnvironmentResult
         compileChecked = do
-          -- load' may need executable dependencies for TH; it never sees the
-          -- metadata target. Restore the full graph for instance visibility.
+          -- Restore the full graph after any target deferral so checking sees
+          -- every source instance, including dependencies loaded for TH.
           environment <- getSession
           when (isNothing (pvExactScope variant)) $
             setSession environment { hsc_mod_graph = modGraphRaw }
