@@ -227,7 +227,8 @@ async fn private_three_item_cell_refusal_keeps_receipts_and_actor_live() {
             original.point,
             tidepool_runtime::session::WorkbenchFailurePoint::Publication {
                 completed_input_units: 3,
-            }
+            },
+            "original execution failed before publication: {original:?}"
         );
         assert_eq!(original.receipts.len(), 3, "all three units completed privately");
         assert!(original.receipts.iter().all(|receipt| {
