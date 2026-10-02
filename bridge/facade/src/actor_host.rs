@@ -64,6 +64,8 @@ mod jev_tests;
 mod lookup_availability_tests;
 #[cfg(test)]
 mod m1_host_tests;
+#[cfg(test)]
+mod native_prefix_publication_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod observation_budget_tests;
 mod overlay_resource;
