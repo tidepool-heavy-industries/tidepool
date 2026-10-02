@@ -171,7 +171,136 @@ pub struct CertifiedAuthoredDeclaration {
     original_imports: Vec<ExactInterfaceOwner>,
 }
 
+/// Shared source selection derived from one immutable original certificate.
+/// Session implementations remain dependencies, without selecting their names.
+pub struct OriginalSourceLexicalSurface {
+    pub roots: Vec<ExactModuleIdentity>,
+    pub lexical: Vec<ExactLexicalNode>,
+}
+
+fn original_source_lexical_surface(
+    original: &ExactModuleIdentity,
+    imports: &std::collections::BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+    inherited: &[ExactLexicalNode],
+    implementations: &std::collections::BTreeMap<
+        ExactModuleIdentity,
+        crate::artifact_inventory::ArtifactKind,
+    >,
+) -> Result<OriginalSourceLexicalSurface, CompileError> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let shared_edges = |edges: &[ExactModuleIdentity]| {
+        edges
+            .iter()
+            .filter_map(|owner| {
+                if !owner.module.starts_with("Tidepool.Session.") {
+                    return Some(Ok(owner.clone()));
+                }
+                let module = match implementations.get(owner) {
+                    Some(crate::artifact_inventory::ArtifactKind::ValueInterface) => owner
+                        .module
+                        .strip_prefix("Tidepool.Session.Val.G")
+                        .and_then(|generation| generation.parse::<u64>().ok())
+                        .map(|generation| {
+                            SessionModule::val(tidepool_repr::Generation(generation))
+                        }),
+                    Some(
+                        crate::artifact_inventory::ArtifactKind::OriginalModule
+                        | crate::artifact_inventory::ArtifactKind::LexicalJoin,
+                    ) => owner
+                        .module
+                        .strip_prefix("Tidepool.Session.Lib.G")
+                        .and_then(|generation| generation.parse::<u64>().ok())
+                        .map(|generation| {
+                            SessionModule::lib(tidepool_repr::Generation(generation))
+                        }),
+                    None => None,
+                };
+                if owner.unit == "main"
+                    && module.is_some_and(|module| module.module_name() == owner.module)
+                {
+                    None
+                } else {
+                    Some(Err(contract(
+                        "source import lacks its authenticated session implementation",
+                    )))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let original_edges = imports.get(original).ok_or_else(|| {
+        contract("authored declaration lacks exact original source import evidence")
+    })?;
+    let roots = shared_edges(original_edges)?;
+    let mut lexical = BTreeMap::new();
+    for node in inherited {
+        if node.owner.module.starts_with("Tidepool.Session.")
+            || lexical
+                .insert(node.owner.clone(), node.imports.clone())
+                .is_some()
+        {
+            return Err(contract(
+                "shared source baseline has an invalid lexical owner",
+            ));
+        }
+    }
+    let mut pending = roots.clone();
+    let mut visited = BTreeSet::new();
+    while let Some(owner) = pending.pop() {
+        if !visited.insert(owner.clone()) {
+            continue;
+        }
+        let edges = imports
+            .get(&owner)
+            .or_else(|| lexical.get(&owner))
+            .ok_or_else(|| {
+                contract(format!(
+                    "admitted surface root {}:{} lacks exact original source import evidence",
+                    owner.unit, owner.module
+                ))
+            })?;
+        let edges = shared_edges(edges)?;
+        if lexical
+            .insert(owner, edges.clone())
+            .is_some_and(|prior| prior != edges)
+        {
+            return Err(contract(
+                "admitted surface owner has conflicting original import edges",
+            ));
+        }
+        pending.extend(edges);
+    }
+    Ok(OriginalSourceLexicalSurface {
+        roots,
+        lexical: lexical
+            .into_iter()
+            .map(|(owner, imports)| ExactLexicalNode { owner, imports })
+            .collect(),
+    })
+}
+
 impl CertifiedAuthoredDeclaration {
+    /// Preserve strict shared-source traversal while excluding only certified
+    /// session implementation anchors from lexical selection.
+    pub fn shared_source_lexical_surface(
+        &self,
+        inherited: &[ExactLexicalNode],
+    ) -> Result<OriginalSourceLexicalSurface, CompileError> {
+        let original = ExactModuleIdentity {
+            unit: self.product.owner().unit.clone(),
+            module: self.product.owner().module.clone(),
+        };
+        let imports = self
+            .original_home_imports()
+            .map(|(owner, imports)| (owner.clone(), imports.to_vec()))
+            .collect();
+        let implementations = self
+            .artifacts
+            .descriptors()
+            .into_iter()
+            .map(|descriptor| (descriptor.owner, descriptor.kind))
+            .collect();
+        original_source_lexical_surface(&original, &imports, inherited, &implementations)
+    }
     pub fn product(&self) -> &CertifiedRecoveryProduct {
         &self.product
     }
@@ -1006,6 +1135,76 @@ impl JoinEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_source_surface_requires_exact_implementation_anchors_and_source_rows() {
+        use crate::artifact_inventory::ArtifactKind;
+        use std::collections::BTreeMap;
+        let owner = |module: &str| ExactModuleIdentity {
+            unit: "main".into(),
+            module: module.into(),
+        };
+        let original = owner("Tidepool.Session.Lib.G2");
+        let value = owner("Tidepool.Session.Val.G1");
+        let helper = owner("Helper");
+        let shared = owner("SharedInstances");
+        let imports = BTreeMap::from([
+            (original.clone(), vec![helper.clone(), value.clone()]),
+            (helper.clone(), vec![value.clone(), shared.clone()]),
+            (shared.clone(), vec![]),
+        ]);
+        let implementations = BTreeMap::from([(value.clone(), ArtifactKind::ValueInterface)]);
+        let surface =
+            original_source_lexical_surface(&original, &imports, &[], &implementations).unwrap();
+        assert_eq!(surface.roots, vec![helper.clone()]);
+        assert_eq!(
+            surface.lexical,
+            vec![
+                ExactLexicalNode {
+                    owner: helper.clone(),
+                    imports: vec![shared.clone()]
+                },
+                ExactLexicalNode {
+                    owner: shared.clone(),
+                    imports: vec![]
+                },
+            ]
+        );
+        assert_eq!(imports[&helper], vec![value.clone(), shared.clone()]);
+        assert!(
+            original_source_lexical_surface(&original, &imports, &[], &BTreeMap::new()).is_err()
+        );
+        let wrong_kind = BTreeMap::from([(value.clone(), ArtifactKind::LexicalJoin)]);
+        assert!(original_source_lexical_surface(&original, &imports, &[], &wrong_kind).is_err());
+        let mut missing_source = imports.clone();
+        missing_source.remove(&shared);
+        assert!(
+            original_source_lexical_surface(&original, &missing_source, &[], &implementations)
+                .is_err()
+        );
+        let inherited = [ExactLexicalNode {
+            owner: shared.clone(),
+            imports: vec![],
+        }];
+        assert!(original_source_lexical_surface(
+            &original,
+            &missing_source,
+            &inherited,
+            &implementations
+        )
+        .is_ok());
+        let conflicting = [ExactLexicalNode {
+            owner: helper,
+            imports: vec![],
+        }];
+        assert!(original_source_lexical_surface(
+            &original,
+            &imports,
+            &conflicting,
+            &implementations
+        )
+        .is_err());
+    }
 
     fn input() -> DeclarationJoinInput {
         DeclarationJoinInput {

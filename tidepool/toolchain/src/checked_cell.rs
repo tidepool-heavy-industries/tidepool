@@ -1363,11 +1363,17 @@ impl ExactCompiledPrefix {
             .planned_declaration()
             .ok_or_else(|| failure("completed declaration has no original certificate"))?;
         let baseline = &self.cell.declaration_context;
-        let mut lexical = baseline
+        let inherited = baseline
             .lexical_graph()
             .iter()
             .filter(|node| !node.owner.module.starts_with("Tidepool.Session."))
-            .map(|node| (node.owner.clone(), node.imports.clone()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let surface = certificate.shared_source_lexical_surface(&inherited)?;
+        let mut lexical = surface
+            .lexical
+            .into_iter()
+            .map(|node| (node.owner, node.imports))
             .collect::<BTreeMap<_, _>>();
         let mut roots = baseline
             .lexical_graph()
@@ -1375,57 +1381,13 @@ impl ExactCompiledPrefix {
             .filter(|node| node.owner.module.starts_with("Tidepool.Session."))
             .flat_map(|node| node.imports.iter().cloned())
             .collect::<Vec<_>>();
+        roots.extend(surface.roots);
+        roots.sort();
+        roots.dedup();
         let owner = crate::declaration_join::ExactModuleIdentity {
             unit: certificate.product().owner().unit.clone(),
             module: certificate.product().owner().module.clone(),
         };
-        let imports = certificate
-            .original_home_imports()
-            .map(|(owner, edges)| (owner, edges))
-            .collect::<BTreeMap<_, _>>();
-        let original = imports
-            .get(&owner)
-            .ok_or_else(|| failure("original declaration has no exact import evidence"))?;
-        let new_roots = original
-            .iter()
-            .filter(|owner| !owner.module.starts_with("Tidepool.Session."))
-            .cloned()
-            .collect::<Vec<_>>();
-        roots.extend(new_roots.clone());
-        roots.sort();
-        roots.dedup();
-        let mut pending = new_roots;
-        let mut visited = BTreeSet::new();
-        while let Some(owner) = pending.pop() {
-            if !visited.insert(owner.clone()) {
-                continue;
-            }
-            let edges = imports
-                .get(&owner)
-                .copied()
-                .or_else(|| lexical.get(&owner).map(Vec::as_slice))
-                .ok_or_else(|| {
-                    failure("completed declaration shared import lacks exact source evidence")
-                })?
-                .to_vec();
-            if edges
-                .iter()
-                .any(|edge| edge.module.starts_with("Tidepool.Session."))
-            {
-                return Err(failure(
-                    "completed shared source imports an unselected session owner",
-                ));
-            }
-            pending.extend(edges.clone());
-            if lexical
-                .insert(owner, edges.clone())
-                .is_some_and(|prior| prior != edges)
-            {
-                return Err(failure(
-                    "completed declaration changes an admitted lexical edge",
-                ));
-            }
-        }
         lexical.insert(owner, roots);
         let expected = (**baseline).clone().extend(
             std::slice::from_ref(certificate),

@@ -1161,6 +1161,57 @@ fn following_declaration_retains_original_native_binding_inventory() {
         &ScalePublication::Ephemeral,
     );
     assert_eq!(resident.current_binding_in(public, "x").unwrap(), original);
+    let public_view = resident.compile_view_in(public).unwrap();
+    let context = public_view.exact_declaration_context().unwrap();
+    assert!(context
+        .artifact_view()
+        .descriptors()
+        .iter()
+        .any(|descriptor| descriptor.owner.module == original.1.module_name()));
+    assert!(!context.lexical_graph().iter().any(|node| node.owner.module
+        == original.1.module_name()
+        || node
+            .imports
+            .iter()
+            .any(|owner| owner.module == original.1.module_name())));
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "following_support_consumer",
+        "dependentThroughSupport",
+        0,
+        Some("1"),
+        &ScalePublication::Ephemeral,
+    );
+    assert_eq!(resident.current_binding_in(public, "x").unwrap(), original);
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "support_rebind_x",
+        "let x = (2 :: Int)",
+        0,
+        None,
+        &ScalePublication::Ephemeral,
+    );
+    assert_ne!(resident.current_binding_in(public, "x").unwrap(), original);
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "support_original_after_rebind",
+        "dependentThroughSupport",
+        0,
+        Some("1"),
+        &ScalePublication::Ephemeral,
+    );
 }
 
 #[test]
