@@ -20,7 +20,7 @@ import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (isHexDigit)
-import Data.List (nub, isPrefixOf)
+import Data.List (isPrefixOf)
 import qualified Data.Text as T
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -695,8 +695,8 @@ bounded limit item = do
   when (count > limit) (fail "exact scope inventory exceeds bound")
   replicateM count item
 
-unique :: Eq a => String -> [a] -> Decoder s ()
-unique label values = unless (length (nub values) == length values) (fail ("duplicate " ++ label))
+unique :: Ord a => String -> [a] -> Decoder s ()
+unique label values = unless (Set.size (Set.fromList values) == length values) (fail ("duplicate " ++ label))
 
 string :: Decoder s String
 string = T.unpack <$> decodeString
