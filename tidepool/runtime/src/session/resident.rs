@@ -2600,6 +2600,27 @@ where
         self.state.revalidate_declaration_rejection(rejected)
     }
 
+    /// Snapshot a host-owned binding write for the existing public-manifest
+    /// publisher. `None` selects an ephemeral surface; it never bypasses an
+    /// initialized durable owner. Staging and publication retain their usual
+    /// exact public/private visibility checks.
+    pub fn snapshot_host_binding_publication(
+        &mut self,
+        owner: Option<super::RecoveryPublicOwner>,
+        public_scope: ScopeId,
+        private_scope: ScopeId,
+        writes: Vec<SessionVarId>,
+    ) -> Result<super::PublicManifestBase, SessionError> {
+        self.settle_dropped_custody();
+        self.state.snapshot_publication_target(
+            owner,
+            public_scope,
+            private_scope,
+            writes,
+            Vec::new(),
+        )
+    }
+
     pub fn publish_staged_public_manifest(
         &mut self,
         ticket: super::StagedPublicManifest,

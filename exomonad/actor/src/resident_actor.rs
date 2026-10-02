@@ -6076,9 +6076,37 @@ where
             request.request,
             request.type_modules(),
         );
+        let publication = {
+            let records = self.environment.actors.lock();
+            let record = records.get(&context.actor).ok_or_else(|| {
+                ResidentActorWorkbenchError::InputMount(
+                    "activation actor has no public owner".into(),
+                )
+            })?;
+            if record.terminal.is_some() || record.descriptor.placement() != context.placement {
+                return Err(ResidentActorWorkbenchError::InputMount(
+                    "activation public owner differs from current actor placement".into(),
+                ));
+            }
+            match &record.public_owner {
+                ActorPublicOwnerPlane::DurablePending(_) => {
+                    crate::resident_workbench::ActivationInputPublication::Bootstrap
+                }
+                ActorPublicOwnerPlane::Ephemeral(owner)
+                | ActorPublicOwnerPlane::DurableReady(owner) => {
+                    crate::resident_workbench::ActivationInputPublication::Published(owner.clone())
+                }
+                ActorPublicOwnerPlane::DurablePublishedUnconfirmed { detail, .. } => {
+                    return Err(ResidentActorWorkbenchError::InputMount(format!(
+                        "activation requires confirmation of the published durable owner: {detail}",
+                    )));
+                }
+            }
+        };
         let (input_preview, reply_preview, input_binding) = workbench
             .mount_activation_input(
                 context.clone(),
+                publication,
                 request.input_type.clone(),
                 input,
                 request.response.expected_type().to_owned(),

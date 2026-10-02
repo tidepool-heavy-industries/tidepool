@@ -181,7 +181,7 @@ impl ExecutionResourceOwners {
 }
 
 impl WorkbenchPublicOwner {
-    pub(super) fn issue(
+    pub(crate) fn issue(
         context: &ActorSessionContext,
         descriptor: &ActorDescriptor,
         durable: Option<tidepool_runtime::session::RecoveryPublicOwner>,

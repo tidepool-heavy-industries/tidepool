@@ -859,6 +859,41 @@ impl PendingChildTeardown {
     }
 }
 
+/// Root bootstrap is the only activation that precedes public-owner
+/// initialization. Every established actor publishes through its exact owner.
+pub(crate) enum ActivationInputPublication {
+    Bootstrap,
+    Published(Arc<crate::resident_actor::WorkbenchPublicOwner>),
+}
+
+fn reject_activation_declaration<H, O>(
+    session: &ResidentSession<H, O>,
+    scope: ScopeId,
+) -> Result<(), ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    if session
+        .current_decl_heads_in(scope)
+        .iter()
+        .any(|(name, _)| name == "sessionInput")
+    {
+        return Err(ResidentActorWorkbenchError::InputMount(
+            "sessionInput is reserved for activation input; remove its authored declaration before activating".into(),
+        ));
+    }
+    Ok(())
+}
+
+struct CancelActivationPublicationOnDrop(Arc<tidepool_runtime::session::PublicationDecision>);
+
+impl Drop for CancelActivationPublicationOnDrop {
+    fn drop(&mut self) {
+        self.0.request_cancellation();
+    }
+}
+
 struct CancelCompilerTransactionOnDrop(Option<tidepool_runtime::CompilerTransactionCancellation>);
 
 impl Drop for CancelCompilerTransactionOnDrop {
@@ -4057,17 +4092,56 @@ where
             .await
     }
 
-    /// Compile the input interface and preview together, commit the input,
-    /// then render it. A failed preview leaves the mounted binding available.
+    /// Compile and mount one input exactly once. Established actors stage it
+    /// in a retained scope and publish through the existing manifest owner
+    /// before exposing an activation. A failed preview keeps the input usable.
+    /// A declaration named `sessionInput` is reserved while activating; ordinary
+    /// value bindings with that name are replaced through binding publication.
     pub(crate) async fn mount_activation_input(
         &self,
         context: crate::ActorSessionContext,
+        publication: ActivationInputPublication,
         input_type: String,
         input: RootCustody,
         reply_type: String,
         reply_declaration: Option<String>,
         reply_declaration_modules: Vec<String>,
     ) -> Result<(String, String, tidepool_repr::SessionVarId), ResidentActorWorkbenchError> {
+        let public_scope = context.placement.lexical_scope;
+        let public_context = context.clone();
+        let (owner, retained) = match publication {
+            ActivationInputPublication::Bootstrap => (None, None),
+            ActivationInputPublication::Published(owner) => {
+                if !owner.matches_context(&context) {
+                    return Err(ResidentActorWorkbenchError::InputMount(
+                        "activation publication requires the original actor public owner".into(),
+                    ));
+                }
+                let durable = owner.durable().cloned();
+                let retained = self
+                    .access
+                    .with_machine(context.clone(), move |session, _, _| {
+                        reject_activation_declaration(session, public_scope)?;
+                        if let Some(durable) = &durable {
+                            // Establish the same exact public-surface fence as
+                            // private cell admission before staging host input.
+                            session
+                                .confirm_durable_public_scope(durable, public_scope)
+                                .map_err(ResidentError::Session)?;
+                        }
+                        session
+                            .retain_lexical_scope(public_scope)
+                            .map_err(Into::into)
+                    })
+                    .await?;
+                (Some(owner), Some(retained))
+            }
+        };
+        let mut context = context;
+        if let Some(retained) = &retained {
+            context.placement.lexical_scope = retained.scope();
+        }
+        let mount_retained = retained.clone();
         let reply_declaration = reply_declaration.filter(|_| {
             reply_declaration_modules.iter().any(|module| {
                 declaration_worth_showing(module, &self.access.source.workspace_modules)
@@ -4083,7 +4157,10 @@ where
         let type_modules = self.type_modules.clone();
         let preview = self
             .access
-            .with_machine(context, move |session, context, _| {
+            .with_machine(context.clone(), move |session, context, _| {
+                // A cancelled caller may leave this blocking checkout running.
+                let _retained = mount_retained;
+                reject_activation_declaration(session, context.placement.lexical_scope)?;
                 use tidepool_runtime::session::turn::{
                     assemble_activation_module, run_activation_turn,
                 };
@@ -4166,6 +4243,86 @@ where
             })
             .await?;
         let (preview, input_binding) = preview;
+        if let Some(owner) = owner {
+            let decision = tidepool_runtime::session::PublicationDecision::new();
+            let _cancel_on_drop = CancelActivationPublicationOnDrop(decision.clone());
+            loop {
+                let durable = owner.durable().cloned();
+                let stage_retained = retained.clone();
+                let baseline = self
+                    .access
+                    .with_machine(context.clone(), move |session, context, _| {
+                        let _retained = stage_retained;
+                        reject_activation_declaration(session, public_scope)?;
+                        session
+                            .snapshot_host_binding_publication(
+                                durable,
+                                public_scope,
+                                context.placement.lexical_scope,
+                                vec![input_binding],
+                            )
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                            })
+                    })
+                    .await?;
+                let ticket = spawn_blocking_in_span(move || baseline.stage())
+                    .await
+                    .map_err(ResidentActorWorkbenchError::Join)?
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                let publish_decision = decision.clone();
+                let publish_retained = retained.clone();
+                let outcome = self
+                    .access
+                    .with_machine(context.clone(), move |session, _, _| {
+                        let _retained = publish_retained;
+                        session
+                            .publish_staged_public_manifest(ticket, &publish_decision)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                            })
+                    })
+                    .await?;
+                use tidepool_runtime::session::PublicManifestCommit;
+                match outcome {
+                    PublicManifestCommit::Stale => continue,
+                    PublicManifestCommit::Durable | PublicManifestCommit::Ephemeral => break,
+                    PublicManifestCommit::PublishedDurabilityUnconfirmed { .. } => {
+                        // The visible write is authoritative: confirm it, never
+                        // stage or mount another input after this point.
+                        let durable = owner.durable().cloned().ok_or_else(|| {
+                            ResidentActorWorkbenchError::InputMount(
+                                "ephemeral activation reported unconfirmed durability".into(),
+                            )
+                        })?;
+                        self.access
+                            .with_machine(public_context.clone(), move |session, _, _| {
+                                session
+                                    .confirm_durable_public_scope(&durable, public_scope)
+                                    .map_err(|error| {
+                                        ResidentActorWorkbenchError::Resident(
+                                            ResidentError::Session(error),
+                                        )
+                                    })
+                            })
+                            .await?;
+                        break;
+                    }
+                    PublicManifestCommit::Cancelled => {
+                        return Err(ResidentActorWorkbenchError::InputMount(
+                            "activation publication was cancelled before commit".into(),
+                        ))
+                    }
+                    PublicManifestCommit::BeforeRename { detail } => {
+                        return Err(ResidentActorWorkbenchError::InputMount(format!(
+                            "activation publication failed before commit: {detail}"
+                        )))
+                    }
+                }
+            }
+        }
         let input = match preview {
             Ok((text, omitted)) => bounded_activation_text(
                 text, ACTIVATION_INPUT_LIMIT, omitted, "inspectFull sessionInput",
@@ -16665,9 +16822,249 @@ mod request_tests {
     }
 
     #[tokio::test]
+    async fn activation_inputs_preserve_durable_private_admission_across_replacement() {
+        struct RunOwner {
+            root: PathBuf,
+            _lock: std::fs::File,
+        }
+        impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
+            fn owns_run(&self, root: &std::path::Path) -> std::io::Result<bool> {
+                Ok(root.canonicalize()? == self.root)
+            }
+        }
+        let durable = tempfile::tempdir().unwrap();
+        let manifest = durable.path().join("declarations.json");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(durable.path().join("run-owner.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        let authority = Arc::new(RunOwner {
+            root: durable.path().canonicalize().unwrap(),
+            _lock: lock,
+        });
+        let (mut session, context, source, _root) = host_mount_fixture_with_lib(|lib| {
+            lib.attach_owned_recovery_graph_v3(&manifest, authority)
+                .unwrap();
+        });
+        // One compiled input fixture is borrowed for both independent mounts.
+        let step = begin_fragment(
+            &mut session,
+            &context,
+            &source,
+            RequestWorkbenchScope {
+                response: None,
+                request: None,
+                type_modules: &[],
+            },
+            ParsedBlock {
+                ordinal: 1,
+                total: 1,
+                source: "sourceValue <- pure ()".into(),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(step, ResidentWorkbenchStep::Committed { .. }));
+        let path = tidepool_repr::ActorPath::parse("root/activation-child").unwrap();
+        let durable_owner =
+            tidepool_runtime::session::RecoveryPublicOwner::new(&path, context.actor.incarnation.0)
+                .unwrap();
+        let public_scope = context.placement.lexical_scope;
+        session
+            .initialize_durable_public_scope(durable_owner.clone(), public_scope)
+            .unwrap();
+        let descriptor = crate::ActorDescriptor::new("activation-child", context.placement)
+            .with_persistence_policy(crate::ActorPersistencePolicy::Durable)
+            .with_actor_path(path);
+        let owner = crate::resident_actor::WorkbenchPublicOwner::issue(
+            &context,
+            &descriptor,
+            Some(durable_owner.clone()),
+        )
+        .unwrap();
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
+        let mut previous = None;
+        let mut captured = None;
+        for _ in 0..2 {
+            let input = workbench
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    let (id, ..) = session
+                        .current_binding_in(public_scope, "sourceValue")
+                        .unwrap();
+                    Ok(session
+                        .retain_binding_custody_in(public_scope, "sourceValue", id)?
+                        .unwrap())
+                })
+                .await
+                .unwrap();
+            let before_manifest = std::fs::read(&manifest).unwrap();
+            let (_, _, binding) = workbench
+                .mount_activation_input(
+                    context.clone(),
+                    ActivationInputPublication::Published(owner.clone()),
+                    "()".into(),
+                    input,
+                    "()".into(),
+                    None,
+                    vec![],
+                )
+                .await
+                .unwrap();
+            assert_ne!(std::fs::read(&manifest).unwrap(), before_manifest);
+            assert_ne!(previous, Some(binding));
+            let expected = durable_owner.clone();
+            let custody = workbench
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    let admission = session
+                        .begin_durable_private_execution(&expected, public_scope)
+                        .map_err(ResidentError::Session)?;
+                    assert_eq!(
+                        session
+                            .current_binding_in(public_scope, "sessionInput")
+                            .unwrap()
+                            .0,
+                        binding
+                    );
+                    let custody = session
+                        .retain_binding_custody_in(public_scope, "sessionInput", binding)?
+                        .unwrap();
+                    let preview = session.render_retained_preview(&custody, 128).unwrap();
+                    assert!(!preview.is_empty());
+                    drop(admission);
+                    Ok((custody, preview))
+                })
+                .await
+                .expect("a published activation admits an ordinary durable private cell");
+            previous = Some(binding);
+            if captured.is_none() {
+                captured = Some(custody);
+            }
+        }
+        // Promotion owns the dependency closure after staging-scope retirement;
+        // an independently retained first input also survives replacement.
+        let (captured, first_preview) = captured.unwrap();
+        let expected = durable_owner;
+        workbench
+            .access
+            .with_machine(context, move |session, _, _| {
+                let _admission = session
+                    .begin_durable_private_execution(&expected, public_scope)
+                    .map_err(ResidentError::Session)?;
+                assert_eq!(
+                    session.render_retained_preview(&captured, 128),
+                    Some(first_preview)
+                );
+                let id = previous.unwrap();
+                assert!(session
+                    .retain_binding_custody_in(public_scope, "sessionInput", id)?
+                    .is_some());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn activation_refuses_reserved_declaration_without_public_mutation() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let descriptor = crate::ActorDescriptor::new("activation", context.placement);
+        let owner = crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None)
+            .unwrap();
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        for code in ["sourceValue <- pure ()", "sessionInput = ()"] {
+            let step = workbench
+                .begin_fragment_split(
+                    context.clone(),
+                    source.clone(),
+                    vec![],
+                    ParsedBlock {
+                        ordinal: 1,
+                        total: 1,
+                        source: code.into(),
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            match step {
+                ResidentWorkbenchStep::Running { fragment, outcome } => {
+                    workbench
+                        .settle_item(context.clone(), *fragment, *outcome)
+                        .await
+                        .unwrap();
+                }
+                ResidentWorkbenchStep::Committed { .. } => {}
+                _ => panic!("collision fixture did not bind: {}", describe_step(&step)),
+            }
+        }
+        let public_scope = context.placement.lexical_scope;
+        let (input, before) = workbench
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                let (id, ..) = session
+                    .current_binding_in(public_scope, "sourceValue")
+                    .unwrap();
+                Ok((
+                    session
+                        .retain_binding_custody_in(public_scope, "sourceValue", id)?
+                        .unwrap(),
+                    session.public_visibility_snapshot_in(public_scope).unwrap(),
+                ))
+            })
+            .await
+            .unwrap();
+        let error = workbench
+            .mount_activation_input(
+                context.clone(),
+                ActivationInputPublication::Published(owner),
+                "()".into(),
+                input,
+                "()".into(),
+                None,
+                vec![],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ResidentActorWorkbenchError::InputMount(ref detail) if detail.contains("reserved"))
+        );
+        workbench
+            .access
+            .with_machine(context, move |session, _, _| {
+                assert_eq!(
+                    session.public_visibility_snapshot_in(public_scope),
+                    Some(before)
+                );
+                assert!(session
+                    .current_decl_heads_in(public_scope)
+                    .iter()
+                    .any(|(name, _)| name == "sessionInput"));
+                assert!(session
+                    .current_binding_in(public_scope, "sessionInput")
+                    .is_none());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn request_input_borrow_refuses_a_shadowed_mount() {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        let descriptor = crate::ActorDescriptor::new("activation", context.placement);
+        let activation_owner =
+            crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None)
+                .unwrap();
         let step = workbench
             .begin_fragment_split(
                 context.clone(),
@@ -16706,6 +17103,7 @@ mod request_tests {
         let (_, _, first) = workbench
             .mount_activation_input(
                 context.clone(),
+                ActivationInputPublication::Published(activation_owner.clone()),
                 "()".into(),
                 borrow_source().await.expect("source borrow"),
                 "()".into(),
@@ -16717,6 +17115,7 @@ mod request_tests {
         let (_, _, second) = workbench
             .mount_activation_input(
                 context.clone(),
+                ActivationInputPublication::Published(activation_owner.clone()),
                 "()".into(),
                 borrow_source().await.expect("source borrow"),
                 "()".into(),
@@ -16757,6 +17156,10 @@ mod request_tests {
         let workbench =
             ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
         let runner = ResidentActorRunner::new(machines, source.clone());
+        let descriptor = crate::ActorDescriptor::new("activation", context.placement);
+        let activation_owner =
+            crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None)
+                .unwrap();
         let step = workbench
             .begin_fragment_split(
                 context.clone(),
@@ -16800,6 +17203,7 @@ mod request_tests {
         let (_, _, binding) = workbench
             .mount_activation_input(
                 context.clone(),
+                ActivationInputPublication::Published(activation_owner.clone()),
                 "()".into(),
                 input,
                 "()".into(),
