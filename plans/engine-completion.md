@@ -5,6 +5,44 @@ verified foundation `2adfe22f1ccf4add4eb77efb9b2c17a70161ea9b`. This document
 records the implementation baseline and accepted shared boundaries. The
 foundation checkpoint is complete; the overall implementation is not.
 
+## Current integration checkpoint — 2026-10-02
+
+M2 implementation is joined into canonical main at
+`1ab47525fb5de651c3da7827ec950eccf990a963`, retaining the current M1 harness
+and browser pin `f2d01bd220028844210740ef518c500098982ca4`. This checkpoint
+supersedes the historical push hold below; reviewed commits may be published.
+The existing Tailscale trial on port 8080 remains running.
+
+The joined optimized compiler passed the full structural corpus, including
+261 suite targets and seven embedded prepared artifacts. Five production actor
+concurrency cases passed: parked execution with later publication, both
+completion orders for shadowing, invalid-join refusal, and independent control
+with one or two parked executions. Two facade capture cases passed, including
+children replying before parent completion and surviving its later failure.
+Two exact activation cases and three publication/cancellation owner tests also
+passed; those owner tests are distinct from the real compiler-backed cases.
+
+Native capture testing exposed two kernel queue defects: hosted tools deferred
+during startup were not eligible to resume without a mailbox receiver, and a
+sealed admission rejection skipped scheduling the next queued call. Both were
+repaired at the kernel owner. The native capture and terminal-transfer cases
+passed after repair; six focused scheduler/drain cases passed on the final
+queue fix. Compilation setup now precedes the terminal-transfer fixture's
+unchanged bounded protocol assertion.
+
+Exact commands, source/build identities, selectors, failures and terminal
+results are retained in the integration checkout
+`/srv/swarm/checkouts/tidepool-m2-main-20261002/target/m2-main-qualification/`
+and its `target/completion-evidence/m2-main-20261002/` directory. The canonical
+checkout retains `target/completion-evidence/m2-main-20261002/canonical-merge.json`.
+
+Remaining in this bounded delivery: qualify lookup cancellation/freshness while
+GHC runs outside machine checkout; deploy the matched port 8088 trial; exercise
+the real Sol root and captured Luna worker tree; and measure the certificate
+encoding candidate with matched optimized A/B runs. These are not closed by
+component passes. Broader latency and scaling goals remain separate: historical
+mixed-build timings are not a current optimized baseline or an accepted SLO.
+
 ## Finish line
 
 - M1: production sequential embedded Engine/Store/browser composition and
