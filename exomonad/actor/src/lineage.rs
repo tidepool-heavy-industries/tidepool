@@ -1512,6 +1512,27 @@ impl ForkGroupRegistry {
         })
     }
 
+    pub(crate) fn pending_children_at_boundary(
+        &self,
+        owner: ActorRef,
+        boundary: &WorkbenchForkBoundary,
+    ) -> HashSet<ActorRef> {
+        self.state
+            .lock()
+            .groups
+            .values()
+            .filter(|group| {
+                group.owner == owner
+                    && group.completion_boundary.as_ref() == Some(boundary)
+                    && matches!(
+                        *group.phase.borrow(),
+                        ForkGroupPhase::Staging | ForkGroupPhase::Ready
+                    )
+            })
+            .flat_map(|group| group.children.iter().copied())
+            .collect()
+    }
+
     pub(crate) fn ready_groups_at_boundary(
         &self,
         owner: ActorRef,
