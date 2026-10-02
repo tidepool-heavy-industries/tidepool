@@ -686,7 +686,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                     policy.dispatch_boxed(preflight_invocation(
                         &format!("captured-parent-private-probe-{name}"),
                         &format!("captured-parent-private-probe-{name}"),
-                        format!("{name} :: Int"),
+                        format!("({name} :: Int)"),
                     )),
                 )
                 .await
