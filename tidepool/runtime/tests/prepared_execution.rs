@@ -310,6 +310,11 @@ fn native_json_parse_preserves_duplicate_policy_and_typed_failure() {
         .expect("artifact requirements");
     let prepared = parse_program(&bytes, &requirements, DecodeLimits::default()).unwrap();
     let entry = prepared.entry();
+    let producer = prepared.clone();
+    let producer_top = tops(&producer)
+        .into_iter()
+        .find(|top| top.binding.id == entry)
+        .unwrap();
     let linked = link_program(prepared, &MachineImports::default()).unwrap();
     let image = Arc::new(CompiledProgram::compile(&linked).unwrap());
     let image_weak = Arc::downgrade(&image);
@@ -324,27 +329,59 @@ fn native_json_parse_preserves_duplicate_policy_and_typed_failure() {
         .run_entry(first_program, entry, &[], call_options(true), RealmId::ROOT)
         .expect("native JSON fixture runs in the first installation");
     assert_eq!(observed_int(&result.values[0]), 1);
+    use tidepool_repr::execution_schema::{
+        testing, Atom, ExprFrame, GlobalDecl, GlobalId, ResultContract, RuntimeRep, SignatureId,
+        ValueRef,
+    };
+    let mut importer = testing::wire_program();
+    importer.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+    importer.globals.push(GlobalDecl {
+        identity: producer_top.identity.clone(),
+        rep: RuntimeRep::LiftedRef,
+        entry_signature: None,
+        required_evaluated: false,
+        required_generation: None,
+    });
+    importer.expressions.nodes[0] = ExprFrame::Enter {
+        callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+        signature: SignatureId(0),
+    };
+    let importer = testing::prepare(importer).unwrap();
+    assert!(importer.json_layout().is_none());
+    assert!(importer.operations().is_empty());
+    let imported = imported_value_for(
+        &second,
+        &producer,
+        &producer_top,
+        producer_top.identity.clone(),
+        pin,
+        0,
+    );
+    let importer = install_importing(
+        &mut second,
+        importer,
+        &[(producer_top.identity, pin, imported)],
+    )
+    .unwrap();
+    second.pin(importer).unwrap();
+    assert!(second.release(pin));
     drop(first);
     let receipt = second.collect_major(second.quiesce().unwrap()).unwrap();
     assert!(
         receipt.programs.is_empty(),
-        "the unforced entry pins its image"
+        "the importer retains its JSON owner"
     );
     let result = second
-        .run_entry(
-            second_program,
-            entry,
-            &[],
-            call_options(true),
-            RealmId::ROOT,
-        )
-        .expect("the fresh installation retains its immutable JSON binding");
+        .run_entry(importer, ValueId(0), &[], call_options(true), RealmId::ROOT)
+        .expect("native JSON borrows the defining image's binding inside another invocation");
     assert_eq!(observed_int(&result.values[0]), 1);
-    assert!(second.release(pin));
-    drop(second);
+    assert!(second.unpin(importer));
+    let receipt = second.collect_major(second.quiesce().unwrap()).unwrap();
+    assert!(receipt.programs.contains(&second_program));
+    assert!(receipt.programs.contains(&importer));
     assert!(
         image_weak.upgrade().is_none(),
-        "JSON metadata does not retain its image"
+        "retiring the final importer releases the JSON owner's image"
     );
     let read_program = |target: &str| {
         let bytes = std::fs::read(output.path().join(format!("{target}.prepared.cbor"))).unwrap();
