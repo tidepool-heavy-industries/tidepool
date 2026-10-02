@@ -1,4 +1,4 @@
 actorsBeforeFailure <- listAgents
 prefixValue <- pure (41 :: Int)
-Just impossible <- pure (Nothing :: Maybe Int)
+impossible <- pure (prefixIdentifierMissing :: Int)
 tailValue <- pure (42 :: Int)
