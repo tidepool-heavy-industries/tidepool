@@ -359,6 +359,47 @@ struct ResidentActorRecord {
     scheduler_root: bool,
 }
 
+fn settle_root_public_owner_record(
+    record: &mut ResidentActorRecord,
+    context: &ActorSessionContext,
+    expected_owner: &tidepool_runtime::session::RecoveryPublicOwner,
+    outcome: &tidepool_runtime::session::PublicManifestCommit,
+) -> Result<(), ResidentActorWorkbenchError> {
+    if record.terminal.is_some()
+        || record.descriptor.placement() != context.placement
+        || !matches!(&record.public_owner,
+                ActorPublicOwnerPlane::DurablePending(owner)
+                | ActorPublicOwnerPlane::DurablePublishedUnconfirmed { owner, .. }
+                if owner == expected_owner)
+    {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "root public settlement requires its original pending owner".into(),
+        ));
+    }
+    match outcome {
+        tidepool_runtime::session::PublicManifestCommit::Durable => {
+            record.public_owner = ActorPublicOwnerPlane::DurableReady(
+                WorkbenchPublicOwner::issue(
+                    context,
+                    &record.descriptor,
+                    Some(expected_owner.clone()),
+                )
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?,
+            );
+        }
+        tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed {
+            detail,
+        } => {
+            record.public_owner = ActorPublicOwnerPlane::DurablePublishedUnconfirmed {
+                owner: expected_owner.clone(),
+                detail: detail.clone(),
+            };
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 enum RootPublicOwnerPosture {
     Pending,
@@ -9727,6 +9768,59 @@ where
                     })?;
                 return Ok(KernelStep::Continue(()));
             }
+            if self.descriptor.persistence_policy() == crate::ActorPersistencePolicy::Durable
+                && self.descriptor.creator().is_none()
+                && self.descriptor.supervisor_parent().is_none()
+                && self.descriptor.context_parent().is_none()
+                && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))
+            {
+                let owner = {
+                    let records = self.environment.actors.lock();
+                    let record = records.get(&context.actor).ok_or_else(|| {
+                        Self::failure("prepared root lost its original allocation")
+                    })?;
+                    match &record.public_owner {
+                        ActorPublicOwnerPlane::DurablePending(owner) => owner.clone(),
+                        _ => {
+                            return Err(Self::failure(
+                                "prepared durable root lost its pending owner",
+                            ))
+                        }
+                    }
+                };
+                let outcome = self
+                    .environment
+                    .runner
+                    .bind_durable_root_public_owner(context.clone(), owner.clone())
+                    .await
+                    .map_err(Self::failure)?;
+                {
+                    let mut records = self.environment.actors.lock();
+                    let record = records.get_mut(&context.actor).ok_or_else(|| {
+                        Self::failure("prepared root allocation retired before publication")
+                    })?;
+                    settle_root_public_owner_record(record, &context, &owner, &outcome)
+                        .map_err(Self::failure)?;
+                }
+                match outcome {
+                    tidepool_runtime::session::PublicManifestCommit::Durable => {},
+                    tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { .. } => {
+                        self.environment.runner.confirm_durable_public_owner(
+                            context.clone(), owner.clone(),
+                        ).await.map_err(Self::failure)?;
+                        let mut records = self.environment.actors.lock();
+                        let record = records.get_mut(&context.actor).ok_or_else(|| Self::failure(
+                            "prepared root allocation retired before confirmation",
+                        ))?;
+                        settle_root_public_owner_record(record, &context, &owner,
+                            &tidepool_runtime::session::PublicManifestCommit::Durable,
+                        ).map_err(Self::failure)?;
+                    }
+                    other => return Err(Self::failure(format!(
+                        "prepared root public owner was not published: {other:?}",
+                    ))),
+                }
+            }
             let boot = self.boot.take().ok_or_else(|| KernelBehaviorError {
                 detail: "resident actor boot was consumed twice".into(),
             })?;
@@ -11463,41 +11557,7 @@ where
                 "root public allocation retired before confirmation".into(),
             )
         })?;
-        if record.terminal.is_some()
-            || record.descriptor.placement() != placement.placement()
-            || !matches!(&record.public_owner,
-                ActorPublicOwnerPlane::DurablePending(owner)
-                | ActorPublicOwnerPlane::DurablePublishedUnconfirmed { owner, .. }
-                if owner == placement.owner())
-        {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "root public settlement requires its original pending owner".into(),
-            ));
-        }
-        match outcome {
-            tidepool_runtime::session::PublicManifestCommit::Durable => {
-                record.public_owner = ActorPublicOwnerPlane::DurableReady(
-                    WorkbenchPublicOwner::issue(
-                        &context,
-                        &record.descriptor,
-                        Some(placement.owner().clone()),
-                    )
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                    })?,
-                );
-            }
-            tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed {
-                detail,
-            } => {
-                record.public_owner = ActorPublicOwnerPlane::DurablePublishedUnconfirmed {
-                    owner: placement.owner().clone(),
-                    detail: detail.clone(),
-                };
-            }
-            _ => {}
-        }
-        Ok(())
+        settle_root_public_owner_record(record, &context, placement.owner(), outcome)
     }
 
     /// Confirm only directory durability of the original visible root owner.
