@@ -225,12 +225,15 @@ where
             .runner
             .application_workbench()
             .with_compilation_authority(authority);
+        let granted_effects = self.descriptor.effective_role().effect_keys().to_vec();
         Self::owned_step_task(
             owned,
             move |_owned| {
                 Box::pin(async move {
                     let prepare_started = std::time::Instant::now();
-                    let candidate = workbench.prepare_tools(context.clone(), install).await;
+                    let candidate = workbench
+                        .prepare_tools(context.clone(), install, granted_effects)
+                        .await;
                     tracing::info!(actor = %context.actor, phase = "reload", install,
                     elapsed_ms = prepare_started.elapsed().as_millis(), success = candidate.is_ok(),
                     "agent spec preparation");

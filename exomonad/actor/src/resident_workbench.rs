@@ -334,6 +334,7 @@ pub struct ActorWorkbenchSource {
     /// spec discovery; rule one is `AgentSpec.hs` in the run graph.
     spec: Option<Arc<str>>,
     workspace_modules: Arc<[String]>,
+    installed_effect_support: Arc<[exomonad_tool::ToolEffectKey]>,
 }
 
 /// One prepared import environment for evaluation and inspection. Name
@@ -360,6 +361,19 @@ impl ActorWorkbenchSource {
         }
     }
 
+    fn prepare_effectful(
+        &self,
+        scope: &crate::ActorCompileView,
+        effects: &str,
+    ) -> Result<WorkbenchCompilation, ResidentActorWorkbenchError> {
+        let mut prepared = self.prepare(scope);
+        let shim = tidepool_mcp::ensure_selected_effects_shim(effects).map_err(|error| {
+            ResidentActorWorkbenchError::ActorProtocol(format!("selected effect profile: {error}"))
+        })?;
+        prepared.include.insert(0, shim);
+        Ok(prepared)
+    }
+
     #[must_use]
     pub fn new(preamble: impl Into<Arc<str>>, base_include: Vec<PathBuf>) -> Self {
         Self {
@@ -372,7 +386,29 @@ impl ActorWorkbenchSource {
             ]),
             spec: None,
             workspace_modules: Arc::from([]),
+            installed_effect_support: Arc::from([]),
         }
+    }
+
+    /// Capture support from the actual assembled interpreter instances and
+    /// installed host services, before admitting source-authored tools.
+    #[must_use]
+    pub fn with_installed_effect_support(
+        mut self,
+        keys: impl IntoIterator<Item = exomonad_tool::ToolEffectKey>,
+    ) -> Self {
+        let mut installed = Vec::new();
+        for key in keys {
+            if !installed.contains(&key) {
+                installed.push(key);
+            }
+        }
+        self.installed_effect_support = installed.into();
+        self
+    }
+
+    pub(crate) fn installed_effect_support(&self) -> &[exomonad_tool::ToolEffectKey] {
+        &self.installed_effect_support
     }
 
     /// Name the workspace-authored Haskell modules already compiled into
@@ -568,45 +604,7 @@ impl InstalledToolsState {
     }
 }
 
-/// What one `installSpec` publishes: the declared surface, and which slots the
-/// same compile filled.
-pub(crate) struct SpecInstallation {
-    pub(crate) tools: Vec<exomonad_tool::ToolDeclaration>,
-    pub(crate) slots: Vec<String>,
-}
-
-/// Read an installation out of the suspension's JSON.
-///
-/// A bare array is a tools-only installation, which is what every spec with no
-/// slot filled publishes and what the shape was before slots existed; the
-/// object form additionally names the slots.
-pub(crate) fn decode_installation(
-    installation: serde_json::Value,
-) -> Result<SpecInstallation, ResidentActorWorkbenchError> {
-    let declarations = |value| {
-        serde_json::from_value::<Vec<exomonad_tool::ToolDeclaration>>(value).map_err(|error| {
-            ResidentActorWorkbenchError::ActorProtocol(format!("tool declarations: {error}"))
-        })
-    };
-    match installation {
-        serde_json::Value::Object(mut fields) => {
-            let tools = declarations(
-                fields
-                    .remove("tools")
-                    .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
-            )?;
-            let slots = fields
-                .remove("slots")
-                .and_then(|slots| serde_json::from_value::<Vec<String>>(slots).ok())
-                .unwrap_or_default();
-            Ok(SpecInstallation { tools, slots })
-        }
-        array => Ok(SpecInstallation {
-            tools: declarations(array)?,
-            slots: Vec::new(),
-        }),
-    }
-}
+pub(crate) use crate::tool_contract::{decode_installation, SpecInstallation};
 
 impl ResidentWorkbenchTools {
     /// The provenance a completed call records: this record, and the revision
@@ -3579,6 +3577,7 @@ where
         &'a self,
         context: crate::ActorSessionContext,
         install: u64,
+        granted_effects: Vec<exomonad_tool::ActorEffectKey>,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
@@ -3589,7 +3588,7 @@ where
             let entry = resolved
                 .entry
                 .clone()
-                .unwrap_or_else(|| "Tidepool.Agent.Contract.defaultSpec".into());
+                .unwrap_or_else(|| "Tidepool.Agent.Contract.defaultWorkbenchSpec".into());
             let mut source = self.access.source.clone();
             // A spec found by convention is named by no configured key, so its
             // module is not in the shared workbench vocabulary; the fragment that
@@ -3604,14 +3603,9 @@ where
                 .extend_text("qualified Tidepool.Agent.Contract");
             source.preamble =
                 insert_preamble_imports(&source.preamble, "qualified Tidepool.Effects.Core").into();
-            source.preamble = format!(
-                "{}\ntype HostedToolEffects = Tidepool.Effects.Core.AgentTools ': {}\n",
-                source.preamble, context.haskell_effects_alias
-            )
-            .into();
             let authored_effects = context.haskell_effects_alias.clone();
             let mut compile_context = context.clone();
-            compile_context.haskell_effects_alias = "HostedToolEffects".into();
+            compile_context.haskell_effects_alias = format!("(Tidepool.Effects.Core.AgentTools ': Tidepool.Effects.Core.ContextReadWrite ': {authored_effects})");
             let block = ParsedBlock {
                 ordinal: 1,
                 total: 1,
@@ -3625,6 +3619,7 @@ where
                 items: Vec::new(),
             };
             let publication_resolved = resolved;
+            let installed_effect_support = source.installed_effect_support.clone();
             // Compile with the resident machine checked out only for the
             // snapshot and the install-and-run step (`begin_fragment_split`),
             // released for the GHC compile in between. The suspension this
@@ -3689,7 +3684,21 @@ where
                             session.data_con_table(),
                             0,
                         );
-                        let SpecInstallation { tools, slots } = decode_installation(installation)?;
+                        let SpecInstallation {
+                            tools,
+                            slots,
+                            slot_effect_keys,
+                        } = decode_installation(installation)?;
+                        crate::tool_contract::validate_installation(
+                            &tools,
+                            &slots,
+                            &slot_effect_keys,
+                            &granted_effects,
+                            &installed_effect_support,
+                        )
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                        })?;
                         let declarations = crate::resident_interactive::project_tools(tools)
                             .map_err(|error| {
                                 ResidentActorWorkbenchError::ActorProtocol(error.to_string())
@@ -3970,7 +3979,7 @@ where
                 use tidepool_runtime::session::{TemplateSelector, TurnTemplate};
                 let view = actor_compile_view(session, context, &source, &type_modules)?;
                 let generation = view.next_value_generation();
-                let prepared = source.prepare(&view);
+                let prepared = source.prepare_effectful(&view, &context.haskell_effects_alias)?;
                 let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
                 let templates = [TurnTemplate {
                     kind: TemplateSelector::Bind,
@@ -4520,7 +4529,8 @@ where
                     mounted_input.as_ref(),
                     Some(execution.admission.as_ref()),
                 )?;
-                let prepared = source.prepare(&snapshot.view);
+                let prepared =
+                    source.prepare_effectful(&snapshot.view, &context.haskell_effects_alias)?;
                 let preamble = cell_module_preamble(
                     &prepared.preamble,
                     &snapshot.candidate_module.module_name(),
@@ -4746,7 +4756,8 @@ where
                         source.preamble = actor_preamble(&source.preamble, context).into();
                         let compile_view =
                             actor_compile_view(session, context, &source, &type_modules)?;
-                        let prepared = source.prepare(&compile_view);
+                        let prepared = source
+                            .prepare_effectful(&compile_view, &context.haskell_effects_alias)?;
                         let check_preamble = cell_module_preamble(
                             &prepared.preamble,
                             &candidate_module.module_name(),
@@ -4935,7 +4946,7 @@ where
                     &source,
                     tidepool_runtime::session::NameScope::Current,
                 );
-                let prepared = source.prepare(&view);
+                let prepared = source.prepare_effectful(&view, &context.haskell_effects_alias)?;
                 let include = prepared
                     .include
                     .iter()
@@ -5461,7 +5472,7 @@ where
         let spawn = {
             let _entered = inspection_span.enter();
             spawn_blocking_in_span(move || {
-                let prepared = compiler_source.prepare(&compile_view);
+                let prepared = compiler_source.prepare_effectful(&compile_view, &effects)?;
                 let include = prepared
                     .include
                     .iter()
@@ -6158,7 +6169,7 @@ fn compile_fragment_off_checkout(
     effect_stack: &str,
     block: &ParsedBlock,
 ) -> Result<CompiledBlock, ResidentActorWorkbenchError> {
-    let prepared = source.prepare(&snapshot.view);
+    let prepared = source.prepare_effectful(&snapshot.view, effect_stack)?;
     let mut templates =
         resident_workbench_templates(&prepared.preamble, effect_stack, &prepared.imports);
     let include_refs: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
@@ -10711,7 +10722,7 @@ fn check_cell_off_checkout(
 ) -> Result<(CellCheck, Option<tidepool_runtime::session::TurnResult>), ResidentActorWorkbenchError>
 {
     let compile_view = &snapshot.view;
-    let prepared = source.prepare(compile_view);
+    let prepared = source.prepare_effectful(compile_view, effects)?;
     let check_preamble =
         cell_module_preamble(&prepared.preamble, &snapshot.candidate_module.module_name())?;
     let template = resident_cell_check_template(&check_preamble, effects, &prepared.imports);
@@ -11528,7 +11539,7 @@ fn compile_host_binding_off_checkout(
     retained_imports: &[(SymbolIdentity, u64)],
 ) -> Result<(BoundBinder, CompiledTurn), ResidentActorWorkbenchError> {
     let view = view.clone().with_workbench_imports(&imports);
-    let prepared = source.prepare(&view);
+    let prepared = source.prepare_effectful(&view, effects)?;
     let templates = resident_workbench_templates(&prepared.preamble, effects, &prepared.imports);
     let include: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
     let retained_anchor = format!("__tidepoolCarrierAnchor{generation}");
@@ -11980,7 +11991,7 @@ fn compile_block_off_checkout(
             .map(|module| format!("qualified {module}")),
     );
     let compile_view = compile_view.with_workbench_imports(&expression_imports);
-    let mut prepared = source.prepare(&compile_view);
+    let mut prepared = source.prepare_effectful(&compile_view, effects)?;
     if let Some(prologue) = prologue {
         prepared.preamble = prepared.preamble.replacen(
             "\nmodule ",
@@ -12231,7 +12242,10 @@ fn inspect_compile_view(
     Vec<Result<tidepool_runtime::session::InspectionResult, String>>,
     ResidentActorWorkbenchError,
 > {
-    let prepared = source.prepare(compile_view);
+    let prepared = match effects {
+        Some(effects) => source.prepare_effectful(compile_view, effects)?,
+        None => source.prepare(compile_view),
+    };
     let include_refs = prepared
         .include
         .iter()

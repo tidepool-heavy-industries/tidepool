@@ -54,6 +54,7 @@ impl WorkbenchCompilationAuthority {
         frame(&actor.id.0.to_le_bytes());
         frame(&actor.incarnation.0.to_le_bytes());
         frame(&source.semantic_digest());
+        frame(context.haskell_effects_alias.as_bytes());
         match &installed_tools {
             Some(lease) => {
                 frame(b"issued-tool-lease");
@@ -2341,6 +2342,24 @@ mod authority_tests {
             haskell_effects_alias: String::new(),
             source_layer: Arc::from([PathBuf::from("original-root")]),
         }
+    }
+
+    #[test]
+    fn effect_profile_is_part_of_exact_compilation_authority() {
+        let source = crate::CheckpointSourceLayer::default();
+        let mut async_context = context();
+        async_context.haskell_effects_alias = "'[Replies]".into();
+        let mut sync_context = async_context.clone();
+        sync_context.haskell_effects_alias = "'[ContextReadWrite, Replies]".into();
+        let (_, asynchronous) =
+            WorkbenchCompilationAuthority::admit(async_context, source.clone(), None, None)
+                .unwrap();
+        let (_, synchronous) =
+            WorkbenchCompilationAuthority::admit(sync_context, source, None, None).unwrap();
+        assert_ne!(
+            asynchronous.authority_digest(),
+            synchronous.authority_digest()
+        );
     }
 
     #[test]

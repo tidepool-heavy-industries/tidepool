@@ -149,15 +149,24 @@ impl WorkbenchExecutionControl {
 
     pub(crate) fn bind_context(&self, binding: Arc<dyn crate::HostedContextBinding>) {
         if let Err(binding) = self.context_binding.set(binding) {
-            assert!(Arc::ptr_eq(self.context_binding.get().expect("original context binding"), &binding));
+            assert!(Arc::ptr_eq(
+                self.context_binding
+                    .get()
+                    .expect("original context binding"),
+                &binding
+            ));
         }
-        if self.context_cancel_requested.load(std::sync::atomic::Ordering::Acquire) {
+        if self
+            .context_cancel_requested
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             self.context_binding.get().expect("bound context").cancel();
         }
     }
 
     pub(crate) fn context_cancellation_requested(&self) -> bool {
-        self.context_cancel_requested.load(std::sync::atomic::Ordering::Acquire)
+        self.context_cancel_requested
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(crate) fn arm_sleep(&self) {
@@ -246,7 +255,8 @@ impl WorkbenchExecutionControl {
     }
 
     fn admit_cancellation(&self) -> (bool, Option<PublicationCancellation>) {
-        self.context_cancel_requested.store(true, std::sync::atomic::Ordering::Release);
+        self.context_cancel_requested
+            .store(true, std::sync::atomic::Ordering::Release);
         if let Some(binding) = self.context_binding.get() {
             binding.cancel();
         }
@@ -943,8 +953,14 @@ impl ResidentToolClient {
         hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
     ) -> Result<serde_json::Value, ResidentToolError> {
         self.dispatch_workbench_issued_with_context(
-            request, invocation, installed_tools, hosted_checkpoint_capture, None, None,
-        ).await
+            request,
+            invocation,
+            installed_tools,
+            hosted_checkpoint_capture,
+            None,
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn dispatch_workbench_issued_with_context(
@@ -964,7 +980,15 @@ impl ResidentToolClient {
             }
             let control = WorkbenchExecutionControl::untracked();
             return self
-                .dispatch_registered_workbench(request, control, None, installed_tools, None, None, selected_tool)
+                .dispatch_registered_workbench(
+                    request,
+                    control,
+                    None,
+                    installed_tools,
+                    None,
+                    None,
+                    selected_tool,
+                )
                 .await;
         };
         if let Some(operation) = invocation.model_operation() {
@@ -1024,7 +1048,8 @@ impl ResidentToolClient {
                     request,
                     installed_tools,
                     hosted_checkpoint_capture,
-                ).with_context(context_binding, selected_tool),
+                )
+                .with_context(context_binding, selected_tool),
                 control: Some(Arc::clone(&control)),
                 reply: response.into(),
             })
@@ -1404,6 +1429,45 @@ mod tests {
         assert_ne!(sibling.reservation_owner(actor), Some(original));
         first.request_cancellation();
         assert!(!sibling.cancellation_requested());
+    }
+
+    struct ContextCancellation(std::sync::atomic::AtomicUsize);
+
+    impl crate::HostedContextBinding for ContextCancellation {
+        fn admit(
+            &self,
+            _: &WorkbenchExecutionId,
+            _: &ToolInvocationContext,
+            _: tidepool_repr::PrincipalId,
+        ) -> Result<(), tidepool_effect::error::EffectError> {
+            Ok(())
+        }
+        fn prepare(
+            &self,
+            _: crate::ContextReq,
+            _: tidepool_repr::PrincipalId,
+            _: tidepool_repr::DataConTable,
+        ) -> tidepool_effect::DeferredEffect {
+            panic!("cancellation test does not evaluate context effects")
+        }
+        fn cancel(&self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        fn finish(&self, _: crate::CellExit) {}
+    }
+
+    #[test]
+    fn cancellation_revokes_context_after_native_publication_and_before_binding() {
+        let control = WorkbenchExecutionControl::untracked();
+        assert!(control.publication_decision().claim_commit().is_some());
+        assert!(!control.request_cancellation());
+        assert!(!control.cancellation_requested());
+        assert!(control.context_cancellation_requested());
+        let binding = Arc::new(ContextCancellation(std::sync::atomic::AtomicUsize::new(0)));
+        control.bind_context(binding.clone());
+        assert_eq!(binding.0.load(std::sync::atomic::Ordering::Acquire), 1);
+        control.request_cancellation();
+        assert_eq!(binding.0.load(std::sync::atomic::Ordering::Acquire), 2);
     }
 
     #[test]

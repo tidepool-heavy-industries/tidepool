@@ -1361,6 +1361,8 @@ struct WorkbenchFinalization {
     result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     rejected: bool,
     retire_scopes: Option<Vec<tidepool_codegen::scope::ScopeId>>,
+    context_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+    control: Option<Arc<crate::WorkbenchExecutionControl>>,
 }
 
 struct WorkbenchFinalizationResult {
@@ -1383,12 +1385,31 @@ where
         kernel,
         result,
         rejected,
-        retire_scopes,
+        mut retire_scopes,
+        context_boundary,
+        control,
     } = finalization;
     let invocation_cleanup = invocation_work.cleanup(&environment, &kernel).await;
     let cleanup_uncertainty = invocation_cleanup.uncertainty();
     let cleanup_confirmed = cleanup_uncertainty.is_none();
     let result = retain_invocation_cleanup_summary(result, cleanup_uncertainty);
+    let context_cancelled = context_boundary.is_some()
+        && control
+            .as_ref()
+            .is_some_and(|control| control.context_cancellation_requested());
+    let context_failed = context_boundary.is_some() && (!cleanup_confirmed || context_cancelled);
+    if context_failed {
+        let scopes = environment
+            .fork_groups
+            .settle_checkpoints(
+                context.actor,
+                context_boundary.as_ref().expect("context boundary"),
+                false,
+            )
+            .into_iter()
+            .filter_map(|(session, scope)| (session == context.placement.session).then_some(scope));
+        retire_scopes.get_or_insert_with(Vec::new).extend(scopes);
+    }
     let checkpoint_cleanup_failure = match retire_scopes {
         Some(scopes) => environment
             .runner
@@ -1399,7 +1420,7 @@ where
         None => None,
     };
     let cleanup_confirmed = cleanup_confirmed && checkpoint_cleanup_failure.is_none();
-    if rejected || checkpoint_cleanup_failure.is_some() {
+    if rejected || context_failed || checkpoint_cleanup_failure.is_some() {
         let (aborted, notifications) = environment
             .requests
             .abort_unsubmitted(context.actor, &reservation_owner);
@@ -1449,7 +1470,10 @@ where
             detail: source.to_string(),
         }),
     });
-    WorkbenchFinalizationResult { result, cleanup_confirmed }
+    WorkbenchFinalizationResult {
+        result,
+        cleanup_confirmed,
+    }
 }
 
 struct WorkbenchEffectState {
@@ -1684,7 +1708,9 @@ enum CurrentEffectOwner<'a> {
 impl CurrentEffectOwner<'_> {
     fn context_binding(&self) -> Option<Arc<dyn crate::HostedContextBinding>> {
         match self {
-            Self::Workbench(execution) if !execution.after_tool_active => execution.context_binding.clone(),
+            Self::Workbench(execution) if !execution.after_tool_active => {
+                execution.context_binding.clone()
+            }
             _ => None,
         }
     }
@@ -1748,12 +1774,22 @@ fn prepare_execution_effect(
     boundary: ResidentActorBoundary,
 ) -> ResidentActorBoundary {
     match boundary {
-        ResidentActorBoundary::Context { continuation, request, table } => {
+        ResidentActorBoundary::Context {
+            continuation,
+            request,
+            table,
+        } => {
             let work = match owner.context_binding() {
-                Some(binding) => binding.prepare(request, tidepool_repr::PrincipalId::from(context.actor), table),
-                None => tidepool_effect::DeferredEffect::blocking(|| Err(
-                    tidepool_effect::error::EffectError::Handler("context mutation requires the exact synchronous invocation".into()),
-                )),
+                Some(binding) => binding.prepare(
+                    request,
+                    tidepool_repr::PrincipalId::from(context.actor),
+                    table,
+                ),
+                None => tidepool_effect::DeferredEffect::blocking(|| {
+                    Err(tidepool_effect::error::EffectError::Handler(
+                        "context mutation requires the exact synchronous invocation".into(),
+                    ))
+                }),
             };
             ResidentActorBoundary::External { continuation, work }
         }
@@ -2116,6 +2152,79 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let invocation_key = control
             .as_ref()
             .and_then(|control| control.invocation.clone());
+        let selected_tool = invocation.selected_tool.or_else(|| {
+            request.tool_call().and_then(|call| {
+                installed_tools
+                    .as_ref()
+                    .and_then(|lease| lease.tools())
+                    .and_then(|tools| {
+                        tools
+                            .declarations
+                            .iter()
+                            .find(|tool| tool.name() == call.name)
+                    })
+                    .cloned()
+            })
+        });
+        if let Some(selected) = &selected_tool {
+            let retained = installed_tools
+                .as_ref()
+                .and_then(|lease| lease.tools())
+                .and_then(|tools| {
+                    tools
+                        .declarations
+                        .iter()
+                        .find(|tool| tool.name() == selected.name())
+                });
+            if retained != Some(selected) {
+                return Err(KernelInvocationFailure::Rejected {
+                    actor,
+                    detail: "selected notebook contract differs from the issued installation"
+                        .into(),
+                });
+            }
+            let keys = selected.effect_keys();
+            if keys.iter().any(|key| match key {
+                exomonad_tool::ToolEffectKey::Actor(key) => {
+                    !self.descriptor.effective_role().effect_keys().contains(key)
+                }
+                exomonad_tool::ToolEffectKey::ContextReadWrite => {
+                    selected.scheduling() != exomonad_tool::ToolScheduling::BeforeNextInference
+                }
+            }) {
+                return Err(KernelInvocationFailure::Rejected {
+                    actor,
+                    detail: "selected notebook effects exceed its scheduling or actor authority"
+                        .into(),
+                });
+            }
+            context.haskell_effects_alias = match selected.implementation() {
+                exomonad_tool::ToolImplementation::HaskellCell => format!(
+                    "'[{}]",
+                    keys.iter()
+                        .map(|key| key.haskell_name())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                exomonad_tool::ToolImplementation::ResidentHandler => format!(
+                    "(ContextReadWrite ': {})",
+                    self.descriptor.effective_role().haskell_effects_type(),
+                ),
+            };
+        }
+        if invocation.context_binding.is_some()
+            && (selected_tool.as_ref().is_none_or(|tool| {
+                tool.scheduling() != exomonad_tool::ToolScheduling::BeforeNextInference
+            }) || invocation_key
+                .as_ref()
+                .is_none_or(|key| key.0.model_operation().is_none()))
+        {
+            return Err(KernelInvocationFailure::Rejected {
+                actor,
+                detail: "context authority requires an exact synchronous provider invocation"
+                    .into(),
+            });
+        }
         if let Some(execution) = request.execution_id() {
             match self.workbench_executions.lock().lookup(
                 execution,
@@ -2201,6 +2310,22 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             }
             owner.clone()
         };
+        if let Some(binding) = &invocation.context_binding {
+            let control = control
+                .as_ref()
+                .expect("context admission checked exact invocation");
+            binding
+                .admit(
+                    request.execution_id().expect("workbench execution issued"),
+                    &invocation_key.as_ref().expect("exact invocation checked").0,
+                    tidepool_repr::PrincipalId::from(actor),
+                )
+                .map_err(|error| KernelInvocationFailure::Rejected {
+                    actor,
+                    detail: error.to_string(),
+                })?;
+            control.bind_context(binding.clone());
+        }
         Ok(WorkbenchPreflight::Admitted(WorkbenchAdmission {
             context,
             public_owner,
@@ -2210,6 +2335,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             compilation_authority,
             current_builtin,
             capture: invocation.hosted_checkpoint_capture,
+            context_binding: invocation.context_binding,
             control,
             invocation: invocation_key,
         }))
@@ -5962,7 +6088,11 @@ where
         let prepare_started = std::time::Instant::now();
         let application_workbench = self.environment.runner.application_workbench();
         let compiled_tools = application_workbench
-            .prepare_tools(context.clone(), self.spec_installs)
+            .prepare_tools(
+                context.clone(),
+                self.spec_installs,
+                self.descriptor.effective_role().effect_keys().to_vec(),
+            )
             .await;
         tracing::info!(
             actor = %context.actor,
@@ -8895,28 +9025,48 @@ where
                 .runtime_observation
                 .publish_workbench_posture(crate::ActorWorkbenchPosture::Failed),
         }
-        let rejected = match &result {
-            Err(_) => true,
-            Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response)) => {
-                response.status == WorkbenchRunStatus::Rejected
-            }
-            Ok(KernelStep::Stop { output, .. }) => output.status == WorkbenchRunStatus::Rejected,
-        };
-        let checkpoint_failed = match &result {
-            Err(_) => true,
-            Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response)) => {
-                matches!(
-                    response.status,
-                    WorkbenchRunStatus::Rejected | WorkbenchRunStatus::RequestCancelled
-                )
-            }
-            Ok(KernelStep::Stop { output, .. }) => {
-                matches!(
-                    output.status,
-                    WorkbenchRunStatus::Rejected | WorkbenchRunStatus::RequestCancelled
-                )
-            }
-        };
+        let context_ineligible = execution_state.effects.context_binding.is_some()
+            && match &result {
+                Err(_) => true,
+                Ok(
+                    KernelStep::Continue(response)
+                    | KernelStep::ContinueLater(response)
+                    | KernelStep::Stop {
+                        output: response, ..
+                    },
+                ) => {
+                    !matches!(
+                        response.status,
+                        WorkbenchRunStatus::Committed | WorkbenchRunStatus::Completed
+                    ) || response.next_index != response.total
+                }
+            };
+        let rejected = context_ineligible
+            || match &result {
+                Err(_) => true,
+                Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response)) => {
+                    response.status == WorkbenchRunStatus::Rejected
+                }
+                Ok(KernelStep::Stop { output, .. }) => {
+                    output.status == WorkbenchRunStatus::Rejected
+                }
+            };
+        let checkpoint_failed = context_ineligible
+            || match &result {
+                Err(_) => true,
+                Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response)) => {
+                    matches!(
+                        response.status,
+                        WorkbenchRunStatus::Rejected | WorkbenchRunStatus::RequestCancelled
+                    )
+                }
+                Ok(KernelStep::Stop { output, .. }) => {
+                    matches!(
+                        output.status,
+                        WorkbenchRunStatus::Rejected | WorkbenchRunStatus::RequestCancelled
+                    )
+                }
+            };
         let retire_scopes = if checkpoint_failed {
             checkpoint_boundary.as_ref().map(|boundary| {
                 self.environment
@@ -8939,6 +9089,12 @@ where
             result,
             rejected,
             retire_scopes,
+            context_boundary: execution_state
+                .effects
+                .context_binding
+                .as_ref()
+                .and(checkpoint_boundary),
+            control: execution_state.effects.control.clone(),
         }
     }
 
@@ -8947,15 +9103,27 @@ where
         execution_state: &mut WorkbenchExecutionState,
         finalized: WorkbenchFinalizationResult,
     ) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> {
-        let WorkbenchFinalizationResult { result, cleanup_confirmed } = finalized;
+        let WorkbenchFinalizationResult {
+            result,
+            cleanup_confirmed,
+        } = finalized;
         let execution = execution_state.request.execution_id().cloned();
         if let (Some(binding), Some(execution)) = (
-            execution_state.effects.context_binding.take(), execution.as_ref(),
+            execution_state.effects.context_binding.take(),
+            execution.as_ref(),
         ) {
-            let cancelled = execution_state.effects.control.as_ref()
-                .is_some_and(|control| control.cancellation_requested() || control.context_cancellation_requested());
+            let cancelled = execution_state
+                .effects
+                .control
+                .as_ref()
+                .is_some_and(|control| {
+                    control.cancellation_requested() || control.context_cancellation_requested()
+                });
             binding.finish(crate::CellExit::from_reply(
-                execution.clone(), &result, cleanup_confirmed, cancelled,
+                execution.clone(),
+                &result,
+                cleanup_confirmed,
+                cancelled,
             ));
         }
         if let (Some(execution), Some(request)) = (execution, execution_state.replay_request.take())

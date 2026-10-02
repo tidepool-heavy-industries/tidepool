@@ -23,10 +23,10 @@
 pub(crate) mod after_tool;
 pub mod agent_spec;
 mod call_timing;
-mod cell_model;
 mod cell_context;
-pub use cell_model::{CellModelBinding, CellModelFactory, ModelBoundaryError, ModelReq};
+mod cell_model;
 pub use cell_context::{CellExit, CellExitCause, ContextReq, HostedContextBinding};
+pub use cell_model::{CellModelBinding, CellModelFactory, ModelBoundaryError, ModelReq};
 mod conversation;
 mod descriptor;
 mod external_application;
