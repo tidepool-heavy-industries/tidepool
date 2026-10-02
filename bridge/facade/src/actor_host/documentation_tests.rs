@@ -460,6 +460,9 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
 async fn notebook_failed_cells_preserve_completed_native_prefix() {
     let campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.as_ref();
+    // The native prefix must replace a public declaration without publishing
+    // the failed cell's new private declaration suffix.
+    committed(policy, include_str!("notebook_prefix_baseline.hs")).await;
     let failed = super::test_campaign::dispatch_haskell_script_result(
         policy,
         include_str!("notebook_prefix_failure.hs"),
