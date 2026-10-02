@@ -1,8 +1,8 @@
 use std::{
     path::Path,
     sync::{
-        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
     },
 };
 
@@ -28,7 +28,7 @@ use harness::{
     store::Store,
     turn::JobScheduler,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 
 use super::embedded_policy::{EmbeddedPolicyInstallation, EmbeddedPolicySnapshot};
@@ -1008,27 +1008,23 @@ mod tests {
             incarnation: "wrong-incarnation".into(),
             ..identity.clone()
         };
-        assert!(
-            service
-                .runtime
-                .attach(wrong, campaign.actor.clone(), installation.clone(), None)
-                .is_err()
-        );
+        assert!(service
+            .runtime
+            .attach(wrong, campaign.actor.clone(), installation.clone(), None)
+            .is_err());
         let wrong_run = HostIdentity {
             run: "another-run".into(),
             ..identity.clone()
         };
-        assert!(
-            service
-                .runtime
-                .attach(
-                    wrong_run,
-                    campaign.actor.clone(),
-                    installation.clone(),
-                    None
-                )
-                .is_err()
-        );
+        assert!(service
+            .runtime
+            .attach(
+                wrong_run,
+                campaign.actor.clone(),
+                installation.clone(),
+                None
+            )
+            .is_err());
 
         let transport = ParkUntilInput {
             entered: Arc::new(tokio::sync::Notify::new()),
