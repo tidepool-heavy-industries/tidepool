@@ -180,7 +180,14 @@ async fn accepted_native_reply_publication_refusal_settles_request_and_retires_a
         panic!(
             "native request activation did not complete: {error}; graph={:?}; requests={:?}",
             forest.inspect_host_graph(),
-            forest.environment.requests.status_for(requester.identity()),
+            {
+                let status = forest.environment.requests.status_for(requester.identity());
+                (
+                    status.pending_responses,
+                    status.ready_responses,
+                    status.unavailable_responses,
+                )
+            },
         );
     });
     eprintln!("native terminal fixture: request activated actor={target:?} request={request:?} elapsed_ms={}", fixture_started.elapsed().as_millis());
@@ -259,7 +266,10 @@ async fn accepted_native_reply_publication_refusal_settles_request_and_retires_a
         panic!(
             "native reply/publication/retirement did not complete after activation: {error}; graph={:?}; requests={:?}",
             forest.inspect_host_graph(),
-            forest.environment.requests.status_for(requester.identity()),
+            {
+                let status = forest.environment.requests.status_for(requester.identity());
+                (status.pending_responses, status.ready_responses, status.unavailable_responses)
+            },
         );
     });
 }
