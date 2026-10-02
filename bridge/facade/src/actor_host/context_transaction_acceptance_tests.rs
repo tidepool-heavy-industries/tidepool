@@ -24,12 +24,20 @@ impl RequestedRound {
     }
 
     fn cell(self, call_id: &str, source: &str) {
+        self.cell_named("haskell_sync", call_id, source);
+    }
+
+    fn async_cell(self, call_id: &str, source: &str) {
+        self.cell_named("haskell", call_id, source);
+    }
+
+    fn cell_named(self, name: &str, call_id: &str, source: &str) {
         self.reply
             .send(ResponsesTurn {
                 response_id: format!("response-{call_id}"),
                 items: vec![Item(json!({
                     "type": "custom_tool_call", "call_id": call_id,
-                    "name": "haskell_sync", "input": source,
+                    "name": name, "input": source,
                 }))],
                 usage: Default::default(),
             })
@@ -481,6 +489,97 @@ async fn resident_sync_context_failure_keeps_prefix_model_and_defers_children() 
     // metadata rather than the successful workbench response's item schema;
     // rollback is proved by the unchanged inference state and absent children.
     successor.finish();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), rounds.recv())
+            .await
+            .is_err()
+    );
+    fixture.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn resident_async_failed_deferred_unfold_keeps_bindings_and_never_launches_children() {
+    let (_files, fixture, mut rounds) = start().await;
+    let actor = fixture.campaign.actor.identity();
+    let setup = next_round(&mut rounds).await;
+    setup.cell(
+        "async-failure-setup",
+        include_str!("fixtures/context_acceptance_setup.hs"),
+    );
+    let parent = next_round(&mut rounds).await;
+    assert!(parent.is_root());
+    successful_output(&parent.request, "async-failure-setup");
+    let session = parent.request.session_id.clone();
+    parent.async_cell(
+        "async-deferred-failure",
+        include_str!("fixtures/context_acceptance_async_failure.hs"),
+    );
+
+    let failed = next_round(&mut rounds).await;
+    assert!(
+        failed.is_root(),
+        "failed async cell launched a deferred child"
+    );
+    assert_eq!(failed.request.session_id, session);
+    assert_eq!(failed.request.model, "test-model");
+    let terminal = retained_output(&failed.request, "async-deferred-failure");
+    assert!(
+        terminal
+            .to_string()
+            .contains("intentional async deferred failure"),
+        "{terminal}"
+    );
+    let store = fixture.runtime.store();
+    let claims = store
+        .claims(&harness::model::CallId("async-deferred-failure".into()))
+        .unwrap();
+    let operation = &claims
+        .first()
+        .expect("failed call owns its scheduler operation")
+        .operation;
+    let settled = fixture
+        .runtime
+        .scheduler()
+        .output(operation)
+        .await
+        .unwrap()
+        .expect("the actual failure settles before the successor inference");
+    match &settled {
+        harness::turn::JobOutput::Completed(Err(failure)) => assert!(
+            failure
+                .message()
+                .contains("intentional async deferred failure"),
+            "{failure}"
+        ),
+        _ => panic!("expected the authored native failure, received {settled:?}"),
+    }
+    let graph = fixture.campaign.forest.inspect_host_graph();
+    assert!(
+        graph.iter().filter(|node| node.actor != actor).all(|node| {
+            node.terminal
+                .as_ref()
+                .is_some_and(|terminal| terminal.kind == exomonad_actor::ActorExitKind::Cancelled)
+        }),
+        "failed async cell left a deferred child able to launch: {graph:?}"
+    );
+    failed.cell(
+        "async-failure-reuse",
+        include_str!("fixtures/context_acceptance_after_failure.hs"),
+    );
+    let reused = next_round(&mut rounds).await;
+    assert!(
+        reused.is_root(),
+        "failed async cell released a deferred child"
+    );
+    assert_eq!(reused.request.session_id, session);
+    let output = successful_output(&reused.request, "async-failure-reuse");
+    assert_eq!(
+        output["items"].as_array().unwrap().last().unwrap()["output"],
+        "42"
+    );
+    assert_eq!(fixture.campaign.actor.identity(), actor);
+    assert!(fixture.campaign.actor.terminal().get().is_none());
+    reused.finish();
     assert!(
         tokio::time::timeout(Duration::from_millis(200), rounds.recv())
             .await
