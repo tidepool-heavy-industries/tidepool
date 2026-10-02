@@ -35,7 +35,7 @@ import Tidepool.Agent.Assignment.Internal (NameError (..), renderNameError)
 import Tidepool.Binders
 import Tidepool.TurnSource (spliceTemplate)
 import Tidepool.SessionArtifacts (mkBoundBinders)
-import Tidepool.DiagJson (Diag (..), DiagSeverity(..), DependencyLoadFailure(..))
+import Tidepool.DiagJson (Diag (..), DiagSeverity(..), DependencyLoadFailure(..), diagsFromSourceError)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
@@ -1590,9 +1590,8 @@ renderNameErrorTeachesGroupPaths = do
 -- to do. 'Tidepool.DiagJson.envelopeToDiag' appends one line naming every
 -- candidate in copyable, fully-qualified form plus the two fixes: qualify
 -- the use, or hide one import. This compiles a genuine two-import ambiguity
--- through the typed dependency-load diagnostic path that failed GHC loads
--- render through (see @app/Main.hs@'s @reportDiags@) and checks the
--- rendered message names both qualified candidates and both fixes.
+-- through the typed target diagnostic path and checks the same renderer
+-- used by @app/Main.hs@'s @reportDiags@: both qualified candidates and fixes.
 ambiguousOccurrenceHintCompilation :: IO ()
 ambiguousOccurrenceHintCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
   let reviewPath = root </> "Review.hs"
@@ -1618,11 +1617,11 @@ ambiguousOccurrenceHintCompilation = bracket temporary removeDirectoryRecursive 
   withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
     rejected <- try (runRequest $ \compiler ->
         compiler CheckedEnvironment mempty GeneralCompile Nothing targetPath [root] Nothing)
-      :: IO (Either DependencyLoadFailure CheckedEnvironmentResult)
+      :: IO (Either SourceError CheckedEnvironmentResult)
     case rejected of
       Right _ -> fail "ambiguous candidateSummary occurrence unexpectedly compiled"
-      Left DependencyWorkerFailure -> fail "ambiguous occurrence became a worker failure"
-      Left (DependencySourceFailure diagnostics) -> do
+      Left sourceError -> do
+        let diagnostics = diagsFromSourceError sourceError
         unless (any ((/= Nothing) . dFile) diagnostics) $
           fail "ambiguous occurrence lost its source span"
         let rendered = intercalate "\n" (map dMessage diagnostics)
