@@ -1452,6 +1452,12 @@ freshExecutionRecipeTest = withScratch $ \work -> do
   unless (case executionSourceProspectiveReferences [promised] []
       [reference {executionRefGraph=executionGraphSha256 promised}] of Left _ -> True; _ -> False) $
     fail "missing promised original graph became optional unavailability"
+  let retainedLegacy = legacy {executionGraphSha256=replicate 64 'c'}
+  nested <- issue legacyRecipe {recipeOwners=[ExecutionSourceOwner target True Nothing,
+    ExecutionSourceOwner support False (Just (executionGraphSha256 retainedLegacy))]}
+  unless (case executionSourceProspectiveReferences [nested,retainedLegacy] []
+      [reference {executionRefGraph=executionGraphSha256 nested}] of Left _ -> True; _ -> False) $
+    fail "promised original graph lost its strict legacy-capability refusal"
   unless (case executionSourceProspectiveReferences [legacy]
       [reference {executionRefGraph=replicate 64 'b'}] [] of Left _ -> True; _ -> False) $
     fail "unsupported prospective recipe hid corrupt inherited advertised proof"
