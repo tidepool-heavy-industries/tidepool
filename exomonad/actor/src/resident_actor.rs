@@ -13363,15 +13363,18 @@ fn committed_declaration_warnings(
     (warnings, diagnostics)
 }
 
+fn receipt_kind(kind: TurnKind) -> WorkbenchCellItemKind {
+    match kind {
+        TurnKind::Decl => WorkbenchCellItemKind::Declaration,
+        TurnKind::Bind => WorkbenchCellItemKind::Statement,
+        TurnKind::Expr => WorkbenchCellItemKind::Expression,
+    }
+}
+
 fn annotate_workbench_receipts(
     items: &mut [WorkbenchItemReceipt],
     cell_check: Option<&[tidepool_runtime::session::CellAnalysisItem]>,
 ) {
-    let receipt_kind = |kind| match kind {
-        TurnKind::Decl => WorkbenchCellItemKind::Declaration,
-        TurnKind::Bind => WorkbenchCellItemKind::Statement,
-        TurnKind::Expr => WorkbenchCellItemKind::Expression,
-    };
     if let Some(checked) = cell_check {
         for receipt in items {
             if let Some(item) = checked.get(receipt.index) {
