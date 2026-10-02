@@ -54,7 +54,7 @@ async fn accepted_native_reply_publication_refusal_settles_request_and_retires_a
         let mut preamble = tidepool_mcp::build_preamble(&declarations, false);
         for import in [
             "qualified Tidepool.Actor as Mailbox",
-            "Tidepool.Agent.Reply (Replies)",
+            "Tidepool.Agent.Reply (Replies, detachRequest)",
             "Tidepool.Agent.Watch (Watches)",
             "Tidepool.Agent.Ref (AgentProtocol(..))",
             "qualified Tidepool.Agent.Ref as AgentRef",
