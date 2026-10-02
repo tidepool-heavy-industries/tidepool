@@ -31,7 +31,7 @@ about a file the crate does not compile.
 An asynchronous tool call can remain pending while you do independent work.
 Admission or progress is not its completed result. Results arrive under their
 original call IDs. When the next step needs a pending result, use the
-engine-provided `yield` tool rather than end with an unverified completion claim.
+engine-provided `yield` tool when available rather than end with an unverified completion claim.
 It waits for an owned tool result or new user or worker input. Set `until` to a
 maximum duration in seconds, or `null` to wait for the first event. A timeout leaves pending work
 running. Ready tool outputs precede the yield result; `ready_results` identifies
