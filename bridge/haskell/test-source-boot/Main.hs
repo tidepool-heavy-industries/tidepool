@@ -89,6 +89,7 @@ import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import GHC.Types.Name (nameModule_maybe)
 import GHC.Types.Var (varName)
 import Tidepool.CompileInput (writeCompileInputProof)
+import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.ExecutionSchema
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencyImport(..)
@@ -122,7 +123,7 @@ import Tidepool.Binders (BoundBinder(..))
 import Tidepool.ExecutionSource
   ( ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
   , executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure, executionIdentityKey
-  , ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences )
+  , ExecutionSourceFailure(..), ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences )
 
 counterValues :: String -> String -> [Integer]
 counterValues name diagnostics = map parseCount matching
@@ -811,10 +812,13 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
     (hidden,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
       (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult))
     unless (case hidden of
-      Left reason -> "source graph imports unadmitted home implementation" `isInfixOf` show reason
-        && not ("tidepool-timing phase=ghc_load" `isInfixOf` diagnostics)
+      Left reason
+        | Just (OriginalSourceSelectionRejected
+            (ExecutionSourceUnavailable ("main", "MetadataQuoteSupport"))) <- fromException reason ->
+          not ("tidepool-timing phase=ghc_load" `isInfixOf` diagnostics)
       _ -> False) $
-      fail "execution recipe granted a fresh provider a hidden lexical import"
+      fail ("hidden lexical import did not refuse its missing source-selection authority: "
+        ++ either show (const "unexpected success") hidden)
   unless (null (scopeExecutionOwners originalScope)) (fail "legacy scope gained execution authority")
   putStrLn "exact retained quoter: metadata/native, missing/change/preprocess refusals, A/B/A, cancellation, hidden-import preflight passed"
 
