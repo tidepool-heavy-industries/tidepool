@@ -98,6 +98,7 @@ fn execution(model: Arc<ModelOwner>) -> OwnedExecution<frunk::HNil, tidepool_mcp
                 public_visibility: None,
                 control: Some(crate::WorkbenchExecutionControl::untracked()),
                 model: Some(model),
+                context_binding: None,
                 installed_tools: None,
                 admitted_source: Default::default(),
                 reservation_owner,

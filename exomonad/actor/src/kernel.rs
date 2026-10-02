@@ -195,6 +195,8 @@ pub struct ActorWorkbenchInvocation {
     pub(crate) installed_tools: Option<crate::resident_workbench::InstalledToolLease>,
     pub(crate) hosted_checkpoint_capture:
         Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
+    pub(crate) context_binding: Option<std::sync::Arc<dyn crate::HostedContextBinding>>,
+    pub(crate) selected_tool: Option<exomonad_tool::HostedTool>,
 }
 
 impl ActorWorkbenchInvocation {
@@ -203,6 +205,8 @@ impl ActorWorkbenchInvocation {
             request,
             installed_tools: None,
             hosted_checkpoint_capture: None,
+            context_binding: None,
+            selected_tool: None,
         }
     }
 
@@ -215,7 +219,19 @@ impl ActorWorkbenchInvocation {
             request,
             installed_tools,
             hosted_checkpoint_capture,
+            context_binding: None,
+            selected_tool: None,
         }
+    }
+
+    pub(crate) fn with_context(
+        mut self,
+        binding: Option<std::sync::Arc<dyn crate::HostedContextBinding>>,
+        selected_tool: Option<exomonad_tool::HostedTool>,
+    ) -> Self {
+        self.context_binding = binding;
+        self.selected_tool = selected_tool;
+        self
     }
 }
 

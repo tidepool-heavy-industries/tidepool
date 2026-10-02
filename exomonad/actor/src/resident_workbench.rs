@@ -1813,6 +1813,11 @@ pub(crate) enum ResidentActorBoundary {
         request: crate::generated::model_call::ModelReq,
         table: DataConTable,
     },
+    Context {
+        continuation: ResidentHole,
+        request: crate::ContextReq,
+        table: DataConTable,
+    },
     Command {
         continuation: ResidentHole,
         request: crate::generated::commands::CommandsReq,
@@ -2019,6 +2024,7 @@ impl ResidentActorBoundary {
             Self::Sleep { .. } => "sleep",
             Self::Jev { .. } => "jev",
             Self::Model { .. } => "model call",
+            Self::Context { .. } => "context transformation",
             Self::Command { .. } => "command job",
             Self::Console { .. } => "print",
             Self::NotificationSend { .. } => "notify",
@@ -2167,6 +2173,7 @@ enum ResidentRequest {
     Notifications(crate::generated::notifications::NotificationsReq),
     Jev(crate::generated::jev::JevReq),
     Model(crate::generated::model_call::ModelReq),
+    Context(crate::ContextReq),
     Actor(crate::generated::actor::ActorReq),
     ActorContext(crate::generated::actor_context::ActorContextReq),
     AgentControl(crate::generated::agent_control::AgentControlReq),
@@ -2215,6 +2222,7 @@ impl ResidentRequest {
         try_member!(Self::Sleep, crate::generated::sleep::SleepReq);
         try_member!(Self::Jev, crate::generated::jev::JevReq);
         try_member!(Self::Model, crate::generated::model_call::ModelReq);
+        try_member!(Self::Context, crate::ContextReq);
         try_member!(Self::Commands, crate::generated::commands::CommandsReq);
         try_member!(Self::Console, crate::generated::console::ConsoleReq);
         try_member!(Self::Actor, crate::generated::actor::ActorReq);
@@ -2270,6 +2278,7 @@ impl ResidentRequest {
             Self::Sleep(crate::generated::sleep::SleepReq::SleepWith(..)) => "sleep",
             Self::Jev(crate::generated::jev::JevReq::JevAskWith(..)) => "jev",
             Self::Model(_) => "model call",
+            Self::Context(_) => "context transformation",
             Self::Commands(_) => "command job",
             Self::Console(_) => "console output",
             Self::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(
@@ -7882,6 +7891,11 @@ where
                         Ok(ResidentActorBoundary::Jev { continuation: hole, request })
                     }
                     ResidentRequest::Model(request) => Ok(ResidentActorBoundary::Model {
+                        continuation: hole,
+                        request,
+                        table: session.data_con_table().clone(),
+                    }),
+                    ResidentRequest::Context(request) => Ok(ResidentActorBoundary::Context {
                         continuation: hole,
                         request,
                         table: session.data_con_table().clone(),

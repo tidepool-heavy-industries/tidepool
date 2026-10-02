@@ -251,6 +251,9 @@ struct OwnedExecution<H, O> {
 
 impl<H, O> Drop for OwnedExecution<H, O> {
     fn drop(&mut self) {
+        if let Some(binding) = &self.state.effects.context_binding {
+            binding.cancel();
+        }
         if let Some(model) = &self.state.effects.model {
             model.cancel();
         }
@@ -503,7 +506,7 @@ async fn settle_execution_finalization<H, O>(
     owned: &mut OwnedExecution<H, O>,
     environment: ResidentEnvironment<H, O>,
     finalization: WorkbenchFinalization,
-) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>
+) -> WorkbenchFinalizationResult
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
@@ -519,10 +522,13 @@ where
                 KernelInvocationFailure::CleanupUnconfirmed { actor, detail } => (actor, detail),
                 other => (owned.state.effects.context.actor, other.to_string()),
             };
-            if let Err(error) = finalized {
+            if let Err(error) = finalized.result {
                 detail.push_str(&format!("; workbench finalization: {error}"));
             }
-            Err(KernelInvocationFailure::CleanupUnconfirmed { actor, detail })
+            WorkbenchFinalizationResult {
+                result: Err(KernelInvocationFailure::CleanupUnconfirmed { actor, detail }),
+                cleanup_confirmed: false,
+            }
         }
     }
 }
@@ -664,6 +670,7 @@ where
             installed_tools,
             admitted_source,
             capture,
+            context_binding,
             control,
             invocation,
             ..
@@ -766,6 +773,7 @@ where
                     public_visibility: None,
                     control,
                     model,
+                    context_binding,
                     installed_tools,
                     admitted_source,
                     reservation_owner,

@@ -63,6 +63,8 @@ pub struct WorkbenchExecutionControl {
     native_cancel: Arc<std::sync::atomic::AtomicBool>,
     reservation_attempt: crate::request::WorkbenchReservationAttempt,
     execution: std::sync::OnceLock<WorkbenchExecutionId>,
+    context_binding: std::sync::OnceLock<Arc<dyn crate::HostedContextBinding>>,
+    context_cancel_requested: std::sync::atomic::AtomicBool,
     publication_waited: std::sync::atomic::AtomicBool,
     phase: std::sync::atomic::AtomicU8,
     sleep_outcome: std::sync::atomic::AtomicU8,
@@ -104,6 +106,8 @@ impl WorkbenchExecutionControl {
             native_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reservation_attempt: crate::request::WorkbenchReservationAttempt::fresh(),
             execution: std::sync::OnceLock::new(),
+            context_binding: std::sync::OnceLock::new(),
+            context_cancel_requested: std::sync::atomic::AtomicBool::new(false),
             publication_waited: std::sync::atomic::AtomicBool::new(false),
             phase: std::sync::atomic::AtomicU8::new(WORKBENCH_IDLE),
             sleep_outcome: std::sync::atomic::AtomicU8::new(SLEEP_NONE),
@@ -141,6 +145,19 @@ impl WorkbenchExecutionControl {
 
     pub(crate) fn native_cancel(&self) -> Arc<std::sync::atomic::AtomicBool> {
         Arc::clone(&self.native_cancel)
+    }
+
+    pub(crate) fn bind_context(&self, binding: Arc<dyn crate::HostedContextBinding>) {
+        if let Err(binding) = self.context_binding.set(binding) {
+            assert!(Arc::ptr_eq(self.context_binding.get().expect("original context binding"), &binding));
+        }
+        if self.context_cancel_requested.load(std::sync::atomic::Ordering::Acquire) {
+            self.context_binding.get().expect("bound context").cancel();
+        }
+    }
+
+    pub(crate) fn context_cancellation_requested(&self) -> bool {
+        self.context_cancel_requested.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(crate) fn arm_sleep(&self) {
@@ -229,6 +246,10 @@ impl WorkbenchExecutionControl {
     }
 
     fn admit_cancellation(&self) -> (bool, Option<PublicationCancellation>) {
+        self.context_cancel_requested.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(binding) = self.context_binding.get() {
+            binding.cancel();
+        }
         let mut claimed = false;
         let publication = self.publication.request_cancellation_if(|| {
             claimed = self
@@ -577,6 +598,24 @@ pub trait ResidentToolEndpoint: Send + Sync {
             self.dispatch_boxed(invocation)
         }
     }
+
+    /// Context authority is supplied by the exact synchronous host invocation.
+    fn dispatch_with_context_boxed(
+        &self,
+        invocation: ToolInvocation,
+        capture: Option<Arc<dyn HostedCheckpointCapture>>,
+        context: Option<Arc<dyn crate::HostedContextBinding>>,
+    ) -> ResidentToolFuture {
+        if context.is_some() {
+            Box::pin(async {
+                Err(ResidentToolError::Unavailable(
+                    "hosted context access is unsupported by this endpoint".into(),
+                ))
+            })
+        } else {
+            self.dispatch_with_checkpoint_boxed(invocation, capture)
+        }
+    }
     fn cancel_workbench_boxed(
         &self,
         _invocation: ToolInvocationContext,
@@ -898,20 +937,34 @@ impl ResidentToolClient {
 
     pub(crate) async fn dispatch_workbench_issued_with_capture(
         &self,
-        mut request: WorkbenchRequest,
+        request: WorkbenchRequest,
         invocation: Option<ToolInvocationContext>,
         installed_tools: Option<crate::InstalledToolLease>,
         hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
     ) -> Result<serde_json::Value, ResidentToolError> {
+        self.dispatch_workbench_issued_with_context(
+            request, invocation, installed_tools, hosted_checkpoint_capture, None, None,
+        ).await
+    }
+
+    pub(crate) async fn dispatch_workbench_issued_with_context(
+        &self,
+        mut request: WorkbenchRequest,
+        invocation: Option<ToolInvocationContext>,
+        installed_tools: Option<crate::InstalledToolLease>,
+        hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
+        context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
+        selected_tool: Option<HostedTool>,
+    ) -> Result<serde_json::Value, ResidentToolError> {
         let Some(invocation) = invocation else {
-            if hosted_checkpoint_capture.is_some() {
+            if hosted_checkpoint_capture.is_some() || context_binding.is_some() {
                 return Err(ResidentToolError::Unavailable(
-                    "hosted checkpoint capture requires an exact provider invocation".into(),
+                    "hosted authority requires an exact provider invocation".into(),
                 ));
             }
             let control = WorkbenchExecutionControl::untracked();
             return self
-                .dispatch_registered_workbench(request, control, None, installed_tools, None)
+                .dispatch_registered_workbench(request, control, None, installed_tools, None, None, selected_tool)
                 .await;
         };
         if let Some(operation) = invocation.model_operation() {
@@ -947,6 +1000,8 @@ impl ResidentToolClient {
             Some(&published),
             installed_tools,
             hosted_checkpoint_capture,
+            context_binding,
+            selected_tool,
         )
         .await
     }
@@ -958,6 +1013,8 @@ impl ResidentToolClient {
         publication: Option<&HostedCellPublication>,
         installed_tools: Option<crate::InstalledToolLease>,
         hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
+        context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
+        selected_tool: Option<HostedTool>,
     ) -> Result<serde_json::Value, ResidentToolError> {
         let (response, receive) = oneshot::channel();
         if let Err(error) = self
@@ -967,7 +1024,7 @@ impl ResidentToolClient {
                     request,
                     installed_tools,
                     hosted_checkpoint_capture,
-                ),
+                ).with_context(context_binding, selected_tool),
                 control: Some(Arc::clone(&control)),
                 reply: response.into(),
             })

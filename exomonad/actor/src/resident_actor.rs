@@ -1363,10 +1363,15 @@ struct WorkbenchFinalization {
     retire_scopes: Option<Vec<tidepool_codegen::scope::ScopeId>>,
 }
 
+struct WorkbenchFinalizationResult {
+    result: Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
+    cleanup_confirmed: bool,
+}
+
 async fn settle_workbench_finalization<H, O>(
     environment: ResidentEnvironment<H, O>,
     finalization: WorkbenchFinalization,
-) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>
+) -> WorkbenchFinalizationResult
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
@@ -1381,7 +1386,9 @@ where
         retire_scopes,
     } = finalization;
     let invocation_cleanup = invocation_work.cleanup(&environment, &kernel).await;
-    let result = retain_invocation_cleanup_summary(result, invocation_cleanup.uncertainty());
+    let cleanup_uncertainty = invocation_cleanup.uncertainty();
+    let cleanup_confirmed = cleanup_uncertainty.is_none();
+    let result = retain_invocation_cleanup_summary(result, cleanup_uncertainty);
     let checkpoint_cleanup_failure = match retire_scopes {
         Some(scopes) => environment
             .runner
@@ -1391,6 +1398,7 @@ where
             .map(|failure| format!("failed checkpoint cleanup: {failure}")),
         None => None,
     };
+    let cleanup_confirmed = cleanup_confirmed && checkpoint_cleanup_failure.is_none();
     if rejected || checkpoint_cleanup_failure.is_some() {
         let (aborted, notifications) = environment
             .requests
@@ -1441,7 +1449,7 @@ where
             detail: source.to_string(),
         }),
     });
-    result
+    WorkbenchFinalizationResult { result, cleanup_confirmed }
 }
 
 struct WorkbenchEffectState {
@@ -1450,6 +1458,7 @@ struct WorkbenchEffectState {
     public_visibility: Option<tidepool_runtime::session::PublicVisibilitySnapshot>,
     control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
     model: Option<Arc<dyn crate::CellModelBinding>>,
+    context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
     installed_tools: Option<crate::InstalledToolLease>,
     admitted_source: crate::CheckpointSourceLayer,
     reservation_owner: RequestReservationOwner,
@@ -1673,6 +1682,12 @@ enum CurrentEffectOwner<'a> {
 }
 
 impl CurrentEffectOwner<'_> {
+    fn context_binding(&self) -> Option<Arc<dyn crate::HostedContextBinding>> {
+        match self {
+            Self::Workbench(execution) if !execution.after_tool_active => execution.context_binding.clone(),
+            _ => None,
+        }
+    }
     fn model(&self) -> Option<Arc<dyn crate::CellModelBinding>> {
         match self {
             Self::Workbench(execution) => execution.model.clone(),
@@ -1727,12 +1742,21 @@ impl CurrentEffectOwner<'_> {
     }
 }
 
-fn prepare_model_effect(
+fn prepare_execution_effect(
     context: &ActorSessionContext,
     owner: &CurrentEffectOwner<'_>,
     boundary: ResidentActorBoundary,
 ) -> ResidentActorBoundary {
     match boundary {
+        ResidentActorBoundary::Context { continuation, request, table } => {
+            let work = match owner.context_binding() {
+                Some(binding) => binding.prepare(request, tidepool_repr::PrincipalId::from(context.actor), table),
+                None => tidepool_effect::DeferredEffect::blocking(|| Err(
+                    tidepool_effect::error::EffectError::Handler("context mutation requires the exact synchronous invocation".into()),
+                )),
+            };
+            ResidentActorBoundary::External { continuation, work }
+        }
         ResidentActorBoundary::Model {
             continuation,
             request,
@@ -1761,6 +1785,7 @@ struct WorkbenchAdmission {
     public_owner: Arc<WorkbenchPublicOwner>,
     current_builtin: bool,
     capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+    context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
     invocation: Option<crate::resident_tools::WorkbenchCallKey>,
 }
@@ -4277,7 +4302,7 @@ where
         ancestry: &crate::CallAncestry,
         boundary: ResidentActorBoundary,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        let boundary = prepare_model_effect(context, &effect_owner, boundary);
+        let boundary = prepare_execution_effect(context, &effect_owner, boundary);
         let boundary =
             match self.prepare_independent_effect(kernel, context, &effect_owner, boundary) {
                 Ok(operation) => return operation.await,
@@ -7132,7 +7157,7 @@ where
                         effect = %effect,
                         "effect boundary captured"
                     );
-                    let boundary = prepare_model_effect(
+                    let boundary = prepare_execution_effect(
                         context,
                         &CurrentEffectOwner::Workbench(execution_state),
                         boundary,
@@ -8920,9 +8945,19 @@ where
     fn complete_workbench_finalization(
         &mut self,
         execution_state: &mut WorkbenchExecutionState,
-        result: Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
+        finalized: WorkbenchFinalizationResult,
     ) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> {
+        let WorkbenchFinalizationResult { result, cleanup_confirmed } = finalized;
         let execution = execution_state.request.execution_id().cloned();
+        if let (Some(binding), Some(execution)) = (
+            execution_state.effects.context_binding.take(), execution.as_ref(),
+        ) {
+            let cancelled = execution_state.effects.control.as_ref()
+                .is_some_and(|control| control.cancellation_requested() || control.context_cancellation_requested());
+            binding.finish(crate::CellExit::from_reply(
+                execution.clone(), &result, cleanup_confirmed, cancelled,
+            ));
+        }
         if let (Some(execution), Some(request)) = (execution, execution_state.replay_request.take())
         {
             let reply = match &result {
@@ -10164,6 +10199,7 @@ where
                     public_visibility,
                     control,
                     model: None,
+                    context_binding: None,
                     installed_tools,
                     admitted_source,
                     reservation_owner,
