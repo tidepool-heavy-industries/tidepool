@@ -15,6 +15,8 @@ mod cell_compile_cost_tests;
 mod cell_model;
 #[cfg(all(test, feature = "codex-compat"))]
 pub(crate) mod command_jobs_tests;
+#[cfg(test)]
+mod command_test_support;
 mod commands;
 mod effect_vocabulary;
 pub(crate) use effect_vocabulary::exomonad_effect_declarations;

@@ -25,7 +25,8 @@
 //! bind at all when three turns of conversation exceed 100 KB — as they
 //! routinely do.
 
-use super::command_jobs_tests::{backend_request, TestCommands};
+use super::command_jobs_tests::backend_request;
+use super::command_test_support::TestCommands;
 use super::jev_tests::{selected_shell_workspace, SectionScoreJev};
 use super::test_campaign::TestCampaign;
 use super::tests::{dispatch_haskell_script, dispatch_structured_tool};

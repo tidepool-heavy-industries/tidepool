@@ -1,4 +1,5 @@
-use super::command_jobs_tests::{backend_request, TestCommands};
+use super::command_jobs_tests::backend_request;
+use super::command_test_support::TestCommands;
 use super::test_campaign::TestCampaign;
 use super::tests::{dispatch_haskell_script, dispatch_structured_tool};
 use super::*;

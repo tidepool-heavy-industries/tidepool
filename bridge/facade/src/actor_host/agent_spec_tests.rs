@@ -1408,7 +1408,7 @@ async fn a_nested_shell_record_declares_its_tools_in_place_and_both_halves_answe
             )),
         }))
     };
-    let backend = super::command_jobs_tests::TestCommands::completed("nested-ok");
+    let backend = super::command_test_support::TestCommands::completed("nested-ok");
     super::command_jobs_tests::backend_request(&mut campaign)
         .await
         .supply(Ok(backend.clone()));

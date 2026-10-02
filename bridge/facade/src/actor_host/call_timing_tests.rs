@@ -5,7 +5,8 @@
 //! handler in one call, so it is enough to prove the summary line carries
 //! all of `checkout_wait_ms`/`checkout_hold_ms`/`compile_ms`/
 //! `compile_count`/`jev_ms`/`jev_count`/`exec_ms`/`outcome`.
-use super::command_jobs_tests::{backend_request, TestCommands};
+use super::command_jobs_tests::backend_request;
+use super::command_test_support::TestCommands;
 use super::test_campaign::TestCampaign;
 use super::*;
 use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};

@@ -1,4 +1,4 @@
-use super::super::{command_jobs_tests, test_campaign::TestCampaign};
+use super::super::{command_test_support::TestCommands, test_campaign::TestCampaign};
 use super::*;
 use harness::{
     item::{Item, ToolKind},
@@ -99,7 +99,7 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
         )
         .await
         .unwrap();
-    let backend = command_jobs_tests::TestCommands::completed("cancellation-prefix");
+    let backend = TestCommands::completed("cancellation-prefix");
     loop {
         let request = campaign
             .next_deployment(
@@ -117,7 +117,7 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
                 break;
             }
             exomonad_actor::command_jobs::CommandBackendPurpose::SourceProbe => {
-                request.supply(Ok(command_jobs_tests::TestCommands::completed(
+                request.supply(Ok(TestCommands::completed(
                     "/work/tree\n0123456789abcdef0123456789abcdef01234567\nclean\n",
                 )));
             }
