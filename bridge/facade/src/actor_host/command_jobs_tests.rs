@@ -502,7 +502,11 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
     let running = tokio::spawn(call(
         "bash",
         serde_json::json!({
-            "cmd":"printf literal", "workdir":"src", "environment":{"EXAMPLE":"value"},
+            "cmd":"printf literal", "workdir":"src",
+            "environment":[
+                {"name":"EXAMPLE","value":"first"},
+                {"name":"EXAMPLE","value":"value"}
+            ],
             "memory_mib":64, "stdin":true, "yield_time_ms":0, "max_output_bytes":2048,
         }),
     ));
@@ -526,16 +530,6 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
         .load(std::sync::atomic::Ordering::Acquire);
     let initial_observations = backend.output_budgets().len();
     for (name, arguments, reason) in [
-        (
-            "write_stdin",
-            serde_json::json!({"session_id":session,"chars":"never","close_stdin":true,"yield_time_ms":-1}),
-            "yield_time_ms must be 0..300000",
-        ),
-        (
-            "write_stdin",
-            serde_json::json!({"session_id":session,"chars":"never","close_stdin":true,"max_output_bytes":0}),
-            "max_output_bytes must be positive",
-        ),
         (
             "cancel_command",
             serde_json::json!({"session_id":session,"yield_time_ms":300001}),
@@ -613,25 +607,46 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
         .unwrap();
     let read_output = read["items"][0]["output"].as_str().unwrap();
     assert!(read_output.contains("result"), "{read}");
-    // read_output is the one direct command tool that never starts, waits, or
-    // sends anything — it still names the same retained binding the earlier
-    // bash call installed, not a fresh one.
-    assert_eq!(
-        read["items"][0]["installedBindings"][0].as_str().unwrap(),
-        binding,
+    // Each hosted call may name its retained handle in a fresh local binding;
+    // the session identity and returned bytes establish that this is the same job.
+    let read_binding = read["items"][0]["installedBindings"][0].as_str().unwrap();
+    assert!(
+        read_output.contains(&format!("session_id: {session}")),
         "{read}"
     );
     assert!(
-        read_output.contains(&format!("retained as {binding} :: Cmd.Job")),
+        read_output.contains(&format!("retained as {read_binding} :: Cmd.Job")),
         "{read}"
     );
+    let observations_before_write = backend.output_budgets().len();
+    let controls_before_write = backend.control_count();
     let input = call(
         "write_stdin",
-        serde_json::json!({"session_id":session,"chars":"hello\n","yield_time_ms":0}),
+        serde_json::json!({
+            "session_id":session,"chars":"hello\n","yield_time_ms":-1,
+            "max_output_bytes":0
+        }),
     )
     .await
     .unwrap();
     assert_eq!(input["status"], "committed", "{input}");
+    assert!(
+        input["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("Input acknowledged by backend"),
+        "{input}"
+    );
+    assert_eq!(
+        backend.control_count(),
+        controls_before_write + 1,
+        "the invalid observation fields must not prevent the input write"
+    );
+    assert_eq!(
+        backend.output_budgets().len(),
+        observations_before_write,
+        "a committed input receipt does not also observe or present output"
+    );
     backend.finish.send_replace(true);
     let finished = call(
         "write_stdin",
@@ -1181,13 +1196,15 @@ async fn inherited_command_helpers_start_fresh_jobs_in_each_callers_checkout() {
         &campaign.worktrees,
         campaign._repository.path(),
         campaign.actor.identity(),
-    );
+    )
+    .unwrap();
     let child_checkout = resident_command_roots(
         &campaign.authority,
         &campaign.worktrees,
         campaign._repository.path(),
         child.actor.identity(),
-    );
+    )
+    .unwrap();
     assert_eq!(root_checkout.directory, campaign._repository.path());
     assert_ne!(child_checkout.directory, root_checkout.directory);
     assert!(child_checkout.custody);
@@ -2896,9 +2913,10 @@ async fn background_bash_returns_at_once_and_its_notice_carries_the_source() {
     let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
         context: None,
         name: "bash".into(),
-        arguments: ToolArguments::Structured(
-            serde_json::json!({"cmd":"cargo test -p crate --lib","background":true}),
-        ),
+        arguments: ToolArguments::Structured(serde_json::json!({
+            "cmd":"cargo test -p crate --lib","background":true,
+            "yield_time_ms":-1,"max_output_bytes":0,"focus":"ignored in background"
+        })),
     }));
     // The source probe is released first; the command waits behind it. The
     // probe is answered while the call is in flight so its admission bound

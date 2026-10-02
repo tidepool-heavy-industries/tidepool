@@ -121,10 +121,12 @@ impl BindingIndex {
         &mut self,
         interface: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
     ) -> bool {
+        if !self.accepts_value_interface(&interface) {
+            return false;
+        }
         let name = interface.owner().module_name();
-        if let Some(existing) = self.value_interfaces.get(&name) {
-            return matches!(existing, RetainedValueInterface::Certified(old)
-                if Arc::ptr_eq(old, &interface) || old == &interface);
+        if self.value_interfaces.contains_key(&name) {
+            return true;
         }
         // A failed display may settle type evidence without retaining a value.
         if self.is_module_live(&name) {
@@ -132,6 +134,18 @@ impl BindingIndex {
                 .insert(name, RetainedValueInterface::Certified(interface));
         }
         true
+    }
+
+    pub(super) fn accepts_value_interface(
+        &self,
+        interface: &Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+    ) -> bool {
+        self.value_interfaces
+            .get(&interface.owner().module_name())
+            .is_none_or(|existing| {
+                matches!(existing, RetainedValueInterface::Certified(old)
+                if Arc::ptr_eq(old, interface) || old == interface)
+            })
     }
 
     pub(super) fn value_interface(&self, module: SessionModule) -> Option<&Arc<[u8]>> {

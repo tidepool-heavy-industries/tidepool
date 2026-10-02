@@ -349,6 +349,12 @@ pub enum CertificationError {
     Mismatch(&'static str),
     #[error("compiler product evidence is no longer valid")]
     StaleEvidence,
+    #[error("original candidate evidence for {unit}:{module} failed: {failure:?}")]
+    CandidateEvidence {
+        unit: String,
+        module: String,
+        failure: Box<crate::cache::DependencyEvidenceFailure>,
+    },
     #[error("compiler execution source proof rejected: {0}")]
     ExecutionSource(#[source] Box<crate::CompileError>),
     #[error("invalid original module product: {0}")]
@@ -3013,12 +3019,19 @@ pub(crate) fn certify_products(
                     if accepted.module_version.as_ref() != Some(&bundle.owner.module_version)
                         || bundle.owner.skinny_iface_sha256 != accepted.skinny_iface_sha256
                         || bundle.owner.product_sha256 != accepted.product_sha256
-                        || !bundle.evidence.valid(&bundle.target_source)
                         || bundle.source_sha256 != hex(&accepted.source_sha256)
                         || bundle.iface_sha256 != hex(&accepted.skinny_iface_sha256)
                     {
                         return Err(CertificationError::Mismatch("candidate owner/evidence"));
                     }
+                    bundle
+                        .evidence
+                        .validate(&bundle.target_source)
+                        .map_err(|failure| CertificationError::CandidateEvidence {
+                            unit: key.0.clone(),
+                            module: key.1.clone(),
+                            failure: Box::new(failure),
+                        })?;
                     if sha(&read_bounded(&bundle.source, SOURCE_LIMIT)?) != accepted.source_sha256
                         || sha(&read_bounded(&bundle.iface_path, PACKAGE_INTERFACE_LIMIT)?)
                             != accepted.skinny_iface_sha256
@@ -3084,7 +3097,7 @@ pub(crate) fn certify_products(
                         bundle.product_bytes.as_slice(),
                         bundle.product_bytes.as_slice(),
                         bundle.package_imports_bytes.as_slice(),
-                        &bundle.evidence,
+                        &*bundle.evidence,
                         ready_source_sha(&bundle.evidence, &key.0, &key.1)?,
                         bundle.owner.module_version.clone(),
                     )
@@ -5311,7 +5324,7 @@ mod tests {
                 package_imports_sha256: hex(&sha(&package_bytes)),
                 package_imports_bytes: package_bytes,
                 product_bytes,
-                evidence,
+                evidence: evidence.into(),
                 target_source: "target".into(),
                 origin: crate::module_candidates::CandidateOrigin::Ordinary,
                 original_execution: None,
@@ -5334,23 +5347,31 @@ mod tests {
         use crate::cache::{ImportQualifier, ModuleImportEvidence, ResolutionEvidence};
         let (mut a, accepted_a, original_a) = cached_closure_fixture(root, "A");
         let (b, accepted_b, original_b) = cached_closure_fixture(root, "B");
-        a.evidence.modules[1].imports.push(ModuleImportEvidence {
-            qualifier: ImportQualifier::Unqualified,
-            module: "B".into(),
-            boot: false,
-            selected: Some(b.source.clone()),
-        });
-        a.evidence.resolutions.push(ResolutionEvidence {
+        a.evidence.make_mut().modules[1]
+            .imports
+            .push(ModuleImportEvidence {
+                qualifier: ImportQualifier::Unqualified,
+                module: "B".into(),
+                boot: false,
+                selected: Some(b.source.clone()),
+            });
+        a.evidence.make_mut().resolutions.push(ResolutionEvidence {
             qualifier: ImportQualifier::Unqualified,
             module: "B".into(),
             boot: false,
             selected: Some(b.source.clone()),
             candidates: vec![b.source.clone()],
         });
-        a.evidence.sources.push(b.evidence.sources[1].clone());
-        a.evidence.modules.push(b.evidence.modules[1].clone());
+        a.evidence
+            .make_mut()
+            .sources
+            .push(b.evidence.sources[1].clone());
+        a.evidence
+            .make_mut()
+            .modules
+            .push(b.evidence.modules[1].clone());
         assert!(a.evidence.valid(&a.target_source));
-        let current = a.evidence.clone();
+        let current = (*a.evidence).clone();
         (
             CandidateSet {
                 manifest_path: root.join("unused.cbor"),
@@ -5933,7 +5954,7 @@ mod tests {
                 let manifest = std::fs::read(&fixture.manifest_path).unwrap();
                 std::fs::write(output.join("module-candidates.cbor"), &manifest).unwrap();
                 std::fs::write(output.join("fixture.json"), serde_json::to_vec_pretty(&serde_json::json!({
-                    "scope": "production Rust issuer/publication/record-selection/TPMCAN7 encoder; synthetic native/interface bytes; decoder-only cross-language fixture, not GHC semantic admission",
+                    "scope": "production Rust issuer/publication/record-selection/TPMCAN8 encoder; synthetic native/interface bytes; decoder-only cross-language fixture, not GHC semantic admission",
                     "raw_producer_hex": hex(&producer), "canonical_producer_sha256": hex(&crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer).sha256()),
                     "manifest_sha256": hex(&sha(&manifest)), "live_root": root.path(), "manifest_live_path": fixture.manifest_path,
                     "owners": fixture.by_owner.values().map(|bundle| serde_json::json!({

@@ -6,7 +6,7 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Data.ByteString.Lazy qualified as BSL
 import Control.Exception (SomeException, bracket, evaluate, finally, try)
-import Control.Monad (forM, unless, void)
+import Control.Monad (foldM, forM, unless, void)
 import GHC.Clock (getMonotonicTimeNSec)
 import Data.Word (Word64)
 import Crypto.Hash.SHA256 qualified as SHA
@@ -19,12 +19,17 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import GHC (runGhc, setSession, ms_mod_name, ms_hsc_src, parseModule, typecheckModule, Target(..))
 import GHC.Core qualified as Core
+import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy)
+import GHC.Types.Id (idName, setIdName)
 import GHC.Types.Literal (Literal(..), LitNumType(..))
-import GHC.Types.Name (getOccString)
+import GHC.Types.Name (getOccString, nameOccName, nameSrcSpan, mkExternalName, mkInternalName)
+import GHC.Types.Avail (availNames)
+import GHC.Types.TypeEnv (typeEnvIds)
+import GHC.Types.Unique.Supply (mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
+import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt, addToHpt)
 import GHC.Utils.Logger (Logger, popLogHook)
-import GHC.Driver.Env (HscEnv(..), hsc_HPT)
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt)
 import GHC.Unit.Finder (initFinderCache, addModuleToFinder)
 import GHC.Unit.Module.Location (ml_hi_file)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
@@ -37,7 +42,8 @@ import Control.Monad.IO.Class (liftIO)
 import GHC.Driver.Session (targetProfile)
 import GHC.Driver.Hooks (hscCompileCoreExprHook)
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Unit.Module.ModIface (set_mi_module, mi_module)
+import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports)
+import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module (Module, mkModule, mkModuleName, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString, stringToUnit, GenWithIsBoot(..))
 import Numeric (showHex)
@@ -61,7 +67,9 @@ import Tidepool.ExecutionProjection (resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
-import Tidepool.PreparedSites (SiteRejection(..))
+import Tidepool.PreparedSites (SiteRejection(..), resolvePreparedInterfaceSiblings, lookupPreparedVerb)
+import Tidepool.SiteClassifier (SiteFailure(..), classifySiteOccurrence)
+import Tidepool.EffectSchema (YieldSite(..), SiteType(..))
 import GHC.Driver.Env (hsc_home_unit)
 import GHC.Unit.Home (isHomeUnit)
 import GHC.Core.DataCon (dataConWorkId, dataConTyCon)
@@ -86,19 +94,21 @@ import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..), CheckedEnvironmentResult(..)
   , renderType, generatedScaffoldRecipe
   , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected )
-import Tidepool.ModuleCandidates (ModuleCandidate(..), readModuleCandidates, candidateExecutionSources, candidateOriginalIdentity)
+import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
+  , readModuleCandidates, candidateExecutionSources, candidateOriginalIdentity)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports)
 import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
 import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule)
 import Tidepool.Session (sessionHiPath)
-import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), CheckedCellAdmission(..), readExactScope, extendExactExecutionSources, scopeExecutionNativeOwners)
+import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), CheckedCellAdmission(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.Binders (BoundBinder(..))
 import Tidepool.ExecutionSource
   ( ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
-  , executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure, executionIdentityKey )
+  , executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure, executionIdentityKey
+  , ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences )
 
 main :: IO ()
 main = getArgs >>= \case
@@ -106,10 +116,14 @@ main = getArgs >>= \case
   ["--original-package-cohort", coreRoot, output] -> originalPackageCohort coreRoot output
   ["--original-projection-products"] -> originalProjectionProducts
   ["--candidate-manifest-products", path] -> candidateManifestProducts path
+  ["--candidate-compact-inventory"] -> candidateCompactInventory
   ["--candidate-ghc-load"] -> candidateGhcLoad
   ["--candidate-sited-siblings"] -> candidateSitedSiblings
   ["--candidate-sited-siblings", work] -> candidateSitedSiblingsAt work
   ["--generated-scaffold-imports"] -> generatedScaffoldImports
+  ["--generated-scaffold-retained",scope,seal] -> generatedScaffoldRetained scope seal
+  ["--hydrated-site-siblings"] -> hydratedSiteSiblings
+  ["--fresh-execution-recipe"] -> freshExecutionRecipeTest
   ["--candidate-execution-sources"] -> candidateExecutionSourcesTest
   ["--candidate-execution-wire", path] -> candidateExecutionWire path
   ["--checked-value-type-closure", effects] -> checkedValueTypeClosure effects
@@ -459,6 +473,86 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult cold))) $
       fail "generated cold source scaffold failed ordinary support admission"
   putStrLn "generated scaffold: exact hidden support, settled result, ordinary/cold scope, bind/display CellProgram; duplicate/helper/source-drift/native/export/hidden-orphan/family/metadata refusals passed"
+
+-- The producer fixture retains real published native/interface/Home-seal
+-- bytes. Only the transport envelope is composed here; this test does not
+-- substitute for Rust's original certificate issuer or the lost G3 scope.
+generatedScaffoldRetained :: FilePath -> FilePath -> IO ()
+generatedScaffoldRetained manifestPath sealPath = withTiming $ withScratch $ \work -> do
+  scope <- readExactScope manifestPath >>= either fail pure
+  (artifact,original) <- case (scopeInterfaces scope,scopeProducts scope) of
+    ([(artifact,_,_)],[original]) -> pure (artifact,original)
+    _ -> fail "retained scaffold fixture lacks one original pair"
+  let owner = (originalUnit original,originalModule original)
+      fullOwner = TList (map (TString . T.pack) [originalUnit original,originalModule original,
+        originalVersion original,originalIfaceSha256 original,originalProductSha256 original])
+      term path = BS.readFile path >>= either (fail . show) (pure . snd)
+        . deserialiseFromBytes decodeTerm . BSL.fromStrict
+      scopeSession = emptySessionScope {ssRoot=work,ssExactScope=Just manifestPath}
+  seal <- term sealPath
+  case seal of
+    TList (TString "TPHOMEOWNERS":_:sealedOwner:_:TList [required]:_)
+      | sealedOwner == fullOwner && required == fullOwner -> pure ()
+    _ -> fail "production Home seal does not retain the exact native self owner"
+  unless (owner == ("main","Tidepool.Internal.Resume") && exactRequirements artifact == [owner]) $
+    fail "retained scaffold fixture lost its native self requirement"
+  native <- term (originalProductPath original)
+  interfaceBytes <- BS.readFile (exactPath artifact)
+  case native of
+    TList [TString "TPMOD",TInt 1,TList [TList [unit,name,TBytes paired,TList groups]]]
+      | [unit,name] == map (TString . T.pack) [fst owner,snd owner]
+      , paired == interfaceBytes, length groups == length (originalGroups original) -> pure ()
+    _ -> fail "production scaffold native bytes are not paired with the exact GHC interface"
+  let target = work </> "Expr.hs"
+  copyFile "test-source-boot/fixtures/GeneratedScaffoldExpr.hs" target
+  source <- readFile target
+  recipe <- generatedScaffoldRecipe source source target "Expr" >>= either fail pure
+  let purpose = GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing [])
+      reject label expected action = do
+        refused <- try (void action) :: IO (Either SomeException ())
+        case refused of
+          Left reason | expected `isInfixOf` show reason ->
+            putStrLn ("retained scaffold refused " ++ label ++ ": " ++ take 512 (show reason))
+          Left reason -> fail ("retained scaffold unexpected refusal for " ++ label ++ ": " ++ show reason)
+          Right _ -> fail ("retained scaffold accepted " ++ label)
+  withResidentPipelineSelected [work] $ \compile -> do
+    reject "general compile" "source graph imports unadmitted home implementation" $
+      compile (PreparedProducts Nothing) Set.empty GeneralCompile
+      (Just scopeSession) target [] Nothing
+    result <- compile (PreparedProducts Nothing) Set.empty purpose (Just scopeSession) target [] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult result))) $
+      fail "real retained Resume self-custody lost settled result"
+    originalTerm <- term manifestPath
+    copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")
+    helper <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+      Nothing (work </> "MetadataQuoteSupport.hs") [] Nothing
+    let helperScope = work </> "helper.cbor"
+    writeExecutionScope helperScope work helper []
+    helperTerm <- term helperScope
+    let encode = toStrictByteString . encodeTerm
+        replacement requirement includeHelper = case (originalTerm,helperTerm) of
+          (TList fields,TList helperFields) -> TList [case index of
+            4 -> case field of
+              TList [TList ownerFields] -> TList ([TList [if column == 4 then TList requirement else value
+                | (column,value) <- zip [0::Int ..] ownerFields]] ++ if includeHelper then
+                  case helperFields !! 4 of TList rows -> rows; _ -> [] else [])
+              _ -> field
+            6 | includeHelper -> case (field,helperFields !! 6) of
+              (TList rows,TList extra) -> TList (rows ++ extra)
+              _ -> field
+            _ -> field | (index,field) <- zip [0::Int ..] fields]
+          _ -> error "retained fixture scope framing changed"
+        key unit name = TList (map (TString . T.pack) [unit,name])
+    forM_ [("foreign home requirement",[key "main" "Tidepool.Internal.Resume",key "main" "MetadataQuoteSupport"],True)
+      ,("wrong unit self requirement",[key "foreign" "Tidepool.Internal.Resume"],False)] $ \(label,requirements,includeHelper) -> do
+        let changedPath = work </> (if includeHelper then "foreign.cbor" else "wrong-unit.cbor")
+        BS.writeFile changedPath (encode (replacement requirements includeHelper))
+        reject label (if includeHelper then "generated scaffold support requires another home implementation owner"
+          else "incomplete or conflicting exact owner closure") $ compile (PreparedProducts Nothing) Set.empty purpose
+          (Just scopeSession {ssExactScope=Just changedPath}) target [] Nothing
+  after <- term sealPath
+  unless (after == seal) (fail "scaffold consumer changed the original Home seal")
+  putStrLn "retained scaffold: real production full owner/native/interface/seal self-custody admitted, foreign and wrong-unit requirements refused; original proof unchanged"
 
 exactRetainedQuoter :: IO ()
 exactRetainedQuoter = withTiming $ withScratch $ \work -> do
@@ -1110,11 +1204,12 @@ candidateManifestProducts path = withScratch $ \work -> do
     _ -> fail "production candidate manifest lost the actual 6037-group Core product"
   bytes <- BS.readFile path
   term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
-  (magic, version, fields) <- case term of
-    TList [magic, version, TList [TList fields]] | length fields == 14 -> pure (magic, version, fields)
+  (magic, version, symbols, globals, fields, execution) <- case term of
+    TList [magic, version, symbols, globals, TList [TList fields], execution]
+      | length fields == 14 -> pure (magic, version, symbols, globals, fields, execution)
     _ -> fail "actual production emitter lost the single candidate row"
-  let changedAt index value = TList [magic, version, TList
-        [TList (take index fields ++ [value] ++ drop (index + 1) fields)]]
+  let changedAt index value = TList [magic, version, symbols, globals, TList
+        [TList (take index fields ++ [value] ++ drop (index + 1) fields)], execution]
       tooMany = TList (replicate 65537 (TList [TInt 0, TList [], TList []]))
   forM_ [("groups", changedAt 10 tooMany), ("digest", changedAt 5 (TString "invalid"))] $
     \(name, changed) -> do
@@ -1199,6 +1294,155 @@ candidateSitedSiblingsAt work = do
     _ -> fail "source-free exact child surface lost its typed sibling or site identity"
   putStrLn "candidate typed siblings: certified candidates and source-free exact owners retain childSited and typed sites without dependency recompilation"
 
+-- The fixture encoder keys complete legacy values by their canonical CBOR.
+-- Its tables therefore preserve identity fields and every global requirement.
+data FixtureInventory = FixtureInventory
+  { fixtureSymbols :: Map.Map BS.ByteString Int
+  , fixtureSymbolRows :: [Term]
+  , fixtureGlobals :: Map.Map BS.ByteString Int
+  , fixtureGlobalRows :: [Term]
+  }
+
+compactInventoryRows :: [Term] -> Either String (Term,Term,[Term])
+compactInventoryRows rows = do
+  (inventory,compact) <- mapFixtureInventory compactRow empty rows
+  pure (TList (reverse (fixtureSymbolRows inventory)),TList (reverse (fixtureGlobalRows inventory)),compact)
+  where
+    empty = FixtureInventory Map.empty [] Map.empty []
+    compactRow inventory (TList fields) | length fields == 14 = case drop 10 fields of
+      TList groups:_ -> do
+        (next,compact) <- mapFixtureInventory compactGroup inventory groups
+        pure (next,TList (take 10 fields ++ [TList compact] ++ drop 11 fields))
+      _ -> Left "fixture candidate lacks groups"
+    compactRow _ _ = Left "fixture candidate must have fourteen fields"
+    compactGroup inventory (TList [ordinal,TList binders,TList globals]) = do
+      (withBinders,binderRefs) <- mapFixtureInventory internFixtureSymbol inventory binders
+      (withGlobals,globalRefs) <- mapFixtureInventory internFixtureGlobal withBinders globals
+      pure (withGlobals,TList [ordinal,TList binderRefs,TList globalRefs])
+    compactGroup _ _ = Left "fixture original group must have three fields"
+
+mapFixtureInventory :: (FixtureInventory -> a -> Either String (FixtureInventory,b))
+  -> FixtureInventory -> [a] -> Either String (FixtureInventory,[b])
+mapFixtureInventory step initial values = do
+  (final,reversed) <- foldM (\(inventory,acc) value -> do
+    (next,result) <- step inventory value
+    pure (next,result:acc)) (initial,[]) values
+  pure (final,reverse reversed)
+
+internFixtureSymbol :: FixtureInventory -> Term -> Either String (FixtureInventory,Term)
+internFixtureSymbol inventory value@(TList [_,_,_,_,_]) =
+  let key = toStrictByteString (encodeTerm value)
+  in case Map.lookup key (fixtureSymbols inventory) of
+    Just index -> Right (inventory,TInt index)
+    Nothing ->
+      let index = Map.size (fixtureSymbols inventory)
+      in Right (inventory
+        { fixtureSymbols = Map.insert key index (fixtureSymbols inventory)
+        , fixtureSymbolRows = value:fixtureSymbolRows inventory },TInt index)
+internFixtureSymbol _ _ = Left "fixture symbol must have five fields"
+
+internFixtureGlobal :: FixtureInventory -> Term -> Either String (FixtureInventory,Term)
+internFixtureGlobal inventory value@(TList [identity,rep,signature,evaluated,generation]) =
+  let key = toStrictByteString (encodeTerm value)
+  in case Map.lookup key (fixtureGlobals inventory) of
+    Just index -> Right (inventory,TInt index)
+    Nothing -> do
+      (withSymbol,symbolRef) <- internFixtureSymbol inventory identity
+      let index = Map.size (fixtureGlobals withSymbol)
+      pure (withSymbol
+        { fixtureGlobals = Map.insert key index (fixtureGlobals withSymbol)
+        , fixtureGlobalRows = TList [symbolRef,rep,signature,evaluated,generation]:fixtureGlobalRows withSymbol },TInt index)
+internFixtureGlobal _ _ = Left "fixture global must have five fields"
+
+candidateCompactInventory :: IO ()
+candidateCompactInventory = withScratch $ \work -> do
+  let identity = SymbolIdentity "main" "Fixture" "value" "entry" Nothing
+      identities = [identity,identity {symbolRecordParent=Just "Parent"}
+        ,identity {symbolUnit="other"},identity {symbolModule="Other"}
+        ,identity {symbolNamespace="data"},identity {symbolOccurrence="other"}]
+      plain = CandidateGlobal identity LiftedRefRep Nothing False Nothing
+      globals = [plain,plain {candidateGlobalRep=IntRep 64}
+        ,plain {candidateGlobalSignature=Just (Signature [LiftedRefRep] (Returns [IntRep 64]))}
+        ,plain {candidateGlobalSignature=Just (Signature [AddressRep] (Returns [IntRep 64]))}
+        ,plain {candidateGlobalSignature=Just (Signature [LiftedRefRep] (Returns [WordRep 64]))}
+        ,plain {candidateGlobalSignature=Just (Signature [LiftedRefRep] NoSuccess)}
+        ,plain {candidateGlobalSignature=Just (Signature [LiftedRefRep] CallerResult)}
+        ,plain {candidateGlobalEvaluated=True},plain {candidateGlobalGeneration=Just 0}
+        ,plain {candidateGlobalGeneration=Just 7}]
+      groups = [CandidateGroup 91 identities globals,CandidateGroup 3 [identity] (reverse globals)]
+      legacyRows = [fixtureCandidate "Fixture" (map groupTerm groups)
+        ,fixtureCandidate "Other" (map groupTerm (reverse groups))]
+      emptyParcel = TList [TList [],TList []]
+      envelope symbols globalTable rows = TList
+        [TString "TPMCAN",TString "8",symbols,globalTable,TList rows,emptyParcel]
+      readFixture name value = do
+        let path = work </> (name ++ ".cbor")
+            bytes = toStrictByteString (encodeTerm value)
+        unless (BS.length bytes <= 4 * 1024 * 1024) (fail "decoder fixture exceeds wire bound")
+        BS.writeFile path bytes
+        readModuleCandidates path
+      refuse name expected value = readFixture name value >>= \case
+        Left reason | expected `isInfixOf` reason -> pure ()
+                    | otherwise -> fail (name ++ " failed at the wrong bound: " ++ reason)
+        Right _ -> fail ("candidate compact decoder accepted " ++ name)
+  (symbols,globalTable,rows) <- either fail pure (compactInventoryRows legacyRows)
+  case (symbols,globalTable) of
+    (TList symbolRows,TList globalRows) | length symbolRows == length identities
+      && length globalRows == length globals -> pure ()
+    _ -> fail "fixture encoder merged complete identities or global requirements"
+  decoded <- readFixture "exact" (envelope symbols globalTable rows) >>= either fail pure
+  unless (map candidateGroups decoded == [groups,reverse groups]) $
+    fail "compact inventory changed exact legacy values, order or ordinal"
+  let badGroup binders globalRefs = [fixtureCandidate "Fixture" [TList [TInt 91,TList binders,TList globalRefs]]]
+  refuse "unavailable-symbol" "unavailable" (envelope symbols globalTable (badGroup [TInt 65535] []))
+  refuse "unavailable-global" "unavailable" (envelope symbols globalTable (badGroup [] [TInt 65535]))
+  forM_ [("out-of-range",TInt 65536),("negative",TInt (-1))
+      ,("u64-max",TInteger (2 ^ (64 :: Int) - 1)),("beyond-u64",TInteger (2 ^ (64 :: Int)))] $ \(label,index) ->
+    forM_ [("symbol",badGroup [index] []),("global",badGroup [] [index])] $ \(kind,invalidRows) ->
+      readFixture (kind ++ "-" ++ label) (envelope symbols globalTable invalidRows) >>= \case
+        Left _ -> pure ()
+        Right _ -> fail ("candidate compact decoder accepted " ++ kind ++ " " ++ label ++ " index")
+  let danglingGlobals = TList [TList [TInt 65535,TList [TString "lifted",TInt 0],TNull,TBool False,TNull]]
+  refuse "dangling-global-symbol" "unavailable" (envelope symbols danglingGlobals rows)
+  refuse "duplicate-owner" "duplicate module candidate"
+    (envelope symbols globalTable (take 1 rows ++ take 1 rows))
+  refuse "oversized-symbol-table" "table exceeds" (envelope (TList (replicate 65537 TNull)) globalTable rows)
+  refuse "oversized-global-table" "table exceeds" (envelope symbols (TList (replicate 65537 TNull)) rows)
+  let largeIdentity = identity {symbolOccurrence=T.replicate 2048 "x"}
+      expandedGroup = TList [TInt 0,TList (replicate 1536 (TInt 0)),TList []]
+      largeSymbols = TList [symbolTerm largeIdentity]
+      oneLarge = [fixtureCandidate "Fixture" [expandedGroup]]
+  readFixture "expanded-within-bound" (envelope largeSymbols (TList []) oneLarge) >>= either fail (const (pure ()))
+  refuse "expanded-aggregate" "expanded candidate inventory exceeds"
+    (envelope largeSymbols (TList []) (oneLarge ++ [fixtureCandidate "Other" [expandedGroup]]))
+  refuse "unsupported6" "unsupported" (TList [TString "TPMCAN",TString "6",TList legacyRows])
+  refuse "unsupported7" "unsupported" (TList [TString "TPMCAN",TString "7",TList legacyRows,emptyParcel])
+  putStrLn "candidate compact inventory: exact legacy values/order/ordinals, complete interning, unavailable/out-of-range indices, dangling globals, duplicate owners, table/expanded bounds and unsupported6/7 passed"
+  where
+    fixtureCandidate name groups = TList
+      ([TString "main",TString name,TString "/fixture/source.hs",sha,TString "/fixture/interface.hi",sha,sha,sha,sha]
+        ++ [TList [],TList groups,TString "/fixture/packages",sha,TString "/fixture/products.tpmod"])
+      where sha = TString (T.replicate 64 "0")
+    groupTerm group = TList [TInt (fromIntegral (candidateGroupOrdinal group))
+      ,TList (map symbolTerm (candidateGroupBinders group)),TList (map globalTerm (candidateGroupGlobals group))]
+    globalTerm global = TList [symbolTerm (candidateGlobalIdentity global),repTerm (candidateGlobalRep global)
+      ,maybe TNull signatureTerm (candidateGlobalSignature global),TBool (candidateGlobalEvaluated global)
+      ,maybe TNull (TInt . fromIntegral) (candidateGlobalGeneration global)]
+    symbolTerm value = TList [TString (symbolUnit value),TString (symbolModule value),TString (symbolNamespace value)
+      ,TString (symbolOccurrence value),maybe TNull TString (symbolRecordParent value)]
+    repTerm value = TList $ case value of
+      VoidRep -> [TString "void",TInt 0]
+      LiftedRefRep -> [TString "lifted",TInt 0]
+      UnliftedRefRep -> [TString "unlifted",TInt 0]
+      AddressRep -> [TString "address",TInt 0]
+      IntRep width -> [TString "int",TInt (fromIntegral width)]
+      WordRep width -> [TString "word",TInt (fromIntegral width)]
+      FloatRep width -> [TString "float",TInt (fromIntegral width)]
+    signatureTerm value = TList [TList (map repTerm (signatureArguments value)),case signatureResults value of
+      Returns reps -> TList [TString "returns",TList (map repTerm reps)]
+      NoSuccess -> TList [TString "no_success",TList []]
+      CallerResult -> TList [TString "caller_result",TList []]]
+
 candidateGhcLoad :: IO ()
 candidateGhcLoad = withTiming $ withScratch $ \work -> do
   forM_ ["MetadataQuoteSupport.hs", "MetadataQuoter.hs", "MetadataQuotedTarget.hs"] $ \name ->
@@ -1234,6 +1478,72 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
         _ -> fail "native candidate retention discarded its actual GHC executable"
   putStrLn "candidate GHC load: original native reuse, actual quoter execution and source A/B/A passed"
 
+-- Pure issuer and scope-budget controls; the runtime suite separately drives
+-- cold parser -> whole checked program -> per-item original certification.
+freshExecutionRecipeTest :: IO ()
+freshExecutionRecipeTest = withScratch $ \work -> do
+  let source = "module Expr where\nanswer = 42\n"
+      supportSource = "module Support where\nvalue = 42\n"
+      supportPath = work </> "Support.hs"
+      sha = replicate 64 'a'
+      identity name = ExecutionSourceIdentity "main" name sha sha sha
+      support = identity "Support"
+      target = identity "Expr"
+      evidence = DependencyEvidence True True
+        [DependencySource "@generated-source" (digest (BSC.pack source)),
+         DependencySource supportPath (digest (BSC.pack supportSource))]
+        [] [] [DependencyModule "main" "Expr" False "@generated-source" [] ProductReady,
+               DependencyModule "main" "Support" False supportPath [] ProductReady]
+      recipe = ExecutionSourceRecipe sha (Just sha) [work] (work </> "Expr.hs",source)
+        evidence [ExecutionSourceOwner target True Nothing,ExecutionSourceOwner support True Nothing]
+        [] []
+      issue value = either (fail . show) (maybe (fail "supported recipe was withheld") pure)
+        (issueExecutionSourceRecipe value)
+      refused value = case issueExecutionSourceRecipe value of Left _ -> True; _ -> False
+  BS.writeFile supportPath (BSC.pack supportSource)
+  graph <- issue recipe
+  let reference = ExecutionSourceRef support (executionGraphSha256 graph)
+  selected <- either (fail . show) pure (executionSourceProspectiveReferences [graph] [] [reference])
+  unless (selected == [reference]) $ fail "fresh supported recipe did not issue exact original"
+  unless (refused recipe {recipeProducer=replicate 64 '0'}
+      && refused recipe {recipeOwners=[ExecutionSourceOwner support True Nothing]}
+      && refused recipe {recipeExactImports=[(("main","Absent"),[])]}
+      && refused recipe {recipeEvidence=evidence {dependencySources=[]}}) $
+    fail "issuer admitted an incomplete owner/generated/producer/exact-import proof"
+  let legacyRecipe = recipe {recipeOwners=[ExecutionSourceOwner target True Nothing,
+        ExecutionSourceOwner support False Nothing]}
+  legacy <- issue legacyRecipe
+  unavailable <- either (fail . show) pure (executionSourceProspectiveReferences [legacy] []
+    [reference {executionRefGraph=executionGraphSha256 legacy}])
+  unless (null unavailable) $ fail "source-free legacy owner acquired a current-source recipe"
+  promised <- issue legacyRecipe {recipeOwners=[ExecutionSourceOwner target True Nothing,
+    ExecutionSourceOwner support False (Just (replicate 64 'b'))]}
+  unless (case executionSourceProspectiveReferences [promised] []
+      [reference {executionRefGraph=executionGraphSha256 promised}] of Left _ -> True; _ -> False) $
+    fail "missing promised original graph became optional unavailability"
+  let retainedLegacy = legacy {executionGraphSha256=replicate 64 'c'}
+  nested <- issue legacyRecipe {recipeOwners=[ExecutionSourceOwner target True Nothing,
+    ExecutionSourceOwner support False (Just (executionGraphSha256 retainedLegacy))]}
+  unless (case executionSourceProspectiveReferences [nested,retainedLegacy] []
+      [reference {executionRefGraph=executionGraphSha256 nested}] of Left _ -> True; _ -> False) $
+    fail "promised original graph lost its strict legacy-capability refusal"
+  unless (case executionSourceProspectiveReferences [legacy]
+      [reference {executionRefGraph=replicate 64 'b'}] [] of Left _ -> True; _ -> False) $
+    fail "unsupported prospective recipe hid corrupt inherited advertised proof"
+  let original = ExactProduct "main" "Support" sha sha sha "" []
+      scope = ExactScope "" sha sha sha
+        [(ExactIfaceArtifact "main" "Support" "" sha [],"",sha)] [] [original]
+        [] [] Nothing Nothing Nothing Nothing
+      oversized = graph {executionGraphBytes=BS.replicate (4*1024*1024+1) 0}
+  bounded <- either (fail . show) pure
+    (extendExactExecutionSourcesWithinBudget [oversized] [reference] scope)
+  unless (isNothing bounded && case extendExactExecutionSources [oversized] [reference] scope of
+      Left _ -> True; _ -> False) $ fail "optional/advertised aggregate budget policies diverged"
+  unless (case extendExactExecutionSourcesWithinBudget [oversized]
+      [reference {executionRefGraph=replicate 64 'b'}] scope of Left _ -> True; _ -> False) $
+    fail "aggregate budget withholding hid corrupt advertised graph"
+  putStrLn "fresh execution recipe: issuer, original lineage and strict/optional budget controls passed"
+
 candidateExecutionSourcesTest :: IO ()
 candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   forM_ ["MetadataQuoteSupport.hs","MetadataQuoter.hs","ExecutionReexportFacade.hs","ExecutionReexportTarget.hs"] $ \name ->
@@ -1251,7 +1561,7 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   let owners = ["MetadataQuoteSupport","MetadataQuoter"]
   writeManifestFor owners work original
   descriptors <- readTerm candidatePath >>= \case
-    TList [_,_,TList rows] -> pure rows
+    TList [_,_,_,_,TList rows,_] -> pure rows
     _ -> fail "candidate fixture lacks source descriptors"
   rows <- forM descriptors $ \case
     TList fields@(TString _:TString name:_) -> do
@@ -1272,11 +1582,12 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
         13 -> TString (T.pack (originalProductPath product'))
         _ -> field | (index,field) <- zip [0::Int ..] fields])
     _ -> fail "candidate fixture has malformed descriptor"
+  (symbols,globals,compactRows) <- either fail pure (compactInventoryRows rows)
   let filteredParcel = case parcel of
         TList [graphs,TList refs] -> TList [graphs,TList [reference | reference@(TList (_:TString name:_)) <- refs
           , T.unpack name `elem` owners]]
         _ -> parcel
-      envelope value = TList [TString "TPMCAN",TString "7",TList rows,value]
+      envelope value = TList [TString "TPMCAN",TString "8",symbols,globals,TList compactRows,value]
       writeTerm path value = BS.writeFile path (toStrictByteString (encodeTerm value))
   writeTerm candidatePath (envelope filteredParcel)
   offered <- readModuleCandidates candidatePath >>= either fail pure
@@ -1492,7 +1803,7 @@ candidateExecutionWire path = do
     case executionSourceClosure graphs selected current quoter of
       Left _ -> pure ()
       Right _ -> fail "retained candidate execution admitted another current owner or graph digest"
-  putStrLn ("Rust TPMCAN7 decoder/retained closure: owners=" ++ show (map candidateModule candidates)
+  putStrLn ("Rust TPMCAN8 decoder/retained closure: owners=" ++ show (map candidateModule candidates)
     ++ " graphs=" ++ show (Set.size (Set.fromList (map executionGraphSha256 graphs)))
     ++ "; source/native/interface/package bytes match; owner/digest refusals passed (synthetic decoder fixture, not GHC admission)")
 hasIntResultLiteral :: Integer -> [Core.CoreBind] -> Bool
@@ -1606,6 +1917,142 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
     unless (any (isInfixOf "\"cache_safe\":false") evidence) $
       fail "untracked dependency was certified as cache safe"
   putStrLn "exact loaded metadata: parity, source drift, quoter bytecode, hidden family and untracked input passed"
+
+-- Native candidates and exact owners bypass fresh preparation. Their defining
+-- interfaces must still supply typed site siblings without widening imports.
+hydratedSiteSiblings :: IO ()
+hydratedSiteSiblings = withScratch $ \work -> do
+  let unfoldName = "Tidepool.Actors.Unfold"
+      replyName = "Tidepool.Agent.Reply.Internal"
+      names = [replyName,unfoldName]
+      target = work </> "HydratedSiteExpr.hs"
+      unfoldPath = work </> "Tidepool/Actors/Unfold.hs"
+      replyPath = work </> "Tidepool/Agent/Reply/Internal.hs"
+      scopePath = work </> "exact-scope.cbor"
+      scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+      compile selection session = runPipelineSessionSelected selection Set.empty GeneralCompile
+        session target [work] Nothing
+      targetModule prepared = case [value | value <- pprModules prepared
+          , moduleNameString (moduleName (pmModule value)) == "HydratedSiteExpr"] of
+        [value] -> pure value
+        _ -> fail "hydrated sibling fixture lost its target"
+      evidence prepared = do
+        target' <- targetModule prepared
+        unless (null (pmSiteRejections target')) $
+          fail ("hydrated child site was rejected: " ++ show (map srMessage (pmSiteRejections target')))
+        let root = SymbolIdentity "main" "HydratedSiteExpr" "value" "__result" Nothing
+            sibling = SymbolIdentity "main" "Tidepool.Actors.Unfold" "value" "childSited" Nothing
+            context = ProjectionContext "test" "matched"
+              (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+              root [] Nothing Nothing Nothing Nothing
+            tops (NonRecursive binding) = [binding]
+            tops (Recursive bindings) = bindings
+        program <- either (fail . show) pure (projectPrepared context [target'])
+        unless ([length arguments | TopBinding identity (HeapBinding _ (Function _ arguments _ _))
+              <- concatMap tops (programBindings program), identity == root] == [1]
+            && any ((== sibling) . globalIdentity) (programGlobals program)) $
+          fail "hydrated sibling changed the capture root arity or original defining global"
+        case pmYieldSites target' of
+          [site] | ysOrigin site == "HydratedSiteExpr.__result"
+            , stType (ysAnswer site) == "Bool"
+            , map stType (ysInputs site) == ["Char"] -> pure site
+          actual -> fail ("hydrated sibling changed the lexical site/root/input arity: " ++ show actual)
+  createDirectoryIfMissing True (work </> "Tidepool/Actors")
+  createDirectoryIfMissing True (work </> "Tidepool/Agent/Reply")
+  copyFile "test-source-boot/fixtures/HydratedSiteUnfold.hs" unfoldPath
+  copyFile "test-source-boot/fixtures/HydratedSiteReply.hs" replyPath
+  copyFile "test-source-boot/fixtures/HydratedSiteExpr.hs" target
+  cold <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing target [work] Nothing
+  originalSite <- evidence cold
+  writeManifestFor names work cold
+  warm <- compile (PreparedProducts (Just (manifest work))) Nothing
+  unless (sortOn id (map candidateModule (pprAcceptedCandidates warm)) == sortOn id names
+      && all (`notElem` preparedNames warm) names) $
+    fail "hydrated sibling regression did not take native-candidate reuse"
+  warmSite <- evidence warm
+  unless (warmSite == originalSite) (fail "native-candidate hydration changed exact child-site identity")
+  let env = prHscEnv (pprPipelineResult cold)
+  owners <- forM names $ \name -> do
+    let hi = work </> (name ++ ".candidate.hi")
+        packages = hi ++ ".packages"
+    bytes <- BS.readFile hi
+    packageBytes <- BS.readFile packages
+    requirements <- either fail pure (selectedHomeRequirements (pprDependencies cold) "main" name)
+    pure (ExactIfaceArtifact "main" name hi (digest bytes) requirements,packages,digest packageBytes)
+  writeExactMetadataScopeWithLexical scopePath owners [(artifact,exactRequirements artifact) | (artifact,_,_) <- owners]
+  exact <- compile (PreparedProducts Nothing) (Just scope)
+  unless (all (`notElem` preparedNames exact) names) $
+    fail "hydrated sibling regression recompiled an exact defining owner"
+  exactSite <- evidence exact
+  unless (exactSite == originalSite) (fail "exact hydration changed child-site identity")
+  targetSource <- BSC.unpack <$> BS.readFile target
+  writeFile target (T.unpack (T.replace "module HydratedSiteExpr where"
+    "module HydratedSiteExpr (result) where" (T.pack targetSource)))
+  let compilePrivate session = runPipelineSessionSelected (PreparedProducts (Just (manifest work)))
+        Set.empty OriginalDeclarationCompile session target [work] Nothing
+  privateCandidate <- compilePrivate Nothing
+  privateExact <- compilePrivate (Just scope)
+  forM_ [privateCandidate,privateExact] $ \prepared -> do
+    unless (all (`notElem` preparedNames prepared) names) $
+      fail "private capture regression recompiled a hydrated defining owner"
+    privateInterface <- maybe (fail "private capture fixture lacks its target interface") pure
+      (Map.lookup (mkModuleName "HydratedSiteExpr") (pprProductInterfaces prepared))
+    unless (all ((/= "__result") . getOccString) (concatMap availNames (mi_exports privateInterface))) $
+      fail "private capture root became a lexical module export"
+    privateSite <- evidence prepared
+    unless (privateSite == originalSite) (fail "private capture root changed its child-site identity")
+  writeFile target targetSource
+  home <- maybe (fail "hydrated sibling fixture lacks its original owner") pure
+    (lookupHpt (hsc_HPT env) (mkModuleName unfoldName))
+  let wrong = home {hm_iface=set_mi_module (mkModule (stringToUnit "other") (mkModuleName unfoldName)) (hm_iface home)}
+      invalid = hscUpdateHPT (\table -> addToHpt table (mkModuleName unfoldName) wrong) env
+  -- A same-spelling interface with another defining unit cannot authorize IDs
+  -- whose Names still belong to the original owner.
+  unless (Map.notMember "child" (resolvePreparedInterfaceSiblings invalid)) $
+    fail "wrong defining interface owner authorized a sibling"
+  surface <- case [binder | binder <- typeEnvIds (md_types (hm_details home)), getOccString binder == "child"] of
+    [binder] -> pure binder
+    _ -> fail "cold HPT lacks its genuine child surface Id"
+  spec <- maybe (fail "cold HPT child did not match its declared surface module") pure (lookupPreparedVerb surface)
+  let siblings = resolvePreparedInterfaceSiblings env
+      arguments = map Core.Type [boolTy,intTy,charTy,stringTy]
+  case classifySiteOccurrence siblings spec surface arguments of
+    Right _ -> pure ()
+    Left _ -> fail "genuine cold HPT child/sibling pair was refused"
+  sibling <- maybe (fail "cold HPT lacks its genuine child sibling Id") pure (Map.lookup "child" siblings)
+  uniqueSupply <- mkSplitUniqSupply 's'
+  let (foreignUnique,remaining) = takeUniqFromSupply uniqueSupply
+      (surfaceUnique,remaining') = takeUniqFromSupply remaining
+      (siblingUnique,_) = takeUniqFromSupply remaining'
+      originalName = idName surface
+      foreignSurface = setIdName surface (mkExternalName foreignUnique
+        (mkModule (stringToUnit "other") (mkModuleName unfoldName))
+        (nameOccName originalName) (nameSrcSpan originalName))
+      unnamedSurface = setIdName surface (mkInternalName surfaceUnique
+        (nameOccName originalName) (nameSrcSpan originalName))
+      unnamedSibling = setIdName sibling (mkInternalName siblingUnique
+        (nameOccName (idName sibling)) (nameSrcSpan (idName sibling)))
+  -- Alter only the surface's defining unit; its occurrence, module and type
+  -- remain identical to GHC's genuine child Id, and the home sibling is valid.
+  case classifySiteOccurrence siblings spec foreignSurface arguments of
+    Left MismatchedSiblingUnit -> pure ()
+    _ -> fail "a foreign-unit child surface acquired the valid home sibling"
+  forM_ [(siblings,unnamedSurface),(Map.insert "child" unnamedSibling siblings,surface)] $ \(available,verb) ->
+    case classifySiteOccurrence available spec verb arguments of
+      Left MissingSiteOwner -> pure ()
+      _ -> fail "a site pair without a defining module acquired sibling authority"
+  source <- BSC.unpack <$> BS.readFile unfoldPath
+  let withoutSibling = unlines (takeWhile (/= "{-# OPAQUE childSited #-}") (lines source))
+  writeFile unfoldPath withoutSibling
+  missing <- compile (PreparedProducts Nothing) Nothing >>= targetModule
+  unless (any (isInfixOf "missing generated site-aware sibling" . srMessage) (pmSiteRejections missing)) $
+    fail "missing typed sibling did not remain a source rejection"
+  writeFile unfoldPath (T.unpack (T.replace ". Int -> input -> Maybe result" ". Bool -> input -> Maybe result" (T.pack source)))
+  incompatible <- compile (PreparedProducts Nothing) Nothing >>= targetModule
+  unless (any (isInfixOf "incompatible type" . srMessage) (pmSiteRejections incompatible)) $
+    fail "incompatible typed sibling did not remain a source rejection"
+  putStrLn "hydrated site siblings: 10 checks passed (native/exact, private native/exact, wrong interface owner, foreign surface unit, two missing owners, missing sibling, incompatible sibling)"
 
 writeExactMetadataScope :: FilePath -> [(ExactIfaceArtifact, FilePath, String)] -> IO ()
 writeExactMetadataScope path owners = writeExactMetadataScopeWithLexical path owners []
@@ -2200,8 +2647,10 @@ writeManifestFor names work cold = do
         <> text (maybe "" id (dependencyImportSelected imported))) imports
       <> encodeListLen 0 <> text packagePath <> text (digest packages) <> text productPath
   BS.writeFile (manifest work) (toStrictByteString
-    (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "6"
-      <> encodeListLen (fromIntegral (length candidates)) <> mconcat candidates))
+    (encodeListLen 6 <> encodeString "TPMCAN" <> encodeString "8"
+      <> encodeListLen 0 <> encodeListLen 0
+      <> encodeListLen (fromIntegral (length candidates)) <> mconcat candidates
+      <> encodeListLen 2 <> encodeListLen 0 <> encodeListLen 0))
 
 digest :: BS.ByteString -> String
 digest = concatMap (\byte -> let text = showHex byte ""

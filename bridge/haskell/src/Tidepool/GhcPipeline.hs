@@ -1301,6 +1301,26 @@ observationFacts (HydratedObservation _ hmi roots) = pure ModuleFacts
   , moduleFactQuasiQuoteOrigins = NoQuasiQuotes
   }
 
+-- Original native groups can construct values from implementation interfaces
+-- outside the lexical graph. Their verified HPT details still belong in the
+-- runtime constructor metadata; adding those facts does not add lexical edges.
+exactInterfaceTyCons :: HscEnv -> Maybe ExactScope -> IO [TyCon]
+exactInterfaceTyCons _ Nothing = pure []
+exactInterfaceTyCons env (Just scope) = concat <$> forM originals
+  (\(artifact, _, _) -> case lookupHpt (hsc_HPT env) (mkModuleName (exactModule artifact)) of
+    Just hmi
+      | unitString (moduleUnit (mi_module (hm_iface hmi))) == exactUnit artifact
+      , moduleNameString (moduleName (mi_module (hm_iface hmi))) == exactModule artifact ->
+          pure (typeEnvTyCons (md_types (hm_details hmi)))
+    _ -> ioError (userError "exact constructor metadata owner is absent from the hydrated HPT"))
+  where
+    paired = Set.fromList
+      [ (executionUnit owner, executionModule owner, executionIfaceSha256 owner)
+      | owner <- scopeExecutionNativeOwners scope ]
+    originals =
+      [ entry | entry@(artifact, _, _) <- scopeInterfaces scope
+      , (exactUnit artifact, exactModule artifact, exactSha256 artifact) `Set.member` paired ]
+
 -- | Whether this observation still lacks an executable body for the memo.
 observationLacksBody :: ModuleObservation -> Bool
 observationLacksBody (CachedObservation _ entry) = case gmePayload entry of
@@ -1591,26 +1611,6 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
       Succeeded -> do
         cpAfterLoad plan
         loaded <- getSession
-        -- Exact owners excluded from downsweep and certified source candidates
-        -- supply interfaces instead of fresh/memoized prepared bodies. Restore
-        -- their nominal site siblings before any new target is elaborated.
-        case preparation of
-          CheckOnly -> pure ()
-          PrepareStg -> do
-            let siblingOwners = Map.fromList
-                  ([(mkModuleName (exactModule iface), exactUnit iface)
-                   | scope <- maybe [] pure (pvExactScope variant)
-                   , (iface, _, _) <- scopeInterfaces scope]
-                   ++ [(name, candidateUnit (admittedCandidateOriginal candidate))
-                      | (name, candidate) <- Map.toList acceptedCandidates])
-            forM_ (Map.toList siblingOwners) $ \(name, unit) ->
-              case lookupHpt (hsc_HPT loaded) name of
-                Just hmi
-                  | moduleName (mi_module (hm_iface hmi)) == name
-                  , unitString (moduleUnit (mi_module (hm_iface hmi))) == unit ->
-                    liftIO $ modifyIORef' preparedSiblingsRef
-                      (Map.union (resolvePreparedInterfaceSiblings hmi))
-                _ -> pure ()
         let sources = case (preparation, pvExactScope variant) of
               (CheckOnly, Just _) -> Map.fromList
                 [ (ms_mod_name summary, (ms_mod summary, ms_hs_hash summary, hmi))
@@ -1798,8 +1798,9 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     Just tidy -> pure tidy
                     Nothing -> fst <$> timePhase timing "prepared_tidy" (liftIO (hscTidy (mfHscEnv mf) simplified))
                   let ownedSiblings = resolvePreparedSiblings (cg_binds cgGuts)
+                      importedSiblings = resolvePreparedInterfaceSiblings (mfHscEnv mf)
                   siblings <- liftIO $ atomicModifyIORef' preparedSiblingsRef $ \known ->
-                    let known' = Map.union ownedSiblings known
+                    let known' = Map.union ownedSiblings (Map.union known importedSiblings)
                     in (known', known')
                   siteAuthority <- timePhase timing "prepared_site_authority" $ liftIO
                     (resolveSiteAuthority (mfHscEnv mf) (tcg_insts (mfTcGblEnv mf)))
@@ -2388,9 +2389,11 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           -- sorted over the target's own import closure, so the target is last) is
           -- the dependencies-then-target order it used to build by hand.
           moduleFacts <- liftIO (mapM observationFacts observations)
+          hscFinal <- getSession
+          exactTyCons <- liftIO (exactInterfaceTyCons hscFinal (pvExactScope variant))
           let allBinds  = concatMap moduleOutputBinds depOutputs
                 ++ moduleOutputBinds targetOutput
-              allTyCons = concatMap moduleFactTyCons moduleFacts
+              allTyCons = concatMap moduleFactTyCons moduleFacts ++ exactTyCons
           targetEnvironment <- case [ mfTcGblEnv front
                                | observation <- observations
                                , Just front <- [observationFront observation]
@@ -2399,7 +2402,6 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
             [] -> liftIO $ ioError $ userError $
               pvLabel variant ++ ": target module '" ++ targetModName
               ++ "' was typechecked without a retained reader environment"
-          hscFinal <- getSession
           warnings <- liftIO (nub . reverse <$> readIORef warnRef)
           let pipelineResult = PipelineResult
                 { prBinds  = allBinds

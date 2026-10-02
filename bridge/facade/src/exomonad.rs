@@ -10,11 +10,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use exomonad_actor::ActorRef;
+use exomonad_agent::{BackendThreadId, InteractiveLaunchMode, ReasoningEffort};
 #[cfg(feature = "codex-compat")]
 use exomonad_agent::{
-    copy_interactive_binding, read_interactive_binding, InteractiveAgentInstallation,
+    InteractiveAgentInstallation, copy_interactive_binding, read_interactive_binding,
 };
-use exomonad_agent::{BackendThreadId, InteractiveLaunchMode, ReasoningEffort};
 #[cfg(feature = "codex-compat")]
 use exomonad_node::host_command::{HostCommand, HostCommandSpec, HostExit, HostStdin, HostStream};
 use exomonad_node::{TmuxLaunch, TmuxSession};
@@ -22,9 +22,9 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tracing::Instrument;
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::Layer;
 
 #[cfg(feature = "codex-compat")]
 use crate::actor_host::ACTOR_PROJECT_ROOT;

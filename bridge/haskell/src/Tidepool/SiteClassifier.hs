@@ -19,7 +19,7 @@ import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Var (PiTyBinder(..), TyCoVar)
 import GHC.Types.Var.Set (isEmptyVarSet)
-import GHC.Unit.Module (moduleName, moduleNameString)
+import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Utils.Outputable (defaultSDocContext, ppr, renderWithContext)
 import Tidepool.EffectSchema
 import Tidepool.Identity (normalizeMod)
@@ -43,6 +43,8 @@ data SiteFailure
   | MissingEvidence Int
   | OpenSiteType SiteTypePosition Type
   | MissingSibling
+  | MissingSiteOwner
+  | MismatchedSiblingUnit
   | IncompatibleSibling
   | MissingEffectResult
 
@@ -53,6 +55,13 @@ classifySiteOccurrence siblings spec surface args = do
   -- over bindings that are never executed) poisons the occurrence and must
   -- never turn a site-shape failure into a rejection.
   sibling <- maybe (Left MissingSibling) Right (Map.lookup (vsName spec) siblings)
+  -- Recognition and sibling resolution check their declared modules. A verb
+  -- and sibling may live in different modules, but must share a defining unit.
+  case (nameModule_maybe (idName surface), nameModule_maybe (idName sibling)) of
+    (Just surfaceOwner, Just siblingOwner)
+      | moduleUnit surfaceOwner == moduleUnit siblingOwner -> Right ()
+      | otherwise -> Left MismatchedSiblingUnit
+    _ -> Left MissingSiteOwner
   let (binders, result) = splitInvisPiTys (idType surface)
       nTypes = length (takeWhile isNamed binders)
       nEvidence = length binders - nTypes
@@ -97,6 +106,8 @@ renderSiteFailure origin spec failure = case failure of
     MissingTypeArgument i -> "missing type argument " ++ show i
     MissingEvidence i -> "missing constraint evidence " ++ show i
     MissingSibling -> "missing generated site-aware sibling"
+    MissingSiteOwner -> "surface verb or generated sibling lacks a defining module"
+    MismatchedSiblingUnit -> "surface verb and generated sibling have different defining units"
     IncompatibleSibling -> "generated site-aware sibling has an incompatible type"
     MissingEffectResult -> "expected an Eff result type"
 
