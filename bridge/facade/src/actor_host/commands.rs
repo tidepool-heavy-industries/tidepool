@@ -355,18 +355,9 @@ impl CommandBackend for NativeCommandBackend {
 /// Default byte budget for one `read` when the caller did not name a count.
 const PAGE_BYTES: u64 = 64 * 1024;
 
-/// A resident actor — one started from a notebook with `R.start`, or an
-/// operator workbench — has no agent process and therefore no sandbox of its
-/// own, so its commands run in this host process instead.
-///
-/// Routing them to the nearest interactive ancestor instead, which is what
-/// this did before, put them inside *that* actor's sandbox, whose only
-/// writable root is that actor's own worktree. A resident actor holding its
-/// own worktree could then read it and merge into it (merging is host-side)
-/// but could not run `git reset --hard` inside it, which is how a rolled-back
-/// check left an integration worktree stranded on a red head in dogfood run 7.
-/// Running here matches where every other custody-following operation already
-/// runs: `exomonad_worktree::git::GitCli` shells out from this same process.
+/// Runs resident commands through the host process owner, with the issuing
+/// actor's resource admission and filesystem grants. An ancestor's terminal
+/// or worktree does not supply authority to the issuing actor.
 pub(super) struct HostCommandBackend {
     resources: Arc<CommandResourceClient>,
     actor: String,
@@ -431,9 +422,13 @@ impl HostCommandBackend {
             CommandInput::PipeInput => HostStdin::Piped,
             // A resident actor has no pane and no terminal to attach one to.
             CommandInput::TerminalInput => {
-                return Err(
-                    "this actor has no terminal; run the command with piped or closed input".into(),
-                );
+                return Ok(CommandResult {
+                    outcome: CommandOutcome::CommandFailed(
+                        "this actor has no terminal; run the command with piped or closed input"
+                            .into(),
+                    ),
+                    cleanup: CommandCleanup::CommandClean,
+                });
             }
         };
         let mut cancelled = self.cancelled.subscribe();
@@ -714,6 +709,73 @@ impl CommandBackend for HostCommandBackend {
 #[cfg(test)]
 mod readiness_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn terminal_input_refusal_is_clean_before_resource_admission_or_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("resources.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let backend = HostCommandBackend::new(
+            Arc::new(CommandResourceClient::Remote {
+                socket,
+                run: "terminal-refusal".into(),
+            }),
+            exomonad_actor::ActorRef::first(exomonad_actor::ActorId(1)),
+            super::super::ResidentCommandRoots {
+                directory: directory.path().to_owned(),
+                protected: Vec::new(),
+                writable: Vec::new(),
+                custody: false,
+            },
+            directory.path().join("must-not-launch-bubblewrap"),
+        );
+        let (phase, observed_phase) = watch::channel(CommandStatus::CommandQueued);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            backend.execute(
+                "terminal-refusal",
+                CommandSpec {
+                    argv: vec![directory
+                        .path()
+                        .join("must-not-launch-command")
+                        .display()
+                        .to_string()],
+                    directory: None,
+                    environment: Vec::new(),
+                    memory: 1,
+                    input: CommandInput::TerminalInput,
+                    source_capture: tidepool_bridge_effects::CommandSourceCapture::NoCapture,
+                },
+                phase,
+            ),
+        )
+        .await
+        .expect("terminal refusal must not wait for resource admission");
+        assert!(matches!(result.outcome, CommandOutcome::CommandFailed(_)));
+        assert_eq!(result.cleanup, CommandCleanup::CommandClean);
+        assert_eq!(*observed_phase.borrow(), CommandStatus::CommandQueued);
+        assert!(backend.running.lock().is_none());
+        assert!(matches!(
+            backend.output("terminal-refusal", 16).await,
+            Err(CommandError::CommandUnavailable(_))
+        ));
+        assert!(matches!(
+            backend
+                .read(
+                    "terminal-refusal",
+                    CommandStream::Stdout,
+                    CommandPosition::OutputBeginning
+                )
+                .await,
+            Err(CommandError::CommandUnavailable(_))
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), listener.accept(),)
+                .await
+                .is_err(),
+            "refused commands must not contact the resource owner"
+        );
+    }
 
     #[tokio::test]
     async fn host_commands_resolve_relative_directories_in_the_executing_checkout() {

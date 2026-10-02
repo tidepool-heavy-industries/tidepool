@@ -281,6 +281,43 @@ orderedInferenceSegments = do
       assertEqual "first declaration excludes later source" False ("Second" `isInfixOf` firstSource)
       assertEqual "second declaration excludes earlier source" False ("First" `isInfixOf` secondSource)
     _ -> fail "unexpected ordered segment count"
+  forM_
+    [ "answer = (43 :: Int)"
+    , "answer :: Int\nanswer = 43"
+    , "answer = (43 :: Int)\nother = answer + 1"
+    ] $ \declarations -> do
+      imported <- analyzeOrderedCell template
+        ("import Data.List\n" ++ declarations)
+        >>= either (fail . renderCellSplitError) pure
+      assertEqual "segmentation preserves each parser-owned source item"
+        (concatMap cellAnalysisSourceItems (cellPlanItems imported))
+        (concatMap (concatMap cellAnalysisSourceItems . cellPlanItems)
+          (cellInferenceSegments imported))
+      case map cellPlanItems (cellInferenceSegments imported) of
+        [[prologue], [declaration]] -> do
+          assertEqual "import prologue retains its own original owner" True
+            (cellAnalysisPrologueOnly prologue)
+          assertEqual "prologue contains no authored declaration" ""
+            (cellAnalysisSource prologue)
+          assertEqual "authored declarations retain their own original owner" False
+            (cellAnalysisPrologueOnly declaration)
+          assertEqual "declaration source is not duplicated across owners" 1
+            (length [() | suffix <- tails (cellAnalysisSource declaration)
+                        , "answer =" `isPrefixOf` suffix])
+        _ -> fail "import prologue and authored declarations share a segment"
+  importedType <- analyzeOrderedCell template "import Data.List\ndata Imported = Imported"
+    >>= either (fail . renderCellSplitError) pure
+  case cellInferenceSegments importedType of
+    [prologue, declaration] -> do
+      assertEqual "import prologue has no generated Generic" []
+        (map genericDeclarationTarget (cellPlanGenericDeclarations prologue))
+      assertEqual "authored type owns its generated Generic" ["Imported"]
+        (map genericDeclarationTarget (cellPlanGenericDeclarations declaration))
+      assertEqual "import prologue has no generated display" []
+        (map displayTargetName (cellPlanDisplayTargets prologue))
+      assertEqual "authored type owns its generated display" ["Imported"]
+        (map displayTargetName (cellPlanDisplayTargets declaration))
+    _ -> fail "import and type declaration share a segment"
   where
     source = unlines
       [ "first <- pure (0 :: Int)"
