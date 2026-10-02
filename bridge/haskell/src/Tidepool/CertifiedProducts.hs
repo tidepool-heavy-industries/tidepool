@@ -13,7 +13,7 @@ import Control.Monad (forM, when)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import Data.Foldable (fold)
-import Data.List (find)
+import Data.List (find, mapAccumL)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, mapMaybe)
 import qualified Data.Set as Set
@@ -178,25 +178,34 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
       case failures of
         first : _ -> pure (Left first)
         [] -> do
-          let globalBytes = Set.toAscList (Set.fromList
-                [toStrictByteString witness
-                | witnesses <- [rows | (_, _, Right rows) <- modules]
-                    ++ [rows | (_, Right rows) <- targetRows]
-                , witness <- witnesses])
-              globalIndices = Map.fromList (zip globalBytes [(0 :: Word)..])
-              encodeReference witness = encodeWord
-                (globalIndices Map.! toStrictByteString witness)
+          let moduleRows =
+                [(product, group, witnesses)
+                | (product, group, Right witnesses) <- modules]
+              targetRowsReady =
+                [(target, witnesses) | (target, Right witnesses) <- targetRows]
+              allWitnessRows = map third moduleRows ++ map snd targetRowsReady
+              (witnessIndices, referenceRows) = mapAccumL
+                (mapAccumL internWitness) Map.empty allWitnessRows
+              orderedWitnesses = Map.toAscList witnessIndices
+              globalBytes = map fst orderedWitnesses
+              canonicalIndices = Map.fromList
+                [(provisional, fromIntegral index)
+                | (index, (_, provisional)) <- zip [0 :: Int ..] orderedWitnesses]
+              encodeReference provisional = encodeWord
+                (canonicalIndices Map.! provisional)
+              (moduleReferenceRows, targetReferenceRows) =
+                splitAt (length moduleRows) referenceRows
               byModule = Map.map reverse $ Map.fromListWith (++)
                 [ ((productUnit product, productModule product),
-                   [(candidateGroupOrdinal group, map encodeReference witnesses)])
-                | (product, group, Right witnesses) <- modules ]
+                   [(candidateGroupOrdinal group, map encodeReference referenceIndices)])
+                | ((product, group, _), referenceIndices) <- zip moduleRows moduleReferenceRows ]
               encodedModules =
                 [ encodeModule product (Map.findWithDefault []
                     (productUnit product, productModule product) byModule)
                 | product <- products ]
               encodedTargets =
-                [ array [encodeString (T.pack target), list encodeReference witnesses]
-                | (target, Right witnesses) <- targetRows ]
+                [ array [encodeString (T.pack target), list encodeReference referenceIndices]
+                | ((target, _), referenceIndices) <- zip targetRowsReady targetReferenceRows ]
               encodedPackages =
                 [ array [encodeString unit, encodeString name
                   , encodeString (T.pack path), encodeString sha]
@@ -206,6 +215,17 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
             [encodeString "TPCERT", encodeWord 4
             , list id encodedModules, list id encodedTargets
             , list id encodedPackages, list encodePreEncoded globalBytes])))
+  where
+    internWitness :: Map.Map BS.ByteString Word -> Encoding
+      -> (Map.Map BS.ByteString Word, Word)
+    internWitness indices witness =
+      let bytes = toStrictByteString witness
+      in case Map.lookup bytes indices of
+        Just index -> (indices, index)
+        Nothing ->
+          let index = fromIntegral (Map.size indices)
+          in (Map.insert bytes index indices, index)
+    third (_, _, value) = value
 
 -- A locally emitted package value may have no incoming global edge. Its exact
 -- defining interface must still be retained before it is offered to later

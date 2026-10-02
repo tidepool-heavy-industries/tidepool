@@ -2975,6 +2975,19 @@ verifyRetainedPackageWitness producer evidence = do
     (first, firstLog) <- certify
     (second, secondLog) <- certify
     unless (first == second) $ fail "repeated package certification changed its wire evidence"
+    retainByteOracle "repeated-package" first
+    repeatedTerm <- either (fail . show) (pure . snd)
+      (deserialiseFromBytes decodeTerm (BSL.fromStrict first))
+    case repeatedTerm of
+      TList [TString "TPCERT", TInt 4, TList [],
+          TList [TList [TString "target", TList references]],
+          TList _, TList globals]
+        | length references == 1001
+            && length globals == 2 -> unless (sameRepeatedReferences references globals) $
+              fail ("repeated package witnesses lost canonical deduplication or reference indices: "
+                ++ show (take 3 references, drop 999 references,
+                  map witnessOccurrence globals))
+      _ -> fail "repeated package witnesses lost canonical deduplication or reference indices"
     forM_ [firstLog, secondLog] $ \diagnostics -> do
       unless (count "certified_package_global_requests" diagnostics == 1001
           && count "certified_package_owner_loads" diagnostics == 1
@@ -2991,6 +3004,7 @@ verifyRetainedPackageWitness producer evidence = do
       Right _ -> fail "checked package interface authorized an absent sibling"
   verifyChangedPackageInterface producer package evidence program global
   bytes <- encode [global package 0, global home 7] >>= either fail pure
+  retainByteOracle "mixed-retained" bytes
   term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
   owners <- case term of
     TList [TString "TPCERT", TInt 4, _, _, _, TList rows] ->
@@ -3020,7 +3034,9 @@ verifyRetainedPackageWitness producer evidence = do
         [("target", target)] evidence "" ""
       decode bytes' = either (fail . show) (pure . snd)
         (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes'))
-  local <- encodeProgram (localProgram [constructor, synthetic]) >>= either fail decode
+  localBytes <- encodeProgram (localProgram [constructor, synthetic]) >>= either fail pure
+  retainByteOracle "local-package" localBytes
+  local <- decode localBytes
   case local of
     TList [TString "TPCERT", TInt 4, _, _, TList [TList
       [TString "ghc-internal", TString "GHC.Internal.Stack.Types", TString _, TString sha]], TList []]
@@ -3040,6 +3056,27 @@ verifyRetainedPackageWitness producer evidence = do
   where
     count :: String -> String -> Integer
     count = counterTotal
+    retainByteOracle label bytes =
+      lookupEnv "TIDEPOOL_CERTIFICATE_BYTE_ORACLE" >>= mapM_ (\prefix ->
+        BS.writeFile (prefix ++ "-" ++ label ++ ".cbor") bytes)
+    sameRepeatedReferences references globals = case (references, globals) of
+      (TInt firstIndex : rest, [firstWitness, secondWitness]) ->
+        all (== TInt firstIndex) (take 999 rest)
+          && case (drop 999 rest, witnessOccurrence firstWitness, witnessOccurrence secondWitness) of
+            ([TInt secondIndex], Just firstOccurrence, Just secondOccurrence) ->
+              secondIndex /= firstIndex
+                && toStrictByteString (encodeTerm firstWitness)
+                  < toStrictByteString (encodeTerm secondWitness)
+                && occurrenceAt firstIndex firstOccurrence secondOccurrence == "map"
+                && occurrenceAt secondIndex firstOccurrence secondOccurrence == "id"
+            _ -> False
+      _ -> False
+    witnessOccurrence = \case
+      TList [TList [_, _, _, TString occurrence, _], _, _, _, _] -> Just occurrence
+      _ -> Nothing
+    occurrenceAt 0 firstOccurrence _ = firstOccurrence
+    occurrenceAt 1 _ secondOccurrence = secondOccurrence
+    occurrenceAt _ _ _ = ""
 
 -- A mutable installed interface exercises the same environment on successive
 -- certifications. No successful owner selection may survive into the next one.
