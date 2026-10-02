@@ -277,12 +277,16 @@ executionSourceWire path = do
         action
         result <- readExactScope path
         BS.writeFile graphPath originalBytes
-        unless (case result of Left _ -> True; Right _ -> False) $
-          fail ("scope6 accepted " ++ label ++ " before execution")
+        unless (case result of Left reason -> expected `isInfixOf` reason; Right _ -> False) $
+          fail ("scope6 failed to enforce " ++ label ++ " before execution")
   refuse "missing graph" (removeFile graphPath)
   refuse "truncated graph" (BS.writeFile graphPath (BS.take (BS.length originalBytes - 1) originalBytes))
   refuse "tampered graph" (BS.writeFile graphPath (BS.cons 0 (BS.drop 1 originalBytes)))
-  refuse "oversized graph aggregate" (BS.writeFile graphPath (BS.replicate (4*1024*1024+1) 0))
+  BS.writeFile graphPath (BS.replicate (4*1024*1024+1) 0)
+  oversizedResult <- readExactScope path
+  BS.writeFile graphPath originalBytes
+  unless (case oversizedResult of Left reason -> "exceed four MiB" `isInfixOf` reason; Right _ -> False) $
+    fail "scope6 graph aggregate was not refused by its byte bound"
   let swapped = takeDirectory path </> "swapped-graph.cbor"
       swappedManifest = takeDirectory path </> "swapped-scope.cbor"
       wrongGraph = BSC.pack "another immutable graph"
@@ -296,20 +300,23 @@ executionSourceWire path = do
   swappedResult <- readExactScope swappedManifest
   unless (case swappedResult of Left _ -> True; Right _ -> False) $
     fail "scope6 accepted swapped graph before execution"
-  let rejectTerm label changedTerm = do
+  let rejectTerm label expected changedTerm = do
         let changedManifest = takeDirectory path </> (label ++ "-scope.cbor")
         BS.writeFile changedManifest (toStrictByteString (encodeTerm changedTerm))
         result <- readExactScope changedManifest
-        unless (case result of Left _ -> True; Right _ -> False) $
-          fail ("scope6 accepted " ++ label ++ " before execution")
+        unless (case result of Left reason -> expected `isInfixOf` reason; Right _ -> False) $
+          fail ("scope6 failed to enforce " ++ label ++ " before execution")
   case term of
-    TList [magic,_,semantic,producer,interfaces,lexical,products,parcel,purpose] ->
-      rejectTerm "legacy-v5" (TList [magic,TString "5",semantic,producer,interfaces,lexical,products,parcel,purpose])
+    TList [magic,_,semantic,producer,interfaces,lexical,products,TList [_,refs],purpose] ->
+      rejectTerm "legacy-v5" "unsupported exact scope" (TList [magic,TString "5",semantic,producer,interfaces,lexical,products,
+        TList [TList [TList [TString (T.pack graphSha),TBytes originalBytes]],refs],purpose])
     _ -> fail "scope6 fixture changed version layout"
+  let outsidePath = takeDirectory (takeDirectory path) </> "outside.cbor"
+  BS.writeFile outsidePath originalBytes
   case term of
     TList [magic,version,semantic,producer,interfaces,lexical,products,TList [_,refs],purpose] ->
-      rejectTerm "outside-request" (TList [magic,version,semantic,producer,interfaces,lexical,products,
-        TList [TList [TList [TString (T.pack graphSha),TString (T.pack (takeDirectory (takeDirectory path) </> "outside.cbor"))]],refs],purpose])
+      rejectTerm "outside-request" "outside its request directory" (TList [magic,version,semantic,producer,interfaces,lexical,products,
+        TList [TList [TList [TString (T.pack graphSha),TString (T.pack outsidePath)]],refs],purpose])
     _ -> fail "scope6 fixture changed path layout"
   putStrLn "Rust execution wire: scope6 closure, independent budgets, wrong native/missing/truncated/tampered/swapped/oversized/outside-request/v5 refusals passed (10 checks)"
 
