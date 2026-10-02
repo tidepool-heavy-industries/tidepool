@@ -2170,7 +2170,18 @@ quasiQuoteCodegenTransition = withTiming $ withScratch $ \work -> do
       fail "warm real quote did not provision and execute its transitive providers"
     writeFile target quoteFree
     run >>= requireFree "warm after quotation"
-  putStrLn "quasiquote codegen: resident quote-free/real-quote/quote-free transition passed"
+    copyFile (fixture "MetadataQuoteSupportExternalPlugin.hs") (work </> "MetadataQuoteSupport.hs")
+    (pluginResult, pluginDiagnostics) <- captureDiagnostics $
+      try (compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] Nothing)
+        :: IO (Either SomeException PreparedPipelineResult, String)
+    case pluginResult of
+      Left failure
+        | "tidepool-quotation-plugin" `isInfixOf` show failure
+        , null (counterValues "quasiquote_codegen_elided_modules" pluginDiagnostics) -> pure ()
+      _ -> fail "external library plugin input entered quotation elision or bypassed GHC loading"
+    copyFile (fixture "MetadataQuoteSupport.hs") (work </> "MetadataQuoteSupport.hs")
+    run >>= requireFree "after plugin refusal"
+  putStrLn "quasiquote codegen: resident quote-free/real-quote/quote-free, external plugin refusal and recovery passed"
 
 exactLoadedMetadata :: IO ()
 exactLoadedMetadata = withTiming $ withScratch $ \work -> do
