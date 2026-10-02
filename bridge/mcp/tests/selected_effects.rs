@@ -39,6 +39,10 @@ fn concurrent_selected_profiles_enforce_membership_and_preserve_shared_shim() {
         );
     });
     compile(&permitted).expect("permitted recipe survives rejected neighbor");
+    assert!(matches!(
+        compile(&forbidden).expect_err("a permitted cache entry cannot grant Console"),
+        tidepool_runtime::CompileError::Diagnostics(_),
+    ));
     assert_eq!(
         std::fs::read(installed.shim.join("Tidepool/Effects.hs")).unwrap(),
         original,
