@@ -3297,6 +3297,11 @@ impl<'code> InstalledProgram<'code> {
             }
         }
         if !slots.is_empty() {
+            // Reserve ledger ownership before retention publishes roots. An
+            // allocation refusal must not leave roots with no releasing handle.
+            handles
+                .try_reserve_handles(slots.len())
+                .map_err(|_| runtime_error(machine, RuntimeError::HeapOverflow))?;
             if unsafe { machine.prepared_old_space() }.is_some() {
                 return Err(runtime_error(machine, crate::host_fns::bad_pointer()));
             }
@@ -3313,9 +3318,6 @@ impl<'code> InstalledProgram<'code> {
                 }
                 return Err(runtime_error(machine, crate::host_fns::bad_pointer()));
             }
-            handles
-                .try_reserve_handles(roots.len())
-                .map_err(|_| runtime_error(machine, RuntimeError::HeapOverflow))?;
             let managed =
                 result_reps.iter().copied().enumerate().filter(|(_, rep)| {
                     matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)
@@ -4284,6 +4286,38 @@ mod tests {
         };
         assert!(machine.release(*handle));
         assert!(!machine.release(*handle));
+    }
+
+    #[test]
+    fn managed_result_handle_allocation_failure_leaves_no_unowned_roots() {
+        let (mut machine, program) = machine();
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: false,
+        };
+        let roots_before = machine.total_persistent_roots();
+        let handles_before = machine.handle_count();
+        let old_bytes_before = machine.old_bytes_live();
+        machine.handles.fail_next_handle_reservation = true;
+        assert!(matches!(
+            machine.run_entry_retained(program, ValueId(0), &[], call, RealmId::ROOT),
+            Err(ExecutionError::Runtime(MachineFailure {
+                cause: RuntimeError::HeapOverflow,
+                disposition: MachineDisposition::Reusable,
+            }))
+        ));
+        assert_eq!(machine.handle_count(), handles_before);
+        assert_eq!(machine.total_persistent_roots(), roots_before);
+        assert_eq!(machine.machine.rust_roots_len(), 0);
+        assert_eq!(machine.old_bytes_live(), old_bytes_before);
+        let batch = machine
+            .run_entry_retained(program, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("allocation refusal leaves the machine reusable");
+        let [PreparedResult::Managed(value)] = batch.values.as_slice() else {
+            panic!("CAF returns one managed result");
+        };
+        assert!(machine.release(*value));
+        assert_eq!(machine.total_persistent_roots(), roots_before);
     }
 
     #[test]
