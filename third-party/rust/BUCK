@@ -9,12 +9,12 @@ checked_harness_source(
     name = "exomonad-harness-5fdd156badd86236",
     cp = read_root_config("nix", "coreutils") + "/cp",
     python = read_root_config("nix", "python"),
-    revision = "143eebd4cf7e84c6bc4d9c3e46f37eb6544f00f3",
-    nar_hash = "sha256-j0uzOZsmvnr4LdWwFbPGJsbTRTykxqapuMfS/LdFLaM=",
+    revision = "f2d01bd220028844210740ef518c500098982ca4",
+    nar_hash = "sha256-alZmVFjHJsthRj0RFlXIdYqb4qogNnrURg5tIciFtRQ=",
     cargo_lock = "root//:workspace_cargo_lock",
     flake_lock = "root//:workspace_flake_lock",
     provenance_script = "root//:embedded_web_provenance_script",
-    store_path = "/nix/store/0wghhayb3ivz6ljzccr7c4vrwbx0whrj-source",
+    store_path = "/nix/store/1zyigcbc2ay5l24wpr9nc2dmviilh3n6-tidepool-matched-harness-source",
     visibility = [],
 )
 
@@ -5855,6 +5855,7 @@ cargo.rust_library(
         ":thiserror-2",
         ":tokio-1",
         ":tokio-util-0.7",
+        ":tracing-0.1",
         ":uuid-1",
     ],
 )
