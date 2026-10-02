@@ -492,6 +492,11 @@ fn merge_instances(
 }
 
 impl FinalExecutionIntent {
+    #[cfg(test)]
+    pub(super) fn native_write_ids(&self) -> &[SessionVarId] {
+        &self.write_ids
+    }
+
     pub fn reserved_generation(&self) -> Generation {
         self.reserved
     }
