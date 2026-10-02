@@ -1,11 +1,35 @@
-use super::test_campaign::{dispatch_haskell_script, dispatch_lookup, TestCampaign};
+use super::test_campaign::{
+    commit_workspace, dispatch_haskell_script, dispatch_lookup, TestCampaign,
+};
 
 #[tokio::test]
 async fn hosted_lookup_uses_actual_actor_row_for_constraint_availability() {
     let campaign = TestCampaign::start_with_config(
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
-        |config| config.backend = crate::exomonad::HostBackendOptions::Embedded,
+        |config| {
+            config.backend = crate::exomonad::HostBackendOptions::Embedded;
+            let authored = config.workspace.join(".exomonad");
+            std::fs::create_dir_all(&authored).unwrap();
+            std::fs::write(
+                authored.join("AgentSpec.hs"),
+                include_str!("lookup_availability_agent_spec.hs"),
+            )
+            .unwrap();
+            std::fs::write(
+                authored.join("config.toml"),
+                "[defaults]\nmodel='test-model'\n[haskell]\nsource_roots=['.']\nspec='AgentSpec.agentSpec'\n",
+            )
+            .unwrap();
+            commit_workspace(&config.workspace);
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_root,
+                )
+                .unwrap(),
+            );
+        },
     )
     .await;
     let policy = campaign.root_installation.policy.as_ref();
