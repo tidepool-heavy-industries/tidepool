@@ -32,10 +32,11 @@ verifyModuleEvidenceProjection :: IO ()
 verifyModuleEvidenceProjection = do
   groups <- project prepared
   assert (length groups == 3) "module evidence fixture lost a group"
-  let firstBody = projectedBody (head groups)
-      secondBody = projectedBody (groups !! 1)
-      emptyBody = projectedBody (groups !! 2)
-      firstNode = TypeUnconstructible "first" "A"
+  (firstBody, secondBody, emptyBody) <- case groups of
+    [first, second, empty] -> pure
+      (projectedBody first, projectedBody second, projectedBody empty)
+    _ -> fail "module evidence fixture lost a group"
+  let firstNode = TypeUnconstructible "first" "A"
       thirdNode = TypeUnconstructible "third" "C"
       row sid origin ordinal root inputs = SiteRow sid origin ordinal HostAnswer root inputs
   assert (projectedTypes firstBody == [firstNode, thirdNode]
