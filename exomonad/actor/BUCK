@@ -16,6 +16,7 @@ rust_filegroup(
         "src/command_jobs.rs": "exomonad/actor/src/command_jobs.rs",
         "src/command_jobs/discard_hold.rs": "exomonad/actor/src/command_jobs/discard_hold.rs",
         "src/command_jobs/discard_hold.sh": "exomonad/actor/src/command_jobs/discard_hold.sh",
+        "src/command_jobs/discard_hold_mock_git.sh": "exomonad/actor/src/command_jobs/discard_hold_mock_git.sh",
         "src/conversation.rs": "exomonad/actor/src/conversation.rs",
         "src/descriptor.rs": "exomonad/actor/src/descriptor.rs",
         "src/external_application.rs": "exomonad/actor/src/external_application.rs",

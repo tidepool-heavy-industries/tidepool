@@ -1,9 +1,11 @@
 # The discard hold; `discard_hold.rs` documents the held forms and the intent.
 # Defines `git` for one Bash command: a held form runs only when
-# EXOMONAD_DISCARD_EXPECTED_TIP names the ref's actual tip; every other call is
-# `command git` unchanged. Safe under errexit and nounset: the hold runs in an
-# `||` context and reads every variable with a default.
+# EXOMONAD_DISCARD_EXPECTED_TIP names the ref's actual tip. The caller supplies
+# its selected executable as the first argument. Safe under errexit and nounset:
+# the hold runs in an `||` context and optional intent variables have defaults.
 __exomonad_discard_hold() {
+  local program="$1"
+  shift
   local -a args=("$@") globals=() rest=()
   local i=0 sub
   while [ "$i" -lt "${#args[@]}" ]; do
@@ -21,7 +23,7 @@ __exomonad_discard_hold() {
     reset|rebase|branch|push) ;;
     *) return 0 ;;
   esac
-  __exomonad_git() { command git "${globals[@]}" "$@" 2>/dev/null; }
+  __exomonad_git() { command -- "$program" "${globals[@]}" "$@" 2>/dev/null; }
   local verb="" tip="" target="" dropped="" arg
   local -a positional=()
   case "$sub" in
@@ -170,4 +172,4 @@ __exomonad_discard_hold() {
     "${tip:0:7}" "$verb" "$listed" "${EXOMONAD_DISCARD_REASON:+ ($EXOMONAD_DISCARD_REASON)}" >&2
   return 0
 }
-git() { __exomonad_discard_hold "$@" || return $?; command git "$@"; }
+git() { __exomonad_discard_hold git "$@" || return $?; command git "$@"; }
