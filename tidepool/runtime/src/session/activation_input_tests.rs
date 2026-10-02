@@ -51,7 +51,7 @@ struct InputFixture {
     recipe: Arc<InputRecipe>,
     producer: CompiledTurn,
     receiver: CompiledTurn,
-    receiver_binder: BoundBinder,
+    receiver_binders: Vec<BoundBinder>,
     receiver_generation: tidepool_repr::Generation,
 }
 
@@ -140,16 +140,17 @@ impl InputFixture {
             panic!("native protocol receiver is a real retained Haskell binding");
         };
         assert_startup_origin("receiver", &receiver, false);
-        let [receiver_binder] = bound.as_slice() else {
-            panic!("exactly one native protocol receiver binding");
-        };
+        assert_eq!(bound.len(), 2, "receiver and native Unit reply bindings");
+        for name in ["activationReceiver", "activationUnitReply"] {
+            assert_eq!(bound.iter().filter(|binder| binder.name == name).count(), 1);
+        }
         Self {
             root,
             session,
             recipe,
             producer,
             receiver,
-            receiver_binder: receiver_binder.clone(),
+            receiver_binders: bound,
             receiver_generation: view.next_value_generation(),
         }
     }
@@ -176,23 +177,44 @@ impl InputFixture {
             )
             .unwrap();
         let outcome = resident
-            .run_bind_with_sites(
+            .run_projected_bind_with_sites(
                 "nativeActivationReceiver",
                 self.receiver.code(),
-                &self.receiver_binder,
+                &self.receiver_binders,
                 self.receiver_generation,
             )
-            .expect("install the actual native protocol receiver");
+            .expect("install the actual native protocol receiver and Unit reply");
         assert!(
-            matches!(outcome, ResidentOutcome::Completed { .. }),
-            "single native binding completion: {outcome:?}"
+            matches!(outcome, ResidentOutcome::BindingsCommitted { .. }),
+            "projected native binding completion: {outcome:?}"
         );
-        assert!(resident
-            .state
-            .bindings()
-            .get(SessionVarId::from_extract(self.receiver_binder.var_id))
-            .is_some_and(|binding| binding.name.0 == self.receiver_binder.name));
+        for binder in &self.receiver_binders {
+            assert!(resident
+                .state
+                .bindings()
+                .get(SessionVarId::from_extract(binder.var_id))
+                .is_some_and(|binding| binding.name.0 == binder.name));
+        }
         resident
+    }
+
+    fn resume_activation(&self, resident: &mut TestSession, hole: ResidentHole) -> ResidentOutcome {
+        let site = parked_site(resident, &hole);
+        assert!(matches!(
+            resident.resume(hole.clone(), ()),
+            Err(ResidentError::Prepared(PreparedRuntimeError::AnswerDelivery {
+                site: rejected,
+                delivery: tidepool_repr::execution_schema::SiteDelivery::ExitCellFill,
+            })) if rejected == site
+        ));
+        assert!(resident.parked_holes().contains(&hole.cont_id()));
+        let reply = resident
+            .retain_binding_custody("activationUnitReply")
+            .expect("retain the genuine native Unit reply")
+            .expect("compiled Unit reply binding is installed");
+        resident
+            .resume_handle(hole, reply)
+            .expect("deliver native reply custody into the original request")
     }
 
     fn start(&self, resident: &mut TestSession) -> ResidentHole {
@@ -737,9 +759,7 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
             value,
         );
         previous_hole = Some(hole.clone());
-        let outcome = resident
-            .resume(hole, ())
-            .expect("resume original request once");
+        let outcome = fixture.resume_activation(&mut resident, hole);
         assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
         let caller = resident
             .resume(submission, ())
@@ -849,7 +869,7 @@ fn activation_opaque_input_refuses_same_spelling_home_shadow_before_mount() {
         .any(|name| name == "sessionInput"));
     assert_eq!(refused.outstanding_custody(), 0);
     assert!(matches!(
-        refused.resume(hole, ()).unwrap(),
+        fixture.resume_activation(&mut refused, hole),
         ResidentOutcome::Completed { .. }
     ));
     assert!(matches!(
@@ -872,7 +892,7 @@ fn activation_opaque_input_refuses_same_spelling_home_shadow_before_mount() {
         42,
     );
     assert!(matches!(
-        accepted.resume(hole, ()).unwrap(),
+        fixture.resume_activation(&mut accepted, hole),
         ResidentOutcome::Completed { .. }
     ));
     assert!(matches!(
