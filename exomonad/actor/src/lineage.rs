@@ -3018,6 +3018,46 @@ mod tests {
     }
 
     #[test]
+    fn output_abort_discards_ready_children_only_at_exact_boundary() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let owner = ActorRef::first(ActorId(1));
+        let make = |call: &str, actor: u64| {
+            let boundary =
+                WorkbenchForkBoundary::external("thread".into(), "turn".into(), call.into());
+            let (group, reservations) = groups
+                .begin_at_boundary(
+                    owner,
+                    ActorPath::parse(&format!("root/{call}")).unwrap(),
+                    vec![segment("child")],
+                    None,
+                    boundary.clone(),
+                )
+                .unwrap();
+            let child = ActorRef::first(ActorId(actor));
+            groups
+                .claim(group, owner, &reservations[0].allocated)
+                .unwrap();
+            groups.attach_child(group, owner, child).unwrap();
+            groups.request_commit(group, owner).unwrap();
+            groups.mark_ready(group, child).unwrap();
+            (boundary, group, child)
+        };
+        let (first, _, first_child) = make("first", 2);
+        let (second, second_group, second_child) = make("second", 3);
+        assert_eq!(
+            groups.abort_unpublished_at_boundary(owner, &first),
+            vec![first_child]
+        );
+        assert!(groups
+            .abort_unpublished_at_boundary(owner, &first)
+            .is_empty());
+        assert_eq!(
+            groups.ready_groups_at_boundary(owner, &second),
+            vec![(second_group, vec![second_child])]
+        );
+    }
+
+    #[test]
     fn completion_boundary_selects_only_its_exact_pending_groups() {
         let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
         let owner = ActorRef::first(ActorId(1));
