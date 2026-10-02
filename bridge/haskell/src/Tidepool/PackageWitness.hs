@@ -9,7 +9,7 @@ import Codec.CBOR.Decoding
 import Codec.CBOR.Encoding
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Write (toStrictByteString)
-import Control.Exception (IOException, try, bracket)
+import Control.Exception (IOException, try, bracket, evaluate)
 import Control.Monad (replicateM, unless, when, foldM)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
@@ -35,6 +35,7 @@ import System.FilePath (isAbsolute, takeDirectory)
 import System.IO (openBinaryTempFile, hClose)
 import System.Posix.Files (createLink)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
 
 -- Directness is certified by the authored import evidence owner. This witness
 -- authenticates the actual selected package interface, including unused imports.
@@ -63,9 +64,11 @@ encodeCompilerProvidedImport CompilerPrimitive = encodeListLen 3
 packageImportRoot :: HscEnv -> Module -> IO (Either String PackageImportRoot)
 packageImportRoot env owner
   | isHomeUnit (hsc_home_unit env) (moduleUnit owner) = pure (Left "package root refers to the home unit")
-  | otherwise = resolve
+  | otherwise = do
+      timing <- readTimingEnabled
+      timeDetailPhase timing "package_imports" "root" (resolve timing)
  where
-  resolve = do
+  resolve timing = do
     found <- findExactModule (hsc_FC env) (initFinderOpts (hsc_dflags env))
       (fmap (initFinderOpts . homeUnitEnv_dflags) (hsc_HUG env))
       (hsc_units env) (hsc_home_unit_maybe env) (toUnitId <$> owner)
@@ -73,10 +76,12 @@ packageImportRoot env owner
       InstalledFound location _ -> do
         let path = ml_hi_file location
         captured <- try (BS.readFile path) :: IO (Either IOException BS.ByteString)
-        pure $ case captured of
-          Left _ -> Left "selected package interface is unavailable"
-          Right bytes -> Right (PackageImportRoot (unitString (moduleUnit owner))
-            (moduleNameString (moduleName owner)) path (digest bytes))
+        case captured of
+          Left _ -> pure (Left "selected package interface is unavailable")
+          Right bytes -> do
+            sha <- measuredDigest timing "package_root" bytes
+            pure (Right (PackageImportRoot (unitString (moduleUnit owner))
+              (moduleNameString (moduleName owner)) path sha))
       _ -> pure (Left "package interface does not resolve in the matched compiler")
 
 validatePackageImportRoot :: HscEnv -> PackageImportRoot -> IO (Either String ())
@@ -101,26 +106,50 @@ sealPackageImports path iface roots = bracket
 readPackageImports
   :: FilePath -> String -> ExactIfaceArtifact -> IO (Either String PackageImportEvidence)
 readPackageImports path expectedDigest iface = do
-  captured <- try $ do
-    size <- getFileSize path
-    when (size > 4 * 1024 * 1024) (fail "package import evidence exceeds four MiB")
-    (,) <$> BS.readFile path <*> BS.readFile (exactPath iface)
-    :: IO (Either IOException (BS.ByteString, BS.ByteString))
-  case captured of
-    Left (_ :: IOException) -> pure (Left "sealed package import evidence is unavailable")
-    Right (bytes, ifaceBytes)
-      | digest bytes /= expectedDigest || digest ifaceBytes /= exactSha256 iface ->
-          pure (Left "sealed package import evidence or owning interface bytes changed")
-      | otherwise -> case deserialiseFromBytes decodeRoots (BL.fromStrict bytes) of
-          Left _ -> pure (Left "invalid sealed package import evidence")
-          Right (remaining, (owner, roots))
-            | not (BL.null remaining) || owner /= (exactUnit iface, exactModule iface, exactSha256 iface)
-                || encodeRoots iface roots /= bytes -> pure (Left "package import evidence has a different owner or encoding")
-            | otherwise -> do
-                packageBytes <- try (mapM (BS.readFile . packagePath) (packageInterfaces roots)) :: IO (Either IOException [BS.ByteString])
-                pure $ case packageBytes of
-                  Right values | map digest values == map packageSha256 (packageInterfaces roots) -> Right roots
-                  _ -> Left "selected package interface bytes changed"
+  timing <- readTimingEnabled
+  timeDetailPhase timing "package_imports" "read" $ do
+    result <- readEvidence timing
+    -- A returned Either may defer its digest guards. Only diagnostics force
+    -- this verdict here so its CPU is charged to the owning validation span.
+    if timing then evaluate result else pure result
+  where
+    readEvidence timing = do
+      captured <- try $ do
+        size <- getFileSize path
+        when (size > 4 * 1024 * 1024) (fail "package import evidence exceeds four MiB")
+        (,) <$> BS.readFile path <*> BS.readFile (exactPath iface)
+        :: IO (Either IOException (BS.ByteString, BS.ByteString))
+      case captured of
+        Left (_ :: IOException) -> pure (Left "sealed package import evidence is unavailable")
+        Right (bytes, ifaceBytes) -> do
+          evidenceSha <- measuredDigest timing "package_evidence" bytes
+          ifaceSha <- measuredDigest timing "owning_iface" ifaceBytes
+          if evidenceSha /= expectedDigest || ifaceSha /= exactSha256 iface
+            then pure (Left "sealed package import evidence or owning interface bytes changed")
+            else case deserialiseFromBytes decodeRoots (BL.fromStrict bytes) of
+              Left _ -> pure (Left "invalid sealed package import evidence")
+              Right (remaining, (owner, roots))
+                | not (BL.null remaining) || owner /= (exactUnit iface, exactModule iface, exactSha256 iface)
+                    || encodeRoots iface roots /= bytes -> pure (Left "package import evidence has a different owner or encoding")
+                | otherwise -> do
+                    packageBytes <- try (mapM (BS.readFile . packagePath) (packageInterfaces roots)) :: IO (Either IOException [BS.ByteString])
+                    case packageBytes of
+                      Left _ -> pure (Left "selected package interface bytes changed")
+                      Right values -> do
+                        hashes <- mapM (measuredDigest timing "package_selection") values
+                        pure $ if hashes == map packageSha256 (packageInterfaces roots)
+                          then Right roots else Left "selected package interface bytes changed"
+
+-- Only enabled diagnostics force the digest before reporting its bytes. The
+-- ordinary path retains the caller's lazy digest evaluation. No contents or
+-- paths are retained; digest identities allow repeated work to be counted.
+measuredDigest :: Bool -> String -> BS.ByteString -> IO String
+measuredDigest timing purpose bytes = do
+  let sha = digest bytes
+  when timing $ do
+    _ <- evaluate (length sha)
+    emitCount timing ("hash_bytes." ++ purpose ++ "." ++ sha) (fromIntegral (BS.length bytes))
+  pure sha
 
 encodePackageImports :: ExactIfaceArtifact -> PackageImportEvidence -> BS.ByteString
 encodePackageImports = encodeRoots

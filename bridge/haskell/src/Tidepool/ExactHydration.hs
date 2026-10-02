@@ -24,7 +24,7 @@ module Tidepool.ExactHydration
   , installExactLexicalGraph
   ) where
 
-import Tidepool.Timing (readTimingEnabled, emitCount)
+import Tidepool.Timing (readTimingEnabled, emitCount, timeDetailPhase)
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Control.Monad (forM, forM_, unless)
 import Control.Exception
@@ -317,23 +317,25 @@ readCheckedValueImportAuthority env artifacts
 -- home interface tables must not carry visibility across lexical scopes.
 freshExactState :: HscEnv -> IO HscEnv
 freshExactState env = do
-  -- Extraction uses NoLink, so GHC's make driver does not unload splice
-  -- executables. Reset those home symbols with the same loader protocol
-  -- before another lexical scope can supply the same module identity.
-  let cleared = discardIC env
-  forM_ (hsc_interp cleared) $ \interp -> Linker.unload interp cleared []
-  eps <- initExternalUnitCache
-  finder <- initFinderCache
-  let units = hsc_unit_env env
-      homes = fmap (\home -> home { homeUnitEnv_hpt = emptyHomePackageTable })
-        (ue_home_unit_graph units)
-  pure cleared
-    { hsc_FC = finder
-    , hsc_targets = []
-    , hsc_mod_graph = mkModuleGraph []
-    , hsc_type_env_vars = emptyKnotVars
-    , hsc_unit_env = units { ue_eps = eps, ue_home_unit_graph = homes }
-    }
+  timing <- readTimingEnabled
+  timeDetailPhase timing "exact_scope" "fresh_state" $ do
+    -- Extraction uses NoLink, so GHC's make driver does not unload splice
+    -- executables. Reset those home symbols with the same loader protocol
+    -- before another lexical scope can supply the same module identity.
+    let cleared = discardIC env
+    forM_ (hsc_interp cleared) $ \interp -> Linker.unload interp cleared []
+    eps <- initExternalUnitCache
+    finder <- initFinderCache
+    let units = hsc_unit_env env
+        homes = fmap (\home -> home { homeUnitEnv_hpt = emptyHomePackageTable })
+          (ue_home_unit_graph units)
+    pure cleared
+      { hsc_FC = finder
+      , hsc_targets = []
+      , hsc_mod_graph = mkModuleGraph []
+      , hsc_type_env_vars = emptyKnotVars
+      , hsc_unit_env = units { ue_eps = eps, ue_home_unit_graph = homes }
+      }
 
 -- Reading every interface before installing any of them prevents a corrupt
 -- member of an implementation SCC from partially mutating the HPT.
@@ -346,7 +348,10 @@ readExactIfaceArtifacts env artifacts
       pure (Left "invalid exact interface digest")
   | any (\artifact -> any (`Set.notMember` owners) (exactRequirements artifact)) artifacts =
       pure (Left "incomplete exact interface dependency closure")
-  | otherwise = sequence <$> forM artifacts (readOne env)
+  | otherwise = do
+      timing <- readTimingEnabled
+      timeDetailPhase timing "exact_scope" "verify_interfaces" $
+        sequence <$> forM artifacts (readOne env)
   where
     moduleNames = Set.fromList (map exactModule artifacts)
     owners = Set.fromList [(exactUnit artifact, exactModule artifact) | artifact <- artifacts]
@@ -484,11 +489,13 @@ withCapturedIface timing owner bytes consume = do
 hydrateExactScope
   :: HscEnv -> [(ExactIfaceArtifact, ModIface)] -> IO HscEnv
 hydrateExactScope env loaded = do
-  details <- fixIO $ \recursiveDetails -> do
-    let knotted = withDetails recursiveDetails
-    forM loaded $ \(_, iface) ->
-      initIfaceCheck (text "tidepool exact hydration") knotted (typecheckIface iface)
-  pure (withDetails details)
+  timing <- readTimingEnabled
+  timeDetailPhase timing "exact_scope" "hydrate" $ do
+    details <- fixIO $ \recursiveDetails -> do
+      let knotted = withDetails recursiveDetails
+      forM loaded $ \(_, iface) ->
+        initIfaceCheck (text "tidepool exact hydration") knotted (typecheckIface iface)
+    pure (withDetails details)
   where
     withDetails details = hscUpdateHPT_lazy (\hpt -> foldr
       (\(iface, detail) table -> addToHpt table (moduleName (mi_module iface))

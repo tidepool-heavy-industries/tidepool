@@ -126,7 +126,7 @@ import Tidepool.Metadata
   ( collectDataCons, dcToMeta, mergeMetaPreserving, targetBindingHasIO
   , wiredInDataCons )
 import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut)
-import Tidepool.Timing (readTimingEnabled, timePhase)
+import Tidepool.Timing (readTimingEnabled, timePhase, timeDetailPhase)
 import Tidepool.TurnSource (extractModuleName, spliceTemplate, replaceTemplateMarker)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencySource(..), DependencyImport(..), ProductAvailability(..)
@@ -603,9 +603,10 @@ writeCertifiedProductsKeeping
   :: OriginalInterfaceArtifacts -> FilePath -> HscEnv -> PreparedPipelineResult -> Maybe PreparedModuleProducts
   -> [PreparedArtifact] -> IO CertifiedOriginalProducts
 writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productContext preparedArtifacts = do
-    (availability, freshProducts) <- writeModuleProducts originalInterfaces outDir
-      productContext (pprProductInterfaces prepared)
-      (pprPackageImports prepared)
+    timing <- readTimingEnabled
+    (availability, freshProducts) <- timeDetailPhase timing "module_products" "write_products" $
+      writeModuleProducts originalInterfaces outDir productContext
+        (pprProductInterfaces prepared) (pprPackageImports prepared)
     let dependencies = pprDependencies prepared
         withCertified = foldr (\candidate -> Map.insert
           (candidateUnit candidate, candidateModule candidate) ProductReady)
@@ -622,22 +623,26 @@ writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productC
           Nothing -> freshDependencies
           Just _ -> freshDependencies
             { dependencyCacheSafe = False, dependencySelectionComplete = False }
-    writeDependencyEvidence outDir finalDependencies
+    timeDetailPhase timing "module_products" "dependency_evidence" $
+      writeDependencyEvidence outDir finalDependencies
     forM_ (pprExactCompilation prepared) $ \compilation -> do
       verified <- revalidateExactScope hscEnv (compilationScope compilation)
       either (ioError . userError) pure verified
       writeExactCompilation compilation freshDependencies
-    productBytes <- BS.readFile (outDir </> "module-products.cbor")
-    evidenceBytes <- BS.readFile (outDir </> "dependencies.json")
-    certified <- encodeCertifiedProducts hscEnv (pprAcceptedCandidates prepared)
-      (compilationScope <$> pprExactCompilation prepared)
-      freshProducts [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
-      finalDependencies productBytes evidenceBytes
-    case certified of
-      Right bytes -> BS.writeFile (outDir </> "certified-products.cbor") bytes
-      Left reason -> do
-        hPutStrLn stderr ("product certification unavailable: " ++ reason)
-        BS.writeFile (outDir </> "certified-products.cbor") BS.empty
+    (productBytes, evidenceBytes) <- timeDetailPhase timing "module_products" "certificate_inputs" $ do
+      productBytes <- BS.readFile (outDir </> "module-products.cbor")
+      evidenceBytes <- BS.readFile (outDir </> "dependencies.json")
+      pure (productBytes, evidenceBytes)
+    timeDetailPhase timing "module_products" "certify" $ do
+      certified <- encodeCertifiedProducts hscEnv (pprAcceptedCandidates prepared)
+        (compilationScope <$> pprExactCompilation prepared)
+        freshProducts [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
+        finalDependencies productBytes evidenceBytes
+      case certified of
+        Right bytes -> BS.writeFile (outDir </> "certified-products.cbor") bytes
+        Left reason -> do
+          hPutStrLn stderr ("product certification unavailable: " ++ reason)
+          BS.writeFile (outDir </> "certified-products.cbor") BS.empty
     pure (CertifiedOriginalProducts freshDependencies freshProducts)
 
 trySynchronous :: IO a -> IO (Either SomeException a)
@@ -781,6 +786,7 @@ writeModuleProducts :: OriginalInterfaceArtifacts -> FilePath -> Maybe PreparedM
          [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])])
 writeModuleProducts _ _ Nothing _ _ = pure (Map.empty, [])
 writeModuleProducts originalInterfaces outDir (Just inventory) interfaces packageRoots = do
+  timing <- readTimingEnabled
   outcomes <- forM (preparedModuleProductOutcomes inventory) $ \(owner, outcome) -> do
     let name = moduleName owner
         key = (unitString (moduleUnit owner), moduleNameString name)
@@ -795,8 +801,9 @@ writeModuleProducts originalInterfaces outDir (Just inventory) interfaces packag
             ++ ": " ++ show reason)
           pure (key, ProductProjectionRejected, Nothing, Nothing)
         Right groups -> do
-          bytes <- originalInterfaceBytes originalInterfaces owner
-            >>= maybe (fail "original product interface lacks its captured artifact") pure
+          bytes <- timeDetailPhase timing "module_products.interfaces" (snd key) $
+            originalInterfaceBytes originalInterfaces owner
+              >>= maybe (fail "original product interface lacks its captured artifact") pure
           roots <- case Map.lookup name packageRoots of
             Nothing -> ioError (userError
               ("resolved direct package import inventory missing for " ++ moduleNameString name))
@@ -812,8 +819,10 @@ writeModuleProducts originalInterfaces outDir (Just inventory) interfaces packag
       packageBundles =
         [(unit, moduleName', sidecar)
         | ((unit, moduleName'), _, Just _, Just sidecar) <- outcomes]
-  BS.writeFile (outDir </> "module-products.cbor") (encodeModuleProducts products)
-  BS.writeFile (outDir </> "module-package-imports.cbor")
+  timeDetailPhase timing "module_products" "encode_products" $
+    BS.writeFile (outDir </> "module-products.cbor") (encodeModuleProducts products)
+  timeDetailPhase timing "module_products" "encode_package_bundles" $
+    BS.writeFile (outDir </> "module-package-imports.cbor")
     (toStrictByteString (encodeListLen 3
       <> encodeString (T.pack "TPPKGBUNDLES") <> encodeWord 1
       <> encodeListLen (fromIntegral (length packageBundles))

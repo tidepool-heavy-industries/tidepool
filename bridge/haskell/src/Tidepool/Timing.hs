@@ -6,6 +6,9 @@ module Tidepool.Timing
   ( readTimingEnabled
   , timePhase
   , timeDetailPhase
+  , ResourceTimingStart
+  , beginResourceTiming
+  , endResourceTiming
   , timeSection
   , emitPhase
   , emitDetailPhase
@@ -42,20 +45,52 @@ readTimingEnabled = (== Just "1") <$> lookupEnv "TIDEPOOL_TIMING"
 
 -- | Run @act@ and, when @enabled@, write one
 -- @tidepool-timing phase=\<name\> ms=\<int\>@ line to stderr AFTER @act@
--- completes. Emits nothing when @enabled@ is 'False' — the only difference
--- between the two is that one stderr line.
+-- completes, plus a nested resource detail when enabled. Disabled calls
+-- retain wall timing internally and emit no diagnostic lines.
 timePhase :: MonadIO m => Bool -> String -> m a -> m a
 timePhase enabled name act = do
-  (r, ms) <- timeSection act
+  (r, ms) <- timeSection (timeDetailPhase enabled "compile" name act)
   liftIO (emitPhase enabled name ms)
   pure r
 
 -- | Measure a named child without putting it in the flat phase stream.
+-- Enabled measurements include monotonic boundaries for perf alignment,
+-- process CPU and RTS deltas. Reading counters never forces a collection;
+-- allocation therefore follows the RTS accounting boundary, not a heap census.
 timeDetailPhase :: MonadIO m => Bool -> String -> String -> m a -> m a
-timeDetailPhase enabled parent name act = do
-  (result, ms) <- timeSection act
-  liftIO (emitDetailPhase enabled parent name ms)
+timeDetailPhase False _ _ act = act
+timeDetailPhase True parent name act = do
+  start <- beginResourceTiming True
+  result <- act
+  endResourceTiming start parent name
   pure result
+
+-- A token brackets existing wall timers whose setup spans several statements.
+-- Keep its constructor private so all resource spans use the same clock and
+-- counter ordering. Nothing performs no counter reads when timing is disabled.
+data ResourceTimingStart = ResourceTimingStart Word64 Integer (Maybe RTS.RTSStats)
+
+beginResourceTiming :: MonadIO m => Bool -> m (Maybe ResourceTimingStart)
+beginResourceTiming False = pure Nothing
+beginResourceTiming True = do
+  wall0 <- liftIO getMonotonicTimeNSec
+  cpu0 <- liftIO getCPUTime
+  rts0 <- liftIO readRtsStats
+  pure (Just (ResourceTimingStart wall0 cpu0 rts0))
+
+endResourceTiming :: MonadIO m => Maybe ResourceTimingStart -> String -> String -> m ()
+endResourceTiming Nothing _ _ = pure ()
+endResourceTiming (Just (ResourceTimingStart wall0 cpu0 rts0)) parent name = do
+  rts1 <- liftIO readRtsStats
+  cpu1 <- liftIO getCPUTime
+  wall1 <- liftIO getMonotonicTimeNSec
+  liftIO $ hPutStrLn stderr ("tidepool-timing-detail parent=" ++ parent
+    ++ " phase=" ++ name
+    ++ " ms=" ++ show ((delta wall0 wall1 + 500000) `div` 1000000)
+    ++ " start_ns=" ++ show wall0 ++ " end_ns=" ++ show wall1
+    ++ " wall_ns=" ++ show (delta wall0 wall1)
+    ++ " cpu_ns=" ++ show ((cpu1 - cpu0) `div` 1000)
+    ++ renderRtsDelta rts0 rts1)
 
 -- | Time @act@ without emitting anything — for a phase whose wall clock is
 -- the SUM of several non-contiguous sub-steps (e.g. once per module in a
@@ -95,8 +130,12 @@ emitDetailPhase True parent name ms =
 
 emitCount :: Bool -> String -> Integer -> IO ()
 emitCount False _ _ = pure ()
-emitCount True name count =
-  hPutStrLn stderr ("tidepool-count name=" ++ name ++ " count=" ++ show count)
+emitCount True name count = do
+  -- Position the count event on the phase clock; this is not a duration of
+  -- the counted work. Older lines without this field are request totals only.
+  countNs <- getMonotonicTimeNSec
+  hPutStrLn stderr ("tidepool-count name=" ++ name ++ " count=" ++ show count
+    ++ " count_ns=" ++ show countNs)
 
 elapsedMs :: Double -> Double -> Integer
 elapsedMs t0 t1 = round ((t1 - t0) * 1000)
@@ -207,17 +246,57 @@ renderInterfaceMeasurement request moduleName stage reuse wallNs cpuNs before af
     ++ " ms=" ++ show ((wallNs + 500000) `div` 1000000)
     ++ " wall_ns=" ++ show wallNs
     ++ " cpu_ns=" ++ show cpuNs
-    ++ case (before, after) of
-      (Just rts0, Just rts1) ->
-        " rts=enabled rts_scope=process_delta"
-          ++ " allocated_bytes=" ++ show (delta (RTS.allocated_bytes rts0) (RTS.allocated_bytes rts1))
-          ++ " gc_cpu_ns=" ++ show (delta (RTS.gc_cpu_ns rts0) (RTS.gc_cpu_ns rts1))
-          ++ " gc_elapsed_ns=" ++ show (delta (RTS.gc_elapsed_ns rts0) (RTS.gc_elapsed_ns rts1))
-          ++ " gcs=" ++ show (delta (RTS.gcs rts0) (RTS.gcs rts1))
-      _ ->
-        " rts=unavailable rts_scope=process_delta"
-          ++ " allocated_bytes=unavailable gc_cpu_ns=unavailable"
-          ++ " gc_elapsed_ns=unavailable gcs=unavailable"
+    ++ renderRtsDelta before after
+
+renderRtsDelta :: Maybe RTS.RTSStats -> Maybe RTS.RTSStats -> String
+renderRtsDelta before after = case (before, after) of
+  (Just rts0, Just rts1) ->
+    let collections = delta (RTS.gcs rts0) (RTS.gcs rts1)
+        majorCollections = delta (RTS.major_gcs rts0) (RTS.major_gcs rts1)
+    in " rts=enabled rts_scope=process_delta"
+      ++ " allocated_bytes=" ++ show (delta (RTS.allocated_bytes rts0) (RTS.allocated_bytes rts1))
+      ++ " gc_cpu_ns=" ++ show (delta (RTS.gc_cpu_ns rts0) (RTS.gc_cpu_ns rts1))
+      ++ " gc_elapsed_ns=" ++ show (delta (RTS.gc_elapsed_ns rts0) (RTS.gc_elapsed_ns rts1))
+      ++ " gcs=" ++ show collections
+      ++ " major_gcs=" ++ show majorCollections
+      ++ " minor_gcs=" ++ show (delta majorCollections collections)
+      ++ renderRtsSnapshot "before" before ++ renderRtsSnapshot "after" after
+      ++ renderRtsHighWater after
+  _ ->
+    " rts=unavailable rts_scope=process_delta"
+      ++ " allocated_bytes=unavailable gc_cpu_ns=unavailable"
+      ++ " gc_elapsed_ns=unavailable gcs=unavailable"
+      ++ " major_gcs=unavailable minor_gcs=unavailable"
+      ++ renderRtsSnapshot "before" before ++ renderRtsSnapshot "after" after
+      ++ renderRtsHighWater after
+
+-- These gauges describe the last completed GC, not the sampling instant.
+-- Equal epochs expose stale samples; epoch zero has no GC details. Minor
+-- collections count uncollected generations as live. No collection is forced.
+renderRtsSnapshot :: String -> Maybe RTS.RTSStats -> String
+renderRtsSnapshot suffix stats =
+  renderRtsValue ("last_gc_epoch_" ++ suffix) (RTS.gcs <$> stats)
+    ++ renderRtsValue ("last_gc_gen_" ++ suffix) (RTS.gcdetails_gen <$> details)
+    ++ renderRtsValue ("last_gc_live_bytes_" ++ suffix) (RTS.gcdetails_live_bytes <$> details)
+    ++ renderRtsValue ("last_gc_mem_in_use_bytes_" ++ suffix) (RTS.gcdetails_mem_in_use_bytes <$> details)
+  where
+    details = stats >>= \value ->
+      if RTS.gcs value == 0 then Nothing else Just (RTS.gc value)
+
+-- Process-lifetime maxima are not phase peaks or native RSS. The live maximum
+-- is sampled only at major (oldest-generation) collections, including -G1.
+renderRtsHighWater :: Maybe RTS.RTSStats -> String
+renderRtsHighWater stats =
+  renderRtsValue "process_highwater_major_gc_live_bytes" live
+    ++ renderRtsValue "process_highwater_rts_mem_in_use_bytes" capacity
+  where
+    live = stats >>= \value ->
+      if RTS.major_gcs value == 0 then Nothing else Just (RTS.max_live_bytes value)
+    capacity = stats >>= \value ->
+      if RTS.gcs value == 0 then Nothing else Just (RTS.max_mem_in_use_bytes value)
+
+renderRtsValue :: Show a => String -> Maybe a -> String
+renderRtsValue name value = " " ++ name ++ "=" ++ maybe "unavailable" show value
 
 renderStage :: InterfaceStage -> String
 renderStage CheckedEnvironmentInterface = "checked_environment"

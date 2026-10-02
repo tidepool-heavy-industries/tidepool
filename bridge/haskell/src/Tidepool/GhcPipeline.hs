@@ -155,6 +155,7 @@ import Tidepool.Session
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule )
 import Tidepool.Timing
   ( readTimingEnabled, timeSection, timePhase, emitPhase, emitDetailPhase, emitCount
+  , timeDetailPhase, ResourceTimingStart, beginResourceTiming, endResourceTiming
   , monotonicTime, elapsedMs
   , emitCompileSummary, emitModuleTiming, emitModuleInterfaceTiming
   , InterfaceStage(..), InterfaceReuse(..), measureModuleInterface
@@ -871,6 +872,7 @@ runCompile selection retained variant path includes buildProductsDir = do
   emitPhase timing "startup" startupMs
   runGhc (Just libdir) $ do
     sessionT0 <- monotonicTime
+    setupResources <- beginResourceTiming timing
     dflags <- getSessionDynFlags
     -- Force x86_64-linux target platform regardless of host architecture.
     -- The Cranelift runtime has a single backend; prepared STG must use
@@ -910,7 +912,7 @@ runCompile selection retained variant path includes buildProductsDir = do
     -- DynFlags bootstrap (above) so the default-on per-compile summary's
     -- wall-clock figure covers it too, exactly as it always has. See
     -- 'runCompileCycle''s haddock for what each argument controls.
-    runCompileCycle selection Nothing Nothing context Nothing timing requestIdentity sessionT0 variant path
+    runCompileCycle selection Nothing Nothing context Nothing timing requestIdentity sessionT0 setupResources variant path
 
 -- | Like 'runPipelineSelected'/'runPipelineSessionSelected', but also taking a
 -- retained-generation set (see 'Tidepool.RetainedUnfoldings') to withhold
@@ -1428,8 +1430,8 @@ type GutsMemo = Map.Map ModuleName GutsMemoEntry
 -- recompilation fingerprint and the prepared memo's module validity check.
 runCompileCycle
   :: PipelineSelection result -> Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
-  -> RetainedContext -> Maybe String -> Bool -> Word64 -> Double -> PipelineVariant -> FilePath -> Ghc result
-runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing requestIdentity sessionT0 variant path = withCycleHooks $ do
+  -> RetainedContext -> Maybe String -> Bool -> Word64 -> Double -> Maybe ResourceTimingStart -> PipelineVariant -> FilePath -> Ghc result
+runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing requestIdentity sessionT0 setupResources variant path = withCycleHooks $ do
     memoTrace <- liftIO readMemoTraceEnabled
     let preparation = selectionKind selection
         captureProducts = capturesProductInterfaces selection
@@ -1523,6 +1525,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
     -- 'sessionT0' first. A resident request starts after the shared bootstrap.
     -- This phase is flat and non-overlapping with 'ghc_load'.
     setupT1 <- monotonicTime
+    endResourceTiming setupResources "compile" "ghc_setup"
     liftIO (emitPhase timing "ghc_setup" (elapsedMs sessionT0 setupT1))
     originalPlan <- pvPlan variant timing modGraphRaw sourceSelection
     certifiedEnv <- getSession
@@ -1610,9 +1613,11 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
               [] -> (plannedLoadGraph, LoadAllTargets)
           _ -> (plannedLoadGraph, LoadAllTargets)
     loadT0 <- monotonicTime
+    loadResources <- beginResourceTiming timing
     loadFlag <- withLoadTargets (cpLoadTargets plan) $ load' mCache loadHowMuch dependencyDiagnostic (Just batchMsg)
                (scopeRetainedModuleGraph (mapMG canonicalizeLoadSummary loadGraph))
     loadT1 <- monotonicTime
+    endResourceTiming loadResources "compile" "ghc_load"
     -- 'ghc_load' phase (TIDEPOOL_TIMING): the 'load'' call alone, nothing
     -- else. FLAT — see 'ghc_setup' above; the two rows partition the work,
     -- they do not nest inside each other.
@@ -1723,14 +1728,15 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 -- origins -- see 'classifyQuasiQuoteOrigins'); dependency
                 -- modules are already resident by this point in the batch.
                 classifyEnv <- getSession
-                ((typechecked, quasiQuoteOrigins), tcMs) <- timeSection $ do
-                  parsed <- parseModule modSum
-                  origins <- liftIO (classifyQuasiQuoteOrigins classifyEnv parsed)
-                  transformed <- liftIO (pvTransformParsed variant classifyEnv modSum parsed)
-                  typed <- typecheckModule transformed
-                  familyEnvironment <- getSession
-                  liftIO (validateCompilationFamilies familyEnvironment (fst (tm_internals_ typed)))
-                  pure (typed, origins)
+                ((typechecked, quasiQuoteOrigins), tcMs) <- timeSection $
+                  timeDetailPhase timing "typecheck" (moduleNameString (ms_mod_name modSum)) $ do
+                    parsed <- parseModule modSum
+                    origins <- liftIO (classifyQuasiQuoteOrigins classifyEnv parsed)
+                    transformed <- liftIO (pvTransformParsed variant classifyEnv modSum parsed)
+                    typed <- typecheckModule transformed
+                    familyEnvironment <- getSession
+                    liftIO (validateCompilationFamilies familyEnvironment (fst (tm_internals_ typed)))
+                    pure (typed, origins)
                 liftIO (modifyIORef' tcMsRef (+ tcMs))
                 hscEnv0 <- getSession
                 let hscEnv   = scopeRetainedHscEnv (ms_mod modSum)
@@ -2513,12 +2519,15 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                   liftIO $ hPutStrLn stderr $
                     "tidepool-checked module=" ++ moduleNameString (ms_mod_name summary)
                       ++ " target=" ++ show isTarget
-                  parsed <- parseModule summary
-                  origins <- liftIO (classifyQuasiQuoteOrigins current parsed)
-                  transformed <- liftIO (pvTransformParsed variant current summary parsed)
-                  typed <- typecheckModule transformed
-                  familyEnvironment <- getSession
-                  liftIO (validateCompilationFamilies familyEnvironment (fst (tm_internals_ typed)))
+                  (typed, origins) <- timeDetailPhase timing "checked_typecheck"
+                    (moduleNameString (ms_mod_name summary)) $ do
+                      parsed <- parseModule summary
+                      origins <- liftIO (classifyQuasiQuoteOrigins current parsed)
+                      transformed <- liftIO (pvTransformParsed variant current summary parsed)
+                      typed <- typecheckModule transformed
+                      familyEnvironment <- getSession
+                      liftIO (validateCompilationFamilies familyEnvironment (fst (tm_internals_ typed)))
+                      pure (typed, origins)
                   let tcg = fst (tm_internals_ typed)
                       inspectionProbes = capturedInspectionProbes typed tcg
                       retainInterface reason = do
@@ -3147,6 +3156,7 @@ residentCompileOne
   -> Ghc result
 residentCompileOne selection cache memoRef retainedRef stateOriginRef baseDFlags baseImportPaths timing requestIdentity purpose mscope path extraIncludes buildProductsDir = do
   sessionT0 <- monotonicTime
+  setupResources <- beginResourceTiming timing
   retained <- liftIO (readIORef retainedRef)
   variant <- liftIO $ case mscope of
     Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
@@ -3179,7 +3189,7 @@ residentCompileOne selection cache memoRef retainedRef stateOriginRef baseDFlags
       (\df -> df { importPaths = requestImportPaths }))
     sourceState)
   let incarnation = mscope >>= ssIncarnation
-  runCompileCycle selection (Just cache) (Just memoRef) retained incarnation timing requestIdentity sessionT0 variant path
+  runCompileCycle selection (Just cache) (Just memoRef) retained incarnation timing requestIdentity sessionT0 setupResources variant path
 
 -- Protected requests use their complete admitted search order. GHC's boot
 -- defaults (including the worker CWD) are not additional source authority.

@@ -14,7 +14,7 @@ import Codec.CBOR.Decoding
 import Codec.CBOR.Read (deserialiseFromBytes)
 import qualified Codec.CBOR.Encoding as E
 import Codec.CBOR.Write (toStrictByteString)
-import Control.Exception (IOException, try, throwIO)
+import Control.Exception (IOException, try, throwIO, evaluate)
 import Control.Monad (foldM, forM, forM_, replicateM, unless, when)
 import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
@@ -43,6 +43,7 @@ import Tidepool.ExecutionSource
   , executionSourceOriginalClosure )
 import Tidepool.PackageWitness
   ( PackageImportEvidence(..), readPackageImports, validatePackageImportRoot )
+import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyModule(..), DependencyImport(..), DependencyResolution(..), renderDependencyEvidence
   , revalidateDependencyEvidence )
@@ -308,29 +309,37 @@ scopeValueInterfaces scope =
 -- bounded original graph bytes. The request hash seals each path and digest.
 readExactScope :: FilePath -> IO (Either String ExactScope)
 readExactScope path = do
-  captured <- try (do
-    unless (isAbsolute path) (fail "exact scope path must be absolute")
-    bytes <- readBoundedFile path (4 * 1024 * 1024)
-    (scope, descriptors) <- case deserialiseFromBytes decodeScope (BL.fromStrict bytes) of
-      Left failure -> fail (show failure)
-      Right (remaining, result)
-        | BL.null remaining -> pure result
-        | otherwise -> fail "exact scope has trailing bytes"
-    sizes <- forM descriptors $ \(_, graphPath) -> do
-      unless (takeDirectory graphPath == takeDirectory path)
-        (fail "original execution graph is outside its request directory")
-      getFileSize graphPath
-    when (sum sizes > 4 * 1024 * 1024)
-      (fail "original execution graphs exceed four MiB")
-    graphs <- forM (zip descriptors sizes) $ \((sha, graphPath), size) -> do
-      graphBytes <- readBoundedFile graphPath (fromIntegral size)
-      unless (toInteger (BS.length graphBytes) == size)
-        (fail "original execution graph size changed")
-      either fail pure (decodeExecutionSourceGraph sha graphBytes)
-    validateExecutionSources scope graphs
-    pure scope { scopeManifestPath = path, scopeRequestSha256 = digest bytes
-      , scopeExecutionGraphs = graphs }) :: IO (Either IOException ExactScope)
-  pure (either (Left . show) Right captured)
+  timing <- readTimingEnabled
+  timeDetailPhase timing "exact_scope" "read" $ do
+    captured <- try (do
+      unless (isAbsolute path) (fail "exact scope path must be absolute")
+      bytes <- readBoundedFile path (4 * 1024 * 1024)
+      (scope, descriptors) <- timeDetailPhase timing "exact_scope" "decode" $ case deserialiseFromBytes decodeScope (BL.fromStrict bytes) of
+        Left failure -> fail (show failure)
+        Right (remaining, result)
+          | BL.null remaining -> pure result
+          | otherwise -> fail "exact scope has trailing bytes"
+      sizes <- forM descriptors $ \(_, graphPath) -> do
+        unless (takeDirectory graphPath == takeDirectory path)
+          (fail "original execution graph is outside its request directory")
+        getFileSize graphPath
+      when (sum sizes > 4 * 1024 * 1024)
+        (fail "original execution graphs exceed four MiB")
+      graphs <- forM (zip descriptors sizes) $ \((sha, graphPath), size) -> do
+        graphBytes <- readBoundedFile graphPath (fromIntegral size)
+        unless (toInteger (BS.length graphBytes) == size)
+          (fail "original execution graph size changed")
+        graph <- either fail pure (decodeExecutionSourceGraph sha graphBytes)
+        emitCount timing ("hash_bytes.execution_graph." ++ sha) (fromIntegral (BS.length graphBytes))
+        pure graph
+      validateExecutionSources scope graphs
+      let sha = digest bytes
+      when timing $ do
+        _ <- evaluate (length sha)
+        emitCount timing ("hash_bytes.scope_metadata." ++ sha) (fromIntegral (BS.length bytes))
+      pure scope { scopeManifestPath = path, scopeRequestSha256 = sha
+        , scopeExecutionGraphs = graphs }) :: IO (Either IOException ExactScope)
+    pure (either (Left . show) Right captured)
 
 -- A bounded read also closes the stat/read growth race without allocating an
 -- unbounded input. Graph sizes are summed before any graph is captured.
@@ -360,26 +369,31 @@ validateExecutionSources scope graphs = do
 -- no source file is a substitute for an admitted original interface.
 revalidateExactScope :: HscEnv -> ExactScope -> IO (Either String ())
 revalidateExactScope env scope = do
-  result <- try (do
-    bytes <- readBoundedFile (scopeManifestPath scope) (4 * 1024 * 1024)
-    unless (digest bytes == scopeRequestSha256 scope) (fail "exact scope request changed")
-    mapM_ checkInterface (scopeInterfaces scope)
-    mapM_ checkProduct (scopeProducts scope)
-    mapM_ checkValue (scopeValueInterfaces scope))
-    :: IO (Either IOException ())
-  pure $ either (Left . show) Right result
+  timing <- readTimingEnabled
+  timeDetailPhase timing "exact_scope" "revalidate" $ do
+    result <- try (do
+      bytes <- readBoundedFile (scopeManifestPath scope) (4 * 1024 * 1024)
+      unless (digest bytes == scopeRequestSha256 scope) (fail "exact scope request changed")
+      mapM_ checkInterface (scopeInterfaces scope)
+      emitCount timing ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 scope) (fromIntegral (BS.length bytes))
+      mapM_ (checkProduct timing) (scopeProducts scope)
+      mapM_ (checkValue timing) (scopeValueInterfaces scope))
+      :: IO (Either IOException ())
+    pure $ either (Left . show) Right result
   where
     checkInterface (iface, packages, packagesSha) = do
       roots <- readPackageImports packages packagesSha iface
       selected <- either fail pure roots
       mapM_ (\root -> validatePackageImportRoot env root >>= either fail pure) (packageInterfaces selected)
-    checkValue value = do
+    checkValue timing value = do
       bytes <- BS.readFile (exactPath value)
       unless (digest bytes == exactSha256 value) (fail "checked value interface changed")
-    checkProduct originalProduct = do
+      emitCount timing ("hash_bytes.checked_value." ++ exactSha256 value) (fromIntegral (BS.length bytes))
+    checkProduct timing originalProduct = do
       bytes <- BS.readFile (originalProductPath originalProduct)
       unless (digest bytes == originalProductSha256 originalProduct)
         (fail "exact original product changed")
+      emitCount timing ("hash_bytes.native_product." ++ originalProductSha256 originalProduct) (fromIntegral (BS.length bytes))
 
 -- Every successful compile owns a distinct immutable source snapshot. Check,
 -- fold and inspection requests can consume several generated modules, so a
