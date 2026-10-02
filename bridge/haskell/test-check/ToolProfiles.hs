@@ -65,6 +65,10 @@ main = do
     (runTool "raw_curate" == (Right (toJSON ("executor" :: Text)), []))
   require "sync notification runs context effect"
     (snd (runTool "notify_curate") == ["executor"])
+  asyncDefault <- either (error . show) pure (compileInstalledTools (specTools (defaultAsyncWorkbenchSpec :: AgentSpec (AsyncHaskellTools '[]) '[])))
+  require "host without context support declares only the async notebook"
+    (map (\entry -> (dtdName entry, dtdSchedule entry, dtdImplementation entry, dtdEffectKeys entry)) (declarations asyncDefault)
+      == [("haskell", Asynchronous, NativeHaskellCell, Just [])])
   narrowCompiled <- either (error . show) pure (compileInstalledTools narrowTools)
   require "notebook profile may select a strict subset of actor effects"
     (map dtdEffectKeys (declarations narrowCompiled) == [Just []])
