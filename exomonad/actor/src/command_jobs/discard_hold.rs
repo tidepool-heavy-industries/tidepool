@@ -33,7 +33,10 @@
 //! directory the call runs in. The prefix is ANSI-C quoted on one physical
 //! line, so the script's own line numbers are unchanged.
 //!
-//! Not held: `command git`, a path to the Git binary, `sh -c`, and nested
+//! Direct Git argv preserves its selected executable for both probes and the
+//! final invocation, including absolute and relative paths.
+//!
+//! Not held: `command git` or a path to Git inside a Bash script, `sh -c`, and nested
 //! shells, which bypass the function; `git clean`, checkout over uncommitted
 //! edits and `reset --hard` over a dirty tree, which name no commit (the design
 //! asks for an exact path acknowledgment there); a force push's live remote
@@ -58,10 +61,13 @@ pub(super) fn install(mut spec: CommandSpec) -> CommandSpec {
             "--noprofile".to_owned(),
             "--norc".to_owned(),
             "-c".to_owned(),
-            format!("{}git \"$@\"", prefix()),
+            format!(
+                "{}__exomonad_discard_hold \"$@\" || exit $?; command -- \"$@\"",
+                prefix()
+            ),
             "exomonad-git".to_owned(),
         ];
-        wrapped.extend(spec.argv.drain(1..));
+        wrapped.append(&mut spec.argv);
         spec.argv = wrapped;
     }
     spec
@@ -129,6 +135,177 @@ mod tests {
     use tidepool_bridge_effects::CommandInput;
 
     const REFUSAL_TAIL: &str = "Inspect/rebase or confirm the actual tip.";
+
+    struct MockGit {
+        directory: tempfile::TempDir,
+        selected: PathBuf,
+        log: PathBuf,
+    }
+
+    impl MockGit {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let directory = tempfile::tempdir().unwrap();
+            let selected = directory.path().join("-chosen dir '$()/git");
+            let alternate = directory.path().join("path/git");
+            for program in [&selected, &alternate] {
+                std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+                std::fs::write(program, include_str!("discard_hold_mock_git.sh")).unwrap();
+                std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let log = directory.path().join("calls");
+            Self {
+                directory,
+                selected,
+                log,
+            }
+        }
+
+        #[allow(clippy::disallowed_methods, reason = "inert command backend fixture")]
+        fn execute(&self, mut command: CommandSpec) -> std::process::Output {
+            command.environment.extend([
+                (
+                    "PATH".into(),
+                    format!(
+                        "{}:{}",
+                        self.directory.path().join("path").display(),
+                        std::env::var("PATH").unwrap()
+                    ),
+                ),
+                ("MOCK_LOG".into(), self.log.to_str().unwrap().into()),
+                ("MOCK_MARKER".into(), "environment with spaces".into()),
+            ]);
+            let admitted = install(command);
+            Command::new(&admitted.argv[0])
+                .args(&admitted.argv[1..])
+                .current_dir(self.directory.path())
+                .envs(admitted.environment)
+                .output()
+                .unwrap()
+        }
+
+        /// Each invocation records argc, executable, cwd, environment marker,
+        /// then the original arguments, separated by NULs to retain whitespace.
+        fn calls(&self) -> Vec<Vec<String>> {
+            let bytes = std::fs::read(&self.log).unwrap();
+            let fields: Vec<_> = bytes.split(|byte| *byte == 0).collect();
+            let mut cursor = 0;
+            let mut calls = Vec::new();
+            while cursor + 1 < fields.len() {
+                let count: usize = std::str::from_utf8(fields[cursor])
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                calls.push(
+                    fields[cursor + 1..cursor + count + 4]
+                        .iter()
+                        .map(|field| String::from_utf8(field.to_vec()).unwrap())
+                        .collect(),
+                );
+                cursor += count + 4;
+            }
+            calls
+        }
+    }
+
+    #[test]
+    fn selected_git_path_is_used_for_probes_and_execution_with_original_inputs() {
+        for path_form in 0..3 {
+            let mock = MockGit::new();
+            let relative = mock.selected.strip_prefix(mock.directory.path()).unwrap();
+            let selected = match path_form {
+                0 => mock.selected.to_str().unwrap().to_owned(),
+                1 => format!("./{}", relative.display()),
+                _ => relative.to_str().unwrap().to_owned(),
+            };
+            let argv = [
+                selected.as_str(),
+                "-C",
+                ".",
+                "-c",
+                "key=value with spaces",
+                "reset",
+                "--hard",
+                "target",
+                "--",
+                "file with spaces\n'$()",
+            ];
+            let output = mock.execute(spec(
+                &argv,
+                &[
+                    ("MOCK_DROP", "yes"),
+                    ("MOCK_EXIT", "23"),
+                    ("EXOMONAD_DISCARD_EXPECTED_TIP", "tip"),
+                    ("EXOMONAD_DISCARD_TARGET", "target"),
+                ],
+            ));
+            assert_eq!(output.status.code(), Some(23));
+            assert_eq!(output.stdout, b"selected executable ran\n");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("Discard confirmed"));
+            let calls = mock.calls();
+            assert_eq!(calls.len(), 6);
+            for call in &calls {
+                assert_eq!(call[0], selected);
+                assert_eq!(call[1], mock.directory.path().to_str().unwrap());
+                assert_eq!(call[2], "environment with spaces");
+                assert_eq!(&call[3..7], &argv[1..5]);
+            }
+            assert_eq!(&calls.last().unwrap()[3..], &argv[1..]);
+        }
+    }
+
+    #[test]
+    fn selected_git_refusals_never_invoke_the_operation_or_path_alternative() {
+        for (expected, target) in [("", ""), ("stale", ""), ("tip", "stale")] {
+            let mock = MockGit::new();
+            let output = mock.execute(spec(
+                &[mock.selected.to_str().unwrap(), "reset", "--hard", "target"],
+                &[
+                    ("MOCK_DROP", "yes"),
+                    ("EXOMONAD_DISCARD_EXPECTED_TIP", expected),
+                    ("EXOMONAD_DISCARD_TARGET", target),
+                ],
+            ));
+            assert_eq!(output.status.code(), Some(1));
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("would drop committed"));
+            for call in mock.calls() {
+                assert_eq!(call[0], mock.selected.to_str().unwrap());
+                assert_ne!(call[3], "reset");
+            }
+        }
+    }
+
+    #[test]
+    fn selected_git_unheld_forms_preserve_the_selected_executable_and_status() {
+        for form in ["--soft", "--hard"] {
+            let mock = MockGit::new();
+            let argv = [mock.selected.to_str().unwrap(), "reset", form, "target"];
+            let output = mock.execute(spec(&argv, &[("MOCK_EXIT", "23")]));
+            assert_eq!(output.status.code(), Some(23));
+            assert_eq!(output.stdout, b"selected executable ran\n");
+            assert!(output.stderr.is_empty());
+            let calls = mock.calls();
+            for call in &calls {
+                assert_eq!(call[0], mock.selected.to_str().unwrap());
+            }
+            assert_eq!(&calls.last().unwrap()[3..], &argv[1..]);
+        }
+    }
+
+    #[test]
+    fn selected_git_bash_calls_keep_path_resolution_and_guard_checks() {
+        let mock = MockGit::new();
+        let output = mock.execute(bash("git reset --hard target", &[("MOCK_DROP", "yes")]));
+        assert_eq!(output.status.code(), Some(1));
+        for call in mock.calls() {
+            assert_eq!(
+                call[0],
+                mock.directory.path().join("path/git").to_str().unwrap()
+            );
+            assert_ne!(call[3], "reset");
+        }
+    }
 
     struct Repository {
         path: PathBuf,
