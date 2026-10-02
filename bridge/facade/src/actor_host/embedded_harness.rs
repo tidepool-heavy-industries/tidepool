@@ -1252,17 +1252,21 @@ mod tests {
             call_id: "call".into(),
         };
         let boundary = tidepool_runtime::session::WorkbenchForkBoundary::Hosted(original.clone());
-        let check = |run, creator, context_parent, boundary| {
-            validate_inherited_operation(
-                issuer,
-                &parent,
-                &operation,
-                run,
-                creator,
-                context_parent,
-                boundary,
-            )
-        };
+        let check =
+            |run: &str,
+             creator,
+             context_parent,
+             boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>| {
+                validate_inherited_operation(
+                    issuer,
+                    &parent,
+                    &operation,
+                    run,
+                    creator,
+                    context_parent,
+                    boundary,
+                )
+            };
         assert!(check("run", Some(issuer), Some(issuer), Some(&boundary)).is_ok());
         assert!(check("other-run", Some(issuer), Some(issuer), Some(&boundary)).is_err());
         assert!(check("run", Some(other), Some(issuer), Some(&boundary)).is_err());
