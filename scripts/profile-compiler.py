@@ -775,14 +775,27 @@ def main():
                     child = subprocess.Popen(command, stdout=stdout, stderr=stderr, start_new_session=True)
                     metadata["command_begin"] = anchor()
                 deadline = time.monotonic() + args.duration
+                sampling_active = True
                 while time.monotonic() < deadline:
-                    if proc_identity(args.pid) != identity:
-                        raise RuntimeError("selected worker PID was reused")
-                    status = (proc / "status").read_text()
-                    memory = {key: int(value) * 1024 for key, value in re.findall(r"^(VmRSS|VmHWM|RssAnon|RssFile):\s+(\d+) kB", status, re.M)}
-                    rss.write(json.dumps({**anchor(), **memory}) + "\n")
-                    if recorder.poll() is not None:
-                        raise RuntimeError("perf ended before the capture boundary; inspect perf.stderr and size limit")
+                    if sampling_active:
+                        try:
+                            if proc_identity(args.pid) != identity:
+                                raise RuntimeError("selected worker PID was reused")
+                            status = (proc / "status").read_text()
+                            memory = {key: int(value) * 1024 for key, value in re.findall(r"^(VmRSS|VmHWM|RssAnon|RssFile):\s+(\d+) kB", status, re.M)}
+                            rss.write(json.dumps({**anchor(), **memory}) + "\n")
+                            if recorder.poll() is not None:
+                                raise RuntimeError("perf ended before the capture boundary; inspect perf.stderr and size limit")
+                        except (OSError, RuntimeError) as error:
+                            capture_error = str(error)
+                            sampling_active = False
+                            metadata["sampling_end"] = anchor()
+                            metadata["sampling_ended_before_workload"] = child is not None and child.poll() is None
+                            # The selected process can retire between compiler
+                            # requests. Keep the admitted workload alive, without
+                            # sampling a replacement, until its original deadline.
+                            if child is None:
+                                break
                     if any((out / name).stat().st_size > LIMIT for name in ("command.stdout", "command.stderr")):
                         raise RuntimeError("command output exceeds four MiB")
                     if child is not None and child.poll() is not None:
@@ -792,7 +805,7 @@ def main():
                     if child is not None:
                         raise RuntimeError("request command exceeded the capture timeout")
                 metadata["command_exit"] = child.poll() if child else None
-                metadata["sampling_end"] = anchor()
+                metadata.setdefault("sampling_end", anchor())
     except (OSError, RuntimeError) as error:
         capture_error = str(error)
     finally:
@@ -810,7 +823,14 @@ def main():
         metadata["perf_exit"] = recorder.returncode if recorder else None
         metadata["perf_recording_ok"] = metadata["perf_exit"] == 0 or (metadata.get("perf_stop_requested", False) and metadata["perf_exit"] == -signal.SIGINT)
         metadata["end"] = anchor()
-        metadata["cgroup_end"] = {"anchor": anchor(), "snapshot": capture_cgroup_context(args.pid)}
+        try:
+            if proc_identity(args.pid) != identity:
+                raise RuntimeError("selected worker PID was reused")
+            cgroup_end = capture_cgroup_context(args.pid)
+        except (OSError, RuntimeError) as error:
+            cgroup_end = {"status": "unavailable", "error": str(error)[:256],
+                          "worker_path": None, "ancestors": []}
+        metadata["cgroup_end"] = {"anchor": anchor(), "snapshot": cgroup_end}
         metadata["cgroup_accounting"] = compare_cgroup_context(metadata["cgroup_start"]["snapshot"],
                                                                  metadata["cgroup_end"]["snapshot"])
         metadata["command_output_truncated"] = [item for name in ("command.stdout", "command.stderr")
