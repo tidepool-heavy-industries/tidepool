@@ -73,7 +73,11 @@ def main():
     parser.add_argument('--kind', choices=('lib-test', 'bin'), required=True)
     parser.add_argument('--name', required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--jobs', type=int, default=2,
+                        help='Cargo build concurrency within the admitted resource budget (default: 2)')
     args = parser.parse_args()
+    if args.jobs < 1:
+        parser.error('--jobs must be positive')
     root = repository_root(Path.cwd())
     output = args.output.resolve()
     if not output.is_relative_to(root) or subprocess.run(
@@ -98,7 +102,7 @@ def main():
         packet['source_oid'] = manifest['source']['head_oid']
         command = [str(tools['cargo']), 'test' if args.kind == 'lib-test' else 'build',
                    '--release', '--locked', '--offline', '--no-default-features', '-p', args.package,
-                   '--message-format=json-render-diagnostics', '-j', '2']
+                   '--message-format=json-render-diagnostics', '-j', str(args.jobs)]
         command += ['--lib', '--no-run'] if args.kind == 'lib-test' else ['--bin', args.name]
         packet['command'] = command
         with (output / 'cargo-messages.jsonl').open('wb') as messages, (output / 'build.log').open('wb') as log:
