@@ -225,4 +225,58 @@ pub(super) fn admitted_factory(
 }
 
 #[cfg(test)]
+pub(super) fn fixture_factory(
+    model: impl Into<String>,
+    effort: Effort,
+) -> Arc<dyn CellModelFactory> {
+    Arc::new(
+        EmbeddedCellModelFactory::<FixtureAuth, _>::new(
+            Arc::new(Store::memory().expect("fixture model store")),
+            Arc::new(JobScheduler::new(1).expect("fixture model scheduler")),
+            model.into(),
+            effort,
+            Arc::new(|| FixtureModelTransport),
+        ),
+    )
+}
+
+#[cfg(test)]
+struct FixtureAuth;
+
+#[cfg(test)]
+impl Auth for FixtureAuth {
+    fn access(&self) -> Result<(String, String), harness::transport::TransportError> {
+        Ok(("fixture-token".into(), "https://fixture.invalid".into()))
+    }
+}
+
+#[cfg(test)]
+struct FixtureModelTransport;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl ResponsesTransport for FixtureModelTransport {
+    async fn create(
+        &self,
+        _request: harness::transport::ResponsesRequest,
+    ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
+        Ok(harness::transport::ResponsesTurn {
+            response_id: uuid::Uuid::new_v4().to_string(),
+            items: vec![harness::item::Item(serde_json::json!({
+                "type":"message",
+                "role":"assistant",
+                "phase":"final_answer",
+                "content":[{"type":"output_text","text":"fixture model response"}]
+            }))],
+            usage: harness::transport::Usage {
+                reported: true,
+                input_tokens: 1,
+                output_tokens: 1,
+                ..Default::default()
+            },
+        })
+    }
+}
+
+#[cfg(test)]
 mod tests;
