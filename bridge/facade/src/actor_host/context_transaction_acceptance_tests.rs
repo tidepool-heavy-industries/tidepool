@@ -523,6 +523,11 @@ async fn resident_async_failed_deferred_unfold_keeps_bindings_and_never_launches
     assert_eq!(failed.request.session_id, session);
     assert_eq!(failed.request.model, "test-model");
     let terminal = retained_output(&failed.request, "async-deferred-failure");
+    assert_eq!(
+        terminal["failure"]["phase"],
+        tidepool_toolchain::failclass::Phase::Run.tag(),
+        "{terminal}"
+    );
     assert!(
         terminal
             .to_string()
