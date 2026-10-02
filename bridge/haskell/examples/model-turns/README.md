@@ -52,6 +52,8 @@ committed transcript and the same Haskell bindings. The child can choose the
 model for its next request with `setNextModel "executor"`. The argument is
 `Text`: the host resolves a configured alias first, then treats an unmatched
 value as a literal model identifier.
+Select its reasoning effort with `C.setNextEffort C.High`; `C.Effort` aliases
+the existing `ForkEffort` type.
 
 The returned `Context` has a bounded structural display, so a direct
 `getContext` or `modifyContext` cell result shows authored blocks and safe

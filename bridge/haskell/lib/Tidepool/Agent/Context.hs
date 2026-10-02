@@ -17,6 +17,8 @@ module Tidepool.Agent.Context
   , ContextNativeKind (..)
   , ContextBlockKind (..)
   , ContextProvenance (..)
+  , Effort
+  , ForkEffort (..)
   , contextBlocks
   , editableTexts
   , visibleTexts
@@ -28,6 +30,7 @@ module Tidepool.Agent.Context
   , modifyContext
   , modifyContextM
   , setNextModel
+  , setNextEffort
   )
 where
 
@@ -42,6 +45,7 @@ import Tidepool.Effects.Core
   , ContextDocument (..)
   , ContextNativeKind (..)
   , ContextReadWrite (..)
+  , ForkEffort (..)
   , ContextReference
   , ContextRole (..)
   )
@@ -142,3 +146,9 @@ modifyContextM update = do
 -- alias first, then treats an unmatched name as a literal model identifier.
 setNextModel :: Member ContextReadWrite effects => Text -> Eff effects ()
 setNextModel = send . SetNextModelWith
+
+-- | Select the reasoning effort for the actor's next provider request.
+type Effort = ForkEffort
+
+setNextEffort :: Member ContextReadWrite effects => Effort -> Eff effects ()
+setNextEffort = send . SetNextEffortWith

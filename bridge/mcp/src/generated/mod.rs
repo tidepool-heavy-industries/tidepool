@@ -339,9 +339,11 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "GetContextWith",
             "PutContextWith",
             "SetNextModelWith",
+            "SetNextEffortWith",
             "getContext",
             "putContext",
             "setNextModel",
+            "setNextEffort",
         ],
     ),
     (

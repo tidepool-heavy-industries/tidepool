@@ -5,6 +5,7 @@ use exomonad_actor::{CellExit, ContextReq, HostedContextBinding};
 use exomonad_tool::ToolInvocationContext;
 use harness::{
     context::{ContextDraft, ContextSnapshot},
+    model::Effort,
     provider::{ContextDisposition, InvocationCompletionSource, ProviderCompletion},
     turn::JobOutput,
 };
@@ -53,6 +54,7 @@ impl EmbeddedContextBinding {
                 draft: ContextDraft {
                     document: snapshot.document.clone(),
                     next_model: None,
+                    next_effort: None,
                 },
                 changed: false,
             })),
@@ -163,6 +165,15 @@ impl HostedContextBinding for EmbeddedContextBinding {
                     state.changed = true;
                     Ok(Response::new(()))
                 }
+                ContextReq::SetNextEffortWith(effort) => {
+                    state.draft.next_effort = Some(match effort {
+                        exomonad_actor::ForkEffort::Low => Effort::Low,
+                        exomonad_actor::ForkEffort::Medium => Effort::Medium,
+                        exomonad_actor::ForkEffort::High => Effort::High,
+                    });
+                    state.changed = true;
+                    Ok(Response::new(()))
+                }
             }
         })
     }
@@ -219,6 +230,7 @@ mod tests {
                 draft: ContextDraft {
                     document: harness::context::ContextDocument { blocks: Vec::new() },
                     next_model: Some("staged-model".into()),
+                    next_effort: None,
                 },
                 changed: true,
             })),
@@ -340,6 +352,66 @@ mod tests {
         )
         .is_err());
         assert_eq!(source.completion(output), Some(owner));
+    }
+
+    #[test]
+    fn next_effort_is_staged_and_committed_with_a_successful_cell() {
+        let binding = binding();
+        let execution = WorkbenchExecutionId::from_digest([11; 16]);
+        let principal = PrincipalId::new(1, 1);
+        binding
+            .admit(&execution, &binding.invocation, principal)
+            .unwrap();
+        prepare_result(
+            &binding,
+            ContextReq::SetNextEffortWith(exomonad_actor::ForkEffort::High),
+            principal,
+        )
+        .unwrap();
+        binding.finish(CellExit {
+            execution,
+            cause: CellExitCause::FullReturn,
+            cleanup_confirmed: true,
+        });
+
+        let completion = binding
+            .completion(JobOutput::Completed(Ok(serde_json::json!(true))))
+            .unwrap();
+        let ContextDisposition::Draft(draft) = completion.context else {
+            panic!("successful effort selection must produce a draft");
+        };
+        assert_eq!(draft.next_effort, Some(Effort::High));
+    }
+
+    #[test]
+    fn next_effort_is_rolled_back_after_failure_or_cancellation() {
+        for cause in [CellExitCause::Failed, CellExitCause::Cancelled] {
+            let binding = binding();
+            let execution = WorkbenchExecutionId::from_digest([12; 16]);
+            let principal = PrincipalId::new(1, 1);
+            binding
+                .admit(&execution, &binding.invocation, principal)
+                .unwrap();
+            prepare_result(
+                &binding,
+                ContextReq::SetNextEffortWith(exomonad_actor::ForkEffort::High),
+                principal,
+            )
+            .unwrap();
+            if cause == CellExitCause::Cancelled {
+                binding.cancel();
+            }
+            binding.finish(CellExit {
+                execution,
+                cause,
+                cleanup_confirmed: true,
+            });
+
+            let completion = binding
+                .completion(JobOutput::Completed(Ok(serde_json::json!(true))))
+                .unwrap();
+            assert_eq!(completion.context, ContextDisposition::Unedited);
+        }
     }
 
     #[test]

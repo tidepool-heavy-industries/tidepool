@@ -17,7 +17,7 @@ const WIRE: WireDerives = WireDerives(&[
     WireDerive::Eq,
 ]);
 
-/// The admitted cell's editable context document and next-model choice.
+/// The admitted cell's editable context document and next-inference choices.
 #[must_use]
 pub fn context_read_write() -> Effect {
     Effect {
@@ -29,7 +29,7 @@ pub fn context_read_write() -> Effect {
         decl_fn: "context_read_write_decl",
         description: &[
             "Read or replace the typed context document for the admitted synchronous tool, ",
-            "or select its next model. Context references and native blocks carry host-owned ",
+            "or select its next model and reasoning effort. Context references and native blocks carry host-owned ",
             "evidence provenance; system and developer instructions remain host-controlled.",
         ],
         prompt_card: None,
@@ -63,6 +63,16 @@ pub fn context_read_write() -> Effect {
                 vec![arg("model", HsType::Text)],
                 HsType::Unit,
             ),
+            verb(
+                "SetNextEffortWith",
+                "set_next_effort_with",
+                vec![Arg {
+                    name: "effort",
+                    ty: HsType::Named("ForkEffort"),
+                    rust: RustBinding::Path("crate::ForkEffort"),
+                }],
+                HsType::Unit,
+            ),
         ],
         helpers: vec![
             Helper {
@@ -82,6 +92,13 @@ pub fn context_read_write() -> Effect {
             Helper {
                 name: "setNextModel",
                 ctor: Some("SetNextModelWith"),
+                substrate: false,
+                doc: &[],
+                body: HelperBody::Pointfree,
+            },
+            Helper {
+                name: "setNextEffort",
+                ctor: Some("SetNextEffortWith"),
                 substrate: false,
                 doc: &[],
                 body: HelperBody::Pointfree,

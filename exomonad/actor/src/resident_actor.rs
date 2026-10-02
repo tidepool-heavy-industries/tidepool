@@ -14486,6 +14486,7 @@ mod tests {
                 blocks: Vec::new(),
             }),
             crate::ContextReq::SetNextModelWith("next-model".into()),
+            crate::ContextReq::SetNextEffortWith(crate::ForkEffort::High),
         ];
         let mut operations = Vec::new();
         for (ordinal, request) in requests.into_iter().enumerate() {

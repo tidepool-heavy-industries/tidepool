@@ -23,6 +23,9 @@ ghc -O0 -Wall "${includes[@]}" -outputdir "$scratch/objects" \
 ghc -fno-code "${includes[@]}" -outputdir "$scratch/objects" \
   bridge/haskell/test-check/tool-profiles/RaisedModelTurn.hs > "$scratch/RaisedModelTurn.log" 2>&1
 echo "passed: compile acceptance RaisedModelTurn" | tee -a "$scratch/result.log"
+ghc -fno-code "${includes[@]}" -outputdir "$scratch/objects" \
+  bridge/haskell/test-check/tool-profiles/ContextEffort.hs > "$scratch/ContextEffort.log" 2>&1
+echo "passed: compile acceptance ContextEffort" | tee -a "$scratch/result.log"
 for fixture in AsyncContext AsyncProfile UnsupportedProfile ConcreteSyncHandler ConcreteNativeProfile ModelContext; do
   if ghc -fno-code "${includes[@]}" -outputdir "$scratch/objects" \
     "bridge/haskell/test-check/tool-profiles/$fixture.hs" > "$scratch/$fixture.log" 2>&1; then

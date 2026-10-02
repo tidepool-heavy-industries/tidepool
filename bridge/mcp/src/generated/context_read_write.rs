@@ -5,12 +5,13 @@
 pub fn context_read_write_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "ContextReadWrite",
-        description: "Read or replace the typed context document for the admitted synchronous tool, or select its next model. Context references and native blocks carry host-owned evidence provenance; system and developer instructions remain host-controlled.",
+        description: "Read or replace the typed context document for the admitted synchronous tool, or select its next model and reasoning effort. Context references and native blocks carry host-owned evidence provenance; system and developer instructions remain host-controlled.",
         prompt_card: None,
         constructors: &[
             "GetContextWith :: ContextReadWrite ContextDocument",
             "PutContextWith :: ContextDocument -> ContextReadWrite ()",
             "SetNextModelWith :: Text -> ContextReadWrite ()",
+            "SetNextEffortWith :: ForkEffort -> ContextReadWrite ()",
         ],
         type_defs: &[
             "data ContextReference = ContextReference Text deriving (Show, Eq)",
@@ -27,6 +28,7 @@ pub fn context_read_write_decl() -> crate::EffectDecl {
             "getContext :: forall effs. Member ContextReadWrite effs => Eff effs ContextDocument\ngetContext = send GetContextWith",
             "putContext :: forall effs. Member ContextReadWrite effs => ContextDocument -> Eff effs ()\nputContext = send . PutContextWith",
             "setNextModel :: forall effs. Member ContextReadWrite effs => Text -> Eff effs ()\nsetNextModel = send . SetNextModelWith",
+            "setNextEffort :: forall effs. Member ContextReadWrite effs => ForkEffort -> Eff effs ()\nsetNextEffort = send . SetNextEffortWith",
         ],
         type_params: &[],
         default_row_args: &[],

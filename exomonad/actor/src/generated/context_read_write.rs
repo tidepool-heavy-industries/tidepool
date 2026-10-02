@@ -24,4 +24,5 @@ pub enum ContextReadWriteReq {
     GetContextWith,
     PutContextWith(tidepool_bridge_effects::ContextDocument),
     SetNextModelWith(String),
+    SetNextEffortWith(crate::ForkEffort),
 }

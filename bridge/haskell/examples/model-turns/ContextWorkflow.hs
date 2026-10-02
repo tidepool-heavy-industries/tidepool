@@ -23,6 +23,7 @@ import Jev.Tidepool ()
 
 import Tidepool.Actors.Exomonad
 import Tidepool.Agent.Context
+import qualified Tidepool.Agent.Context as C
 import Tidepool.Agent.Assignment (assignment)
 import Tidepool.Agent.Reply (Response)
 import Tidepool.Effects.Core (ContextReadWrite, Jev)
@@ -38,6 +39,7 @@ curateChild = do
   modifyContext (over contextBlocks
     (<> [Text Nothing User ("Child finding: " <> sharedFinding) []]))
   setNextModel "executor"
+  C.setNextEffort C.High
 
 -- The caller can persist the returned responses or attach watches. The two
 -- child applications are explicitly actor-owned and inherit the parent's
