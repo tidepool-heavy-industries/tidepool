@@ -8079,6 +8079,7 @@ where
         &self,
         context: crate::ActorSessionContext,
         execution: Arc<ExecutionPrivateScope>,
+        publication: tidepool_runtime::session::ExecutionPublicationIntent,
     ) -> Result<PrivateExecutionPublication, ResidentActorWorkbenchError> {
         if context.placement.lexical_scope != execution.private_scope {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -8106,7 +8107,7 @@ where
             .access
             .with_machine(context.clone(), move |session, _, _| {
                 session
-                    .freeze_private_execution(&admission)
+                    .freeze_private_execution(&admission, publication)
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })

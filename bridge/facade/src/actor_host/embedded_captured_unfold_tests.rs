@@ -675,8 +675,8 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             eprintln!(
                 "[captured-engine] actual parent execution failed after both typed child replies"
             );
-            // Capturing a completed prefix retains it for children without
-            // publishing the failed cell's private names into its parent.
+            // Native prefixes publish; private declarations and unrun suffixes do not.
+            // Captures keep their exact prefix after later public rebinding.
             let policy = campaign.root_installation.policy.clone();
             let public_names = tokio::time::timeout(
                 COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
@@ -690,7 +690,19 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             .expect("earlier parent public names remain readable within the cell budget")
             .expect("earlier parent public names remain installed");
             assert_committed_haskell_value(&public_names, "(41, 42)");
-            for name in ["capturedValue", "capturedGetter"] {
+            let prefix = tokio::time::timeout(
+                COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                policy.dispatch_boxed(preflight_invocation(
+                    "captured-parent-prefix-probe",
+                    "captured-parent-prefix-probe",
+                    "(capturedValue, capturedGetter)".into(),
+                )),
+            )
+            .await
+            .expect("completed parent native prefix probe settles")
+            .expect("completed parent native prefix remains installed");
+            assert_committed_haskell_value(&prefix, "(41, 42)");
+            for name in ["privateCapturedHelper", "capturedSuffix"] {
                 let private_name = tokio::time::timeout(
                     COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
                     policy.dispatch_boxed(preflight_invocation(
@@ -718,6 +730,16 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                     "failed cell leaked {name}, or its probe failed for an unrelated reason: {private_name}"
                 );
             }
+            let rebound = tokio::time::timeout(
+                COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                policy.dispatch_boxed(preflight_invocation(
+                    "captured-parent-rebind",
+                    "captured-parent-rebind",
+                    "capturedValue <- pure (99 :: Int)\nlet capturedGetter = capturedValue + 1\n(capturedValue, capturedGetter)".into(),
+                )),
+            ).await.expect("parent prefix rebinding settles")
+                .expect("parent prefix rebinding succeeds");
+            assert_committed_haskell_value(&rebound, "(99, 100)");
             transport.parent_failed.send_replace(true);
             let mut retained = std::collections::HashSet::new();
             for _ in 0..2 {

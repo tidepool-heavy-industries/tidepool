@@ -4,7 +4,7 @@ use tidepool_runtime::session::ResidentError;
 fn receipt(status: WorkbenchItemStatus) -> WorkbenchItemReceipt {
     WorkbenchItemReceipt {
         index: 0,
-        kind: None,
+        kind: Some(WorkbenchCellItemKind::Statement),
         span: None,
         source_items: Vec::new(),
         status,
@@ -40,21 +40,50 @@ fn prefix_publication_preserves_failed_cell_eligibility_and_cancellation_veto() 
         vec![receipt(WorkbenchItemStatus::Committed)],
     )));
     let failed = Err(failure(vec![receipt(WorkbenchItemStatus::Committed)]));
-    assert!(private_publication_required(&rejected));
-    assert!(private_publication_required(&failed));
-    assert!(!private_publication_required(&Ok(KernelStep::Continue(
-        response(
+    assert_eq!(
+        private_publication_intent(&rejected),
+        Some(ExecutionPublicationIntent::CommittedNativePrefix)
+    );
+    assert_eq!(
+        private_publication_intent(&failed),
+        Some(ExecutionPublicationIntent::CommittedNativePrefix)
+    );
+    assert!(
+        private_publication_intent(&Ok(KernelStep::Continue(response(
             WorkbenchRunStatus::Rejected,
             vec![receipt(WorkbenchItemStatus::NotRun)]
-        )
-    ))));
-    assert!(!private_publication_required(&Err(failure(Vec::new()))));
-    assert!(!private_publication_required(&Ok(KernelStep::Continue(
-        response(
+        ))))
+        .is_none()
+    );
+    assert!(private_publication_intent(&Err(failure(Vec::new()))).is_none());
+    assert!(
+        private_publication_intent(&Ok(KernelStep::Continue(response(
             WorkbenchRunStatus::RequestCancelled,
             vec![receipt(WorkbenchItemStatus::Committed)]
-        )
-    ))));
+        ))))
+        .is_none()
+    );
+
+    let mut declaration = receipt(WorkbenchItemStatus::Committed);
+    declaration.kind = Some(WorkbenchCellItemKind::Declaration);
+    declaration.installed_bindings = vec!["privateDeclaration".into()];
+    let declarations_only = Err(failure(vec![declaration.clone()]));
+    assert!(private_publication_intent(&declarations_only).is_none());
+    let mixed = Err(failure(vec![
+        declaration,
+        receipt(WorkbenchItemStatus::Committed),
+    ]));
+    assert_eq!(
+        private_publication_bindings(&mixed),
+        vec!["completedPrefix"]
+    );
+    assert_eq!(
+        private_publication_intent(&Ok(KernelStep::Continue(response(
+            WorkbenchRunStatus::Committed,
+            vec![]
+        )))),
+        Some(ExecutionPublicationIntent::CompletedCell)
+    );
 
     let decision = tidepool_runtime::session::PublicationDecision::new();
     decision.claim_commit().unwrap().published();

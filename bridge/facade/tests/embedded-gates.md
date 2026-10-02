@@ -15,7 +15,7 @@ No live provider credentials are used.
 | M2 failure and reuse | `actor_host::embedded_captured_unfold_tests::embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell` | Both children reply, the same parent cell fails, both children still read its completed private prefix, and a third child uses the retained checkpoint independently. |
 
 The M2 parent call first completes `capturedValue <- pure (x :: Int)` and a
-`capturedGetter` declaration before creating its checkpoint. The children read
+native `let capturedGetter = ...` binding before creating its checkpoint. The children read
 these new private names, not just the earlier published `x` and `getX`.
 The scripted child turns remain held until both branches are observed with the
 original exact Store claim pending. Real Haskell `respond capturedGetter`
@@ -28,7 +28,10 @@ unfinished parent call.
 The failure gate raises an authored Haskell error after those replies. It fails
 the parent **cell**, leaving its actor alive, and therefore retains the normal
 `ParentOwned` child lifetime. Changing the children to `SwarmOwned` would test a
-different contract. Their subsequent real reads must return `(41, 42)`, then the
+different contract. The completed native prefix remains public, while the actual
+`privateCapturedHelper` declaration and unrun suffix remain absent. The parent
+then rebinds its public prefix to `(99, 100)`. The children's subsequent real
+reads must still return `(41, 42)`, then the
 checkpoint retained in the seed-store actor admits a third reader after the
 failed original operation has durably settled. Releasing that checkpoint twice
 must succeed. Issuer actor retirement and final native reader reclamation have

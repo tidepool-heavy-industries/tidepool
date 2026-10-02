@@ -480,7 +480,7 @@ async fn notebook_failed_cells_preserve_completed_native_prefix() {
             .phase,
         tidepool_toolchain::failclass::Phase::Run,
     );
-    for binding in ["actorsBeforeFailure", "prefixValue"] {
+    for binding in ["actorsBeforeFailure", "prefixGetter", "prefixValue"] {
         assert!(
             failure.receipts.iter().any(|receipt| receipt
                 .installed_bindings
@@ -491,7 +491,9 @@ async fn notebook_failed_cells_preserve_completed_native_prefix() {
     }
     let recovered = committed(policy, "prefixValue").await;
     assert_eq!(recovered["items"][0]["output"], "41", "{recovered}");
-    for binding in ["impossible", "tailValue"] {
+    let retained = committed(policy, "prefixGetter 41").await;
+    assert_eq!(retained["items"][0]["output"], "42", "{retained}");
+    for binding in ["privatePrefixHelper", "impossible", "tailValue"] {
         let missing = dispatch_haskell_script(policy, binding).await;
         assert_eq!(missing["status"], "rejected", "{missing}");
         assert!(missing.to_string().contains("not in scope"), "{missing}");

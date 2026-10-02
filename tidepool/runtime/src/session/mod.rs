@@ -64,11 +64,11 @@ pub use admission::{
     RuntimeCheckedItemAdmission, RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot,
     RuntimeLexicalScopeLease,
 };
-pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{
     AcceptedDeclarationPublication, CertifiedDeclarationPublication, DeclarationPublicationBase,
     DeclarationPublicationRejection, ExecutionPublication, RejectedDeclarationPublication,
 };
+pub use paired_publication::{ExecutionPublicationIntent, FinalExecutionIntent};
 pub use planned_cell::{
     RuntimeCellPlanReservation, RuntimePlannedCellItem, RuntimePlannedCellItemKind,
     RuntimePlannedCellSlot,

@@ -564,7 +564,14 @@ fn try_execute_cell_with_template_imports(
         scenario,
         &format!("{label}.freeze"),
         None,
-        |resident| resident.freeze_private_execution(&execution).unwrap(),
+        |resident| {
+            resident
+                .freeze_private_execution(
+                    &execution,
+                    crate::session::ExecutionPublicationIntent::CompletedCell,
+                )
+                .unwrap()
+        },
     );
     for id in intent.native_write_ids() {
         let (name, _) = private_winners
