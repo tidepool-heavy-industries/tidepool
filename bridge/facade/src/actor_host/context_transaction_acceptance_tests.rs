@@ -93,7 +93,12 @@ async fn next_round_with_state(
     let waiting = async {
         loop {
             tokio::select! {
-                round = rounds.recv() => return round.expect("scripted provider closed"),
+                round = rounds.recv() => return round.unwrap_or_else(|| {
+                    panic!(
+                        "scripted provider closed before native acceptance completed; graph={:?}",
+                        fixture.campaign.forest.inspect_host_graph()
+                    )
+                }),
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
                     let graph = fixture.campaign.forest.inspect_host_graph();
                     if let Some(child) = graph.iter().find(|node| {
