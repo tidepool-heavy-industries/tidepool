@@ -420,6 +420,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         |config| {
             config.backend = crate::exomonad::HostBackendOptions::Embedded;
             config.embedded = Some(settings.clone());
+            test_campaign::configure_notebook_lookup_workspace(config);
         },
     )
     .await;

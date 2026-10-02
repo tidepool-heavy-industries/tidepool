@@ -48,6 +48,27 @@ pub(super) fn configure_shell_workspace(config: &mut ActorHostConfig) {
     );
 }
 
+/// Install the real notebook and lookup surfaces with Jev in the notebook row.
+pub(super) fn configure_notebook_lookup_workspace(config: &mut ActorHostConfig) {
+    let authored = config.workspace.join(".exomonad");
+    std::fs::create_dir_all(&authored).unwrap();
+    std::fs::write(
+        authored.join("AgentSpec.hs"),
+        include_str!("fixtures/notebook_lookup_agent_spec.hs"),
+    )
+    .unwrap();
+    std::fs::write(
+        authored.join("config.toml"),
+        "[defaults]\nmodel='test-model'\n[haskell]\nsource_roots=['.']\nmodules=['AgentSpec']\nspec='AgentSpec.agentSpec'\n",
+    )
+    .unwrap();
+    commit_workspace(&config.workspace);
+    config.workspace_inputs = Some(
+        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+            .unwrap(),
+    );
+}
+
 pub(super) struct TestCampaign {
     pub config: ActorHostConfig,
     pub _repository: exomonad_worktree::testing::TestRepo,
