@@ -1876,7 +1876,7 @@ impl PersistentSession {
             return None;
         }
         let lib = self.lib.as_ref()?;
-        let source_selection = self.bindings.scope_witness(&self.scopes, scope)?;
+        let source_selection = self.bindings.scope_snapshot(&self.scopes, scope).ok()?;
         let mut bindings: Vec<_> = self
             .bindings
             .iter_current_in(&self.scopes, scope)

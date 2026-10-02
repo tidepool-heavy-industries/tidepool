@@ -694,3 +694,51 @@ fn persistent_names_follow_promotion_observation_expiry_and_legacy_ancestry() {
     assert!(table.is_empty());
     assert!(table.capturable_names.is_empty());
 }
+
+#[test]
+fn semantic_scope_snapshot_ignores_sibling_cache_changes_but_tracks_transitive_dependencies() {
+    let mut tree = ScopeTree::new();
+    let a = tree.mint_isolated();
+    let b = tree.mint_isolated();
+    let c = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let mut slots = [std::ptr::null_mut(); 3];
+    let aid = table.bind_in(a, entry("a", 91, &mut slots[0])).unwrap();
+    let bid = table.bind_in(b, entry("b", 92, &mut slots[1])).unwrap();
+    let cid = table.bind_in(c, entry("c", 93, &mut slots[2])).unwrap();
+    table.save_observation(cid, &[], 10);
+    table.save_observation(bid, &[], 10);
+    table.save_observation(aid, &[bid.var()], 10);
+    let before = table.scope_snapshot(&tree, a).unwrap();
+    let cache = table.scope_witness(&tree, a).unwrap();
+    table.save_observation(cid, &[], 10);
+    assert_ne!(table.scope_witness(&tree, a).unwrap(), cache);
+    assert_eq!(table.scope_snapshot(&tree, a).unwrap(), before);
+
+    // The visible head in A stays unchanged; a foreign observation reached
+    // through A adds an exact transitive root and must invalidate admission.
+    table.save_observation(bid, &[cid.var()], 10);
+    let after = table.scope_snapshot(&tree, a).unwrap();
+    assert_ne!(after, before);
+    assert_eq!(after.dependencies, vec![aid, bid, cid]);
+
+    // Two own roots retain B. Removing A's edge changes its publication
+    // dependency closure while D keeps the complete scoped root union intact.
+    let mut d_slot = std::ptr::null_mut();
+    let did = table.bind_in(a, entry("d", 94, &mut d_slot)).unwrap();
+    table.save_observation(did, &[bid.var()], 10);
+    let both_roots = table.scope_snapshot(&tree, a).unwrap();
+    table.save_observation(aid, &[], 10);
+    let same_roots = table.scope_snapshot(&tree, a).unwrap();
+    assert_eq!(same_roots.dependencies, both_roots.dependencies);
+    assert_ne!(same_roots, both_roots);
+
+    // Capture retains the hidden dependency identities, not just name heads.
+    let child = tree.mint_isolated();
+    table.seed_detached_scope(&tree, a, child);
+    let captured = table.scope_snapshot(&tree, child).unwrap();
+    assert_eq!(captured.dependencies, vec![aid, bid, cid, did]);
+    table.save_observation(bid, &[], 10);
+    assert_eq!(table.scope_snapshot(&tree, child).unwrap(), captured);
+    assert_ne!(table.scope_snapshot(&tree, a).unwrap(), same_roots);
+}
