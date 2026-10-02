@@ -1018,7 +1018,9 @@ fn service_transaction(
         phase = "compiler_queue",
         "compiler job dequeued"
     );
-    let mut transaction_failed = worker.begin_transaction().err();
+    let mut transaction_failed = worker
+        .begin_transaction_while_connected(&connection, request_deadline)
+        .err();
     let mut orderly_end = false;
     let mut request_ordinal = RequestOrdinal(0);
     while transaction_failed.is_none() {
@@ -1108,7 +1110,9 @@ fn service_transaction(
         }
     }
     if transaction_failed.is_none() {
-        transaction_failed = worker.end_transaction().err();
+        transaction_failed = worker
+            .end_transaction_while_connected(&connection, request_deadline)
+            .err();
     }
     if let Some(error) = transaction_failed {
         if matches!(error, FrontendError::WorkerClientDisconnected) {
@@ -2158,42 +2162,48 @@ fn worker_rss_mb(pid: u32) -> io::Result<u64> {
 
 #[cfg(target_os = "linux")]
 fn peer_disconnected(stream: &UnixStream) -> bool {
-    const MSG_PEEK: std::os::raw::c_int = 0x2;
-    const MSG_DONTWAIT: std::os::raw::c_int = 0x40;
-    unsafe extern "C" {
-        fn recv(
-            socket: std::os::raw::c_int,
-            buffer: *mut std::ffi::c_void,
-            length: usize,
-            flags: std::os::raw::c_int,
-        ) -> isize;
+    const POLLERR: std::os::raw::c_short = 0x8;
+    const POLLHUP: std::os::raw::c_short = 0x10;
+    const POLLRDHUP: std::os::raw::c_short = 0x2000;
+    #[repr(C)]
+    struct PollFd {
+        fd: std::os::raw::c_int,
+        events: std::os::raw::c_short,
+        revents: std::os::raw::c_short,
     }
-    let mut byte = 0u8;
-    // SAFETY: `byte` is writable for the one-byte length supplied, and the
-    // stream owns a live socket descriptor for the duration of this call.
-    let received = unsafe {
-        recv(
-            stream.as_raw_fd(),
-            (&mut byte as *mut u8).cast(),
-            1,
-            MSG_PEEK | MSG_DONTWAIT,
-        )
+    unsafe extern "C" {
+        fn poll(
+            fds: *mut PollFd,
+            count: std::os::raw::c_ulong,
+            timeout: std::os::raw::c_int,
+        ) -> std::os::raw::c_int;
+    }
+    let mut descriptor = PollFd {
+        fd: stream.as_raw_fd(),
+        events: POLLRDHUP,
+        revents: 0,
     };
-    if received == 0 {
-        true
-    } else if received < 0 {
-        !matches!(
-            io::Error::last_os_error().kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-        )
+    // SAFETY: the descriptor points to one initialized pollfd and the stream
+    // retains ownership of its live descriptor throughout this nonblocking call.
+    // Read-half closure must remain observable behind queued request bytes.
+    let ready = unsafe { poll(&mut descriptor, 1, 0) };
+    if ready < 0 {
+        io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
     } else {
-        false
+        descriptor.revents & (POLLRDHUP | POLLHUP | POLLERR) != 0
     }
 }
 
 #[cfg(not(target_os = "linux"))]
 fn peer_disconnected(_stream: &UnixStream) -> bool {
     false
+}
+
+#[derive(Clone, Copy, Debug)]
+enum WorkerOperation {
+    BeginTransaction,
+    Request,
+    EndTransaction,
 }
 
 pub(crate) struct Worker {
@@ -2262,11 +2272,19 @@ impl Worker {
         decode_response(&mut self.stdout).map_err(daemon_frontend_error)
     }
 
-    /// Serve one request against the pinned worker, bounded on two axes: the
-    /// caller's own connection (dropping the client interrupts an in-flight
-    /// compile promptly) and an absolute `deadline` from when this request
-    /// started (a wedged worker — hung GHC, a stuck external tool — must not
-    /// block a worker slot forever, even while the caller stays connected).
+    fn begin_transaction_while_connected(
+        &mut self,
+        connection: &UnixStream,
+        deadline: Duration,
+    ) -> Result<(), FrontendError> {
+        self.operation_while_connected(
+            connection,
+            deadline,
+            WorkerOperation::BeginTransaction,
+            Self::begin_transaction,
+        )
+    }
+
     fn request_while_connected(
         &mut self,
         connection: &UnixStream,
@@ -2274,6 +2292,36 @@ impl Worker {
         argv: &[OsString],
         deadline: Duration,
     ) -> Result<WorkerResponse, FrontendError> {
+        self.operation_while_connected(connection, deadline, WorkerOperation::Request, |worker| {
+            worker.request(cwd, argv)
+        })
+    }
+
+    fn end_transaction_while_connected(
+        &mut self,
+        connection: &UnixStream,
+        deadline: Duration,
+    ) -> Result<(), FrontendError> {
+        self.operation_while_connected(
+            connection,
+            deadline,
+            WorkerOperation::EndTransaction,
+            Self::end_transaction,
+        )
+    }
+
+    /// Each worker operation has its own deadline and peer-disconnect monitor.
+    /// Deadline expiry or disconnect kills the worker and joins its blocked IO
+    /// before the transaction owner replaces it. Other failures also settle
+    /// through that owner's quarantine path. Waiting between client
+    /// requests remains governed by the connection's existing idle policy.
+    fn operation_while_connected<T: Send>(
+        &mut self,
+        connection: &UnixStream,
+        deadline: Duration,
+        operation: WorkerOperation,
+        action: impl FnOnce(&mut Self) -> Result<T, FrontendError> + Send,
+    ) -> Result<T, FrontendError> {
         let pid = self.child.id();
         let started = Instant::now();
         let result = std::thread::scope(|scope| {
@@ -2281,14 +2329,14 @@ impl Worker {
             scope.spawn(move || {
                 // best-effort: the receiver may already have returned via the
                 // deadline or disconnect branch below and dropped its end.
-                completed_tx.send(self.request(cwd, argv)).ok();
+                completed_tx.send(action(self)).ok();
             });
             loop {
                 match completed_rx.recv_timeout(Duration::from_millis(50)) {
                     Ok(result) => return result,
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         return Err(FrontendError::Daemon(
-                            "compiler worker request monitor disconnected".to_owned(),
+                            "compiler worker operation monitor disconnected".to_owned(),
                         ));
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -2299,10 +2347,11 @@ impl Worker {
                         tracing::warn!(pid, %error, "failed to kill deadline-exceeded compiler worker");
                     }
                     tracing::warn!(
-                        cwd = %cwd.display(),
+                        ?operation,
+                        worker_pid = pid,
                         elapsed_secs = elapsed.as_secs(),
                         deadline_secs = deadline.as_secs(),
-                        "compiler worker exceeded its request deadline; killing it"
+                        "compiler worker exceeded its operation deadline; killing it"
                     );
                     // The kill unblocks whatever the worker was doing (a read
                     // or a write) so the monitor thread settles quickly; its
@@ -2311,7 +2360,7 @@ impl Worker {
                     // own definite report below.
                     completed_rx.recv().ok();
                     return Err(FrontendError::Daemon(format!(
-                        "compiler worker exceeded its {}s request deadline and was killed",
+                        "compiler worker exceeded its {}s operation deadline ({operation:?}) and was killed",
                         deadline.as_secs()
                     )));
                 }
@@ -3539,6 +3588,19 @@ tidepool-target phase=desugar module=Execute\n",
         worker.abort();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn peer_disconnect_is_visible_behind_unread_request_bytes() {
+        let (mut connection, mut client) = UnixStream::pair().unwrap();
+        client.write_all(&[TRANSACTION_REQUEST]).unwrap();
+        assert!(!peer_disconnected(&connection));
+        client.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(peer_disconnected(&connection));
+        let mut queued = [0];
+        connection.read_exact(&mut queued).unwrap();
+        assert_eq!(queued, [TRANSACTION_REQUEST]);
+    }
+
     #[test]
     fn independently_exited_worker_is_not_a_client_disconnect() {
         let cwd = Path::new("/tmp");
@@ -3618,6 +3680,166 @@ tidepool-target phase=desugar module=Execute\n",
             DaemonError::AfterAcceptance(inner) if matches!(*inner, DaemonError::IncompleteResponse)
         ));
         std::fs::remove_file(socket).ok();
+    }
+
+    #[derive(Clone, Copy)]
+    enum ControlRecovery {
+        Deadline,
+        Cancel,
+        Stop,
+    }
+
+    fn control_ack_recovery_cases(recovery: ControlRecovery) {
+        let scratch = tempfile::tempdir().unwrap();
+        let source = scratch.path().join("worker.rs");
+        std::fs::write(&source, include_str!("test_fixtures/control_ack_worker.rs")).unwrap();
+        let fixture = scratch.path().join("worker");
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: compile one immutable fake worker"
+        )]
+        let built = std::process::Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&fixture)
+            .status()
+            .unwrap();
+        assert!(built.success());
+
+        for operation in [
+            WorkerOperation::BeginTransaction,
+            WorkerOperation::EndTransaction,
+        ] {
+            let dir = scratch.path().join(format!("{operation:?}"));
+            std::fs::create_dir(&dir).unwrap();
+            let worker_bin = dir.join("worker");
+            std::fs::copy(&fixture, &worker_bin).unwrap();
+            let phase = match operation {
+                WorkerOperation::BeginTransaction => TRANSACTION_REQUEST,
+                WorkerOperation::EndTransaction => TRANSACTION_END,
+                WorkerOperation::Request => unreachable!(),
+            };
+            std::fs::write(dir.join("phase"), [phase]).unwrap();
+            let socket = dir.join("daemon.sock");
+            let prepared = PreparedWorker::for_test(worker_bin).unwrap();
+            let config = DaemonConfig {
+                socket: socket.clone(),
+                rotate_after: None,
+                rss_ceiling_mb: None,
+                request_deadline_secs: Some(match recovery {
+                    ControlRecovery::Cancel => 20,
+                    _ => 1,
+                }),
+                watch_stamp: None,
+                persistent: true,
+                run_id: None,
+                log_path: None,
+                workers: Some(1),
+            };
+            let (settled_tx, settled_rx) = std::sync::mpsc::channel();
+            let server = std::thread::spawn(move || {
+                let result = crate::daemon::serve(&config, prepared);
+                settled_tx.send(()).unwrap();
+                result
+            });
+            let ready_deadline = Instant::now() + Duration::from_secs(10);
+            let binding = loop {
+                if let Ok(binding) = preflight(&socket) {
+                    break binding;
+                }
+                assert!(Instant::now() < ready_deadline);
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "test fixture: await owned daemon startup"
+                )]
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let cancellation = crate::CompilerTransactionCancellation::new();
+            let mut transaction =
+                begin_transaction_with_cancellation(&socket, &binding.epoch, Some(&cancellation))
+                    .unwrap();
+            let argv = vec![OsString::from("Expr.hs")];
+            if matches!(operation, WorkerOperation::EndTransaction) {
+                let output = execute_transaction_request(&mut transaction, &dir, &argv).unwrap();
+                assert_eq!(output.status.code(), Some(0));
+            }
+            let client_dir = dir.clone();
+            let client_argv = argv.clone();
+            let (client_settled_tx, client_settled_rx) = std::sync::mpsc::channel();
+            let client = std::thread::spawn(move || {
+                let result = match operation {
+                    WorkerOperation::BeginTransaction => {
+                        execute_transaction_request(&mut transaction, &client_dir, &client_argv)
+                            .map(|_| ())
+                    }
+                    WorkerOperation::EndTransaction => end_transaction(&mut transaction),
+                    WorkerOperation::Request => unreachable!(),
+                };
+                client_settled_tx.send(()).unwrap();
+                result
+            });
+            while !dir.join("stalled").exists() {
+                assert!(
+                    Instant::now() < ready_deadline,
+                    "worker never stalled at {operation:?}"
+                );
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "test fixture: await fake worker control phase"
+                )]
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let started = Instant::now();
+            match recovery {
+                ControlRecovery::Deadline => {}
+                ControlRecovery::Cancel => cancellation.cancel(),
+                ControlRecovery::Stop => {
+                    request_stop(&socket).unwrap();
+                    assert!(
+                        started.elapsed() < Duration::from_secs(1),
+                        "STOP waited on control acknowledgement"
+                    );
+                }
+            }
+            client_settled_rx
+                .recv_timeout(Duration::from_secs(4))
+                .expect("control operation did not settle");
+            let error = client.join().unwrap().unwrap_err();
+            assert!(error.was_accepted(), "{error}");
+            assert!(!error.permits_rebind(), "{error}");
+            if !matches!(recovery, ControlRecovery::Stop) {
+                let next = preflight(&socket).unwrap();
+                assert_eq!(next.epoch, binding.epoch);
+                let output = execute(&socket, &binding.epoch, &dir, &argv).unwrap();
+                assert_eq!(output.status.code(), Some(0));
+                if matches!(recovery, ControlRecovery::Cancel) {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(2),
+                        "worker replacement waited for the 20s deadline"
+                    );
+                }
+                request_stop(&socket).unwrap();
+            }
+            settled_rx
+                .recv_timeout(Duration::from_secs(4))
+                .expect("STOP did not drain the worker");
+            assert_eq!(server.join().unwrap().unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn worker_control_ack_deadlines_replace_hung_workers() {
+        control_ack_recovery_cases(ControlRecovery::Deadline);
+    }
+
+    #[test]
+    fn worker_control_ack_cancellation_replaces_hung_workers() {
+        control_ack_recovery_cases(ControlRecovery::Cancel);
+    }
+
+    #[test]
+    fn worker_control_ack_stop_drains_at_deadline() {
+        control_ack_recovery_cases(ControlRecovery::Stop);
     }
 
     #[test]
