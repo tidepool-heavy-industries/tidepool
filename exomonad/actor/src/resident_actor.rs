@@ -5923,6 +5923,34 @@ where
         )
     }
 
+    fn ready_public_owner(
+        &self,
+        context: &ActorSessionContext,
+    ) -> Result<Arc<WorkbenchPublicOwner>, ResidentActorWorkbenchError> {
+        self.environment
+            .actors
+            .lock()
+            .get(&context.actor)
+            .and_then(|record| record.public_owner.ready())
+            .cloned()
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "application readiness requires its confirmed public owner".into(),
+                )
+            })
+    }
+
+    fn commit_interactive_installation(&mut self, installation: LocalResidentInstallation) {
+        self.publish_installation(installation);
+        self.policy_installed = true;
+        for notice in self.deferred_child_failures.drain(..) {
+            self.environment
+                .deployments
+                .try_send(LocalResidentDeployment::ChildExited { notice })
+                .ok();
+        }
+    }
+
     async fn install_interactive_policy(
         &mut self,
         kernel: &KernelContext,
@@ -5932,6 +5960,29 @@ where
         if self.policy_installed {
             return Ok(());
         }
+        let owner = self.ready_public_owner(context)?;
+        let bootstrap = self
+            .environment
+            .runner
+            .begin_public_bootstrap(context.clone(), Arc::clone(&owner))
+            .await?;
+        let installation = self
+            .prepare_interactive_policy(kernel, context, initial_user_message)
+            .await?;
+        self.environment
+            .runner
+            .publish_public_bootstrap(context.clone(), owner, bootstrap)
+            .await?;
+        self.commit_interactive_installation(installation);
+        Ok(())
+    }
+
+    async fn prepare_interactive_policy(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        initial_user_message: Option<String>,
+    ) -> Result<LocalResidentInstallation, ResidentActorWorkbenchError> {
         let actor = kernel.resolve(context.actor).ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
                 "local actor was absent from its routing directory".into(),
@@ -5977,7 +6028,7 @@ where
             .map_or((None, None), |(lease, attachment)| {
                 (Some(lease), attachment)
             });
-        self.publish_installation(LocalResidentInstallation {
+        Ok(LocalResidentInstallation {
             actor,
             label: self.descriptor.label().to_owned(),
             policy,
@@ -5997,16 +6048,7 @@ where
             fork_group: self.descriptor.fork_group(),
             fork_gate,
             runtime_observation: self.runtime_observation.clone(),
-        });
-        self.policy_installed = true;
-        for notice in self.deferred_child_failures.drain(..) {
-            // best-effort: deployment observer channel may have no listener.
-            self.environment
-                .deployments
-                .try_send(LocalResidentDeployment::ChildExited { notice })
-                .ok();
-        }
-        Ok(())
+        })
     }
 
     fn advance_child_release(
@@ -6525,6 +6567,13 @@ where
                 terminal,
             });
         }
+        let public_owner = self.ready_public_owner(context)?;
+        let bootstrap = self
+            .environment
+            .runner
+            .begin_public_bootstrap(context.clone(), Arc::clone(&public_owner))
+            .await?;
+        let mut installation = None;
         let outcome = match boot {
             ResidentBoot::Replacement(_) => {
                 unreachable!("replacement bootstrap parks before initialization")
@@ -6615,12 +6664,19 @@ where
                                     "actor installed its Codex application more than once".into(),
                                 ));
                             }
-                            self.install_interactive_policy(
-                                kernel,
-                                context,
-                                attachment.initial_user_message,
-                            )
-                            .await?;
+                            if installation.is_some() {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                    "actor prepared its Codex application more than once".into(),
+                                ));
+                            }
+                            installation = Some(
+                                self.prepare_interactive_policy(
+                                    kernel,
+                                    context,
+                                    attachment.initial_user_message,
+                                )
+                                .await?,
+                            );
                             outcome = self
                                 .environment
                                 .runner
@@ -6737,6 +6793,13 @@ where
                 }
             }
         };
+        self.environment
+            .runner
+            .publish_public_bootstrap(context.clone(), public_owner, bootstrap)
+            .await?;
+        if let Some(installation) = installation {
+            self.commit_interactive_installation(installation);
+        }
         self.stabilize_program(
             kernel,
             context,

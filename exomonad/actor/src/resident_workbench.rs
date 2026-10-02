@@ -7387,6 +7387,68 @@ where
             .await
     }
 
+    pub(crate) async fn begin_public_bootstrap(
+        &self,
+        context: crate::ActorSessionContext,
+        owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
+    ) -> Result<
+        Option<tidepool_runtime::session::DurablePublicBootstrap>,
+        ResidentActorWorkbenchError,
+    > {
+        if !owner.matches_context(&context) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "bootstrap requires its original public owner".into(),
+            ));
+        }
+        let Some(durable) = owner.durable().cloned() else {
+            return Ok(None);
+        };
+        self.access
+            .with_machine(context, move |session, context, _| {
+                session
+                    .begin_durable_public_bootstrap(durable, context.placement.lexical_scope)
+                    .map(Some)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await
+    }
+
+    pub(crate) async fn publish_public_bootstrap(
+        &self,
+        context: crate::ActorSessionContext,
+        owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
+        bootstrap: Option<tidepool_runtime::session::DurablePublicBootstrap>,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        if !owner.matches_context(&context) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "bootstrap publication requires its original public owner".into(),
+            ));
+        }
+        let Some(bootstrap) = bootstrap else {
+            return Ok(());
+        };
+        let durable = owner.durable().cloned().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "durable bootstrap lost its original public owner".into(),
+            )
+        })?;
+        self.access.with_machine(context, move |session, context, _| {
+            let commit = session.publish_durable_public_bootstrap(bootstrap)?;
+            match commit {
+                tidepool_runtime::session::PublicManifestCommit::Durable => Ok(()),
+                tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { .. } => {
+                    session.confirm_durable_public_scope(&durable, context.placement.lexical_scope)?;
+                    Ok(())
+                }
+                other => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                    "native bootstrap public surface was not published: {other:?}",
+                ))),
+            }
+        }).await
+    }
+
     pub(crate) async fn validate_fork_child_scope(
         &self,
         context: crate::ActorSessionContext,

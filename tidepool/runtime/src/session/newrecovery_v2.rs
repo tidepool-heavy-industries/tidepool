@@ -559,6 +559,36 @@ pub(crate) fn stage_public_visibility_v2(
     source_instances: Vec<RecoveryPublicSourceInstance>,
     initial_declaration_root: Option<Generation>,
 ) -> Result<StagedRecoveryManifest, RecoveryError> {
+    let next_epoch = expected_epoch
+        .checked_add(1)
+        .ok_or_else(|| error("public visibility epoch exhausted"))?;
+    stage_public_visibility_at_epoch_v2(
+        path,
+        recovery_root,
+        graph,
+        owner,
+        expected_epoch,
+        next_epoch,
+        bindings,
+        source_instances,
+        initial_declaration_root,
+    )
+}
+
+pub(crate) fn stage_public_visibility_at_epoch_v2(
+    path: &Path,
+    recovery_root: &Path,
+    graph: &RecoveryGraph,
+    owner: RecoveryPublicOwner,
+    expected_epoch: u64,
+    next_epoch: u64,
+    bindings: Vec<RecoveryPublicBinding>,
+    source_instances: Vec<RecoveryPublicSourceInstance>,
+    initial_declaration_root: Option<Generation>,
+) -> Result<StagedRecoveryManifest, RecoveryError> {
+    if next_epoch <= expected_epoch {
+        return Err(error("public visibility epoch must advance"));
+    }
     graph.validate()?;
     let mut candidate = graph.candidate();
     let mut surface = match graph.surface(&owner) {
@@ -581,9 +611,7 @@ pub(crate) fn stage_public_visibility_v2(
     if surface.epoch != expected_epoch {
         return Err(error("paired public visibility epoch changed"));
     }
-    surface.epoch = expected_epoch
-        .checked_add(1)
-        .ok_or_else(|| error("public visibility epoch exhausted"))?;
+    surface.epoch = next_epoch;
     candidate.replace_surface(surface);
     let candidate = ValidatedRecoveryGraph::seal(candidate)?;
     stage_validated_v2(path, recovery_root, candidate)

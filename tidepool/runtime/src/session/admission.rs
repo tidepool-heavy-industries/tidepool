@@ -1774,15 +1774,30 @@ impl PersistentSession {
         owner: &super::RecoveryPublicOwner,
         public_scope: ScopeId,
     ) -> Result<PrivateExecutionAdmission, SessionError> {
+        self.validate_durable_public_admission(owner, public_scope)?;
+        self.begin_private_execution(public_scope)
+    }
+
+    pub(super) fn validate_durable_public_admission(
+        &self,
+        owner: &super::RecoveryPublicOwner,
+        public_scope: ScopeId,
+    ) -> Result<PublicVisibilitySnapshot, SessionError> {
+        use super::DurablePublicAdmissionFailure as Failure;
+        let fail = |reason| SessionError::InvalidDurablePublicAdmission {
+            owner: owner.clone(),
+            scope: public_scope,
+            reason,
+        };
         let lib = self.lib();
         let state = lib
             .durable_graph
             .as_ref()
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
+            .ok_or_else(|| fail(Failure::MissingGraph))?;
         let retained = state
             .owner
             .as_ref()
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
+            .ok_or_else(|| fail(Failure::MissingRunOwner))?;
         retained.validate_owner()?;
         let snapshot = self
             .public_visibility_snapshot_in(public_scope)
@@ -1791,14 +1806,27 @@ impl PersistentSession {
             .graph
             .public_surfaces()
             .find(|surface| &surface.owner == owner)
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
-        if state.unconfirmed.is_some()
-            || lib.durable_public_scopes.get(owner) != Some(&public_scope)
-            || surface.declaration_root
-                != (snapshot.declaration_tip != Generation(0)).then_some(snapshot.declaration_tip)
-            || surface.epoch != snapshot.epoch
-        {
-            return Err(SessionError::WrongPublicManifestTicket);
+            .ok_or_else(|| fail(Failure::MissingSurface))?;
+        if state.unconfirmed.is_some() {
+            return Err(fail(Failure::Unconfirmed));
+        }
+        let mapped = lib.durable_public_scopes.get(owner).copied();
+        if mapped != Some(public_scope) {
+            return Err(fail(Failure::Scope { mapped }));
+        }
+        let current =
+            (snapshot.declaration_tip != Generation(0)).then_some(snapshot.declaration_tip);
+        if surface.declaration_root != current {
+            return Err(fail(Failure::DeclarationTip {
+                published: surface.declaration_root,
+                current,
+            }));
+        }
+        if surface.epoch != snapshot.epoch {
+            return Err(fail(Failure::Epoch {
+                published: surface.epoch,
+                current: snapshot.epoch,
+            }));
         }
         let bytes = std::fs::read(&state.path).map_err(|error| SessionError::RecoveryManifest {
             path: state.path.clone(),
@@ -1814,11 +1842,19 @@ impl PersistentSession {
             path: state.path.clone(),
             detail: error.to_string(),
         })?
-        .ok_or(SessionError::WrongPublicManifestTicket)?;
-        if !read.artifact_losses.is_empty() || read.graph.checksum() != state.graph.checksum() {
-            return Err(SessionError::WrongPublicManifestTicket);
+        .ok_or_else(|| fail(Failure::UnrecognizedManifest))?;
+        if !read.artifact_losses.is_empty() {
+            return Err(fail(Failure::ArtifactLoss {
+                count: read.artifact_losses.len(),
+            }));
         }
-        self.begin_private_execution(public_scope)
+        if read.graph.checksum() != state.graph.checksum() {
+            return Err(fail(Failure::ManifestChecksum {
+                published: read.graph.checksum().to_owned(),
+                current: state.graph.checksum().to_owned(),
+            }));
+        }
+        Ok(snapshot)
     }
 
     pub fn begin_private_execution(

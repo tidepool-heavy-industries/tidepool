@@ -2372,6 +2372,23 @@ where
         self.state.initialize_durable_public_scope(owner, scope)
     }
 
+    pub fn begin_durable_public_bootstrap(
+        &mut self,
+        owner: super::RecoveryPublicOwner,
+        scope: ScopeId,
+    ) -> Result<super::DurablePublicBootstrap, SessionError> {
+        self.settle_dropped_custody();
+        self.state.begin_durable_public_bootstrap(owner, scope)
+    }
+
+    pub fn publish_durable_public_bootstrap(
+        &mut self,
+        bootstrap: super::DurablePublicBootstrap,
+    ) -> Result<super::PublicManifestCommit, SessionError> {
+        self.settle_dropped_custody();
+        self.state.publish_durable_public_bootstrap(bootstrap)
+    }
+
     pub fn validate_recovered_public_owner(
         &self,
         owner: &super::RecoveryPublicOwner,

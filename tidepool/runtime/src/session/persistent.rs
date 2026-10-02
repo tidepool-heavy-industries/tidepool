@@ -113,6 +113,18 @@ fn value_import_specs(entries: impl IntoIterator<Item = (String, SessionModule)>
 // The shared session core
 // ---------------------------------------------------------------------------
 
+/// The original published surface authorizes one actor's native bootstrap.
+/// This affine seal is consumed before interactive readiness; it cannot be
+/// reconstructed from a scope identifier after bootstrap mutations.
+pub struct DurablePublicBootstrap {
+    admission_owner: Arc<super::admission::RuntimeAdmissionOwner>,
+    admission_epoch: u64,
+    session: super::SessionId,
+    owner: RecoveryPublicOwner,
+    initial: super::PublicVisibilitySnapshot,
+    surface: super::recovery::RecoveryPublicSurface,
+}
+
 /// The resident-session substrate: one live [`PreparedEngine`]
 /// (`None` until the first turn bootstraps it), the accumulated constructor
 /// [`DataConTable`], the [`SessionLib`] persistent declaration environment, the [`BindingTable`] persistent
@@ -2497,6 +2509,187 @@ impl PersistentSession {
         Ok(committed)
     }
 
+    /// Admit bootstrap only against the exact already published actor surface.
+    pub fn begin_durable_public_bootstrap(
+        &self,
+        owner: RecoveryPublicOwner,
+        scope: ScopeId,
+    ) -> Result<DurablePublicBootstrap, SessionError> {
+        let initial = self.validate_durable_public_admission(&owner, scope)?;
+        let lib = self.lib();
+        let surface = lib
+            .durable_graph
+            .as_ref()
+            .expect("validated graph")
+            .graph
+            .public_surfaces()
+            .find(|surface| surface.owner == owner)
+            .expect("validated surface")
+            .clone();
+        Ok(DurablePublicBootstrap {
+            admission_owner: self.admission_owner().clone(),
+            admission_epoch: self.admission_owner().epoch(),
+            session: lib.id,
+            owner,
+            initial,
+            surface,
+        })
+    }
+
+    /// Publish native bootstrap's actual binding/source view under its original
+    /// public owner. Declaration publication remains the declaration owner.
+    pub fn publish_durable_public_bootstrap(
+        &mut self,
+        bootstrap: DurablePublicBootstrap,
+    ) -> Result<PublicManifestCommit, SessionError> {
+        use super::DurablePublicAdmissionFailure as Failure;
+        let scope = bootstrap.initial.scope;
+        let fail = |reason| SessionError::InvalidDurablePublicAdmission {
+            owner: bootstrap.owner.clone(),
+            scope,
+            reason,
+        };
+        let current = self
+            .public_visibility_snapshot_in(scope)
+            .ok_or(SessionError::DeadScope(scope))?;
+        let lib = self.lib();
+        if !Arc::ptr_eq(&bootstrap.admission_owner, self.admission_owner())
+            || bootstrap.admission_epoch != self.admission_owner().epoch()
+            || bootstrap.session != lib.id
+            || current.machine_incarnation != bootstrap.initial.machine_incarnation
+        {
+            return Err(fail(Failure::BootstrapIdentity));
+        }
+        let state = lib
+            .durable_graph
+            .as_ref()
+            .ok_or_else(|| fail(Failure::MissingGraph))?;
+        let retained = state
+            .owner
+            .as_ref()
+            .ok_or_else(|| fail(Failure::MissingRunOwner))?;
+        retained.validate_owner()?;
+        if state.unconfirmed.is_some() {
+            return Err(fail(Failure::Unconfirmed));
+        }
+        let mapped = lib.durable_public_scopes.get(&bootstrap.owner).copied();
+        if mapped != Some(scope) {
+            return Err(fail(Failure::Scope { mapped }));
+        }
+        let surface = state
+            .graph
+            .public_surfaces()
+            .find(|surface| surface.owner == bootstrap.owner)
+            .ok_or_else(|| fail(Failure::MissingSurface))?;
+        if surface != &bootstrap.surface {
+            return Err(fail(Failure::BootstrapSurface));
+        }
+        let tip = (current.declaration_tip != Generation(0)).then_some(current.declaration_tip);
+        if tip != surface.declaration_root {
+            return Err(fail(Failure::DeclarationTip {
+                published: surface.declaration_root,
+                current: tip,
+            }));
+        }
+        let original = std::fs::read(&state.path)?;
+        let root = state.path.parent().expect("canonical manifest parent");
+        let read = super::recovery::read_v2_bytes(
+            &state.path,
+            root,
+            &original,
+            super::recovery::RecoveryReadPurpose::Metadata,
+        )
+        .map_err(|error| SessionError::RecoveryManifest {
+            path: state.path.clone(),
+            detail: error.to_string(),
+        })?
+        .ok_or_else(|| fail(Failure::UnrecognizedManifest))?;
+        if !read.artifact_losses.is_empty() {
+            return Err(fail(Failure::ArtifactLoss {
+                count: read.artifact_losses.len(),
+            }));
+        }
+        if read.graph.checksum() != state.graph.checksum() {
+            return Err(fail(Failure::ManifestChecksum {
+                published: read.graph.checksum().to_owned(),
+                current: state.graph.checksum().to_owned(),
+            }));
+        }
+        if current == bootstrap.initial {
+            return Ok(PublicManifestCommit::Durable);
+        }
+        let next_epoch =
+            current
+                .epoch
+                .checked_add(1)
+                .ok_or_else(|| SessionError::RecoveryManifest {
+                    path: state.path.clone(),
+                    detail: "public visibility epoch exhausted".into(),
+                })?;
+        let bindings = current
+            .bindings
+            .iter()
+            .map(|(name, id)| super::recovery::RecoveryPublicBinding {
+                name: name.clone(),
+                owner: super::recovery::RecoveryBindingId {
+                    session: lib.id.0,
+                    variable: id.raw(),
+                },
+            })
+            .collect();
+        let sources = self.recovery_source_instances(current.source_instances.iter().cloned())?;
+        let staged = super::recovery::stage_public_visibility_at_epoch_v2(
+            &state.path,
+            root,
+            &state.graph,
+            bootstrap.owner.clone(),
+            surface.epoch,
+            next_epoch,
+            bindings,
+            sources,
+            tip,
+        )
+        .map_err(|error| SessionError::RecoveryManifest {
+            path: state.path.clone(),
+            detail: error.to_string(),
+        })?;
+        retained.validate_owner()?;
+        if std::fs::read(&state.path)? != original {
+            return Err(fail(Failure::BootstrapSurface));
+        }
+        tracing::info!(target: "tidepool::session", owner=?bootstrap.owner, scope=?scope,
+            declaration_tip=?current.declaration_tip, published_epoch=surface.epoch,
+            bootstrap_epoch=current.epoch, next_epoch,
+            binding_count=current.bindings.len(), source_count=current.source_instances.len(),
+            "publishing completed native bootstrap public surface");
+        let lib = self.lib_mut();
+        let outcome = lib.publish_recovery_manifest(staged);
+        let state = lib
+            .durable_graph
+            .as_mut()
+            .expect("bootstrap preflight graph");
+        let commit = match outcome {
+            super::recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
+                return Ok(PublicManifestCommit::BeforeRename { detail });
+            }
+            super::recovery::RecoveryPublishOutcome::Durable { graph, .. } => {
+                state.graph = graph;
+                PublicManifestCommit::Durable
+            }
+            super::recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
+                graph,
+                publication,
+                detail,
+            } => {
+                state.graph = graph;
+                state.unconfirmed = Some(publication);
+                PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
+            }
+        };
+        self.public_visibility_epochs.insert(scope, next_epoch);
+        Ok(commit)
+    }
+
     /// Confirm the already visible initialization or transfer for this exact
     /// owner and local scope. This never stages or publishes another surface.
     pub fn confirm_durable_public_scope(
@@ -3688,6 +3881,198 @@ mod checkpoint_scope_tests {
         lib.attach_recovery_graph_v2(root.join("declarations.json"))
             .unwrap();
         PersistentSession::new(Some(lib), 1024)
+    }
+
+    fn bootstrap_session(
+        root: &Path,
+        id: u64,
+    ) -> (PersistentSession, ScopeId, RecoveryPublicOwner) {
+        struct RunOwner(PathBuf);
+        impl super::super::RecoveryRunAuthority for RunOwner {
+            fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+                Ok(root.canonicalize()? == self.0)
+            }
+        }
+        let mut lib = SessionLib::open(
+            tidepool_repr::SessionId(id),
+            root.join("session"),
+            super::super::ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.attach_owned_recovery_graph_v3(
+            root.join("declarations.json"),
+            Arc::new(RunOwner(root.canonicalize().unwrap())),
+        )
+        .unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_isolated_scope();
+        let initial =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "original", id);
+        session.bind_in(public, initial).unwrap();
+        let owner = public_owner("root/bootstrap");
+        assert_eq!(
+            session
+                .initialize_durable_public_scope(owner.clone(), public)
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        (session, public, owner)
+    }
+
+    #[test]
+    fn durable_bootstrap_publishes_native_visibility_before_private_admission() {
+        use super::super::prepared::tests::install_selected_source_fixture;
+        let root = tempfile::tempdir().unwrap();
+        let (mut session, public, owner) = bootstrap_session(root.path(), 930);
+        let seal = session
+            .begin_durable_public_bootstrap(owner.clone(), public)
+            .unwrap();
+        let (target, added) = install_selected_source_fixture(&mut session, public, "a");
+        assert!(!added.is_empty());
+        session.advance_public_visibility(public);
+        assert!(matches!(
+            session.begin_durable_private_execution(&owner, public),
+            Err(SessionError::InvalidDurablePublicAdmission {
+                reason: super::super::DurablePublicAdmissionFailure::Epoch {
+                    published: 1,
+                    current: 2
+                },
+                ..
+            })
+        ));
+        let before = session.public_visibility_snapshot_in(public).unwrap();
+        assert_eq!(
+            session.publish_durable_public_bootstrap(seal).unwrap(),
+            PublicManifestCommit::Durable
+        );
+        let after = session.public_visibility_snapshot_in(public).unwrap();
+        assert_eq!(after.bindings, before.bindings);
+        assert_eq!(after.source_instances, before.source_instances);
+        assert_eq!(after.declaration_tip, before.declaration_tip);
+        assert_eq!(after.epoch, 3);
+        session
+            .begin_durable_private_execution(&owner, public)
+            .unwrap();
+        assert!(session.prepared_mut().unwrap().unpin(target));
+    }
+
+    #[test]
+    fn durable_bootstrap_uncertainty_refuses_private_admission_until_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut session, public, owner) = bootstrap_session(root.path(), 931);
+        let seal = session
+            .begin_durable_public_bootstrap(owner.clone(), public)
+            .unwrap();
+        let binding = super::super::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "bootstrapResult",
+            932,
+        );
+        session.bind_in(public, binding).unwrap();
+        session.advance_public_visibility(public);
+        session.lib_mut().fail_recovery_durability_once = true;
+        assert!(matches!(
+            session.publish_durable_public_bootstrap(seal).unwrap(),
+            PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+        ));
+        assert!(matches!(
+            session.begin_durable_private_execution(&owner, public),
+            Err(SessionError::InvalidDurablePublicAdmission {
+                reason: super::super::DurablePublicAdmissionFailure::Unconfirmed,
+                ..
+            })
+        ));
+        session
+            .confirm_durable_public_scope(&owner, public)
+            .unwrap();
+        session
+            .begin_durable_private_execution(&owner, public)
+            .unwrap();
+        assert!(session.resolve_in(public, "bootstrapResult").is_some());
+    }
+
+    #[test]
+    fn durable_bootstrap_foreign_runtime_and_changed_declaration_preserve_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let foreign_root = tempfile::tempdir().unwrap();
+        let (mut session, public, owner) = bootstrap_session(root.path(), 933);
+        let (mut foreign, _, _) = bootstrap_session(foreign_root.path(), 934);
+        let seal = session
+            .begin_durable_public_bootstrap(owner.clone(), public)
+            .unwrap();
+        let original = std::fs::read(foreign_root.path().join("declarations.json")).unwrap();
+        assert!(matches!(
+            foreign.publish_durable_public_bootstrap(seal),
+            Err(SessionError::InvalidDurablePublicAdmission {
+                reason: super::super::DurablePublicAdmissionFailure::BootstrapIdentity,
+                ..
+            })
+        ));
+        assert_eq!(
+            std::fs::read(foreign_root.path().join("declarations.json")).unwrap(),
+            original
+        );
+        let seal = session
+            .begin_durable_public_bootstrap(owner.clone(), public)
+            .unwrap();
+        let original = std::fs::read(root.path().join("declarations.json")).unwrap();
+        session.lib_mut().seed_scope(public, Generation(99));
+        assert!(matches!(
+            session.publish_durable_public_bootstrap(seal),
+            Err(SessionError::InvalidDurablePublicAdmission {
+                reason: super::super::DurablePublicAdmissionFailure::DeclarationTip {
+                    published: None,
+                    current: Some(Generation(99))
+                },
+                ..
+            })
+        ));
+        assert_eq!(
+            std::fs::read(root.path().join("declarations.json")).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn durable_bootstrap_write_failure_keeps_published_surface_and_blocks_admission() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Restore(PathBuf, std::fs::Permissions);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let (mut session, public, owner) = bootstrap_session(root.path(), 935);
+        let seal = session
+            .begin_durable_public_bootstrap(owner.clone(), public)
+            .unwrap();
+        let original = std::fs::read(root.path().join("declarations.json")).unwrap();
+        session.advance_public_visibility(public);
+        let restore = Restore(
+            root.path().to_owned(),
+            std::fs::metadata(root.path()).unwrap().permissions(),
+        );
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(matches!(
+            session.publish_durable_public_bootstrap(seal),
+            Err(SessionError::RecoveryManifest { .. })
+        ));
+        drop(restore);
+        assert_eq!(
+            std::fs::read(root.path().join("declarations.json")).unwrap(),
+            original
+        );
+        assert!(matches!(
+            session.begin_durable_private_execution(&owner, public),
+            Err(SessionError::InvalidDurablePublicAdmission {
+                reason: super::super::DurablePublicAdmissionFailure::Epoch {
+                    published: 1,
+                    current: 2
+                },
+                ..
+            })
+        ));
     }
 
     fn selected_sources(session: &PersistentSession, scope: ScopeId) -> Vec<SourceInstanceLease> {
