@@ -6,7 +6,7 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Data.ByteString.Lazy qualified as BSL
 import Control.Exception (SomeException, bracket, evaluate, finally, try)
-import Control.Monad (foldM, forM, forM_, unless, void)
+import Control.Monad (foldM, forM, unless, void)
 import GHC.Clock (getMonotonicTimeNSec)
 import Data.Word (Word64)
 import Crypto.Hash.SHA256 qualified as SHA
