@@ -8,7 +8,10 @@ import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.List (isInfixOf, sort)
 import Data.String (fromString)
-import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobals, requiredOriginalPackageGlobalsWithRetained)
+import Tidepool.OriginalProductRoots
+  ( requiredOriginalPackageGlobals, requiredOriginalPackageGlobalsWithExact
+  , requiredOriginalPackageGlobalsWithRetained
+  , projectedOriginalGlobalDemand, candidateOriginalGlobalDemand )
 import qualified Tidepool.ExecutionSchema as Execution
 import Tidepool.ModuleCandidates
 import GHC
@@ -36,6 +39,8 @@ import Tidepool.ExactHydration
 main :: IO ()
 main = getArgs >>= \case
   ["--original-product-roots"] -> originalProductRootsProof
+  ["--original-product-roots-evaluated-control"] -> originalProductRootsProofWith
+    (\global -> (Execution.globalIdentity global, Execution.globalRequiredEvaluated global))
   ["--consumer", root] -> recoveredConsumer root
   ["--next-consumer", root] -> recoveredNextConsumer root
   ["--wire-fixture", root] -> do
@@ -379,7 +384,10 @@ typedWireInput = emptyWireInput
 -- Exercise exact original-group traversal without compiling an unrelated
 -- fixture. The real parser package dictionary is admitted by the worker gate.
 originalProductRootsProof :: IO ()
-originalProductRootsProof = do
+originalProductRootsProof = originalProductRootsProofWith projectedOriginalGlobalDemand
+
+originalProductRootsProofWith :: (Execution.GlobalDecl -> (Execution.SymbolIdentity, Bool)) -> IO ()
+originalProductRootsProofWith projectedDemand = do
   let identity unit name occurrence = Execution.SymbolIdentity
         (fromString unit) (fromString name) (fromString "value") (fromString occurrence) Nothing
       source = identity "main" "Tidepool.Aeson.FromJSON" "$fFromJSONInt_$cparseJSON"
@@ -430,4 +438,37 @@ originalProductRootsProof = do
         [global caller, global newlyReached]
   unless (first == Right [package] && second == Right (sort [package, unused]))
     (fail "recovery-induced source global did not extend exact package roots")
-  putStrLn "original-product-roots: PASS (demanded parser, whole group, unrelated omission, exact unit, retained boundary, duplicate refusal, failed home owner, recovery-induced source root)"
+  let agent occurrence = identity "main" "Tidepool.Actors.Internal.Agent" occurrence
+      effect occurrence = identity "main" "Tidepool.Effects.Core" occurrence
+      textShow = identity "text-2.1.2-2594" "Data.Text.Show" "$w$cshowsPrec"
+      request = agent "request"
+      requestSited = agent "requestSited"
+      requestConfigured = agent "requestConfiguredSited"
+      dictionary = effect "$fShowWorktreeError"
+      showListMethod = effect "$fShowWorktreeError_$cshowList"
+      showsPrecWorker = effect "$w$cshowsPrec104"
+      dictionaryGlobal = (global dictionary) { Execution.globalRequiredEvaluated = False }
+      dictionaryCandidate = (imported dictionary Nothing) { candidateGlobalEvaluated = False }
+      originalRows demand =
+        [ ("main", "Tidepool.Actors.Internal.Agent",
+            [(295,[request],[projectedOriginalGlobalDemand (global requestSited)])
+            ,(292,[requestSited],[projectedOriginalGlobalDemand (global requestConfigured)])
+            ,(288,[requestConfigured],[demand])])
+        , ("main", "Tidepool.Effects.Core",
+            [(1380,[dictionary],[projectedOriginalGlobalDemand (global showListMethod)])
+            ,(1378,[showListMethod],[projectedOriginalGlobalDemand (global showsPrecWorker)])
+            ,(1376,[showsPrecWorker],[projectedOriginalGlobalDemand (global textShow)])]) ]
+      originalRoots demand = requiredOriginalPackageGlobalsWithExact [] []
+        (originalRows demand) [global request]
+  unless (originalRoots (projectedDemand dictionaryGlobal) == Right [textShow]
+      && originalRoots (candidateOriginalGlobalDemand dictionaryCandidate) == Right [textShow])
+    (fail "unevaluated original dictionary lost its exact package worker definition")
+  let retainedDictionary = dictionaryGlobal { Execution.globalRequiredGeneration = Just 7 }
+      retainedCandidate = dictionaryCandidate { candidateGlobalGeneration = Just 7 }
+  unless (originalRoots (projectedOriginalGlobalDemand retainedDictionary) == Right []
+      && originalRoots (candidateOriginalGlobalDemand retainedCandidate) == Right []
+      && requiredOriginalPackageGlobalsWithRetained [] []
+          (originalRows (projectedOriginalGlobalDemand dictionaryGlobal))
+          (Set.singleton textShow) [global request] == Right [])
+    (fail "original package recovery crossed an exact retained generation boundary")
+  putStrLn "original-product-roots: PASS (demanded parser, whole group, unrelated omission, exact unit, retained boundary, duplicate refusal, failed home owner, recovery-induced source root, unevaluated dictionary package worker)"

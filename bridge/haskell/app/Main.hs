@@ -66,7 +66,7 @@ import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..)
-  , WireProgram(..), ProjectedGroup(..), SiteRow(..), ProjectedGroupBody(..), GlobalDecl(..) )
+  , WireProgram(..), ProjectedGroup(..), SiteRow(..), ProjectedGroupBody(..) )
 import qualified Tidepool.ExecutionSchema as Execution
 import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
@@ -74,10 +74,12 @@ import Tidepool.PreparedStg
   , evictPreparedBodyMatching )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots )
-import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..), candidateExecutionSources)
+import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), candidateExecutionSources)
 import Tidepool.CompileInput (writeCompileInputProof)
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
-import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
+import Tidepool.OriginalProductRoots
+  ( requiredOriginalPackageGlobalsWithRetained
+  , projectedOriginalGlobalDemand, candidateOriginalGlobalDemand )
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), OriginalInterfaceArtifacts
   , newOriginalInterfaceArtifacts, originalInterfaceBytes)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports)
@@ -1758,7 +1760,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
         (shaHex interfaceBytes) (shaHex originalBytes) productPath
         [ExactOriginalGroup (fromIntegral (Execution.projectedOriginalOrdinal group))
             (Execution.projectedBinders group)
-            [(globalIdentity global, globalRequiredEvaluated global) | global <- projectedGlobals (Execution.projectedBody group)]
+            (map projectedOriginalGlobalDemand (projectedGlobals (Execution.projectedBody group)))
         | group <- originalGroups']
       extended = supportScope
         { scopeProducts = scopeProducts supportScope ++ [originalProduct]
@@ -1817,8 +1819,7 @@ retainProgramProducts includes directory prepared certified target initial = do
       lexicalRequirements <- programLexicalRequirements scope supportOwners requirements
       let groups = [ExactOriginalGroup (candidateGroupOrdinal group)
               (candidateGroupBinders group)
-              [(candidateGlobalIdentity global,candidateGlobalEvaluated global)
-              | global <- candidateGroupGlobals group]
+              (map candidateOriginalGlobalDemand (candidateGroupGlobals group))
             | group <- candidateGroups candidate]
           existingInterfaces = [(artifact,packages,sha)
             | (artifact,packages,sha) <- scopeInterfaces scope
@@ -1888,8 +1889,7 @@ retainProgramProducts includes directory prepared certified target initial = do
             (shaHex interfaceBytes) (shaHex productBytes) productPath
             [ExactOriginalGroup (fromIntegral (Execution.projectedOriginalOrdinal group))
               (Execution.projectedBinders group)
-              [(globalIdentity global, globalRequiredEvaluated global)
-                | global <- projectedGlobals (Execution.projectedBody group)] | group <- groups]
+              (map projectedOriginalGlobalDemand (projectedGlobals (Execution.projectedBody group))) | group <- groups]
       BS.writeFile interfacePath interfaceBytes
       BS.writeFile packagesPath packageBytes
       BS.writeFile productPath productBytes

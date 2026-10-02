@@ -2,10 +2,12 @@
 -- target no longer references. Their executable closure is part of admission.
 module Tidepool.OriginalProductRoots
   ( requiredOriginalPackageGlobals, requiredOriginalPackageGlobalsWithExact
-  , requiredOriginalPackageGlobalsWithRetained ) where
+  , requiredOriginalPackageGlobalsWithRetained
+  , projectedOriginalGlobalDemand, candidateOriginalGlobalDemand ) where
 
 import Control.Monad (foldM)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (isNothing)
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import Tidepool.ExecutionSchema
@@ -13,6 +15,17 @@ import Tidepool.ExecutionSchema
   , GlobalDecl(..) )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..) )
+
+-- The outline bit records whether recovery must supply a definition. GHC's
+-- evaluatedness flag is independent: an unevaluated dictionary still needs
+-- its complete executable dependency closure.
+projectedOriginalGlobalDemand :: GlobalDecl -> (SymbolIdentity, Bool)
+projectedOriginalGlobalDemand global =
+  (globalIdentity global, isNothing (globalRequiredGeneration global))
+
+candidateOriginalGlobalDemand :: CandidateGlobal -> (SymbolIdentity, Bool)
+candidateOriginalGlobalDemand global =
+  (candidateGlobalIdentity global, isNothing (candidateGlobalGeneration global))
 
 requiredOriginalPackageGlobals
   :: [(String, String, Either String [ProjectedGroup])] -> [ModuleCandidate] -> [GlobalDecl]
@@ -48,13 +61,11 @@ requiredOriginalPackageGlobalsWithRetained fresh cached exact retained target = 
     groups =
       [ ((unit, name, fromIntegral (projectedOriginalOrdinal group)),
           projectedBinders group,
-          [(globalIdentity global, globalRequiredGeneration global == Nothing)
-           | global <- projectedGlobals (projectedBody group)])
+          map projectedOriginalGlobalDemand (projectedGlobals (projectedBody group)))
       | (unit, name, Right originals) <- fresh, group <- originals ]
       ++ [ ((candidateUnit candidate, candidateModule candidate,
              candidateGroupOrdinal group), candidateGroupBinders group,
-             [(candidateGlobalIdentity global, candidateGlobalGeneration global == Nothing)
-              | global <- candidateGroupGlobals group])
+             map candidateOriginalGlobalDemand (candidateGroupGlobals group))
          | candidate <- cached, group <- candidateGroups candidate ]
       ++ [((unit, name, ordinal), binders, references)
          | (unit, name, originals) <- exact, (ordinal, binders, references) <- originals]
