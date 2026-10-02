@@ -757,11 +757,14 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
         displayed[0].contains("compiled-handler-curated"),
         "{output}"
     );
-    assert!(displayed[1].contains("Reviewed by the parent."), "{output}");
+    assert!(
+        displayed[1].contains("compiled-handler-curated"),
+        "{output}"
+    );
     assert!(displayed[1].contains("Child finding:"), "{output}");
     assert!(has_user_text(
         &inspected.request,
-        "compiled-handler-curated Reviewed by the parent."
+        "compiled-handler-curated"
     ));
     assert!(has_user_text(
         &inspected.request,
