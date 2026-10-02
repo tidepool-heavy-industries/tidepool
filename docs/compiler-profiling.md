@@ -146,7 +146,13 @@ Per-module `typecheck` spans include parsing, classification, transformation,
 typechecking and family validation. `checked_typecheck` spans cover that work
 only when a checked candidate needs fresh typechecking; reused candidates do
 not emit a synthetic span. Planning between setup and loading remains outside
-those spans. Other manually accumulated flat phases have no inferred resource
+those spans. Product construction also records per-module interface serialization,
+product and package-bundle encoding, dependency-evidence construction, certificate
+input reads, and certification. Certification includes encoding and the output
+write so lazy serialization is charged to that phase. These spans nest inside
+`module_products`; their times must not be added to the parent. Interface
+sidecars and remaining digest work belong to the surrounding product-writing
+span, rather than the individual interface span. Other manually accumulated flat phases have no inferred resource
 span. An action that throws before completion has no completed span; missing
 phases are unmeasured, not zero. `allocated_bytes` follows RTS accounting and
 can lag until GC; these counters do not force collection. `major_gcs` and

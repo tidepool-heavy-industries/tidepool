@@ -186,7 +186,7 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
               globalIndices = Map.fromList (zip globalBytes [(0 :: Word)..])
               encodeReference witness = encodeWord
                 (globalIndices Map.! toStrictByteString witness)
-              byModule = Map.fromListWith (flip (++))
+              byModule = Map.map reverse $ Map.fromListWith (++)
                 [ ((productUnit product, productModule product),
                    [(candidateGroupOrdinal group, map encodeReference witnesses)])
                 | (product, group, Right witnesses) <- modules ]
