@@ -113,6 +113,9 @@ async fn assert_pending(host: &RunningBrowserHost, operation: &OperationId, phas
                 "metadata":error.metadata(),
             }),
             JobOutput::Cancelled => json!({"kind":"cancelled"}),
+            JobOutput::CancelledWithReceipt(receipt) => {
+                json!({"kind":"cancelled", "receipt":receipt})
+            }
             JobOutput::Interrupted => json!({"kind":"interrupted"}),
             JobOutput::CancellationUnconfirmed(error) => json!({
                 "kind":"cancellation_unconfirmed", "message":error.chars().take(512).collect::<String>(),

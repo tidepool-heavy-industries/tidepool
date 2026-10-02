@@ -61,6 +61,32 @@ pub enum PreparedFailureStage {
     Run,
 }
 
+/// The package evidence observed when a sealed package owner cannot be
+/// resolved. These facts explain the refusal; they never authorize a fallback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CertifiedPackageOwnerEvidence {
+    RetainedExport {
+        interface_digest: Option<[u8; 32]>,
+    },
+    TargetDefinition {
+        present: bool,
+        interfaces_match: bool,
+        interface_digest: Option<[u8; 32]>,
+    },
+    DeclarationMismatch {
+        declaration: SymbolIdentity,
+    },
+    ConflictingPackageProof {
+        previous_interface_digest: [u8; 32],
+    },
+    ConflictingTargetDefinition {
+        previous_binding: ValueId,
+        requested_binding: ValueId,
+        previous_interface_digest: [u8; 32],
+        requested_interface_digest: [u8; 32],
+    },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PreparedRuntimeError {
     #[error(transparent)]
@@ -77,6 +103,11 @@ pub enum PreparedRuntimeError {
     Demand(#[from] DemandError),
     #[error("no exact live owner for certified import {0:?}")]
     MissingCertifiedOwner(ImportOwner),
+    #[error("certified package owner {owner:?} has no exact source: {evidence:?}")]
+    CertifiedPackageOwnerUnavailable {
+        owner: ImportOwner,
+        evidence: CertifiedPackageOwnerEvidence,
+    },
     #[error(
         "no exact live owner for certified retained import {identity:?} at generation {generation}"
     )]
@@ -250,6 +281,7 @@ impl PreparedRuntimeError {
             | Self::Install(_)
             | Self::Demand(_)
             | Self::MissingCertifiedOwner(_)
+            | Self::CertifiedPackageOwnerUnavailable { .. }
             | Self::MissingRetainedCertifiedOwner { .. }
             | Self::CertifiedTargetOwners
             | Self::ConflictingSettledConstructors
@@ -294,6 +326,7 @@ impl PreparedRuntimeError {
             | Self::Link(_)
             | Self::Demand(_)
             | Self::MissingCertifiedOwner(_)
+            | Self::CertifiedPackageOwnerUnavailable { .. }
             | Self::MissingRetainedCertifiedOwner { .. }
             | Self::CertifiedTargetOwners
             | Self::ConflictingSettledConstructors
@@ -610,6 +643,115 @@ pub struct SiteTypeEvidence {
     constructors: Vec<SymbolIdentity>,
     input: TypeNodeId,
     answer: TypeNodeId,
+}
+
+impl SiteTypeEvidence {
+    /// Commit to the complete canonical site type graph with explicit framing
+    /// and a versioned domain. This is evidence identity, not a type renderer.
+    pub(crate) fn commitment(&self) -> [u8; 32] {
+        fn frame(hash: &mut blake3::Hasher, bytes: &[u8]) {
+            hash.update(&(bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+        }
+
+        fn count(hash: &mut blake3::Hasher, value: usize) {
+            frame(hash, &(value as u64).to_le_bytes());
+        }
+
+        fn type_node_id(hash: &mut blake3::Hasher, id: TypeNodeId) {
+            frame(hash, &id.0.to_le_bytes());
+        }
+
+        fn constructor_id(
+            hash: &mut blake3::Hasher,
+            id: tidepool_repr::execution_schema::ConstructorId,
+        ) {
+            frame(hash, &id.0.to_le_bytes());
+        }
+
+        fn identity(hash: &mut blake3::Hasher, identity: &SymbolIdentity) {
+            frame(hash, identity.unit.as_bytes());
+            frame(hash, identity.module.as_bytes());
+            frame(hash, identity.namespace.as_bytes());
+            frame(hash, identity.occurrence.as_bytes());
+            match identity.record_parent.as_deref() {
+                Some(parent) => {
+                    frame(hash, &[1]);
+                    frame(hash, parent.as_bytes());
+                }
+                None => frame(hash, &[0]),
+            }
+        }
+
+        fn runtime_rep(hash: &mut blake3::Hasher, rep: RuntimeRep) {
+            match rep {
+                RuntimeRep::Void => frame(hash, &[0]),
+                RuntimeRep::LiftedRef => frame(hash, &[1]),
+                RuntimeRep::UnliftedRef => frame(hash, &[2]),
+                RuntimeRep::Address => frame(hash, &[3]),
+                RuntimeRep::Int(width) => {
+                    frame(hash, &[4]);
+                    frame(hash, &[width]);
+                }
+                RuntimeRep::Word(width) => {
+                    frame(hash, &[5]);
+                    frame(hash, &[width]);
+                }
+                RuntimeRep::Float(width) => {
+                    frame(hash, &[6]);
+                    frame(hash, &[width]);
+                }
+            }
+        }
+
+        let mut hash = blake3::Hasher::new();
+        frame(&mut hash, b"Tidepool.SiteTypeEvidence");
+        frame(&mut hash, b"v1");
+        count(&mut hash, self.types.len());
+        for node in &self.types {
+            match node {
+                TypeNode::Data {
+                    family,
+                    arguments,
+                    rows,
+                } => {
+                    frame(&mut hash, &[0]);
+                    identity(&mut hash, family);
+                    count(&mut hash, arguments.len());
+                    for argument in arguments {
+                        type_node_id(&mut hash, *argument);
+                    }
+                    count(&mut hash, rows.len());
+                    for row in rows {
+                        constructor_id(&mut hash, row.constructor);
+                        count(&mut hash, row.fields.len());
+                        for field in &row.fields {
+                            type_node_id(&mut hash, *field);
+                        }
+                    }
+                }
+                TypeNode::Text => frame(&mut hash, &[1]),
+                TypeNode::Integer => frame(&mut hash, &[2]),
+                TypeNode::Natural => frame(&mut hash, &[3]),
+                TypeNode::Scalar(rep) => {
+                    frame(&mut hash, &[4]);
+                    runtime_rep(&mut hash, *rep);
+                }
+                TypeNode::Unconstructible { reason, rendered } => {
+                    frame(&mut hash, &[5]);
+                    frame(&mut hash, reason.as_bytes());
+                    frame(&mut hash, rendered.as_bytes());
+                }
+            }
+        }
+        count(&mut hash, self.constructors.len());
+        for constructor in &self.constructors {
+            identity(&mut hash, constructor);
+        }
+        type_node_id(&mut hash, self.input);
+        type_node_id(&mut hash, self.answer);
+        *hash.finalize().as_bytes()
+    }
 }
 
 trait TypeGraph {
@@ -2998,25 +3140,48 @@ impl PreparedEngine {
             if *interface_digest == [0; 32] {
                 return Err(PreparedRuntimeError::MissingCertifiedOwner(owner.clone()));
             }
-            if self.code_exports.contains_key(binder) {
+            if let Some(export) = self.code_exports.get(binder) {
+                if !matches_protected_package_interface(export, interface_digest) {
+                    return Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                        owner: owner.clone(),
+                        evidence: CertifiedPackageOwnerEvidence::RetainedExport {
+                            interface_digest: export.interface_digest,
+                        },
+                    });
+                }
                 continue;
             }
-            let value = target_exports
-                .get(binder)
-                .copied()
+            let target_definition = target_exports.get(binder).copied();
+            let target_interface_digest = target.package_interfaces.interface_digest(unit, module);
+            let value = target_definition
                 .filter(|_| {
                     binder.unit == *unit
                         && binder.module == *module
                         && matches_target
-                        && target.package_interfaces.interface_digest(unit, module)
-                            == Some(*interface_digest)
+                        && target_interface_digest == Some(*interface_digest)
                 })
-                .ok_or_else(|| PreparedRuntimeError::MissingCertifiedOwner(owner.clone()))?;
-            if target_packages
-                .insert(binder.clone(), (value, *interface_digest))
-                .is_some_and(|previous| previous != (value, *interface_digest))
+                .ok_or_else(|| PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                    owner: owner.clone(),
+                    evidence: CertifiedPackageOwnerEvidence::TargetDefinition {
+                        present: target_definition.is_some(),
+                        interfaces_match: matches_target,
+                        interface_digest: target_interface_digest,
+                    },
+                })?;
+            if let Some(previous) =
+                target_packages.insert(binder.clone(), (value, *interface_digest))
             {
-                return Err(PreparedRuntimeError::MissingCertifiedOwner(owner.clone()));
+                if previous != (value, *interface_digest) {
+                    return Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                        owner: owner.clone(),
+                        evidence: CertifiedPackageOwnerEvidence::ConflictingTargetDefinition {
+                            previous_binding: previous.0,
+                            requested_binding: value,
+                            previous_interface_digest: previous.1,
+                            requested_interface_digest: *interface_digest,
+                        },
+                    });
+                }
             }
         }
         self.install_certified_turn_admitted(
@@ -3382,15 +3547,27 @@ impl PreparedEngine {
                                 || binder.unit != *unit
                                 || binder.module != *module
                             {
-                                return Err(PreparedRuntimeError::MissingCertifiedOwner(
-                                    owner.clone(),
-                                ));
+                                return Err(
+                                    PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                                        owner: owner.clone(),
+                                        evidence:
+                                            CertifiedPackageOwnerEvidence::DeclarationMismatch {
+                                                declaration: declaration.identity.clone(),
+                                            },
+                                    },
+                                );
                             }
                             let import = if let Some(export) = self.code_exports.get(binder) {
                                 if !matches_protected_package_interface(export, interface_digest) {
-                                    return Err(PreparedRuntimeError::MissingCertifiedOwner(
-                                        owner.clone(),
-                                    ));
+                                    return Err(
+                                        PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                                            owner: owner.clone(),
+                                            evidence:
+                                                CertifiedPackageOwnerEvidence::RetainedExport {
+                                                    interface_digest: export.interface_digest,
+                                                },
+                                        },
+                                    );
                                 }
                                 BatchImport::Existing {
                                     handle: export.handle,
@@ -3401,7 +3578,21 @@ impl PreparedEngine {
                                     .get(binder)
                                     .filter(|(_, digest)| digest == interface_digest)
                                     .ok_or_else(|| {
-                                        PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
+                                        PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                                            owner: owner.clone(),
+                                            evidence:
+                                                CertifiedPackageOwnerEvidence::TargetDefinition {
+                                                    present: exports
+                                                        .iter()
+                                                        .any(|(identity, _, _)| identity == binder),
+                                                    interfaces_match: target
+                                                        .package_interfaces
+                                                        .matches_target(&target.prepared),
+                                                    interface_digest: target
+                                                        .package_interfaces
+                                                        .interface_digest(unit, module),
+                                                },
+                                        }
                                     })?;
                                 debug_assert_eq!(digest, *interface_digest);
                                 BatchImport::Source {
@@ -3409,14 +3600,19 @@ impl PreparedEngine {
                                     binding,
                                 }
                             };
-                            if !target.package_literals.contains_key(binder)
-                                && package_updates
-                                    .insert(binder.clone(), *interface_digest)
-                                    .is_some_and(|previous| previous != *interface_digest)
-                            {
-                                return Err(PreparedRuntimeError::MissingCertifiedOwner(
-                                    owner.clone(),
-                                ));
+                            if !target.package_literals.contains_key(binder) {
+                                if let Some(previous) =
+                                    package_updates.insert(binder.clone(), *interface_digest)
+                                {
+                                    if previous != *interface_digest {
+                                        return Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                                            owner: owner.clone(),
+                                            evidence: CertifiedPackageOwnerEvidence::ConflictingPackageProof {
+                                                previous_interface_digest: previous,
+                                            },
+                                        });
+                                    }
+                                }
                             }
                             import
                         }
@@ -6960,7 +7156,14 @@ pub(super) mod tests {
         assert!(matches!(engine.install_certified_turn(
             target(), std::slice::from_ref(&source_owner), &evidence, selected(&good), &[],
             &BTreeMap::new(), &HashMap::new(), &BindingTable::new(),
-        ), Err(PreparedRuntimeError::MissingCertifiedOwner(owner)) if owner == package_owner([9; 32])));
+        ), Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+            owner,
+            evidence: CertifiedPackageOwnerEvidence::TargetDefinition {
+                present: true,
+                interfaces_match: false,
+                interface_digest: None,
+            },
+        }) if owner == package_owner([9; 32])));
         assert_eq!(engine.residency(), before);
         let admitted = || BTreeMap::from([(package.clone(), (ValueId(1), [9; 32]))]);
         let install = |engine: &mut PreparedEngine, group: &CertifiedGroup| {
@@ -6989,7 +7192,8 @@ pub(super) mod tests {
         assert!(engine.programs.is_empty());
         let wrong_digest = group(false, [8; 32]);
         assert!(matches!(install(&mut engine, &wrong_digest),
-            Err(PreparedRuntimeError::MissingCertifiedOwner(owner)) if owner == package_owner([8; 32])));
+            Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable { owner, .. })
+                if owner == package_owner([8; 32])));
         assert_eq!(engine.residency(), before);
         let mut aborted = install(&mut engine, &good).unwrap();
         assert_eq!(aborted.exports.len(), 2);
@@ -7051,8 +7255,13 @@ pub(super) mod tests {
         let stale = group(false, [8; 32]);
         assert!(matches!(
             install(&mut engine, &stale),
-            Err(PreparedRuntimeError::MissingCertifiedOwner(owner))
-                if owner == package_owner([8; 32])
+            Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                owner,
+                evidence: CertifiedPackageOwnerEvidence::RetainedExport {
+                    interface_digest,
+                },
+            })
+                if owner == package_owner([8; 32]) && interface_digest == Some([9; 32])
         ));
         assert_eq!(
             engine.code_exports[&package].interface_digest,
@@ -8741,6 +8950,36 @@ pub(super) mod tests {
             inputs: inputs.iter().copied().map(TypeNodeId).collect(),
         }];
         testing::prepare(program).expect("typed site fixture validates")
+    }
+
+    #[test]
+    fn site_type_evidence_commitment_covers_graph_and_endpoints() {
+        let evidence = SiteTypeEvidence {
+            types: vec![
+                TypeNode::Text,
+                TypeNode::Data {
+                    family: testing::identity("Fixture.Types", "Reply"),
+                    arguments: vec![TypeNodeId(0)],
+                    rows: vec![tidepool_repr::execution_schema::CtorRow {
+                        constructor: tidepool_repr::execution_schema::ConstructorId(0),
+                        fields: vec![TypeNodeId(0)],
+                    }],
+                },
+            ],
+            constructors: vec![testing::identity("Fixture.Types", "ReplyValue")],
+            input: TypeNodeId(0),
+            answer: TypeNodeId(1),
+        };
+        let commitment = evidence.commitment();
+        assert_eq!(commitment, evidence.clone().commitment());
+
+        let mut changed_endpoint = evidence.clone();
+        changed_endpoint.answer = TypeNodeId(0);
+        assert_ne!(commitment, changed_endpoint.commitment());
+
+        let mut changed_constructor = evidence;
+        changed_constructor.constructors[0].occurrence = "OtherReplyValue".into();
+        assert_ne!(commitment, changed_constructor.commitment());
     }
 
     #[test]

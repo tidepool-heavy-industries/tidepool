@@ -94,6 +94,7 @@ impl KernelBehavior for CompletionProbe {
                     items: Vec::new(),
                     next_index: 0,
                     total: 0,
+                    publication: None,
                 }))
             })
         })))

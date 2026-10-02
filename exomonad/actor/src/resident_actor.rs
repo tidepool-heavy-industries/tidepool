@@ -54,10 +54,10 @@ use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
     truncate_preview_at_line, CellSourceSpan, OutputSink, ParsedBlock, ResidentHole,
     ResidentOutcome, ResidentSession, RootCustody, TurnKind, WorkbenchCellItemKind,
-    WorkbenchCellSourceItem, WorkbenchExecutionId, WorkbenchFailureLayer, WorkbenchItemReceipt,
-    WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
-    WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
-    WorkbenchTerminalTransfer,
+    WorkbenchCellSourceItem, WorkbenchExecutionId, WorkbenchFailureLayer, WorkbenchFailurePoint,
+    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+    WorkbenchOperationReceipt, WorkbenchPublicationOutcome, WorkbenchRequest, WorkbenchResponse,
+    WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -925,7 +925,8 @@ impl std::fmt::Debug for RetainedActorInput {
 
 struct WorkbenchExecutionFailure {
     receipts: Vec<WorkbenchItemReceipt>,
-    failed_index: usize,
+    point: WorkbenchFailurePoint,
+    publication: Option<WorkbenchPublicationOutcome>,
     total: usize,
     source: ResidentActorWorkbenchError,
 }
@@ -981,7 +982,10 @@ fn workbench_failure(
 ) -> WorkbenchExecutionFailure {
     WorkbenchExecutionFailure {
         receipts: completed.to_vec(),
-        failed_index,
+        point: WorkbenchFailurePoint::InputUnit {
+            index: failed_index,
+        },
+        publication: None,
         total,
         source,
     }
@@ -995,7 +999,10 @@ fn failed_checkpoint_cleanup_response(
     let next_index = response.next_index;
     WorkbenchExecutionFailure {
         receipts: response.items,
-        failed_index: next_index.saturating_sub(1),
+        point: WorkbenchFailurePoint::Finalization {
+            completed_input_units: next_index,
+        },
+        publication: response.publication,
         total: response.total,
         source: ResidentActorWorkbenchError::ActorProtocol(format!(
             "{cleanup}; original workbench status {status:?}, next index {next_index}"
@@ -1041,7 +1048,10 @@ fn workbench_failure_after_operations(
     }
     WorkbenchExecutionFailure {
         receipts,
-        failed_index,
+        point: WorkbenchFailurePoint::InputUnit {
+            index: failed_index,
+        },
+        publication: None,
         total,
         source,
     }
@@ -1463,7 +1473,8 @@ where
         (result, None) => result,
         (Err(failure), Some(cleanup)) => Err(WorkbenchExecutionFailure {
             receipts: failure.receipts,
-            failed_index: failure.failed_index,
+            point: failure.point,
+            publication: failure.publication,
             total: failure.total,
             source: ResidentActorWorkbenchError::ActorProtocol(format!(
                 "{}; {cleanup}",
@@ -1489,7 +1500,8 @@ where
         source => KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
             actor: context.actor,
             receipts: failure.receipts,
-            failed_index: failure.failed_index,
+            point: failure.point,
+            publication: failure.publication,
             total: failure.total,
             diagnostic: source.failure_diagnostic(),
             detail: source.to_string(),
@@ -5958,15 +5970,30 @@ where
                 (owner, bootstrap, None)
             }
         };
-        let workbench = self.environment.runner.workbench(
-            request.response.clone(),
-            request.request,
-            request.type_modules(),
-        );
+        let installed_tools = self.installed_tools.current();
+        let activation_source = match &installed_tools {
+            Some(lease) => lease.source().clone(),
+            None => self.freeze_installed_source(context.actor)?,
+        };
+        let (compile_context, authority) = WorkbenchCompilationAuthority::admit(
+            context.clone(),
+            activation_source.clone(),
+            installed_tools,
+            self.environment.source_layers.as_ref(),
+        )
+        .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let workbench = self
+            .environment
+            .runner
+            .workbench(
+                request.response.clone(),
+                request.request,
+                request.type_modules(),
+            )
+            .with_compilation_authority(authority);
         let (input_preview, reply_preview, input_binding) = workbench
             .mount_activation_input(
-                context.clone(),
-                request.input_type.clone(),
+                compile_context,
                 input,
                 request.response.expected_type().to_owned(),
                 request.response.declaration.clone(),
@@ -5993,8 +6020,13 @@ where
                 Some(installation)
             }
             None if !self.policy_installed => Some(
-                self.prepare_interactive_policy(kernel, context, Some(request_message.clone()))
-                    .await?,
+                self.prepare_interactive_policy_from_source(
+                    kernel,
+                    context,
+                    Some(request_message.clone()),
+                    activation_source,
+                )
+                .await?,
             ),
             None => None,
         };
@@ -6224,6 +6256,18 @@ where
         context: &ActorSessionContext,
         initial_user_message: Option<String>,
     ) -> Result<LocalResidentInstallation, ResidentActorWorkbenchError> {
+        let source = self.freeze_installed_source(context.actor)?;
+        self.prepare_interactive_policy_from_source(kernel, context, initial_user_message, source)
+            .await
+    }
+
+    async fn prepare_interactive_policy_from_source(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        initial_user_message: Option<String>,
+        source: crate::CheckpointSourceLayer,
+    ) -> Result<LocalResidentInstallation, ResidentActorWorkbenchError> {
         let actor = kernel.resolve(context.actor).ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
                 "local actor was absent from its routing directory".into(),
@@ -6231,7 +6275,6 @@ where
         })?;
         self.spec_installs = 1;
         let prepare_started = std::time::Instant::now();
-        let source = self.freeze_installed_source(context.actor)?;
         let (compile_context, authority) = WorkbenchCompilationAuthority::admit(
             context.clone(),
             source.clone(),
@@ -13055,6 +13098,7 @@ fn workbench_response(
     }
     WorkbenchResponse {
         status,
+        publication: None,
         summary: cell_check.map(|checked| {
             let mut declarations = 0;
             let mut statements = 0;
@@ -13227,6 +13271,7 @@ mod tests {
         let failure = failed_checkpoint_cleanup_response(
             WorkbenchResponse {
                 status: WorkbenchRunStatus::RequestCancelled,
+                publication: None,
                 summary: None,
                 items: vec![receipt.clone()],
                 next_index: 3,
@@ -13235,7 +13280,12 @@ mod tests {
             "injected scope checkout failure".into(),
         );
         assert_eq!(failure.receipts, vec![receipt]);
-        assert_eq!(failure.failed_index, 2);
+        assert_eq!(
+            failure.point,
+            WorkbenchFailurePoint::Finalization {
+                completed_input_units: 3
+            }
+        );
         assert_eq!(failure.total, 5);
         let detail = failure.source.to_string();
         assert!(detail.contains("injected scope checkout failure"));

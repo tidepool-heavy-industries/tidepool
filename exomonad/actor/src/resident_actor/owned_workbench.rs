@@ -1250,7 +1250,10 @@ where
                         owned.state.cursor.receipts.push(slot.receipt);
                         let failure = WorkbenchExecutionFailure {
                             receipts: std::mem::take(&mut owned.state.cursor.receipts),
-                            failed_index: owned.state.cursor.index,
+                            point: WorkbenchFailurePoint::InputUnit {
+                                index: owned.state.cursor.index,
+                            },
+                            publication: None,
                             total: owned.state.request.items.len(),
                             source: binding.expect_err("failed exact cleanup"),
                         };
@@ -1877,7 +1880,12 @@ where
                 match published {
                     Ok(PrivateExecutionPublication::Manifest(
                         PublicManifestCommit::Durable | PublicManifestCommit::Ephemeral,
-                    )) => Self::settle_owned_execution(behavior, &kernel, owned, result),
+                    )) => Self::settle_owned_execution(
+                        behavior,
+                        &kernel,
+                        owned,
+                        mark_private_publication(result),
+                    ),
                     Ok(PrivateExecutionPublication::Manifest(
                         PublicManifestCommit::PublishedDurabilityUnconfirmed { detail },
                     )) => Ok(WorkbenchAdvance::Park(
@@ -1911,11 +1919,14 @@ where
                             .expect("owned execution retains its original control")
                             .publication_decision()
                             .terminate();
+                        let publication = WorkbenchPublicationOutcome::Rejected {
+                            detail: error.to_string(),
+                        };
                         Self::settle_owned_execution(
                             behavior,
                             &kernel,
                             owned,
-                            Err(private_publication_failure(result, error)),
+                            Err(private_publication_failure(result, error, publication)),
                         )
                     }
                 }
@@ -1950,13 +1961,21 @@ where
             },
             move |behavior, kernel, owned, confirmed| {
                 let result = match confirmed {
-                    Ok(()) => result,
-                    Err(error) => Err(private_publication_failure(
-                        result,
-                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                    Ok(()) => mark_private_publication(result),
+                    Err(error) => {
+                        let unconfirmed = private_publication_bindings(&result);
+                        let failure_detail = format!(
                             "published write durability remains unconfirmed: {detail}; {error}"
-                        )),
-                    )),
+                        );
+                        Err(private_publication_failure(
+                            result,
+                            ResidentActorWorkbenchError::ActorProtocol(failure_detail.clone()),
+                            WorkbenchPublicationOutcome::DurabilityUnconfirmed {
+                                bindings: unconfirmed,
+                                detail: failure_detail,
+                            },
+                        ))
+                    }
                 };
                 Self::settle_owned_execution(behavior, kernel, owned, result)
             },
@@ -2045,9 +2064,43 @@ fn private_publication_required(
     )
 }
 
+fn private_publication_bindings(
+    result: &Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+) -> Vec<String> {
+    let receipts = match result {
+        Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
+        | Ok(KernelStep::Stop {
+            output: response, ..
+        }) => &response.items,
+        Err(failure) => &failure.receipts,
+    };
+    receipts
+        .iter()
+        .flat_map(|receipt| receipt.installed_bindings.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn mark_private_publication(
+    mut result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
+    let bindings = private_publication_bindings(&result);
+    let publication = WorkbenchPublicationOutcome::Published { bindings };
+    match &mut result {
+        Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
+        | Ok(KernelStep::Stop {
+            output: response, ..
+        }) => response.publication = Some(publication),
+        Err(failure) => failure.publication = Some(publication),
+    }
+    result
+}
+
 fn private_publication_failure(
     result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     source: ResidentActorWorkbenchError,
+    publication: WorkbenchPublicationOutcome,
 ) -> WorkbenchExecutionFailure {
     match result {
         Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
@@ -2055,11 +2108,18 @@ fn private_publication_failure(
             output: response, ..
         }) => WorkbenchExecutionFailure {
             receipts: response.items,
-            failed_index: response.next_index.saturating_sub(1),
+            point: WorkbenchFailurePoint::Publication {
+                completed_input_units: response.next_index,
+            },
+            publication: Some(publication),
             total: response.total,
             source,
         },
-        Err(failure) => WorkbenchExecutionFailure { source, ..failure },
+        Err(failure) => WorkbenchExecutionFailure {
+            source,
+            publication: Some(publication),
+            ..failure
+        },
     }
 }
 

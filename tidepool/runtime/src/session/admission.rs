@@ -71,7 +71,7 @@ pub struct RuntimeCellAdmission {
     owner: Arc<RuntimeAdmissionOwner>,
     owner_epoch: u64,
     private_execution: Option<Arc<PrivateExecutionAdmission>>,
-    native_setup: Option<NativeSetupAdmission>,
+    native_purpose: Option<NativeCellPurpose>,
     _retained_scope: Arc<RuntimeLexicalScopeLease>,
     prefix_started: std::sync::atomic::AtomicBool,
     view: SessionCompileView,
@@ -92,7 +92,10 @@ pub struct RuntimeCellAdmission {
 
 /// Runtime-issued purpose for one parser-certified binderless setup action.
 /// It never authorizes authored private writes or declarations.
-struct NativeSetupAdmission;
+enum NativeCellPurpose {
+    Setup,
+    HostActivation([u8; 32]),
+}
 
 /// An admission lifetime exists before the lazy machine bootstrap and is
 /// distinct from recoverable source-session IDs and per-store counters.
@@ -147,6 +150,7 @@ impl Drop for RuntimeLexicalScopeLease {
 pub struct AdmittedValueInterface {
     module: tidepool_repr::SessionModule,
     bytes: Arc<[u8]>,
+    checked_artifact: Option<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>>,
 }
 
 /// The original native import ledger remains fixed for the whole cell.
@@ -636,7 +640,8 @@ impl RuntimeCheckedPrefix {
         execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
     ) -> Result<Arc<CheckedTurnCompletion>, SessionError> {
         let mut state = self.state.lock();
-        if !self.admission.belongs_to(session)
+        if self.admission.is_host_activation()
+            || !self.admission.belongs_to(session)
             || self.admission.visibility.scope != scope
             || state.in_flight.is_some()
             || state.display_in_flight.is_some()
@@ -1002,6 +1007,7 @@ fn settle_checked_snapshot(
                     AdmittedValueInterface {
                         module,
                         bytes: bytes.clone(),
+                        checked_artifact: Some(interface.clone()),
                     },
                     digest,
                 );
@@ -1117,6 +1123,11 @@ fn checked_snapshot(
 }
 
 impl AdmittedValueInterface {
+    pub fn checked_artifact(
+        &self,
+    ) -> Option<&Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
+        self.checked_artifact.as_ref()
+    }
     pub fn module(&self) -> tidepool_repr::SessionModule {
         self.module
     }
@@ -1166,7 +1177,13 @@ impl RuntimeCellAdmission {
     }
 
     pub(super) fn is_native_setup(&self) -> bool {
-        self.native_setup.is_some()
+        matches!(self.native_purpose, Some(NativeCellPurpose::Setup))
+    }
+    pub(super) fn is_host_activation(&self) -> bool {
+        matches!(
+            self.native_purpose,
+            Some(NativeCellPurpose::HostActivation(_))
+        )
     }
     pub fn view(&self) -> &SessionCompileView {
         &self.view
@@ -1217,6 +1234,38 @@ impl RuntimeCellAdmission {
 }
 
 impl PersistentSession {
+    pub(super) fn consume_host_activation_reservation(
+        &self,
+        admission: &Arc<RuntimeCheckedItemAdmission>,
+        execution: &tidepool_toolchain::checked_cell::ExactCompiledActivationInput,
+    ) -> Result<(), SessionError> {
+        let prefix = admission.prefix();
+        let mut state = prefix.state.lock();
+        let scope = prefix.admission.visibility.scope;
+        if !prefix.admission.is_host_activation()
+            || !prefix.admission.belongs_to(self)
+            || !Arc::ptr_eq(&state.snapshot, admission.snapshot())
+            || state.in_flight.is_some()
+            || state.display_in_flight.is_some()
+            || state.reservation.as_ref().is_none_or(|reservation| {
+                reservation.item != *execution.item()
+                    || reservation.generation.0 != execution.generation()
+                    || reservation.digest != admission.digest()
+            })
+            || self.public_visibility_snapshot_in(scope).as_ref()
+                != Some(&state.snapshot.visibility)
+            || self.compile_view_digest_in(scope) != Some(state.snapshot.view_digest)
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        execution.validate_runtime_admission(admission.digest(), prefix.admission.digest())?;
+        execution.validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
+        // The host transfers its original value. No placeholder was executed,
+        // and the authored compiler prefix must not claim such a completion.
+        state.reservation = None;
+        Ok(())
+    }
+
     /// Check exhaustion before the authoritative owner manifest rename.
     pub(crate) fn prepare_execution_admission_epoch_advance(&self) -> Result<u64, SessionError> {
         self.admission_owner()
@@ -1975,7 +2024,29 @@ impl PersistentSession {
             include_paths,
             Some(plan),
             None,
-            Some(NativeSetupAdmission),
+            Some(NativeCellPurpose::Setup),
+        )
+    }
+
+    pub(super) fn admit_host_activation_cell_in(
+        &mut self,
+        scope: ScopeId,
+        input_commitment: [u8; 32],
+        specification: Arc<dyn Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
+    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        self.admit_cell_with_plan(
+            scope,
+            0,
+            specification,
+            specification_digest,
+            authority_digest,
+            include_paths,
+            None,
+            None,
+            Some(NativeCellPurpose::HostActivation(input_commitment)),
         )
     }
 
@@ -1989,7 +2060,7 @@ impl PersistentSession {
         include_paths: Vec<PathBuf>,
         plan: Option<Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>>,
         private_execution: Option<Arc<PrivateExecutionAdmission>>,
-        native_setup: Option<NativeSetupAdmission>,
+        native_purpose: Option<NativeCellPurpose>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.reap_admission_leases();
         let view = self
@@ -2051,6 +2122,7 @@ impl PersistentSession {
                 Ok(AdmittedValueInterface {
                     module: *module,
                     bytes,
+                    checked_artifact: self.retained_checked_value_artifact(*module).cloned(),
                 })
             })
             .collect::<Result<Vec<_>, SessionError>>()?;
@@ -2264,8 +2336,13 @@ impl PersistentSession {
                 frame(parent.as_bytes());
             }
         }
-        if native_setup.is_some() {
-            frame(b"TidepoolNativeSetupAdmission1");
+        match &native_purpose {
+            Some(NativeCellPurpose::Setup) => frame(b"TidepoolNativeSetupAdmission1"),
+            Some(NativeCellPurpose::HostActivation(input_commitment)) => {
+                frame(b"TidepoolHostActivationAdmission1");
+                frame(input_commitment);
+            }
+            None => {}
         }
         let digest = *digest.finalize().as_bytes();
         let planned = planned.map(|mut planned| {
@@ -2278,7 +2355,7 @@ impl PersistentSession {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
             private_execution,
-            native_setup,
+            native_purpose,
             _retained_scope: retained_scope,
             prefix_started: std::sync::atomic::AtomicBool::new(false),
             view,
@@ -2530,10 +2607,12 @@ mod tests {
     #[test]
     fn initial_interface_inventory_refuses_missing_extra_duplicate_and_changed_bytes() {
         let first = AdmittedValueInterface {
+            checked_artifact: None,
             module: tidepool_repr::SessionModule::val(Generation(1)),
             bytes: Arc::from([1, 2, 3]),
         };
         let second = AdmittedValueInterface {
+            checked_artifact: None,
             module: tidepool_repr::SessionModule::val(Generation(2)),
             bytes: Arc::from([4, 5, 6]),
         };
@@ -2837,6 +2916,7 @@ mod tests {
                     interfaces = Some(Arc::new(CheckedInterfaceDelta {
                         previous: interfaces,
                         interface: AdmittedValueInterface {
+                            checked_artifact: None,
                             module: tidepool_repr::SessionModule::val(Generation(generation)),
                             bytes: bytes.clone(),
                         },
@@ -2881,6 +2961,7 @@ mod tests {
             interfaces = Some(Arc::new(CheckedInterfaceDelta {
                 previous: interfaces,
                 interface: AdmittedValueInterface {
+                    checked_artifact: None,
                     module: tidepool_repr::SessionModule::val(Generation(generation)),
                     bytes: bytes.clone(),
                 },
@@ -3453,6 +3534,7 @@ mod tests {
             for count in [1, 10, 100] {
                 let baseline = (0..baseline_count)
                     .map(|index| AdmittedValueInterface {
+                        checked_artifact: None,
                         module: tidepool_repr::SessionModule::val(Generation(index + 1)),
                         bytes: Arc::from(vec![index as u8; BYTES]),
                     })
@@ -3468,6 +3550,7 @@ mod tests {
                     assert!(index.insert(module.gen.0, digest).is_none());
                     snapshot = snapshot.append(
                         AdmittedValueInterface {
+                            checked_artifact: None,
                             module,
                             bytes: bytes.clone(),
                         },

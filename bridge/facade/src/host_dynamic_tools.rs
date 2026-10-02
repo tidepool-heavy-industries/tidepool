@@ -923,12 +923,32 @@ impl CallResponse {
 
 fn workbench_failure_transcript(failure: &exomonad_actor::KernelWorkbenchFailure) -> String {
     let detail = exomonad_actor::bound_workbench_display(&failure.detail, 2048);
-    let mut text = format!(
-        "actor {:?} workbench input unit {} of {} failed: {detail}\n",
-        failure.actor,
-        failure.failed_index + 1,
-        failure.total
-    );
+    let mut text = match failure.point {
+        tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index } => format!(
+            "actor {:?} workbench input unit {} of {} failed: {detail}\n",
+            failure.actor,
+            index + 1,
+            failure.total
+        ),
+        tidepool_runtime::session::WorkbenchFailurePoint::Publication {
+            completed_input_units,
+        } => match failure.publication.as_ref() {
+            Some(tidepool_runtime::session::WorkbenchPublicationOutcome::DurabilityUnconfirmed { .. }) => format!(
+                "actor {:?} workbench publication durability remains unconfirmed after {completed_input_units} completed input units: {detail}\n",
+                failure.actor
+            ),
+            _ => format!(
+                "actor {:?} workbench publication rejected after {completed_input_units} completed input units: {detail}\n",
+                failure.actor
+            ),
+        },
+        tidepool_runtime::session::WorkbenchFailurePoint::Finalization {
+            completed_input_units,
+        } => format!(
+            "actor {:?} workbench finalization failed after {completed_input_units} completed input units: {detail}\n",
+            failure.actor
+        ),
+    };
     // Command observations reserve 4 KiB for diagnostics. Present those
     // observations before optional operation metadata, without repeating detail.
     for receipt in &failure.receipts {
@@ -972,7 +992,9 @@ fn workbench_failure_transcript(failure: &exomonad_actor::KernelWorkbenchFailure
 enum HostToolFailure {
     #[error("tool host is quiescing")]
     Quiescing,
-    #[error("this submission was rejected before execution because its completion boundary was already settled; earlier calls may have executed—inspect retained results before new intent")]
+    #[error(
+        "this submission was rejected before execution because its completion boundary was already settled; earlier calls may have executed—inspect retained results before new intent"
+    )]
     SettledBoundary,
     #[error("tool completion boundary already has an active call")]
     ActiveBoundary,
@@ -1424,6 +1446,7 @@ pub(crate) mod tests {
                             items: vec![],
                             next_index: 0,
                             total: 2,
+                            publication: None,
                         }),
                     })
                 } else {
@@ -1461,6 +1484,7 @@ pub(crate) mod tests {
                             items: vec![],
                             next_index: 1,
                             total: 1,
+                            publication: None,
                         }),
                     },
                     "call-b" => WorkbenchBoundaryReconciliation::Pending,
@@ -2301,8 +2325,9 @@ pub(crate) mod tests {
         );
         let failure = exomonad_actor::KernelWorkbenchFailure {
             actor: exomonad_actor::ActorRef::first(exomonad_actor::ActorId(7)),
-            failed_index: 1,
+            point: tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index: 1 },
             total: 3,
+            publication: None,
             diagnostic: None,
             detail: "large diagnostic λ\n".repeat(20_000),
             receipts: vec![WorkbenchItemReceipt {
@@ -2330,6 +2355,19 @@ pub(crate) mod tests {
                     .collect(),
             }],
         };
+        let mut uncertain = failure.clone();
+        uncertain.point = tidepool_runtime::session::WorkbenchFailurePoint::Publication {
+            completed_input_units: 3,
+        };
+        uncertain.publication = Some(
+            tidepool_runtime::session::WorkbenchPublicationOutcome::DurabilityUnconfirmed {
+                bindings: vec!["visibleWrite".into()],
+                detail: "journal outcome unknown".into(),
+            },
+        );
+        let uncertain_text = workbench_failure_transcript(&uncertain);
+        assert!(uncertain_text.contains("publication durability remains unconfirmed"));
+        assert!(!uncertain_text.contains("publication rejected"));
         let response =
             CallResponse::failure(&HostToolFailure::Dispatch(ResidentToolError::Invocation(
                 exomonad_actor::KernelInvocationFailure::Workbench(failure),
@@ -2394,6 +2432,7 @@ pub(crate) mod tests {
             }],
             next_index: 0,
             total: 1,
+            publication: None,
         });
         let response = workbench_reply(reply);
         let CallContent::InputText { text } = &response.content_items[0];

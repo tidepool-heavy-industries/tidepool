@@ -738,26 +738,27 @@ impl CancellationOwner for EmbeddedDispatcher {
             Err(error) => return CancellationAcknowledgment::Unconfirmed(error.to_string()),
         };
         match self.snapshot.cancel(context).await {
-            Ok(WorkbenchCancellationOutcome::Cancelled { .. }) => {
-                CancellationAcknowledgment::Stopped
+            Ok(WorkbenchCancellationOutcome::Cancelled { reply, .. }) => {
+                CancellationAcknowledgment::StoppedWithReceipt(workbench_reply_receipt(reply))
             }
             Ok(
                 WorkbenchCancellationOutcome::Expired { reply, .. }
                 | WorkbenchCancellationOutcome::PublicationSettled { reply, .. },
-            ) => {
-                let result = reply
-                    .map_err(ResidentToolError::Invocation)
-                    .and_then(|response| {
-                        serde_json::to_value(response).map_err(ResidentToolError::Encoding)
-                    })
-                    .map_err(provider_tool_error)
-                    .map_err(ProviderError::into_tool_failure);
-                CancellationAcknowledgment::Completed(result)
-            }
+            ) => CancellationAcknowledgment::Completed(workbench_reply_receipt(reply)),
             Ok(outcome) => CancellationAcknowledgment::Unconfirmed(format!("{outcome:?}")),
             Err(error) => CancellationAcknowledgment::Unconfirmed(error.to_string()),
         }
     }
+}
+
+fn workbench_reply_receipt(
+    reply: exomonad_actor::KernelWorkbenchReply,
+) -> Result<Value, ToolFailure> {
+    reply
+        .map_err(ResidentToolError::Invocation)
+        .and_then(|response| serde_json::to_value(response).map_err(ResidentToolError::Encoding))
+        .map_err(provider_tool_error)
+        .map_err(ProviderError::into_tool_failure)
 }
 
 #[cfg(test)]
@@ -774,7 +775,8 @@ mod round_control_tests {
                 exomonad_actor::KernelWorkbenchFailure {
                     actor: ActorRef::first(exomonad_actor::ActorId(7)),
                     receipts: vec![],
-                    failed_index: 0,
+                    point: tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index: 0 },
+                    publication: None,
                     total: 1,
                     detail: "retained owner missing".into(),
                     diagnostic: Some(diagnostic),

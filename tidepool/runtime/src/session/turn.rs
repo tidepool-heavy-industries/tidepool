@@ -1852,6 +1852,8 @@ pub struct TurnCertification {
     pub recovery_products: Vec<CertifiedRecoveryProduct>,
     pub(crate) checked_item: Option<ExactCheckedItem>,
     pub(crate) checked_execution: Option<Arc<ExactCompiledItem>>,
+    pub(crate) checked_activation_input:
+        Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledActivationInput>>,
     pub(crate) checked_prefix: Option<Arc<super::RuntimeCheckedPrefix>>,
     pub(crate) checked_display: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>>,
     pub(crate) checked_display_admission: Option<Arc<super::RuntimeCheckedDisplayAdmission>>,
@@ -1882,6 +1884,9 @@ impl TurnCertification {
         }
         if let Some(display) = &self.checked_display {
             display.validate_table(table)?;
+        }
+        if let Some(activation) = &self.checked_activation_input {
+            activation.validate_table(table)?;
         }
         Ok(())
     }
@@ -1923,6 +1928,11 @@ impl TurnCertification {
         generation: u64,
         bound: &[BoundBinder],
     ) -> Result<(), CompileError> {
+        if self.checked_activation_input.is_some() {
+            return Err(CompileError::ExtractFailed(
+                "host activation input requires its affine mount consumer".into(),
+            ));
+        }
         if self.checked_display.is_some() {
             return Err(CompileError::ExtractFailed(
                 "checked display requires its dedicated owning consumer".into(),
@@ -2640,12 +2650,149 @@ pub fn check_cell_admitted(
     check_cell_impl(req, fold, Some(admission), Some(templates))
 }
 
+/// Check only the placeholder interface belonging to an original host input.
+/// The protected role cannot authorize evaluation of that placeholder.
+pub fn check_activation_input(
+    owner: &super::RuntimeActivationInputAdmission,
+) -> Result<CellCheck, CellCheckFailure> {
+    let view = owner.admission.view();
+    let include = owner
+        .admission
+        .include_paths()
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
+    if !owner.admission.is_host_activation() {
+        return Err(CompileError::ExtractFailed(
+            "activation lacks its original host admission".into(),
+        )
+        .into());
+    }
+    check_cell_admitted(
+        CellCheckRequest {
+            exact_context: view.exact_declaration_context().cloned(),
+            cell_text: &owner.specification.cell_source,
+            template: &owner.specification.template_source,
+            include: &include,
+            session_root: view.session_root(),
+            inject_modules: &owner.specification.injected_modules,
+            compile_generation: view.next_value_generation().0,
+            compile_view_evidence: &owner.compile_view_evidence,
+            session_id: Some(view.session()),
+        },
+        owner.admission.clone(),
+        &owner.templates,
+        None,
+    )
+    .map(|(checked, _)| checked)
+}
+
+/// Produce only the opaque compiler recipe for the original host mount.
+pub fn compile_activation_input(
+    owner: &super::RuntimeActivationInputAdmission,
+    admission: Arc<super::RuntimeCheckedItemAdmission>,
+) -> Result<super::CompiledActivationInput, TurnFailure> {
+    if !owner.admission.is_host_activation()
+        || !Arc::ptr_eq(admission.prefix().admission(), &owner.admission)
+        || admission.item().index() != 0
+        || admission.item().kind() != tidepool_toolchain::checked_cell::CheckedItemKind::Bind
+        || admission.item().binders() != ["sessionInput"]
+        || admission.item().source() != owner.specification.cell_source
+    {
+        return Err(CompileError::ExtractFailed(
+            "activation compile has another input owner or item".into(),
+        )
+        .into());
+    }
+    let snapshot = admission.snapshot();
+    let view = snapshot.view();
+    let include = owner
+        .admission
+        .include_paths()
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
+    let result = run_turn_with_pin(
+        TurnRequest {
+            exact_context: view.exact_declaration_context().cloned(),
+            session_id: Some(view.session()),
+            turn_text: admission.item().source(),
+            templates: &owner.templates,
+            include: &include,
+            session_root: view.session_root(),
+            inject_modules: snapshot.compiler_prefix().injected_modules(),
+            gen: admission.generation().0,
+            verdict: Some(TurnClassification {
+                kind: TurnKind::Bind,
+                binders: vec!["sessionInput".into()],
+                items: Vec::new(),
+            }),
+            target: None,
+            retained_imports: snapshot.admitted_retained_imports(),
+        },
+        None,
+        true,
+        Some(admission.clone()),
+        None,
+    )?;
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = result
+    else {
+        return Err(CompileError::ExtractFailed(
+            "activation did not produce its checked input binder".into(),
+        )
+        .into());
+    };
+    let [binder] = bound.as_slice() else {
+        return Err(
+            CompileError::ExtractFailed("activation produced another binder set".into()).into(),
+        );
+    };
+    let certification = compiled.certification.as_ref().ok_or_else(|| {
+        CompileError::ExtractFailed("activation has no sealed native products".into())
+    })?;
+    let proof = certification
+        .checked_activation_input
+        .as_ref()
+        .ok_or_else(|| {
+            CompileError::ExtractFailed("activation has no distinct host input receipt".into())
+        })?;
+    if binder.name != "sessionInput"
+        || proof.item() != admission.item()
+        || proof.generation() != admission.generation().0
+        || !proof.matches_target(&compiled.prepared)
+        || certification
+            .checked_prefix
+            .as_ref()
+            .is_none_or(|prefix| !Arc::ptr_eq(prefix, admission.prefix()))
+    {
+        return Err(CompileError::ExtractFailed(
+            "activation output differs from its exact input admission".into(),
+        )
+        .into());
+    }
+    proof.validate_table(&compiled.table)?;
+    proof.validate_bound_binders(&[encode_bound_binder_authority(binder)])?;
+    proof.validate_runtime_admission(admission.digest(), owner.admission.digest())?;
+    let proof = proof.clone();
+    Ok(super::CompiledActivationInput {
+        admission,
+        binder: binder.clone(),
+        compiled,
+        proof,
+    })
+}
+
 fn validate_cell_admitted_request(
     req: &CellCheckRequest<'_>,
     admission: &super::RuntimeCellAdmission,
 ) -> Result<(), CellCheckFailure> {
     let view = admission.view();
-    if admission.private_execution().is_none() && !admission.is_native_setup() {
+    if admission.private_execution().is_none()
+        && !admission.is_native_setup()
+        && !admission.is_host_activation()
+    {
         return Err(CompileError::ExtractFailed(
             "checked execution requires its owning private or native setup admission".into(),
         )
@@ -2766,6 +2913,11 @@ pub fn compile_cell_program_admitted(
             .map(|interface| (interface.module(), interface.bytes_owned().clone()))
             .collect(),
         planned.compiler_specification(),
+        &admission
+            .interfaces()
+            .iter()
+            .filter_map(|interface| interface.checked_artifact().cloned())
+            .collect::<Vec<_>>(),
     )?;
     if let Some(root) = offer.checked_value_root() {
         command.session_root(root);
@@ -2883,6 +3035,11 @@ fn check_cell_impl(
                 .iter()
                 .map(|interface| (interface.module(), interface.bytes_owned().clone()))
                 .collect(),
+            &admission
+                .interfaces()
+                .iter()
+                .filter_map(|interface| interface.checked_artifact().cloned())
+                .collect::<Vec<_>>(),
         )?
     } else {
         select_module_candidate_offer(
@@ -3177,6 +3334,7 @@ fn decode_cell_program_turn(
         checked_item: (!display).then(|| item.checked_item().clone()),
         checked_execution: (!display)
             .then(|| item.native().expect("native products preflighted").clone()),
+        checked_activation_input: None,
         checked_prefix: None,
         checked_display: display.then(|| {
             item.display()
@@ -3234,6 +3392,12 @@ pub fn run_checked_item(
     item_admission: Arc<super::RuntimeCheckedItemAdmission>,
 ) -> Result<TurnResult, TurnFailure> {
     let prefix = item_admission.prefix();
+    if prefix.admission().is_host_activation() {
+        return Err(CompileError::ExtractFailed(
+            "host activation input requires its affine compile and mount route".into(),
+        )
+        .into());
+    }
     let item = item_admission.item();
     let snapshot = item_admission.snapshot();
     let view = snapshot.view();
@@ -3340,33 +3504,30 @@ pub fn run_checked_display(
     run_turn_with_pin(req, None, false, None, Some(admission.clone()))
 }
 
-/// Compile the internal input-mount/preview module. Its bind shape is known
-/// by construction, so no authored-source classification request is needed.
-pub fn run_activation_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
-    if !matches!(&req.verdict, Some(TurnClassification { kind: TurnKind::Bind, binders, .. }) if binders.len() == 1)
-        || req.templates.len() != 1
-    {
-        return Err(CompileError::ExtractFailed(
-            "activation requires one prepared bind template".into(),
-        )
-        .into());
-    }
-    run_turn_with_pin(req, None, true, None, None)
-}
-
-/// One module supplies the mount's checked type and an independently callable
-/// preview. The compiler replaces the reserved body using constraint evidence.
-pub fn assemble_activation_module(
+/// Protected host-input recipe: the checked bind supplies the exact interface
+/// while the settled entry renders the separately mounted original input.
+pub fn assemble_checked_activation_module(
     preamble: &str,
     effect_stack: &str,
     input_type: &str,
     budget: usize,
 ) -> String {
-    let mut source = with_resume_import(preamble);
+    let source = assemble_bind_module(
+        preamble,
+        "",
+        "__result",
+        effect_stack,
+        "{{TURN_STMT}}",
+        "({{BINDERS}})",
+        false,
+    );
+    let scaffold = prepared_scaffold_binding("__result");
+    let mut source = source
+        .strip_suffix(&scaffold)
+        .expect("bind assembler ends with its prepared scaffold")
+        .to_owned();
     source.push_str(&format!(
-        "\n__result :: Eff {effect_stack} ({input_type})\n\
-         __result = pure undefined\n\
-         __activationPreview :: ({input_type}) -> Eff {effect_stack} ({TEXT_ALIAS}.Text, Bool)\n\
+        "__activationPreview :: ({input_type}) -> Eff {effect_stack} ({TEXT_ALIAS}.Text, Bool)\n\
          __activationPreview __activationInput = pure ({{{{ACTIVATION_PREVIEW}}}})\n\
          __tidepoolActivationConstraint :: TidepoolInspection.WorkbenchDisplay value => value -> ()\n\
          __tidepoolActivationConstraint _ = ()\n\
@@ -3588,22 +3749,45 @@ fn run_turn_with_pin(
             settled_bindings,
         )?
     } else if let Some(admission) = &checked {
-        ModuleCandidateOffer::select_checked_item(
-            endpoint.identity().producer_bytes(),
-            &include,
-            temp.path(),
-            req.exact_context.clone(),
-            admission.item().clone(),
-            admission.snapshot().compiler_prefix().clone(),
-            admission.digest(),
-            req.gen,
-            admission.observation_name(),
-            &req.templates
-                .iter()
-                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
-                .collect::<Vec<_>>(),
-            settled_bindings,
-        )?
+        let templates = req
+            .templates
+            .iter()
+            .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+            .collect::<Vec<_>>();
+        if admission.prefix().admission().is_host_activation() {
+            if !activation_preview {
+                return Err(CompileError::ExtractFailed(
+                    "host activation input lacks its protected preview purpose".into(),
+                )
+                .into());
+            }
+            ModuleCandidateOffer::select_checked_activation_item(
+                endpoint.identity().producer_bytes(),
+                &include,
+                temp.path(),
+                req.exact_context.clone(),
+                admission.item().clone(),
+                admission.snapshot().compiler_prefix().clone(),
+                admission.digest(),
+                req.gen,
+                &templates,
+                settled_bindings,
+            )?
+        } else {
+            ModuleCandidateOffer::select_checked_item(
+                endpoint.identity().producer_bytes(),
+                &include,
+                temp.path(),
+                req.exact_context.clone(),
+                admission.item().clone(),
+                admission.snapshot().compiler_prefix().clone(),
+                admission.digest(),
+                req.gen,
+                admission.observation_name(),
+                &templates,
+                settled_bindings,
+            )?
+        }
     } else if req.exact_context.is_none() {
         ModuleCandidateOffer::select_admitted(&endpoint, &include, temp.path())?
     } else {
@@ -3774,7 +3958,16 @@ fn run_turn_with_pin(
         let certification = compiled.certification.as_mut().ok_or_else(|| {
             CompileError::ExtractFailed("checked item lacks sealed native products".into())
         })?;
-        if certification.checked_execution.is_none() {
+        if admission.prefix().admission().is_host_activation() {
+            if certification.checked_activation_input.is_none()
+                || certification.checked_execution.is_some()
+            {
+                return Err(CompileError::ExtractFailed(
+                    "host activation input lacks its distinct sealed mount recipe".into(),
+                )
+                .into());
+            }
+        } else if certification.checked_execution.is_none() {
             return Err(CompileError::ExtractFailed(
                 "checked item lacks a sealed execution recipe".into(),
             )
@@ -3902,6 +4095,7 @@ fn retained_compiled_turn(
             recovery_products: products.recovery_products.clone(),
             checked_item: None,
             checked_execution: products.checked_execution.clone(),
+            checked_activation_input: products.checked_activation_input.clone(),
             checked_prefix: None,
             checked_display: products.checked_display.clone(),
             checked_display_admission: None,
@@ -4027,6 +4221,7 @@ fn read_compiled_turn(
             recovery_products: sealed.recovery_products,
             checked_item: None,
             checked_execution: sealed.checked_execution,
+            checked_activation_input: sealed.checked_activation_input,
             checked_prefix: None,
             checked_display: sealed.checked_display,
             checked_display_admission: None,
@@ -5624,6 +5819,148 @@ mod tests {
         );
     }
 
+    #[test]
+    fn checked_fold_retains_fresh_home_type_owners_after_source_removal() {
+        use crate::session::{
+            resident_cell_check_template, resident_workbench_templates, ModuleEnv,
+            PersistentSession, SessionLib,
+        };
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::SessionId;
+        use tidepool_testing::effect_surface::TestEffectSurface;
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let support = root.path().join("CheckedHomeValue.hs");
+        std::fs::write(&support, include_str!("fixtures/checked-home-value.hs")).unwrap();
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let lib = SessionLib::open(
+            SessionId(1005),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(effects.include_paths().to_vec());
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let execution = Arc::new(session.begin_private_execution(public).unwrap());
+        let view = execution.view();
+        let imports = view.turn_imports(&crate::session::SourceImports::from_specs([
+            "qualified CheckedHomeValue",
+        ]));
+        let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
+        let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+        let source = "let home = CheckedHomeValue.homeValue";
+        let specification = CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: source.into(),
+            template_source: template.clone(),
+            turn_templates: templates
+                .iter()
+                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                .collect(),
+            injected_modules: vec![],
+            reserved_declaration_modules: vec![],
+        };
+        let mut roots = effects.include_paths().to_vec();
+        roots.insert(0, root.path().to_owned());
+        let admitted_include = view.include_paths(&roots);
+        let admission = session
+            .admit_cell_for_execution(
+                execution,
+                0,
+                Arc::new(specification.clone()),
+                specification.specification_digest(),
+                [1; 32],
+                admitted_include,
+            )
+            .unwrap();
+        let view = admission.view();
+        let include = admission
+            .include_paths()
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let (_, folded) = check_cell_admitted(
+            CellCheckRequest {
+                exact_context: view.exact_declaration_context().cloned(),
+                session_id: Some(view.session()),
+                cell_text: source,
+                template: &template,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &[],
+                compile_generation: admission.initial_value_generation().0,
+                compile_view_evidence: "",
+            },
+            admission.clone(),
+            &templates,
+            Some(CellFoldTurn {
+                templates: &templates,
+                gen: admission.initial_value_generation().0,
+                retained_imports: &[],
+            }),
+        )
+        .unwrap();
+        let Some(TurnResult::Bind { compiled, .. }) = folded else {
+            panic!("home value must use the same-check fold")
+        };
+        let artifact = compiled
+            .certification
+            .unwrap()
+            .checked_execution
+            .unwrap()
+            .value_interface_certificate()
+            .unwrap();
+        assert!(artifact
+            .certified_interface()
+            .unwrap()
+            .requirements()
+            .iter()
+            .any(|owner| owner.unit == "main" && owner.module == "CheckedHomeValue"));
+        std::fs::remove_file(support).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let endpoint = extract_cmd().unwrap().bind().unwrap();
+        let following = CheckedCellSpecification {
+            admission_digest: [2; 32],
+            cell_source: "let alias = home".into(),
+            template_source: template,
+            turn_templates: vec![],
+            injected_modules: vec![artifact.owner().module_name()],
+            reserved_declaration_modules: vec![],
+        };
+        let offer = ModuleCandidateOffer::select_checked_cell(
+            endpoint.identity().producer_bytes(),
+            admission.include_paths(),
+            scratch.path(),
+            None,
+            following,
+            vec![(artifact.owner(), artifact.bytes_owned().clone())],
+            std::slice::from_ref(&artifact),
+        )
+        .unwrap();
+        assert!(offer.exact_scope_path().unwrap().is_file());
+        assert!(
+            ModuleCandidateOffer::select_checked_cell(
+                endpoint.identity().producer_bytes(),
+                admission.include_paths(),
+                scratch.path(),
+                None,
+                CheckedCellSpecification {
+                    admission_digest: [3; 32],
+                    cell_source: "let alias = home".into(),
+                    template_source: "module Next where".into(),
+                    turn_templates: vec![],
+                    injected_modules: vec![artifact.owner().module_name()],
+                    reserved_declaration_modules: vec![]
+                },
+                vec![(artifact.owner(), Arc::from(&b"changed interface"[..]))],
+                std::slice::from_ref(&artifact),
+            )
+            .is_err(),
+            "another interface cannot borrow the retained certificate"
+        );
+    }
+
     fn compile_public_checked_offer(
         admission: &Arc<crate::session::RuntimeCellAdmission>,
         specification: CheckedCellSpecification,
@@ -5669,6 +6006,7 @@ mod tests {
             admission.view().exact_declaration_context().cloned(),
             specification,
             Vec::new(),
+            &[],
         )?;
         cmd.session_root(offer.checked_value_root().unwrap())
             .session_artifacts(offer.exact_scope_path().unwrap());
@@ -8938,6 +9276,7 @@ mod tests {
                         modules: Vec::new(),
                         heads: Vec::new(),
                         inputs: Vec::new(),
+                        input_type_witnesses: Vec::new(),
                     }]
                 );
                 assert!(wrapped_source.contains("result ="));

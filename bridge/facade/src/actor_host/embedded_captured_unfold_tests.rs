@@ -176,6 +176,42 @@ impl CapturedHostTransport {
                             .any(|item| item["call_id"] == "captured-scope-setup"),
                         "earlier provider provenance was lost"
                     );
+                    if round == 2 {
+                        let call_id = format!("captured-child-{path}");
+                        let returned: Vec<_> = items
+                            .iter()
+                            .filter(|item| {
+                                item["type"] == "custom_tool_call_output"
+                                    && item["call_id"] == call_id
+                            })
+                            .collect();
+                        assert_eq!(
+                            returned.len(),
+                            1,
+                            "child follow-up must return exactly its original synchronous Haskell call"
+                        );
+                        let receipt: Value = serde_json::from_str(
+                            returned[0]["output"]
+                                .as_str()
+                                .expect("returned Haskell receipt is encoded as JSON text"),
+                        )
+                        .expect("returned Haskell receipt is valid JSON");
+                        assert_eq!(receipt["status"], "replied", "{receipt}");
+                        assert_eq!(receipt["items"].as_array().map(Vec::len), Some(1), "{receipt}");
+                        assert_eq!(receipt["items"][0]["status"], "committed", "{receipt}");
+                        assert_eq!(receipt["items"][0]["output"], "42", "{receipt}");
+                        assert_eq!(
+                            receipt["items"][0]["terminalTransfer"],
+                            "replyAccepted",
+                            "{receipt}"
+                        );
+                        assert!(receipt["items"][0]["operations"].as_array().is_some_and(
+                            |operations| operations.iter().any(|operation| {
+                                operation["effect"] == "reply"
+                                    && operation["disposition"] == "committed"
+                            })
+                        ), "typed reply effect was not committed: {receipt}");
+                    }
                     self.requests.send(request.clone()).unwrap();
                     if ordinal < 2 {
                         let mut release = self.reply_children.subscribe();

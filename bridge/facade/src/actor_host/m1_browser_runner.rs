@@ -300,12 +300,13 @@ async fn verify_cancelled_resident_call(
         return Err("cancellation evidence belongs to another originating operation".into());
     }
     let scheduler = fixture.runtime.scheduler();
-    if scheduler
-        .output(&claim.operation)
-        .await
-        .map_err(|error| error.to_string())?
-        != Some(harness::turn::JobOutput::Cancelled)
-    {
+    if !matches!(
+        scheduler
+            .output(&claim.operation)
+            .await
+            .map_err(|error| error.to_string())?,
+        Some(harness::turn::JobOutput::CancelledWithReceipt(_))
+    ) {
         return Err("resident call did not retain confirmed cancellation".into());
     }
     if !matches!(
@@ -313,7 +314,7 @@ async fn verify_cancelled_resident_call(
             .cancellation_acknowledgment(&claim.operation)
             .await
             .map_err(|error| error.to_string())?,
-        Some(harness::provider::CancellationAcknowledgment::Stopped)
+        Some(harness::provider::CancellationAcknowledgment::StoppedWithReceipt(_))
     ) {
         return Err("resident cancellation owner did not confirm cleanup".into());
     }
@@ -604,7 +605,9 @@ pub(super) async fn production_browser_journey() {
                     }
                     _ => None,
                 };
-                eprintln!("browser gate call={call_id} retained_signature={retained_signature:?} scheduler_signature={scheduler_signature:?}");
+                eprintln!(
+                    "browser gate call={call_id} retained_signature={retained_signature:?} scheduler_signature={scheduler_signature:?}"
+                );
             }
         }
         if let Ok(agents) = store.list_agents() {

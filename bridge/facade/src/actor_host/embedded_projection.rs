@@ -156,6 +156,7 @@ impl EmbeddedProjection {
                     active_round_for(node.actor)
                 },
                 model_conversation: conversation.clone(),
+                model_head_request: None,
             });
             if let Some(path) = conversation {
                 conversations.push(serde_json::json!({

@@ -3049,8 +3049,27 @@ impl<H, O> ResidentActorWorkbench<H, O> {
     }
 }
 
+/// The owning boundary that refused a whole-cell public publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivatePublicationPhase {
+    Freeze,
+    Restage,
+    CertifyAndStage,
+    Publish,
+    RevalidateRejection,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
+    #[error(
+        "actor {actor:?} public scope {scope:?} publication failed during {phase:?}: {source}"
+    )]
+    PrivatePublication {
+        actor: crate::ActorRef,
+        scope: ScopeId,
+        phase: PrivatePublicationPhase,
+        source: Box<ResidentActorWorkbenchError>,
+    },
     #[error("actor continuation handoff refused: actor {actor:?}, placement {placement:?}, continuation {continuation}, reason {reason:?}")]
     ContinuationHandoff {
         actor: crate::ActorRef,
@@ -3130,6 +3149,7 @@ impl ResidentActorWorkbenchError {
         &self,
     ) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
         match self {
+            Self::PrivatePublication { source, .. } => source.failure_diagnostic(),
             Self::Compile(error) => Some(classify_compile(error)),
             Self::CellCheck(failure) => Some(classify_compile(&failure.error)),
             Self::CompileInfrastructure(diagnostic) => Some(diagnostic.clone()),
@@ -4027,8 +4047,7 @@ where
     pub(crate) async fn mount_activation_input(
         &self,
         context: crate::ActorSessionContext,
-        input_type: String,
-        input: RootCustody,
+        input: tidepool_runtime::session::RuntimeActivationInput,
         reply_type: String,
         reply_declaration: Option<String>,
         reply_declaration_modules: Vec<String>,
@@ -4046,70 +4065,53 @@ where
         }
         source.preamble = actor_preamble(&source.preamble, &context).into();
         let type_modules = self.type_modules.clone();
+        let authority = self.compilation_authority.clone().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "activation requires its original source authority".into(),
+            )
+        })?;
         let preview = self
             .access
             .with_machine(context, move |session, context, _| {
-                use tidepool_runtime::session::turn::{
-                    assemble_activation_module, run_activation_turn,
-                };
-                use tidepool_runtime::session::{TemplateSelector, TurnTemplate};
+                use tidepool_runtime::session::turn::{check_activation_input, compile_activation_input};
                 let view = actor_compile_view(session, context, &source, &type_modules)?;
-                let generation = view.next_value_generation();
                 let prepared = source.prepare(&view);
                 let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
-                let templates = [TurnTemplate {
-                    kind: TemplateSelector::Bind,
-                    source: assemble_activation_module(
-                        &preamble,
-                        &context.haskell_effects_alias,
-                        &input_type,
-                        ACTIVATION_INPUT_LIMIT,
-                    ),
-                }];
-                let include: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
-                let retained = session.prepared_retained();
-                let result = run_activation_turn(TurnRequest {
-                exact_context: view.exact_declaration_context().cloned(),
-                session_id: Some(view.session_id()),
-                    turn_text: "sessionInput <- pure undefined",
-                    templates: &templates,
-                    include: &include,
-                    session_root: view.session_root(),
-                    inject_modules: &prepared.injected,
-                    gen: generation.0,
-                    verdict: Some(generated_bind_verdict("sessionInput")),
-                    target: None,
-                    retained_imports: &retained,
-                })
-                .map_err(|failure| {
+                let candidate = session.next_declaration_module().ok_or_else(|| {
+                    ResidentActorWorkbenchError::InputMount("activation has no declaration plane".into())
+                })?;
+                let check_preamble = cell_module_preamble(&prepared.preamble, &candidate.module_name())?;
+                let template = resident_cell_check_template(
+                    &check_preamble,
+                    &context.haskell_effects_alias,
+                    &prepared.imports,
+                );
+                let evidence = cell_check_evidence(&view, &template, &prepared);
+                let owner = session.admit_activation_input_in(
+                    context.placement.lexical_scope,
+                    input,
+                    &preamble,
+                    &context.haskell_effects_alias,
+                    ACTIVATION_INPUT_LIMIT,
+                    template,
+                    prepared.injected,
+                    authority.clone(),
+                    authority.authority_digest(),
+                    prepared.include,
+                    evidence,
+                ).map_err(ResidentActorWorkbenchError::Resident)?;
+                let checked = check_activation_input(&owner).map_err(|failure| {
                     ResidentActorWorkbenchError::InputMount(failure.error.to_string())
                 })?;
-                let TurnResult::Bind {
-                    bound, compiled, ..
-                } = result
-                else {
-                    return Err(ResidentActorWorkbenchError::InputMount(
-                        "activation did not produce a bind".into(),
-                    ));
-                };
-                let [binder] = bound.as_slice() else {
-                    return Err(ResidentActorWorkbenchError::InputMount(
-                        "activation did not produce one input binder".into(),
-                    ));
-                };
-                session
-                    .mount_compiled_binding_in(
-                        context.placement.lexical_scope,
-                        binder,
-                        generation,
-                        &compiled.table,
-                        input,
-                    )
+                let item = session.admit_activation_input_item(&owner, &checked)
                     .map_err(ResidentActorWorkbenchError::Resident)?;
-                let preview = match session.run_mounted_inspection_with_sites(
-                    compiled.into_code(),
-                    tidepool_repr::SessionVarId::from_extract(binder.var_id),
-                ) {
+                let compiled = compile_activation_input(&owner, item).map_err(|failure| {
+                    ResidentActorWorkbenchError::InputMount(failure.error.to_string())
+                })?;
+                let mounted = session.mount_activation_input(owner, compiled)
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                let binding = mounted.binding();
+                let preview = match session.run_activation_preview(mounted) {
                     Ok(ResidentOutcome::Suspended { hole, .. } | ResidentOutcome::Deferred { hole, .. }) => {
                         if let Err(abort_error) = session
                             .abort(hole.cont_id(), "pure activation preview suspended".into())
@@ -4120,14 +4122,25 @@ where
                                 "failed to abort parked hole after pure activation preview suspended"
                             );
                         }
-                        Err(ResidentActorWorkbenchError::Inspection(
+                        return Err(ResidentActorWorkbenchError::Inspection(
                             "pure activation preview suspended".into(),
-                        ))
+                        ));
                     }
                     Ok(outcome) => decode_activation_observation(outcome),
-                    Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
+                    Err(error) if error.is_observation_budget_exhausted()
+                        || matches!(&error,
+                            ResidentError::Prepared(prepared)
+                                if matches!(prepared,
+                                    tidepool_runtime::session::PreparedRuntimeError::Run(
+                                        tidepool_codegen::prepared_program::ExecutionError::Runtime(_)
+                                    )) && prepared.kind()
+                                        == tidepool_runtime::session::PreparedFailureKind::Language
+                        ) => {
+                        Err(ResidentActorWorkbenchError::Resident(error))
+                    }
+                    Err(error) => return Err(ResidentActorWorkbenchError::Resident(error)),
                 };
-                Ok((preview, tidepool_repr::SessionVarId::from_extract(binder.var_id)))
+                Ok((preview, binding))
             })
             .await?;
         let (preview, input_binding) = preview;
@@ -7741,6 +7754,15 @@ where
                 "publication requires its original public owner".into(),
             ));
         }
+        let actor = context.actor;
+        let scope = execution.public_scope;
+        let publication_error =
+            move |phase, source| ResidentActorWorkbenchError::PrivatePublication {
+                actor,
+                scope,
+                phase,
+                source: Box::new(source),
+            };
         let admission = execution.admission.clone();
         let intent = self
             .access
@@ -7751,7 +7773,8 @@ where
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })
             })
-            .await?;
+            .await
+            .map_err(|error| publication_error(PrivatePublicationPhase::Freeze, error))?;
         let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
         loop {
@@ -7779,7 +7802,8 @@ where
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })
                 })
-                .await?;
+                .await
+                .map_err(|error| publication_error(PrivatePublicationPhase::Restage, error))?;
             let compile_cancellation = cancellation.clone();
             let prepared = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 tidepool_runtime::with_compiler_transaction_cancellable(
@@ -7802,8 +7826,8 @@ where
                 )
             }))
             .await
-            .map_err(ResidentActorWorkbenchError::Join)?
-            .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
+            .map_err(|error| publication_error(PrivatePublicationPhase::CertifyAndStage, ResidentActorWorkbenchError::Join(error)))?
+            .map_err(|error| publication_error(PrivatePublicationPhase::CertifyAndStage, ResidentActorWorkbenchError::Resident(ResidentError::Session(error))))?;
             match prepared {
                 PreparedExecutionPublication::Manifest(ticket) => {
                     let decision = execution.decision.clone();
@@ -7818,7 +7842,10 @@ where
                                     ))
                                 })
                         })
-                        .await?;
+                        .await
+                        .map_err(|error| {
+                            publication_error(PrivatePublicationPhase::Publish, error)
+                        })?;
                     if outcome == tidepool_runtime::session::PublicManifestCommit::Stale {
                         continue;
                     }
@@ -7837,7 +7864,10 @@ where
                                     ))
                                 })
                         })
-                        .await?;
+                        .await
+                        .map_err(|error| {
+                            publication_error(PrivatePublicationPhase::RevalidateRejection, error)
+                        })?;
                     match outcome {
                         tidepool_runtime::session::DeclarationPublicationRejection::Stale => {
                             continue
@@ -16604,8 +16634,59 @@ mod request_tests {
         );
     }
 
+    /// Mount the source binding through the legacy typed host interface used
+    /// by these request-scope alias tests. The custody is retained from the
+    /// actual source binder and consumed by the ordinary compiled-binding
+    /// mount; these tests do not model activation-input admission.
+    async fn mount_request_scope_test_input(
+        workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        context: crate::ActorSessionContext,
+    ) -> Result<tidepool_repr::SessionVarId, ResidentActorWorkbenchError> {
+        let scope = context.placement.lexical_scope;
+        let source = workbench.access.source.clone();
+        let type_modules = workbench.type_modules.clone();
+        workbench
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let (source_id, ..) = session
+                    .current_binding_in(scope, "sourceValue")
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::InputMount(
+                            "sourceValue is not visible in the request scope test".into(),
+                        )
+                    })?;
+                let custody = session
+                    .retain_binding_custody_in(scope, "sourceValue", source_id)?
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::InputMount(
+                            "sourceValue has no retained custody".into(),
+                        )
+                    })?;
+                let (binder, compiled, generation) = compile_host_binding(
+                    session,
+                    context,
+                    &source,
+                    &type_modules,
+                    "sessionInput",
+                    "()",
+                    "sourceValue",
+                    SourceImports::default(),
+                    false,
+                )?;
+                session.mount_compiled_binding_in(
+                    scope,
+                    &binder,
+                    generation,
+                    &compiled.table,
+                    custody,
+                )?;
+                Ok(tidepool_repr::SessionVarId::from_extract(binder.var_id))
+            })
+            .await
+    }
+
     #[tokio::test]
-    async fn request_input_borrow_refuses_a_shadowed_mount() {
+    async fn request_scope_alias_borrow_refuses_a_shadowed_mount() {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
         let step = workbench
@@ -16629,42 +16710,12 @@ mod request_tests {
                 .expect("source value binds");
         }
         let scope = context.placement.lexical_scope;
-        let borrow_source = || async {
-            workbench
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    let (id, ..) = session
-                        .current_binding_in(scope, "sourceValue")
-                        .expect("source value remains visible");
-                    Ok(session
-                        .retain_binding_custody_in(scope, "sourceValue", id)
-                        .expect("retain source value")
-                        .expect("borrow source value"))
-                })
-                .await
-        };
-        let (_, _, first) = workbench
-            .mount_activation_input(
-                context.clone(),
-                "()".into(),
-                borrow_source().await.expect("source borrow"),
-                "()".into(),
-                None,
-                vec![],
-            )
+        let first = mount_request_scope_test_input(&workbench, context.clone())
             .await
-            .expect("first activation mount");
-        let (_, _, second) = workbench
-            .mount_activation_input(
-                context.clone(),
-                "()".into(),
-                borrow_source().await.expect("source borrow"),
-                "()".into(),
-                None,
-                vec![],
-            )
+            .expect("first request-scope alias mount");
+        let second = mount_request_scope_test_input(&workbench, context.clone())
             .await
-            .expect("second activation shadows the first");
+            .expect("second alias shadows the first");
         assert_ne!(first, second);
         workbench
             .access
@@ -16688,7 +16739,7 @@ mod request_tests {
     }
 
     #[tokio::test]
-    async fn current_request_private_cell_borrows_activation_input_without_extra_root() {
+    async fn current_request_private_cell_borrows_scope_alias_without_extra_root() {
         let (machines, mut context, mut source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Replies]".into();
         source
@@ -16725,27 +16776,7 @@ mod request_tests {
             _ => panic!("source binding did not complete"),
         }
         let original_scope = context.placement.lexical_scope;
-        let input = workbench
-            .access
-            .with_machine(context.clone(), move |session, _, _| {
-                let (id, ..) = session
-                    .current_binding_in(original_scope, "sourceValue")
-                    .unwrap();
-                Ok(session
-                    .retain_binding_custody_in(original_scope, "sourceValue", id)?
-                    .expect("owned input"))
-            })
-            .await
-            .unwrap();
-        let (_, _, binding) = workbench
-            .mount_activation_input(
-                context.clone(),
-                "()".into(),
-                input,
-                "()".into(),
-                None,
-                vec![],
-            )
+        let binding = mount_request_scope_test_input(&workbench, context.clone())
             .await
             .unwrap();
         let (private, before) = workbench

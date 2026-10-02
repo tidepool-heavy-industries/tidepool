@@ -110,11 +110,12 @@ pub use facade::{
 pub use supervisor::{GraceOutcome, TurnSupervisor};
 
 pub use resident::{
-    truncate_preview_at_line, HostBindingType, HostCarrier, HostPayload, PendingDisplayInstall,
-    PendingPreparedInstall, PendingPreparedMode, PreparedStartupEntry, ProgramProvenance,
-    ProgramProvenanceError, ReadyDisplayInstall, ReadyPreparedInstall, ResidentContinuationEvent,
-    ResidentDisplayBundle, ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError,
-    ResidentSession, RootCustody, SessionRunContext,
+    truncate_preview_at_line, CompiledActivationInput, HostBindingType, HostCarrier, HostPayload,
+    MountedActivationInput, PendingDisplayInstall, PendingPreparedInstall, PendingPreparedMode,
+    PreparedStartupEntry, ProgramProvenance, ProgramProvenanceError, ReadyDisplayInstall,
+    ReadyPreparedInstall, ResidentContinuationEvent, ResidentDisplayBundle, ResidentError,
+    ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
+    RuntimeActivationInput, RuntimeActivationInputAdmission, SessionRunContext,
 };
 
 pub use view::{hide_preamble_exports, SessionCompileView, SourceImports};
@@ -125,10 +126,10 @@ pub use workbench::{
     run_block_sequence, BlockExecution, BlockSequenceOutcome, CommittedBlock, MetaCommandLine,
     ParsedBlock, SourceOrderCollision, WorkSequence, WorkbenchBinding, WorkbenchBindingKind,
     WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchDiscovery, WorkbenchExecutionId,
-    WorkbenchFailureLayer, WorkbenchForkBoundary, WorkbenchItem, WorkbenchItemReceipt,
-    WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
-    WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
-    WorkbenchTerminalTransfer,
+    WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchForkBoundary, WorkbenchItem,
+    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+    WorkbenchOperationReceipt, WorkbenchPublicationOutcome, WorkbenchRequest, WorkbenchResponse,
+    WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
 
 pub use turn::{

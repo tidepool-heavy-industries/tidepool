@@ -361,9 +361,9 @@ pub struct WorkbenchItemReceipt {
     pub failure_layer: Option<WorkbenchFailureLayer>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
-    /// Names installed into the persistent lexical environment by this unit.
-    /// This is authoritative metadata; clients need not scrape transcript
-    /// strings such as `[bound x]` or declaration summaries.
+    /// Names installed into this unit's execution scope. For privately
+    /// executed cells this does not establish public visibility; publication
+    /// reports the whole-cell outcome.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub installed_bindings: Vec<String>,
     /// Effect boundaries completed before this unit returned or failed.
@@ -395,6 +395,55 @@ pub struct WorkbenchResponse {
     pub items: Vec<WorkbenchItemReceipt>,
     pub next_index: usize,
     pub total: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<WorkbenchPublicationOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum WorkbenchPublicationOutcome {
+    Published {
+        bindings: Vec<String>,
+    },
+    Rejected {
+        detail: String,
+    },
+    DurabilityUnconfirmed {
+        bindings: Vec<String>,
+        detail: String,
+    },
+}
+
+impl WorkbenchPublicationOutcome {
+    #[must_use]
+    pub fn public_bindings(&self) -> &[String] {
+        match self {
+            Self::Published { bindings } | Self::DurabilityUnconfirmed { bindings, .. } => bindings,
+            Self::Rejected { .. } => &[],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkbenchFailurePoint {
+    InputUnit { index: usize },
+    Publication { completed_input_units: usize },
+    Finalization { completed_input_units: usize },
+}
+
+impl WorkbenchFailurePoint {
+    #[must_use]
+    pub const fn next_index(self) -> usize {
+        match self {
+            Self::InputUnit { index } => index,
+            Self::Publication {
+                completed_input_units,
+            }
+            | Self::Finalization {
+                completed_input_units,
+            } => completed_input_units,
+        }
+    }
 }
 
 /// One term-level name visible in a persistent Haskell workbench.
@@ -1699,6 +1748,7 @@ mod tests {
             }],
             next_index: 1,
             total: 1,
+            publication: None,
         };
         let encoded = serde_json::to_value(response).unwrap();
         assert_eq!(encoded["status"], "replied");

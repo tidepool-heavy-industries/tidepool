@@ -2662,6 +2662,7 @@ pub(crate) fn tool_control_reply(
             }],
             next_index: 1,
             total: 1,
+            publication: None,
         }),
         Err(error) => Err(error.clone()),
     }
@@ -3529,6 +3530,7 @@ mod tests {
                     items: Vec::new(),
                     next_index: 0,
                     total: 0,
+                    publication: None,
                 }))
             })
         }
@@ -3609,6 +3611,7 @@ mod tests {
                                             items: Vec::new(),
                                             next_index: 0,
                                             total: 0,
+                                            publication: None,
                                         }))
                                     })
                                 },
@@ -3633,6 +3636,7 @@ mod tests {
                         items: Vec::new(),
                         next_index: 0,
                         total: 0,
+                        publication: None,
                     }))
                 });
                 match guard {
@@ -6511,6 +6515,7 @@ mod tests {
                     items: Vec::new(),
                     next_index: 0,
                     total: 0,
+                    publication: None,
                 }))
             })
         }

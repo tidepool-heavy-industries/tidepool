@@ -1329,6 +1329,7 @@ mod tests {
             items: Vec::new(),
             next_index: 0,
             total: 1,
+            publication: None,
         })
     }
 

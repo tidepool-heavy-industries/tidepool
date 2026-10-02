@@ -1083,6 +1083,56 @@ fn complete_cell_consumes_item_and_display_without_compiler_requests() {
 }
 
 #[test]
+fn following_declaration_retains_original_native_binding_inventory() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let lib = SessionLib::open(
+        SessionId(1004),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "original_binding",
+        "x <- pure (1 :: Int)",
+        0,
+        None,
+        &ScalePublication::Ephemeral,
+    );
+    let original = resident.current_binding_in(public, "x").unwrap();
+    assert_eq!(
+        original.1,
+        tidepool_repr::SessionModule::val(tidepool_repr::Generation(1))
+    );
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "following_declaration",
+        include_str!("fixtures/compiled-cell-native-binding-declaration.hs"),
+        1,
+        Some("1"),
+        &ScalePublication::Ephemeral,
+    );
+    assert_eq!(resident.current_binding_in(public, "x").unwrap(), original);
+}
+
+#[test]
 fn late_record_selector_replaces_earlier_cell_value() {
     let names = simple_cell_vertical(
         "record_selector",

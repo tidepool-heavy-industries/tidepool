@@ -705,6 +705,7 @@ fn unconfirmed_invocation_cleanup_preserves_committed_reply_and_receipts() {
         items: vec![receipt.clone()],
         next_index: 1,
         total: 1,
+        publication: None,
     };
     let terminal = ActorTerminal {
         kind: ActorExitKind::Completed,

@@ -367,17 +367,17 @@ async fn production_engine_store_active_cancellation_50() {
         let started_ns = started.duration_since(monotonic_origin).as_nanos();
         let scheduler = fixture.runtime.scheduler();
         let acknowledged = async {
-            assert_eq!(
+            assert!(matches!(
                 scheduler.wait(&cell.operation).await.unwrap(),
-                JobOutput::Cancelled
-            );
+                JobOutput::CancelledWithReceipt(_)
+            ));
             assert!(
                 matches!(
                     scheduler
                         .cancellation_acknowledgment(&cell.operation)
                         .await
                         .unwrap(),
-                    Some(CancellationAcknowledgment::Stopped)
+                    Some(CancellationAcknowledgment::StoppedWithReceipt(_))
                 ),
                 "only the retained native cancellation owner can acknowledge stop"
             );
