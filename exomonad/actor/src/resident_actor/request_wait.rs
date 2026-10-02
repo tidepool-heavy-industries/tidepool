@@ -111,9 +111,14 @@ async fn wait_watch_event(
     boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
 ) -> WatchWaitEvent {
     match blocked_watch_target(requests, groups, actor, watch, boundary) {
-        Ok(Some(refusal)) => return WatchWaitEvent::Refused(refusal),
-        Err(error) => return WatchWaitEvent::Resume(Err(error)),
-        Ok(None) => {}
+        Ok(Some(refusal)) => {
+            return match retirement.claim_before_shutdown(|| control.claim_expiry()) {
+                Ok(true) => WatchWaitEvent::Refused(refusal),
+                Ok(false) => WatchWaitEvent::Cancelled,
+                Err(terminal) => WatchWaitEvent::Retired(terminal),
+            };
+        }
+        Err(_) | Ok(None) => {}
     }
     let waiting = requests.await_watch(actor, watch);
     tokio::pin!(waiting);

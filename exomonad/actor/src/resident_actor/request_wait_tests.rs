@@ -150,6 +150,47 @@ async fn own_deferred_readiness_is_refused_without_waiting_or_cancelling_work() 
 }
 
 #[tokio::test]
+async fn deferred_refusal_preserves_cancellation_and_retirement_priority() {
+    for retired in [false, true] {
+        let fixture = Fixture::new();
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "thread".into(),
+            "request".into(),
+            "call".into(),
+        );
+        deferred_child(
+            &fixture.groups,
+            fixture.owner,
+            fixture.target,
+            boundary.clone(),
+        );
+        fixture.control.request_cancellation();
+        if retired {
+            fixture.retirement.request_shutdown(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "retirement before deferred refusal".into(),
+            });
+        }
+        let event = wait_watch_event(
+            &fixture.registry,
+            fixture.owner,
+            fixture.watch,
+            &fixture.control,
+            &fixture.retirement,
+            &fixture.groups,
+            Some(&boundary),
+        )
+        .await;
+        assert!(if retired {
+            matches!(event, WatchWaitEvent::Retired(_))
+        } else {
+            matches!(event, WatchWaitEvent::Cancelled)
+        });
+        assert!(fixture.control.cancellation_requested());
+    }
+}
+
+#[tokio::test]
 async fn unrelated_publication_and_committed_children_remain_awaitable() {
     for committed in [false, true] {
         let fixture = Fixture::new();
