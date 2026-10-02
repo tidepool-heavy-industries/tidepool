@@ -81,6 +81,7 @@ rust_filegroup(
         "src/resident_actor/command_settlement.rs": "exomonad/actor/src/resident_actor/command_settlement.rs",
         "src/resident_actor/commands.rs": "exomonad/actor/src/resident_actor/commands.rs",
         "src/resident_actor/drain_wait.rs": "exomonad/actor/src/resident_actor/drain_wait.rs",
+        "src/resident_actor/inherited_host_tests.rs": "exomonad/actor/src/resident_actor/inherited_host_tests.rs",
         "src/resident_actor/inspection_wait.rs": "exomonad/actor/src/resident_actor/inspection_wait.rs",
         "src/resident_actor/inspection_wait_tests.rs": "exomonad/actor/src/resident_actor/inspection_wait_tests.rs",
         "src/resident_actor/invocation_work.rs": "exomonad/actor/src/resident_actor/invocation_work.rs",
