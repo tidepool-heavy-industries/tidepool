@@ -2025,6 +2025,20 @@ impl ResidentKernelBoundary {
 }
 
 impl ResidentActorBoundary {
+    pub(crate) fn success_disposition(
+        &self,
+    ) -> tidepool_runtime::session::WorkbenchOperationDisposition {
+        use tidepool_runtime::session::WorkbenchOperationDisposition;
+        match self {
+            Self::Context {
+                request: crate::ContextReq::GetContextWith,
+                ..
+            } => WorkbenchOperationDisposition::Read,
+            Self::Context { .. } => WorkbenchOperationDisposition::Staged,
+            _ => WorkbenchOperationDisposition::Committed,
+        }
+    }
+
     pub(crate) fn operation(&self) -> &'static str {
         match self {
             Self::Completed => "program completion",

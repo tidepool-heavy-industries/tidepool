@@ -1464,6 +1464,7 @@ where
                                             ordinal: pending.ordinal,
                                             effect: pending.effect,
                                             started: pending.started,
+                                            success_disposition: pending.success_disposition,
                                         };
                                         Ok(WorkbenchAdvance::Park(
                                             behavior.resume_owned_effect_task(
@@ -1516,6 +1517,7 @@ where
                                     ordinal: pending.ordinal,
                                     effect: pending.effect,
                                     started: pending.started,
+                                    success_disposition: pending.success_disposition,
                                 };
                                 Ok(WorkbenchAdvance::Park(behavior.resume_owned_effect_task(
                                     owned,
@@ -1551,6 +1553,7 @@ where
                             ordinal: pending.ordinal,
                             effect: pending.effect,
                             started: pending.started,
+                            success_disposition: pending.success_disposition,
                         };
                         Ok(WorkbenchAdvance::Park(behavior.resume_owned_effect_task(
                             owned,
@@ -1764,7 +1767,7 @@ where
                     pending.ordinal,
                     &pending.effect,
                     pending.started.elapsed(),
-                    result.disposition,
+                    scoped_operation_disposition(pending.success_disposition, result.disposition),
                 );
                 if let Some(job) = result.started_job {
                     owned

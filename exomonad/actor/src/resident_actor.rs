@@ -1131,6 +1131,17 @@ fn disposition_for_non_command_failure(
     }
 }
 
+fn scoped_operation_disposition(
+    success: WorkbenchOperationDisposition,
+    actual: WorkbenchOperationDisposition,
+) -> WorkbenchOperationDisposition {
+    if actual == WorkbenchOperationDisposition::Committed {
+        success
+    } else {
+        actual
+    }
+}
+
 fn settle_prepared_operations(
     operations: &mut [WorkbenchOperationReceipt],
     disposition: WorkbenchOperationDisposition,
@@ -1581,12 +1592,14 @@ impl Default for WorkbenchCursor {
 }
 
 struct WorkbenchEffectStamp {
+    success_disposition: WorkbenchOperationDisposition,
     ordinal: usize,
     effect: String,
     started: std::time::Instant,
 }
 
 struct ParkedWorkbenchEffect {
+    success_disposition: WorkbenchOperationDisposition,
     wait: OwnedWorkbenchWait,
     ordinal: usize,
     effect: String,
@@ -7299,6 +7312,7 @@ where
                         .fragment
                         .as_mut()
                         .expect("captured effect retains its fragment");
+                    let success_disposition = boundary.success_disposition();
                     let effect = boundary.operation().to_owned();
                     self.runtime_observation.publish_workbench_posture(
                         crate::ActorWorkbenchPosture::AwaitingEffect {
@@ -7315,6 +7329,7 @@ where
                     // `elapsed_ms` once the match below settles it.
                     let effect_started = std::time::Instant::now();
                     current.inflight_effect = Some(WorkbenchEffectStamp {
+                        success_disposition,
                         ordinal,
                         effect: effect.clone(),
                         started: effect_started,
@@ -7458,6 +7473,11 @@ where
                                         .arm_sleep();
                                 }
                                 current.parked_effect = Some(ParkedWorkbenchEffect {
+                                    success_disposition: current
+                                        .inflight_effect
+                                        .as_ref()
+                                        .expect("parked effect retains its boundary stamp")
+                                        .success_disposition,
                                     wait,
                                     ordinal,
                                     effect,
@@ -7725,8 +7745,12 @@ where
                                         ordinal,
                                         &effect,
                                         effect_started.elapsed(),
-                                        command_disposition
-                                            .unwrap_or(WorkbenchOperationDisposition::Committed),
+                                        scoped_operation_disposition(
+                                            success_disposition,
+                                            command_disposition.unwrap_or(
+                                                WorkbenchOperationDisposition::Committed,
+                                            ),
+                                        ),
                                     );
                                     outcome
                                 }
@@ -7739,9 +7763,12 @@ where
                                         ordinal,
                                         &effect,
                                         effect_started.elapsed(),
-                                        command_disposition.unwrap_or_else(|| {
-                                            disposition_for_non_command_failure(&error)
-                                        }),
+                                        scoped_operation_disposition(
+                                            success_disposition,
+                                            command_disposition.unwrap_or_else(|| {
+                                                disposition_for_non_command_failure(&error)
+                                            }),
+                                        ),
                                     );
                                     return Err(error);
                                 }
@@ -14386,6 +14413,104 @@ mod tests {
             failure.receipts[0].operations[0].disposition,
             WorkbenchOperationDisposition::Unknown
         );
+    }
+
+    fn completed_context_operations() -> Vec<WorkbenchOperationReceipt> {
+        let execution = WorkbenchExecutionId::from_digest([11; 16]);
+        let requests = [
+            crate::ContextReq::GetContextWith,
+            crate::ContextReq::PutContextWith(tidepool_bridge_effects::ContextDocument {
+                blocks: Vec::new(),
+            }),
+            crate::ContextReq::SetNextModelWith("next-model".into()),
+        ];
+        let mut operations = Vec::new();
+        for (ordinal, request) in requests.into_iter().enumerate() {
+            let boundary = crate::ResidentActorBoundary::Context {
+                continuation: tidepool_runtime::session::ResidentHole::plain("context-answer"),
+                request,
+                table: tidepool_repr::DataConTable::new(),
+            };
+            super::record_workbench_operation(
+                &mut operations,
+                Some(&execution),
+                0,
+                ordinal,
+                boundary.operation(),
+                std::time::Duration::ZERO,
+                super::scoped_operation_disposition(
+                    boundary.success_disposition(),
+                    WorkbenchOperationDisposition::Committed,
+                ),
+            );
+        }
+        operations
+    }
+
+    fn assert_context_receipt_states(operations: &[WorkbenchOperationReceipt]) {
+        let encoded = serde_json::to_value(operations).unwrap();
+        for (ordinal, state) in ["read", "staged", "staged"].into_iter().enumerate() {
+            assert_eq!(encoded[ordinal]["effect"], "context transformation");
+            assert_eq!(encoded[ordinal]["disposition"], state);
+        }
+    }
+
+    #[test]
+    fn context_operation_receipts_are_not_promoted_at_cell_completion() {
+        let mut operations = completed_context_operations();
+        // Ordinary per-item success settles provisional fork admissions, but
+        // it is not the Store's enclosing context transaction acknowledgment.
+        super::settle_prepared_operations(
+            &mut operations,
+            WorkbenchOperationDisposition::Committed,
+        );
+        assert_context_receipt_states(&operations);
+    }
+
+    #[test]
+    fn context_operation_receipts_survive_failure_and_cancellation_without_commit() {
+        let failure = workbench_failure_after_operations(
+            &[],
+            0,
+            1,
+            crate::ResidentActorWorkbenchError::ActorProtocol("authored cell failed".into()),
+            completed_context_operations(),
+        );
+        assert_context_receipt_states(&failure.receipts[0].operations);
+        let cancelled = workbench_response(
+            WorkbenchRunStatus::RequestCancelled,
+            failure.receipts,
+            0,
+            1,
+            None,
+        );
+        assert_context_receipt_states(&cancelled.items[0].operations);
+        let cleanup_failure =
+            failed_checkpoint_cleanup_response(cancelled, "cleanup unavailable".into());
+        assert_context_receipt_states(&cleanup_failure.receipts[0].operations);
+    }
+
+    #[test]
+    fn delivered_context_response_does_not_claim_store_commit() {
+        let error = crate::ResidentActorWorkbenchError::Delivered(ResidentError::ForeignCustody);
+        let delivered = disposition_for_non_command_failure(&error);
+        assert_eq!(delivered, WorkbenchOperationDisposition::Committed);
+        for disposition in [
+            WorkbenchOperationDisposition::Read,
+            WorkbenchOperationDisposition::Staged,
+        ] {
+            assert_eq!(
+                super::scoped_operation_disposition(disposition, delivered),
+                disposition
+            );
+            assert_eq!(
+                super::scoped_operation_disposition(
+                    disposition,
+                    WorkbenchOperationDisposition::Unknown
+                ),
+                WorkbenchOperationDisposition::Unknown
+            );
+        }
     }
 
     #[test]
