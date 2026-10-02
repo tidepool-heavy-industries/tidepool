@@ -789,9 +789,11 @@ impl ForkGroupRegistry {
                     .send_replace(CheckpointPhase::ReleasedAfterPublication);
                 Some(lease.scope)
             }
-            CheckpointPhase::Failed
-            | CheckpointPhase::Released
-            | CheckpointPhase::ReleasedAfterPublication => None,
+            // Failed settlement returns the original captured scope for
+            // immediate cleanup, but that cleanup can fail. Transfer it to
+            // the same retryable release record used by published captures.
+            CheckpointPhase::Failed => Some(lease.scope),
+            CheckpointPhase::Released | CheckpointPhase::ReleasedAfterPublication => None,
         };
         state.released_checkpoints.insert(
             token.to_owned(),
@@ -2482,6 +2484,62 @@ mod tests {
             restarted.release_checkpoint(&published, SessionId(7)),
             Err(CheckpointRefusal::ProcessRestartUnsupported)
         );
+    }
+
+    #[test]
+    fn failed_checkpoint_release_retains_scope_until_retry_is_confirmed() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let issuer = ActorRef::first(ActorId(1));
+        let boundary =
+            WorkbenchForkBoundary::external("thread".into(), "call".into(), "call".into());
+        let token = groups.capture_checkpoint(
+            "failed capture".into(),
+            issuer,
+            crate::EffectiveRole::root(),
+            None,
+            None,
+            crate::CheckpointSourceLayer::default(),
+            SessionId(7),
+            ScopeId(3),
+            boundary,
+        );
+
+        // Failed settlement starts retirement of the original captured scope.
+        assert_eq!(
+            groups.settle_checkpoint(&token, SessionId(7), false),
+            Ok(Some(ScopeId(3)))
+        );
+        assert_eq!(
+            groups.failed_checkpoint_scopes(issuer),
+            vec![(SessionId(7), ScopeId(3))]
+        );
+
+        // Model a failed first retirement by withholding confirmation.
+        // Releasing the token transfers the same obligation into the retryable
+        // released-checkpoint record.
+        assert_eq!(
+            groups.release_checkpoint(&token, SessionId(7)),
+            Ok(Some(ScopeId(3)))
+        );
+        assert!(groups.failed_checkpoint_scopes(issuer).is_empty());
+        assert_eq!(
+            groups.pending_release_scopes(SessionId(7)),
+            vec![(token.clone(), ScopeId(3))]
+        );
+        assert!(groups.retains_session(SessionId(7)));
+
+        // An unconfirmed retry returns the original scope again. Confirmation
+        // is the only operation that consumes the pending retirement.
+        assert_eq!(
+            groups.release_checkpoint(&token, SessionId(7)),
+            Ok(Some(ScopeId(3)))
+        );
+        groups
+            .confirm_checkpoint_release(&token, SessionId(7), ScopeId(3))
+            .unwrap();
+        assert!(groups.pending_release_scopes(SessionId(7)).is_empty());
+        assert!(!groups.retains_session(SessionId(7)));
+        assert_eq!(groups.release_checkpoint(&token, SessionId(7)), Ok(None));
     }
 
     #[test]
