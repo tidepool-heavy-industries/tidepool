@@ -377,10 +377,10 @@ async fn resident_sync_context_commits_before_deferred_children_and_child_model_
                 include_str!("fixtures/context_acceptance_child.hs"),
             );
         } else {
+            let output = successful_output(&round.request, "context-child");
             assert_eq!(round.request.model, "gpt-6.1-sol");
             assert!(has_user_text(&round.request, "child-curated"));
             assert!(!has_user_text(&round.request, "parent-curated"));
-            let output = successful_output(&round.request, "context-child");
             assert_eq!(
                 output["items"].as_array().unwrap().last().unwrap()["output"],
                 "43"
