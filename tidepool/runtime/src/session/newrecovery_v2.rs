@@ -10,8 +10,8 @@ use tidepool_repr::Generation;
 use tidepool_toolchain::artifact_inventory::{ArtifactDependency, ArtifactDescriptor, ArtifactId};
 use tidepool_toolchain::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
 use tidepool_toolchain::recovery_artifacts::{
-    verify_materialized_join_with_work, verify_materialized_ref_with_work, RecoveryArtifactError,
-    RecoveryArtifactRef, RecoveryArtifactWork, RecoveryJoinRef, RecoveryValueInterfaceRef,
+    with_recovery_artifact_verification, RecoveryArtifactError, RecoveryArtifactRef,
+    RecoveryArtifactWork, RecoveryJoinRef, RecoveryValueInterfaceRef,
 };
 
 #[path = "newrecovery_v2/snapshots.rs"]
@@ -912,35 +912,36 @@ impl RecoveryGraph {
     ) -> Result<BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>, RecoveryError> {
         let root = fs::canonicalize(root)
             .map_err(|e| error(format!("could not resolve recovery root: {e}")))?;
-        let mut losses = BTreeMap::new();
-        for artifact in self.artifacts() {
-            let (interface, product) = artifact.paths();
-            validate_relative(interface)?;
-            if let Some(product) = product {
-                validate_relative(product)?;
-            }
-            let key = artifact.artifact_id();
-            let mut item_losses = Vec::new();
-            let verification = match artifact {
-                RecoveryArtifactClosure::Home(reference) => {
-                    verify_materialized_ref_with_work(&root, reference, work).map(|_| ())
+        with_recovery_artifact_verification(&root, work, |verification| {
+            let mut losses = BTreeMap::new();
+            for artifact in self.artifacts() {
+                let (interface, product) = artifact.paths();
+                validate_relative(interface)?;
+                if let Some(product) = product {
+                    validate_relative(product)?;
                 }
-                RecoveryArtifactClosure::Join(reference) => {
-                    verify_materialized_join_with_work(&root, reference, work).map(|_| ())
+                let key = artifact.artifact_id();
+                let mut item_losses = Vec::new();
+                let verification = match artifact {
+                    RecoveryArtifactClosure::Home(reference) => {
+                        verification.verify_home(reference).map(|_| ())
+                    }
+                    RecoveryArtifactClosure::Join(reference) => {
+                        verification.verify_join(reference).map(|_| ())
+                    }
+                    RecoveryArtifactClosure::ValueInterface(reference) => {
+                        verification.verify_join(&reference.interface).map(|_| ())
+                    }
+                };
+                if let Err(error) = verification {
+                    item_losses.push(artifact_error_loss(artifact, error));
                 }
-                RecoveryArtifactClosure::ValueInterface(reference) => {
-                    verify_materialized_join_with_work(&root, &reference.interface, work)
-                        .map(|_| ())
+                if !item_losses.is_empty() {
+                    losses.insert(key, item_losses);
                 }
-            };
-            if let Err(error) = verification {
-                item_losses.push(artifact_error_loss(artifact, error));
             }
-            if !item_losses.is_empty() {
-                losses.insert(key, item_losses);
-            }
-        }
-        Ok(losses)
+            Ok(losses)
+        })
     }
 }
 
@@ -3223,6 +3224,83 @@ mod tests {
         let mut changed = graph;
         changed.nodes[1].state = RecoveryNodeState::ExactArtifactClosure;
         assert!(changed.validate().is_err());
+    }
+
+    #[test]
+    fn artifact_validation_shares_package_bytes_and_rechecks_each_read() {
+        use ciborium::value::Value;
+        use tidepool_toolchain::recovery_artifacts::{
+            materialize_joined_interface, verify_materialized_join_with_work,
+            verify_materialized_ref_with_work,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("package.hi");
+        fs::write(&package, b"interface").unwrap();
+        let mut wire = fixture(dir.path());
+        let RecoveryArtifactClosure::Home(home) = &mut wire.artifacts[0] else {
+            unreachable!()
+        };
+        let sidecar = dir.path().join(&home.package_imports_path);
+        let mut witness: Value =
+            ciborium::de::from_reader(fs::read(&sidecar).unwrap().as_slice()).unwrap();
+        let Value::Array(fields) = &mut witness else {
+            unreachable!()
+        };
+        fields[3] = Value::Array(vec![Value::Array(vec![
+            Value::Text("base-unit".into()),
+            Value::Text("Data.Base".into()),
+            Value::Text(package.display().to_string()),
+            Value::Text(IFACE_SHA.iter().map(|byte| format!("{byte:02x}")).collect()),
+        ])]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&witness, &mut bytes).unwrap();
+        fs::write(&sidecar, bytes).unwrap();
+        let join = materialize_joined_interface(
+            dir.path(),
+            home.toolchain_identity_sha256,
+            &home.unit,
+            &home.module,
+            &dir.path().join(&home.interface_path),
+            home.skinny_iface_sha256,
+        )
+        .unwrap();
+        home.package_imports_sha256 = join.package_imports_sha256;
+        let certification_path = dir.path().join(&home.certification_path);
+        let mut separate = RecoveryArtifactWork::default();
+        verify_materialized_ref_with_work(dir.path(), home, &mut separate).unwrap();
+        verify_materialized_join_with_work(dir.path(), &join, &mut separate).unwrap();
+        let home_id = wire.artifacts[0].artifact_id();
+        let join = RecoveryArtifactClosure::Join(join);
+        let join_id = join.artifact_id();
+        wire.nodes[0].artifact_refs = vec![home_id];
+        wire.nodes[1].artifact_refs = vec![join_id];
+        wire.nodes[1].state = RecoveryNodeState::ExactArtifactClosure;
+        wire.artifacts.push(join);
+        wire.seal().unwrap();
+        let graph = snapshot(&wire);
+        let mut batched = RecoveryArtifactWork::default();
+        assert!(graph
+            .validate_artifact_files_with_work(dir.path(), &mut batched)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            separate.hash_bytes - batched.hash_bytes,
+            b"interface".len() as u64
+        );
+
+        let bytes = serde_json::to_vec(&graph).unwrap();
+        let path = dir.path().join("graph.json");
+        fs::write(&package, b"corrupt").unwrap();
+        let recovered = read_v2_bytes(&path, dir.path(), &bytes, RecoveryReadPurpose::Metadata)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.artifact_losses.len(), 2);
+        fs::write(&package, b"interface").unwrap();
+        fs::write(&certification_path, b"corrupt").unwrap();
+        let losses = graph.validate_artifact_files(dir.path()).unwrap();
+        assert_eq!(losses.len(), 1);
+        assert!(losses.contains_key(&home_id));
     }
 
     #[test]

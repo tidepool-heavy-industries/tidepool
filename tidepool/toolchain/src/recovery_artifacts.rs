@@ -443,7 +443,7 @@ const CERTIFICATION_LIMIT: u64 = 4 * 1024 * 1024;
 
 // Captures belong to one validation stage, never to a later filesystem check.
 // Limit retained bytes without rejecting an otherwise valid large closure:
-// interfaces beyond the budget keep the existing read-and-verify behavior.
+// interfaces and execution graphs beyond the budget are read and verified again.
 const PACKAGE_VALIDATION_RETAIN_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Bytes actually consumed by SHA-256 in recovery materialization/verification.
@@ -463,11 +463,47 @@ pub(crate) fn with_artifact_work<T, E>(
     result
 }
 
+/// Share bounded package captures across one filesystem validation operation.
+/// A later operation starts fresh and rechecks the files.
+pub fn with_recovery_artifact_verification<T, E>(
+    root: &Path,
+    work: &mut RecoveryArtifactWork,
+    operation: impl FnOnce(&mut RecoveryArtifactVerification<'_>) -> Result<T, E>,
+) -> Result<T, E> {
+    with_artifact_work(work, |validation| {
+        operation(&mut RecoveryArtifactVerification { root, validation })
+    })
+}
+
+/// Available only inside one `with_recovery_artifact_verification` operation.
+pub struct RecoveryArtifactVerification<'a> {
+    root: &'a Path,
+    validation: &'a mut PackageInterfaceValidation,
+}
+
+impl RecoveryArtifactVerification<'_> {
+    pub fn verify_home(
+        &mut self,
+        reference: &RecoveryArtifactRef,
+    ) -> Result<VerifiedRecoveryArtifact, RecoveryArtifactError> {
+        verify_materialized_ref_with_validation(self.root, reference, self.validation)
+    }
+
+    pub fn verify_join(
+        &mut self,
+        reference: &RecoveryJoinRef,
+    ) -> Result<VerifiedRecoveryJoin, RecoveryArtifactError> {
+        verify_materialized_join_with_validation(self.root, reference, self.validation)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct PackageInterfaceValidation {
     captured: BTreeMap<PathBuf, CapturedPackageInterface>,
     retained_bytes: usize,
     hash_bytes: u64,
+    #[cfg(test)]
+    pub(crate) home_witness_validations: usize,
     execution_sources:
         BTreeMap<PathBuf, Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
 }
@@ -600,7 +636,12 @@ fn verify_execution_source(
         let graph =
             crate::execution_source::CertifiedExecutionSourceGraph::recover_verified(bytes, digest)
                 .map_err(|_| RecoveryArtifactError::InvalidReference)?;
-        validation.execution_sources.insert(path, graph.clone());
+        if graph.bytes().len()
+            <= PACKAGE_VALIDATION_RETAIN_LIMIT.saturating_sub(validation.retained_bytes)
+        {
+            validation.retained_bytes += graph.bytes().len();
+            validation.execution_sources.insert(path, graph.clone());
+        }
         graph
     };
     if graph.producer_sha256() != producer {
@@ -644,12 +685,17 @@ fn ref_owner(reference: &RecoveryArtifactRef) -> CachedHomeOwner {
     }
 }
 
+struct VerifiedCertification {
+    bytes: Vec<u8>,
+    execution_source_digest: Option<[u8; 32]>,
+}
+
 fn read_certification(
     path: &Path,
     expected_sha256: Option<&[u8; 32]>,
     owner: &CachedHomeOwner,
     validation: &mut PackageInterfaceValidation,
-) -> Result<Vec<u8>, RecoveryArtifactError> {
+) -> Result<VerifiedCertification, RecoveryArtifactError> {
     let metadata = fs::metadata(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             RecoveryArtifactError::CertifiedOwnersUnavailable(path.to_path_buf())
@@ -679,11 +725,15 @@ fn read_certification(
             path.to_path_buf(),
         ));
     }
-    crate::certified_products::validate_home_certification_with_validation(
-        &bytes, owner, validation,
-    )
-    .map_err(|_| RecoveryArtifactError::InvalidCertifiedOwners(path.to_path_buf()))?;
-    Ok(bytes)
+    let execution_source_digest =
+        crate::certified_products::home_execution_source_digest_with_validation(
+            &bytes, owner, validation,
+        )
+        .map_err(|_| RecoveryArtifactError::InvalidCertifiedOwners(path.to_path_buf()))?;
+    Ok(VerifiedCertification {
+        bytes,
+        execution_source_digest,
+    })
 }
 
 fn read_package_imports(
@@ -1376,12 +1426,6 @@ pub(crate) fn materialize_certified_products_with_validation(
                 certification_path,
             ));
         }
-        crate::certified_products::validate_home_certification_with_validation(
-            &product.certification_bytes,
-            owner,
-            validation,
-        )
-        .map_err(|_| RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone()))?;
         let source_digest =
             crate::certified_products::home_execution_source_digest_with_validation(
                 &product.certification_bytes,
@@ -1511,7 +1555,7 @@ pub fn materialize_recovery_closure(
             interface_bytes,
             product_bytes,
             package_imports_bytes,
-            certification_bytes,
+            certification_bytes.bytes,
         ));
     }
     materialize_certified_products_with_validation(
@@ -1541,8 +1585,8 @@ pub fn verify_materialized_ref_with_work(
     reference: &RecoveryArtifactRef,
     work: &mut RecoveryArtifactWork,
 ) -> Result<VerifiedRecoveryArtifact, RecoveryArtifactError> {
-    with_artifact_work(work, |validation| {
-        verify_materialized_ref_with_validation(recovery_root, reference, validation)
+    with_recovery_artifact_verification(recovery_root, work, |verification| {
+        verification.verify_home(reference)
     })
 }
 
@@ -1584,19 +1628,13 @@ pub(crate) fn verify_materialized_ref_with_validation(
     )?;
     let certification_path = resolve_owned(recovery_root, &reference.certification_path)
         .map_err(classify_certification_path_error)?;
-    let certification_bytes = read_certification(
+    let certification = read_certification(
         &certification_path,
         Some(&reference.certification_sha256),
         &owner,
         validation,
     )?;
-    let source_digest = crate::certified_products::home_execution_source_digest_with_validation(
-        &certification_bytes,
-        &owner,
-        validation,
-    )
-    .map_err(|_| RecoveryArtifactError::InvalidCertifiedOwners(certification_path.clone()))?;
-    if source_digest
+    if certification.execution_source_digest
         != reference
             .execution_source
             .as_ref()
@@ -1628,7 +1666,7 @@ pub(crate) fn verify_materialized_ref_with_validation(
         interface_bytes,
         package_imports_bytes,
         certification_path,
-        certification_bytes,
+        certification_bytes: certification.bytes,
         product_bytes,
         execution_source,
     })
@@ -1652,8 +1690,8 @@ pub fn verify_materialized_join_with_work(
     reference: &RecoveryJoinRef,
     work: &mut RecoveryArtifactWork,
 ) -> Result<VerifiedRecoveryJoin, RecoveryArtifactError> {
-    with_artifact_work(work, |validation| {
-        verify_materialized_join_with_validation(recovery_root, reference, validation)
+    with_recovery_artifact_verification(recovery_root, work, |verification| {
+        verification.verify_join(reference)
     })
 }
 
@@ -1736,7 +1774,16 @@ mod tests {
                 .unwrap()
             })
             .collect::<Vec<_>>();
-        let references = materialize_certified_products(run.path(), [7; 32], &products).unwrap();
+        let mut materialization = PackageInterfaceValidation::default();
+        let references = materialize_certified_products_with_validation(
+            run.path(),
+            [7; 32],
+            &products,
+            &mut materialization,
+            MaterializationMode::Durable,
+        )
+        .unwrap();
+        assert_eq!(materialization.home_witness_validations, products.len());
         assert_eq!(
             references[0].execution_source,
             references[1].execution_source
@@ -1767,6 +1814,7 @@ mod tests {
             second.execution_source.as_ref().unwrap()
         ));
         assert_eq!(validation.execution_sources.len(), 1);
+        assert_eq!(validation.home_witness_validations, references.len());
         let mut graph_validation = PackageInterfaceValidation::default();
         for (reference, owner) in references.iter().zip(&owners) {
             verify_execution_source(
@@ -1779,6 +1827,22 @@ mod tests {
             .unwrap();
         }
         assert_eq!(graph_validation.hash_bytes, graph.bytes().len() as u64);
+        let mut uncaptured = PackageInterfaceValidation {
+            retained_bytes: PACKAGE_VALIDATION_RETAIN_LIMIT,
+            ..Default::default()
+        };
+        for (reference, owner) in references.iter().zip(&owners) {
+            verify_execution_source(
+                run.path(),
+                reference.execution_source.as_ref().unwrap(),
+                [7; 32],
+                owner,
+                &mut uncaptured,
+            )
+            .unwrap();
+        }
+        assert!(uncaptured.execution_sources.is_empty());
+        assert_eq!(uncaptured.hash_bytes, 2 * graph.bytes().len() as u64);
         fs::remove_file(source.path().join("A.hs")).unwrap();
         assert!(verify_materialized_ref(run.path(), &references[0]).is_ok());
         let mut mismatched = references[0].clone();
