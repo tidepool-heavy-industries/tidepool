@@ -2705,7 +2705,7 @@ impl<H, O> ResidentActorRunner<H, O> {
     ///
     /// `seed`, when the launch carried one (`crate::start::ChildSessionSeed`
     /// — an eligible launch always does), is written to the child's own
-    /// session root BEFORE the bootstrap install: the facade
+    /// session root BEFORE the bootstrap install: any declaration facade
     /// `capture_decoded` materialized under the PARENT's session root (its
     /// `import Tidepool.Session.Lib.G<n> (...)` line names generations that
     /// otherwise exist nowhere the child can find them) and every
@@ -2746,8 +2746,12 @@ impl<H, O> ResidentActorRunner<H, O> {
         let source_layer = source_layer.to_vec();
         let seed = seed.map(|seed| {
             (
-                seed.facade.identity().relative_hs_path(),
-                seed.facade.source().to_owned(),
+                seed.facade.as_ref().map(|facade| {
+                    (
+                        facade.identity().relative_hs_path(),
+                        facade.source().to_owned(),
+                    )
+                }),
                 seed.lib_sources.clone(),
                 seed.val_generation,
             )
@@ -2770,16 +2774,17 @@ impl<H, O> ResidentActorRunner<H, O> {
                     tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
                 )
                 .map_err(|error| format!("child session bootstrap context: {error}"))?;
-            if let Some((facade_path, facade_source, lib_sources, val_generation)) = seed {
+            if let Some((facade, lib_sources, val_generation)) = seed {
                 let root = machine
                     .compile_view_in(tidepool_codegen::scope::ScopeId::ROOT)
                     .ok_or_else(|| {
-                        "child session has no compile view to seed with the parent's facade"
-                            .to_string()
+                        "child session has no compile view for inherited source seeding".to_string()
                     })?
                     .session_root()
                     .to_path_buf();
-                write_seed_source(&root.join(facade_path), &facade_source)?;
+                if let Some((facade_path, facade_source)) = facade {
+                    write_seed_source(&root.join(facade_path), &facade_source)?;
+                }
                 for (relative, source) in &lib_sources {
                     write_seed_source(&root.join(relative), source)?;
                 }

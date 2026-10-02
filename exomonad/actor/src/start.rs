@@ -225,20 +225,18 @@ pub(crate) struct CapturedChildLaunch {
     /// `Some` exactly for an eligible launch (see `child_session_eligibility`):
     /// everything `ResidentActorRunner::provision_child_session` needs to
     /// give the child's own, freshly built session what its first cell (the
-    /// tool installer) will need to compile against the facade
-    /// `with_source_imports` already names — the facade never physically
-    /// existed under the child's own session root otherwise. `None` for a
-    /// same-session launch: nothing to seed, the facade is already
+    /// tool installer) will need to compile against any selected declaration
+    /// facade. A launch with no declaration exports carries no facade.
+    /// `None` for a same-session launch, whose selected source is already
     /// reachable from the session that will run it.
     pub seed: Option<ChildSessionSeed>,
 }
 
 /// Captured in `capture_decoded` while the PARENT checkout is still held —
 /// everything a fresh child session needs physically present on its own
-/// disk before a cell can compile there against the facade the parent
-/// materialized: the facade itself (path + source, already rendered), the
-/// source text of every `Tidepool/Session/Lib/G<n>.hs` module under the
-/// parent's session root at that exact moment (the facade's `import`
+/// disk before its first cell: an optional declaration facade (path + source,
+/// already rendered), the source text of every `Tidepool/Session/Lib/G<n>.hs`
+/// module under the parent's session root at that exact moment (the facade's `import`
 /// line names whichever generations it re-exports from; read every Lib
 /// module present rather than parsing that line, since a re-exported
 /// item's own definition may in turn reference an EARLIER generation), and
@@ -246,7 +244,7 @@ pub(crate) struct CapturedChildLaunch {
 /// the child's own counter past every generation number a copied file uses
 /// before the child ever mints one of its own.
 pub(crate) struct ChildSessionSeed {
-    pub facade: MaterializedFacade,
+    pub facade: Option<MaterializedFacade>,
     pub lib_sources: Vec<(std::path::PathBuf, String)>,
     pub val_generation: Generation,
 }
@@ -406,7 +404,7 @@ impl ResidentActorStart {
         let entry = session
             .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)?
             .ok_or(ActorStartCaptureError::MissingEntry)?;
-        let facade = materialize_entry_facade(session, &entry)?;
+        let facade = materialize_entry_facade(session, entry.provenance())?;
         let effective_role = role.effective_role(!launch_worktrees.is_empty());
         let effective_role = match effect_keys {
             Some(keys) => {
@@ -497,7 +495,7 @@ impl ResidentActorStart {
         .with_fork_budget(fork_budget)
         .with_creator(parent_actor)
         .with_checkpoint_token(checkpoint)
-        .with_source_imports(crate::ActorSourceImports::from_exact_facades([&facade]));
+        .with_source_imports(crate::ActorSourceImports::from_exact_facades(facade.iter()));
         if lifetime != WorkerLifetime::SwarmOwned {
             descriptor = descriptor.with_supervisor_parent(parent_actor);
         }
@@ -578,31 +576,33 @@ fn child_session_eligibility(
 
 fn materialize_entry_facade<H, O>(
     session: &ResidentSession<H, O>,
-    entry: &RootCustody,
-) -> Result<MaterializedFacade, ActorStartCaptureError>
+    provenance: &tidepool_runtime::session::ProgramProvenance,
+) -> Result<Option<MaterializedFacade>, ActorStartCaptureError>
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let heads = facade_heads(entry.provenance());
+    let heads = facade_heads(provenance);
     let scope = session.run_context().lexical_scope;
-    validate_head_incarnations(session, scope, entry.provenance(), &heads)?;
+    validate_head_incarnations(session, scope, provenance, &heads)?;
     let names: Vec<_> = heads.iter().map(String::as_str).collect();
     let surface = session.exact_exports_in(scope, &names)?;
+    // A child with no declaration exports needs no module or source import.
+    // Its executable entry and type-site provenance remain owned by custody.
+    if surface.items().is_empty() {
+        return Ok(None);
+    }
     let view = session
         .compile_view_in(scope)
         .ok_or(ActorStartCaptureError::NoCompileView)?;
-    Ok(surface.materialize(&view)?)
+    Ok(Some(surface.materialize(&view)?))
 }
 
 /// Every `Tidepool/Session/Lib/G<n>.hs` file under `scope`'s session root
 /// right now, as `(path relative to the session root, source text)` pairs —
 /// the source half of a [`ChildSessionSeed`]. `None` only when this session
-/// has no compile view at `scope` at all (the same condition
-/// `materialize_entry_facade` already turns into
-/// [`ActorStartCaptureError::NoCompileView`] for the facade itself); an
-/// unreadable directory (no declarations committed yet) is an empty list,
-/// not an error, since a launch with no Lib generations to copy is ordinary,
+/// has no compile view at `scope` at all. An unreadable directory (no declarations
+/// committed yet) is an empty list, not an error, since a launch with no Lib generations to copy is ordinary,
 /// not exceptional.
 fn capture_lib_sources<H, O>(
     session: &ResidentSession<H, O>,
@@ -729,8 +729,6 @@ impl ActorLaunchRoleWire {
 
 #[cfg(test)]
 mod tests {
-    use super::facade_heads;
-
     #[test]
     fn selected_profile_preserves_exact_keys_and_rejects_a_second_selection() {
         use super::{
@@ -815,8 +813,69 @@ mod tests {
 
     #[test]
     fn empty_provenance_requires_no_child_facade() {
-        let heads = facade_heads(&tidepool_runtime::session::ProgramProvenance::default());
-        assert!(heads.is_empty());
+        let (session, root) = facade_selection_fixture();
+        let facade = super::materialize_entry_facade(
+            &session,
+            &tidepool_runtime::session::ProgramProvenance::default(),
+        )
+        .unwrap();
+        assert!(facade.is_none());
+        assert_eq!(
+            crate::ActorSourceImports::from_exact_facades(facade.iter()),
+            crate::ActorSourceImports::default()
+        );
+        assert!(!root.path().join("Tidepool/Actor/Surface").exists());
+    }
+
+    fn facade_selection_fixture() -> (
+        tidepool_runtime::session::ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        tempfile::TempDir,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let lib = tidepool_runtime::session::SessionLib::open(
+            tidepool_repr::SessionId(17),
+            root.path(),
+            tidepool_runtime::session::ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        (
+            tidepool_runtime::session::ResidentSession::unbootstrapped(
+                frunk::HNil,
+                tidepool_mcp::CapturedOutput::new(),
+                tidepool_runtime::DEFAULT_NURSERY_SIZE,
+                Some(lib),
+            ),
+            root,
+        )
+    }
+
+    #[test]
+    fn nonempty_facade_selection_still_refuses_unknown_exports() {
+        let (session, root) = facade_selection_fixture();
+        let provenance = tidepool_runtime::session::ProgramProvenance::from_sites(&[
+            tidepool_runtime::YieldSite {
+                site: 17,
+                origin: "entry".into(),
+                ordinal: 0,
+                ty: "Missing".into(),
+                modules: vec!["Tidepool.Session.Lib.G1".into()],
+                heads: vec![tidepool_runtime::NominalHead {
+                    unit: "main".into(),
+                    module: "Tidepool.Session.Lib.G1".into(),
+                    name: "Missing".into(),
+                }],
+                inputs: vec![],
+                reply_declaration: None,
+            },
+        ])
+        .unwrap();
+        assert!(
+            matches!(super::materialize_entry_facade(&session, &provenance),
+            Err(super::ActorStartCaptureError::ExactExports(
+                tidepool_runtime::session::ExactExportError::UnknownExport { name, .. },
+            )) if name == "Missing")
+        );
+        assert!(!root.path().join("Tidepool/Actor/Surface").exists());
     }
 
     /// The errand's authority comes from holding no worktree, not from a
