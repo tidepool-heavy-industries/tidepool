@@ -5840,9 +5840,9 @@ pub(super) mod tests {
             .bindings()
             .source_domain_selection_in(session.scope_tree(), scope)
             .unwrap();
-        let witness = session
+        let snapshot = session
             .bindings()
-            .scope_witness(session.scope_tree(), scope)
+            .scope_snapshot(session.scope_tree(), scope)
             .unwrap();
         let registry = ImageRegistry::new();
         let (selected, inherited, target_sources) = GroupInventory::new(groups)
@@ -5872,7 +5872,7 @@ pub(super) mod tests {
             .with_source_plan(super::super::persistent::ResolvedSourceDomainPlan::fixture(
                 target_sources,
                 selection,
-                witness,
+                snapshot,
             ));
         let demanded = target.compile_scoped_demanded(selected, &registry).unwrap();
         let owners = roots
@@ -6138,7 +6138,7 @@ pub(super) mod tests {
         };
         let prepare = |bindings: &BindingTable, scope, root: SourceBinder| {
             let selected = bindings.source_domain_selection_in(&scopes, scope).unwrap();
-            let witness = bindings.scope_witness(&scopes, scope).unwrap();
+            let snapshot = bindings.scope_snapshot(&scopes, scope).unwrap();
             let (groups, inherited, roots) = GroupInventory::new(&groups)
                 .unwrap()
                 .seal_in_domains([root.clone()], &selected)
@@ -6164,7 +6164,7 @@ pub(super) mod tests {
                 .with_source_plan(super::super::persistent::ResolvedSourceDomainPlan::fixture(
                     roots,
                     selected.clone(),
-                    witness,
+                    snapshot,
                 ));
             let demanded = target.compile_scoped_demanded(groups, &registry).unwrap();
             (

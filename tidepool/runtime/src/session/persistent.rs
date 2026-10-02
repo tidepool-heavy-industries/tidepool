@@ -68,7 +68,7 @@ pub(crate) struct ResolvedSourceDomainPlan {
     pub(super) target:
         BTreeMap<SourceBinder, tidepool_codegen::prepared_program::ScopedSourceBinder>,
     selection: tidepool_codegen::prepared_program::SourceDomainSelection,
-    witness: tidepool_codegen::binding_table::BindingScopeWitness,
+    snapshot: tidepool_codegen::binding_table::BindingScopeSnapshot,
 }
 
 impl ResolvedSourceDomainPlan {
@@ -76,12 +76,12 @@ impl ResolvedSourceDomainPlan {
     pub(super) fn fixture(
         target: BTreeMap<SourceBinder, tidepool_codegen::prepared_program::ScopedSourceBinder>,
         selection: tidepool_codegen::prepared_program::SourceDomainSelection,
-        witness: tidepool_codegen::binding_table::BindingScopeWitness,
+        snapshot: tidepool_codegen::binding_table::BindingScopeSnapshot,
     ) -> Self {
         Self {
             target,
             selection,
-            witness,
+            snapshot,
         }
     }
 }
@@ -609,10 +609,10 @@ impl PersistentSession {
             .bindings
             .source_domain_selection_in(&self.scopes, scope)
             .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
-        let witness = self
+        let snapshot = self
             .bindings
-            .scope_witness(&self.scopes, scope)
-            .ok_or(PreparedRuntimeError::SourceScopeAdmission)?;
+            .scope_snapshot(&self.scopes, scope)
+            .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
         let roots = target_owners.iter().filter_map(|owner| match owner {
             ImportOwner::Source { version, binder } => Some(SourceBinder {
                 version: version.clone(),
@@ -652,7 +652,7 @@ impl PersistentSession {
             source_plan: ResolvedSourceDomainPlan {
                 target,
                 selection,
-                witness,
+                snapshot,
             },
         })
     }
@@ -683,12 +683,12 @@ impl PersistentSession {
         let inherited = if let Some(plan) = target.source_plan() {
             let current = self
                 .bindings
-                .scope_witness(&self.scopes, scope)
-                .ok_or(PreparedRuntimeError::SourceScopeAdmission)?;
-            if current != plan.witness {
+                .scope_snapshot(&self.scopes, scope)
+                .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
+            if current != plan.snapshot {
                 return Err(PreparedRuntimeError::SourceScopeAdmission);
             }
-            // The unchanged owner witness binds the private issued selection.
+            // The exact scoped snapshot binds the privately issued selection.
             plan.selection.inherited().clone()
         } else {
             #[cfg(not(test))]
@@ -4132,6 +4132,61 @@ mod checkpoint_scope_tests {
             assert_eq!(session.persistent_roots_count(), 0);
             assert_eq!(session.residency().unwrap().programs, 0);
         }
+    }
+
+    #[test]
+    fn certified_source_plan_ignores_unrelated_sibling_observation_changes() {
+        use super::super::prepared::tests::{
+            certified_source_group_modules, prepare_selected_groups_fixture,
+        };
+        use tidepool_repr::execution_schema::{testing, ModuleVersion};
+        let root = tempfile::tempdir().unwrap();
+        let mut session = publication_session(root.path(), 828);
+        let scope = session.mint_detached_scope(ScopeId::ROOT).unwrap();
+        let observation = super::super::prepared::tests::evaluated_publication_fixture(
+            &mut session,
+            "observation",
+            922,
+        );
+        let id = observation.id;
+        session.bind_in(scope, observation).unwrap();
+        session.save_observation(id, &[]);
+        let groups = [certified_source_group_modules("D", "d1", 1, "D", "d1")];
+        let source = SourceBinder {
+            version: ModuleVersion([1; 32]),
+            binder: testing::identity("D", "d1"),
+        };
+        let (target, owners, evidence, demanded, inherited) =
+            prepare_selected_groups_fixture(&session, scope, &groups, &[source]);
+        let admitted = session.public_visibility_snapshot_in(scope).unwrap();
+        let cache = session
+            .bindings()
+            .scope_witness(session.scope_tree(), scope)
+            .unwrap();
+        let sibling = session.mint_isolated_scope();
+        let sibling_observation = super::super::prepared::tests::evaluated_publication_fixture(
+            &mut session,
+            "sibling",
+            923,
+        );
+        let sibling_id = sibling_observation.id;
+        session.bind_in(sibling, sibling_observation).unwrap();
+        session.save_observation(sibling_id, &[]);
+        assert_ne!(
+            session
+                .bindings()
+                .scope_witness(session.scope_tree(), scope)
+                .unwrap(),
+            cache
+        );
+        assert_eq!(
+            session.public_visibility_snapshot_in(scope).unwrap(),
+            admitted
+        );
+        let (program, _) = session
+            .install_certified_turn_in(scope, target, &owners, &evidence, demanded, &inherited)
+            .unwrap();
+        assert!(session.prepared_mut().unwrap().unpin(program));
     }
 
     #[test]
