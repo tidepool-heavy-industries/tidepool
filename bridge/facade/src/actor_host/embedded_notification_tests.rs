@@ -204,10 +204,7 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
     let campaign = TestCampaign::start().await;
     let actor = campaign.actor.identity();
     let (_files, settings) = embedded_settings();
-    let mut service =
-        embedded_service::EmbeddedService::prepare(campaign.session_root.path(), &settings)
-            .await
-            .unwrap();
+    let mut service = campaign.prepare_embedded_service(&settings).await.unwrap();
     let (entered, mut rounds) = tokio::sync::mpsc::unbounded_channel();
     let transport = HeldFirstRound {
         entered,

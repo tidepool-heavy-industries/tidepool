@@ -1,4 +1,4 @@
-use super::embedded_service::{attach_actor, drive_conversation_with_transport, EmbeddedService};
+use super::embedded_service::{attach_actor, drive_conversation_with_transport};
 use super::test_campaign::TestCampaign;
 use async_trait::async_trait;
 use exomonad_actor::{ResidentToolEndpoint, ResidentToolError, ResidentToolFuture};
@@ -313,9 +313,7 @@ async fn production_engine_carries_raw_and_typed_pending_calls_through_compactio
         context_capacity_tokens: 200_000,
         concurrent_jobs: 2,
     };
-    let mut service = EmbeddedService::prepare(campaign.session_root.path(), &settings)
-        .await
-        .unwrap();
+    let mut service = campaign.prepare_embedded_service(&settings).await.unwrap();
     let embedded = attach_actor(
         &service,
         campaign.session_root.path(),
@@ -540,9 +538,7 @@ async fn production_engine_compaction_failure_continues_once_then_cleans_pending
         context_capacity_tokens: 200_000,
         concurrent_jobs: 2,
     };
-    let mut service = EmbeddedService::prepare(campaign.session_root.path(), &settings)
-        .await
-        .unwrap();
+    let mut service = campaign.prepare_embedded_service(&settings).await.unwrap();
     let embedded = attach_actor(
         &service,
         campaign.session_root.path(),
@@ -658,9 +654,7 @@ async fn browser_interrupt_cancels_one_engine_round_and_driver_accepts_later_inp
         context_capacity_tokens: 200_000,
         concurrent_jobs: 1,
     };
-    let mut service = EmbeddedService::prepare(campaign.session_root.path(), &settings)
-        .await
-        .unwrap();
+    let mut service = campaign.prepare_embedded_service(&settings).await.unwrap();
     let embedded = attach_actor(
         &service,
         campaign.session_root.path(),

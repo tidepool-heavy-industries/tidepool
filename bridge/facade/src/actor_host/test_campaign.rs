@@ -53,6 +53,7 @@ pub(super) struct TestCampaign {
     pub _repository: exomonad_worktree::testing::TestRepo,
     pub _runtime: tempfile::TempDir,
     pub session_root: Arc<tempfile::TempDir>,
+    host_incarnation: Arc<HostIncarnationLease>,
     pub worktrees: WorktreeManager,
     pub bindings: Arc<Mutex<BindingTable>>,
     pub authority: ActorWorktreeAuthority,
@@ -71,6 +72,19 @@ pub(super) struct TestCampaign {
 }
 
 impl TestCampaign {
+    /// Attach the browser service to the resident campaign's existing run owner.
+    pub async fn prepare_embedded_service(
+        &self,
+        settings: &crate::exomonad::EmbeddedLaunchConfig,
+    ) -> Result<super::embedded_service::EmbeddedService, String> {
+        super::embedded_service::EmbeddedService::prepare_owned(
+            self.session_root.path(),
+            settings,
+            Arc::clone(&self.host_incarnation),
+        )
+        .await
+    }
+
     /// Await the next deployment matching `pick`, scanning previously parked
     /// deployments first (in arrival order) so legitimate interleaving with
     /// other deployment kinds never loses one. A deployment `pick` rejects
@@ -301,6 +315,7 @@ impl TestCampaign {
         configure(&mut config);
         let super::model_free::ModelFreeSession {
             session_root,
+            host_incarnation,
             worktrees,
             bindings,
             authority,
@@ -324,6 +339,7 @@ impl TestCampaign {
             _repository: repository,
             _runtime: runtime,
             session_root,
+            host_incarnation,
             worktrees,
             bindings,
             authority,
