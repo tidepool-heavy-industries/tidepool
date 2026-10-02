@@ -102,7 +102,7 @@ import Tidepool.FatIface (readExactInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
 import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule)
 import Tidepool.Session (sessionHiPath)
-import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), CheckedCellAdmission(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
+import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), CheckedCellAdmission(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.Binders (BoundBinder(..))
 import Tidepool.ExecutionSource
@@ -112,6 +112,7 @@ import Tidepool.ExecutionSource
 
 main :: IO ()
 main = getArgs >>= \case
+  ["--exact-scope-binders"] -> exactScopeBinders
   ["--original-package-projection"] -> originalPackageProjection
   ["--original-package-cohort", coreRoot, output] -> originalPackageCohort coreRoot output
   ["--original-projection-products"] -> originalProjectionProducts
@@ -143,6 +144,7 @@ main = getArgs >>= \case
     forM_ [1, 10, 100] (mixedGraph False)
     mixedGraph True 10
   [] -> withScratch $ \work -> do
+    exactScopeBinders
     selectedHomeInstanceEdges
     forM_ ["CacheEven.hs", "CacheEven.hs-boot", "CacheOdd.hs", "CacheEntry.hs"] $ \file ->
       copyFile ("test-source-boot/fixtures" </> file) (work </> file)
@@ -237,6 +239,52 @@ checkedValueImports = withScratch $ \work -> do
       [ModuleNode _ summary] -> void (parseModule summary >>= typecheckModule)
       _ -> liftIO (fail "checked value import fixture lacks its consumer")
   putStrLn "checked value imports: HPT parity, delayed injection and wrong-input refusal passed"
+
+exactScopeBinders :: IO ()
+exactScopeBinders = withScratch $ \work -> do
+  let path = work </> "binder-scope.cbor"
+      text = TString . T.pack
+      sha = text (replicate 64 '0')
+      binder namespace occurrence parent = SymbolIdentity "main" "BinderFixture" namespace occurrence parent
+      identity value = TList [TString (symbolUnit value), TString (symbolModule value)
+        , TString (symbolNamespace value), TString (symbolOccurrence value)
+        , maybe TNull TString (symbolRecordParent value)]
+      term groups = TList [text "TPEXACTSCOPE", text "6", sha, sha
+        , TList [TList [text "main", text "BinderFixture", text (work </> "original.hi"), sha
+            , TList [], text (work </> "packages.cbor"), sha]]
+        , TList []
+        , TList [TList [text "main", text "BinderFixture", sha, sha, sha, text (work </> "original.tpmod")
+            , TList [TList [TInt ordinal, TList (map identity values), TList []]
+              | (ordinal, values) <- zip [0..] groups]]]
+        , TList [TList [], TList []], TNull]
+      readGroups groups = do
+        BS.writeFile path (toStrictByteString (encodeTerm (term groups)))
+        readExactScope path
+      accepted groups = do
+        scope <- readGroups groups >>= either fail pure
+        unless (map (map originalBinders . originalGroups) (scopeProducts scope) == [groups]) $
+          fail "exact scope changed accepted binder identities or group order"
+      refused groups = do
+        result <- readGroups groups
+        unless (case result of Left reason -> "duplicate exact original binders" `isInfixOf` reason; Right _ -> False) $
+          fail "exact scope accepted duplicate original binder identity"
+      answer = binder "value" "answer" Nothing
+      sameSpelling = [answer, binder "type" "answer" Nothing
+        , binder "value" "answer" (Just "RecordA"), binder "value" "answer" (Just "RecordB")]
+      allFields = sameSpelling ++ [answer { symbolUnit = "another-unit" }
+        , answer { symbolModule = "AnotherModule" }
+        , binder "value" "anotherOccurrence" Nothing]
+      large = [binder "value" (T.pack ("binder" ++ show index)) Nothing | index <- [1..6037 :: Int]]
+  unless (and [(left == right) == (compare left right == EQ) | left <- allFields, right <- allFields]) $
+    fail "SymbolIdentity Eq and Ord disagree"
+  accepted [[]]
+  accepted [[answer]]
+  accepted [take 2 sameSpelling, drop 2 sameSpelling]
+  accepted [large]
+  refused [[answer, answer]]
+  refused [take 2 sameSpelling, drop 2 sameSpelling ++ [answer]]
+  refused [large, [binder "value" "binder1" Nothing]]
+  putStrLn "exact scope binders: 8 checks passed (identity equality, empty/singleton/distinct/6037 inventory, same-group/cross-group/late duplicate)"
 
 executionSourceWire :: FilePath -> IO ()
 executionSourceWire path = do
