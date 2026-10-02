@@ -3,6 +3,7 @@
 
 use ciborium::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -171,7 +172,11 @@ fn execution_scope_value(
                     let path = root.join(format!("execution-{}.cbor", hex(&digest)));
                     // The request owner captures each distinct graph once. Its digest
                     // and exact original references are sealed by the scope manifest.
-                    std::fs::write(&path, graph.bytes())?;
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&path)?;
+                    file.write_all(graph.bytes())?;
                     Ok(Value::Array(vec![text(hex(&digest)), path_value(&path)?]))
                 })
                 .collect::<Result<Vec<_>, CompileError>>()?,
@@ -3660,13 +3665,21 @@ mod tests {
         ));
     }
 
+    fn execution_scope_fixture(
+        entries: &[Arc<ArtifactEntry>],
+        parent: &Path,
+    ) -> Result<Option<Value>, CompileError> {
+        let root = tempfile::tempdir_in(parent)?.keep();
+        execution_scope_value(entries, &root)
+    }
+
     #[test]
     fn execution_scope_shares_graph_and_matches_selected_original_closure() {
         let source = tempfile::tempdir().unwrap();
         let (graph, owners) = crate::execution_source::test_graph(source.path());
         let a = execution_entry(owners[0].clone(), graph.clone());
         let b = execution_entry(owners[1].clone(), graph.clone());
-        let scope = execution_scope_value(&[a, b.clone()], source.path())
+        let scope = execution_scope_fixture(&[a, b.clone()], source.path())
             .unwrap()
             .unwrap();
         let rows = scope.as_array().unwrap();
@@ -3678,12 +3691,14 @@ mod tests {
             graph.digest(),
         );
         let a = execution_entry(owners[0].clone(), graph_a);
-        let scope = execution_scope_value(&[a.clone(), b.clone()], source.path())
+        let scope = execution_scope_fixture(&[a.clone(), b.clone()], source.path())
             .unwrap()
             .unwrap();
         assert_eq!(scope.as_array().unwrap()[0].as_array().unwrap().len(), 2);
         assert_eq!(scope.as_array().unwrap()[1].as_array().unwrap().len(), 2);
-        let scope = execution_scope_value(&[a], source.path()).unwrap().unwrap();
+        let scope = execution_scope_fixture(&[a], source.path())
+            .unwrap()
+            .unwrap();
         assert!(
             scope.as_array().unwrap()[1].as_array().unwrap().is_empty(),
             "a graph digest cannot discover a missing original owner"
@@ -3692,7 +3707,7 @@ mod tests {
         wrong.module_version = tidepool_repr::execution_schema::ModuleVersion([99; 32]);
         let graph_a =
             crate::execution_source::test_graph_requiring_original(&graph, &wrong, graph.digest());
-        let scope = execution_scope_value(
+        let scope = execution_scope_fixture(
             &[execution_entry(owners[0].clone(), graph_a), b],
             source.path(),
         )
@@ -3708,7 +3723,7 @@ mod tests {
         let large =
             crate::execution_source::test_graph_with_large_origin(&graph, EXACT_SCOPE_BYTES_LIMIT);
         assert!(
-            execution_scope_value(&[execution_entry(owners[0].clone(), large)], source.path())
+            execution_scope_fixture(&[execution_entry(owners[0].clone(), large)], source.path())
                 .unwrap()
                 .is_none(),
             "an oversized optional recipe cannot reject native/interface context preparation"
@@ -3759,15 +3774,16 @@ mod tests {
             Arc::new(ArtifactEntry::original([7; 32], product, vec![]).unwrap())
         };
         let b1 = native_entry(owners[1].clone());
-        let scope = execution_scope_value(&[Arc::clone(&a), Arc::clone(&b1)], source.path())
+        let scope = execution_scope_fixture(&[Arc::clone(&a), Arc::clone(&b1)], source.path())
             .unwrap()
             .unwrap();
         assert_eq!(scope.as_array().unwrap()[1].as_array().unwrap().len(), 1);
         let mut changed = owners[1].clone();
         changed.module_version = ModuleVersion([99; 32]);
-        let scope = execution_scope_value(&[Arc::clone(&a), native_entry(changed)], source.path())
-            .unwrap()
-            .unwrap();
+        let scope =
+            execution_scope_fixture(&[Arc::clone(&a), native_entry(changed)], source.path())
+                .unwrap()
+                .unwrap();
         assert!(scope.as_array().unwrap()[1].as_array().unwrap().is_empty());
         assert!(
             scope.as_array().unwrap()[0].as_array().unwrap().is_empty(),
@@ -3777,7 +3793,7 @@ mod tests {
             unreachable!()
         };
         assert!(Arc::ptr_eq(original.execution_source().unwrap(), &graph));
-        let scope = execution_scope_value(&[a, b1], source.path())
+        let scope = execution_scope_fixture(&[a, b1], source.path())
             .unwrap()
             .unwrap();
         assert_eq!(scope.as_array().unwrap()[1].as_array().unwrap().len(), 1);
@@ -3893,6 +3909,14 @@ mod tests {
         let graph_row = &fields[7].as_array().unwrap()[0].as_array().unwrap()[0];
         let graph_path = graph_row.as_array().unwrap()[1].as_text().unwrap();
         assert_eq!(std::fs::read(graph_path).unwrap(), graph.bytes());
+        assert!(context
+            .prepare_compilation(&root.join("ordinary"), producer)
+            .is_err());
+        assert_eq!(
+            std::fs::read(graph_path).unwrap(),
+            graph.bytes(),
+            "a reused request directory cannot truncate an already captured graph"
+        );
         let mut inflated = fields[..7].to_vec();
         let interfaces = inflated[4].as_array_mut().unwrap();
         for index in 0..4000 {
