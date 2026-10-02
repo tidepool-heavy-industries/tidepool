@@ -1242,13 +1242,6 @@ async fn custody_missing_or_foreign_pane_never_clears_process_fence() {
     }
 }
 
-/// Dogfood run 7: a record actor holding an integration worktree could read it
-/// and merge into it (merging is host-side) but `git reset --hard` inside it
-/// failed, because its commands ran in an interactive ancestor's sandbox where
-/// that worktree is mounted read-only. Commands now run in the host process,
-/// confined to the roots resolved here: the actor's own custody and the shared
-/// git directory it publishes through, or nothing at all when it holds no
-/// worktree.
 #[tokio::test]
 async fn a_resident_actor_may_write_its_own_worktree_and_nothing_else() {
     let (_repo, _runtime, tree, bindings, admission) = custody_fixture();
@@ -1263,7 +1256,7 @@ async fn a_resident_actor_may_write_its_own_worktree_and_nothing_else() {
     let authority = ActorWorktreeAuthority::new("custody-test", bindings);
     let source = admission.manager.source_repository().to_owned();
 
-    let held = resident_command_roots(&authority, &admission.manager, &source, holder);
+    let held = resident_command_roots(&authority, &admission.manager, &source, holder).unwrap();
     assert_eq!(held.directory, tree.cwd());
     assert!(held.custody);
     assert_eq!(
@@ -1272,10 +1265,10 @@ async fn a_resident_actor_may_write_its_own_worktree_and_nothing_else() {
         "its own worktree, and the git directory a publication moves a ref in"
     );
 
-    // An actor holding no custody gets no writable root at all: it has to
-    // allocate a worktree before it can change anything in the repository.
+    // An actor with neither repository authority nor custody gets no write access.
     let without_custody = ActorRef::first(exomonad_actor::ActorId(12));
-    let unheld = resident_command_roots(&authority, &admission.manager, &source, without_custody);
+    let unheld =
+        resident_command_roots(&authority, &admission.manager, &source, without_custody).unwrap();
     assert_eq!(unheld.directory, source);
     assert!(!unheld.custody);
     assert!(unheld.writable.is_empty());
@@ -1314,4 +1307,184 @@ async fn a_resident_actor_may_write_its_own_worktree_and_nothing_else() {
         .is_err(),
         "a directory outside every root is refused"
     );
+}
+
+#[test]
+fn resident_command_grants_allow_root_coding_and_preserve_checkout_isolation() {
+    let (_repo, _runtime, child_tree, bindings, admission) = custody_fixture();
+    let source = admission.manager.source_repository();
+    let root_tree = admission
+        .manager
+        .root_allocations()
+        .create(&exomonad_worktree::WorktreeSpec::from_current_repository(
+            "root-coding",
+        ))
+        .unwrap();
+    let other_tree = admission
+        .manager
+        .create(&exomonad_worktree::WorktreeSpec::from_current_repository(
+            "other-child",
+        ))
+        .unwrap();
+    let root = ActorRef::first(exomonad_actor::ActorId(21));
+    let operator = ActorRef::first(exomonad_actor::ActorId(22));
+    let ungranted = ActorRef::first(exomonad_actor::ActorId(23));
+    let child = ActorRef::first(exomonad_actor::ActorId(24));
+    let _custody = admission
+        .install_custody(
+            child,
+            child_tree.id().as_str(),
+            exomonad_actor::ActorRole::Coding,
+        )
+        .unwrap();
+    let authority = ActorWorktreeAuthority::new("custody-test", bindings);
+    authority.install_grant(root.into(), ActorWorktreeGrant::Repository);
+    authority.install_grant(operator.into(), ActorWorktreeGrant::RepositoryReadOnly);
+    authority.install_grant(
+        child.into(),
+        worktree_grant(exomonad_actor::ActorRole::Coding),
+    );
+    let bubblewrap = resolve_scope_bubblewrap(&BTreeMap::new()).unwrap();
+    let write = |actor, cwd: &Path, file: &str| {
+        let roots = resident_command_roots(&authority, &admission.manager, source, actor).unwrap();
+        let boundary = ProcessMountBoundary::new(cwd, roots.protected, roots.writable).unwrap();
+        let invocation = boundary.wrap(
+            bubblewrap.to_string_lossy(),
+            exomonad_node::ProcessInvocation {
+                program: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    r#"printf actual-command-write > "$1""#.into(),
+                    "smoke".into(),
+                    file.into(),
+                ],
+            },
+        );
+        std::process::Command::new(invocation.program)
+            .args(invocation.args)
+            .output()
+            .unwrap()
+    };
+    for cwd in [source, root_tree.cwd()] {
+        let result = write(root, cwd, "root-write.txt");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("root-write.txt")).unwrap(),
+            "actual-command-write"
+        );
+    }
+    let own_write = write(child, child_tree.cwd(), "child-write.txt");
+    assert!(
+        own_write.status.success(),
+        "{}",
+        String::from_utf8_lossy(&own_write.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(child_tree.cwd().join("child-write.txt")).unwrap(),
+        "actual-command-write"
+    );
+    for (actor, cwd) in [
+        (root, child_tree.cwd()),
+        (operator, source),
+        (operator, root_tree.cwd()),
+        (ungranted, source),
+        (child, source),
+        (child, other_tree.cwd()),
+    ] {
+        let result = write(actor, cwd, "denied-write.txt");
+        assert!(
+            !result.status.success(),
+            "unexpected write authority for {actor} at {}",
+            cwd.display()
+        );
+        assert!(!cwd.join("denied-write.txt").exists());
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("Read-only file system"),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    // Inspection authority attenuates even an existing exact checkout binding.
+    authority.install_grant(child.into(), ActorWorktreeGrant::RepositoryReadOnly);
+    let denied = write(child, child_tree.cwd(), "inspection-write.txt");
+    assert!(!denied.status.success());
+    assert!(!child_tree.cwd().join("inspection-write.txt").exists());
+    // A successor incarnation does not inherit the predecessor's repository grant.
+    let successor = ActorRef {
+        incarnation: exomonad_actor::Incarnation(2),
+        ..root
+    };
+    let denied = write(successor, source, "successor-write.txt");
+    assert!(!denied.status.success());
+    assert!(!source.join("successor-write.txt").exists());
+}
+
+#[test]
+fn resident_commands_resolve_linked_repository_metadata_without_parent_write_grants() {
+    let (_repo, runtime, linked_source, _bindings, _admission) = custody_fixture();
+    let (manager, bindings) =
+        actor_worktree_resources_at(&runtime.path().join("linked-root"), linked_source.cwd())
+            .unwrap();
+    let authority = ActorWorktreeAuthority::new("linked-root", Arc::new(Mutex::new(bindings)));
+    let root = ActorRef::first(exomonad_actor::ActorId(31));
+    let operator = ActorRef::first(exomonad_actor::ActorId(32));
+    authority.install_grant(root.into(), ActorWorktreeGrant::Repository);
+    authority.install_grant(operator.into(), ActorWorktreeGrant::RepositoryReadOnly);
+    let common =
+        exomonad_worktree::git::inspect::git_common_dir(manager.git(), linked_source.cwd())
+            .unwrap();
+    assert!(linked_source.cwd().join(".git").is_file());
+    assert!(!common.starts_with(linked_source.cwd()));
+    let bubblewrap = resolve_scope_bubblewrap(&BTreeMap::new()).unwrap();
+    for (actor, writable) in [(root, true), (operator, false)] {
+        let roots =
+            resident_command_roots(&authority, &manager, linked_source.cwd(), actor).unwrap();
+        assert!(roots.protected.contains(&common));
+        assert!(!roots
+            .protected
+            .contains(&common.parent().unwrap().to_owned()));
+        assert_eq!(roots.writable.contains(&common), writable);
+        let boundary =
+            ProcessMountBoundary::new(linked_source.cwd(), roots.protected, roots.writable)
+                .unwrap();
+        let path = common.join(if writable {
+            "root-metadata-smoke"
+        } else {
+            "operator-metadata-smoke"
+        });
+        let invocation = boundary.wrap(
+            bubblewrap.to_string_lossy(),
+            exomonad_node::ProcessInvocation {
+                program: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    r#"printf metadata-write > "$1""#.into(),
+                    "smoke".into(),
+                    path.to_string_lossy().into_owned(),
+                ],
+            },
+        );
+        let result = std::process::Command::new(invocation.program)
+            .args(invocation.args)
+            .output()
+            .unwrap();
+        assert_eq!(
+            result.status.success(),
+            writable,
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(path.exists(), writable);
+    }
+    assert!(resident_command_roots(
+        &authority,
+        &manager,
+        &runtime.path().join("missing-repository"),
+        root
+    )
+    .is_err());
 }

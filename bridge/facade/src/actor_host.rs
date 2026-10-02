@@ -7965,7 +7965,13 @@ fn supply_resident_command_backend(
         Ok(Arc::new(commands::HostCommandBackend::new(
             resources,
             actor,
-            resident_command_roots(authority, worktrees, &config.workspace, actor),
+            resident_command_roots(authority, worktrees, &config.workspace, actor).map_err(
+                |error| {
+                    tidepool_bridge_effects::CommandError::CommandUnavailable(format!(
+                        "cannot resolve resident command authority: {error}"
+                    ))
+                },
+            )?,
             bubblewrap,
         ))
             as Arc<dyn exomonad_actor::command_jobs::CommandBackend>)
@@ -10486,50 +10492,48 @@ fn worktree_grant(role: exomonad_actor::ActorRole) -> ActorWorktreeGrant {
     }
 }
 
-/// Where a command raised by an actor with no agent process of its own runs,
-/// and what it may write while it runs there.
-///
-/// Custody is exclusive, so an actor's bound worktree is unambiguous and is
-/// the only checkout it is entitled to write in. It is granted alongside the
-/// repository's shared git directory, because publishing a checked revision
-/// means moving a ref and a linked worktree keeps its refs there; an actor
-/// holding no custody — an operator workbench — gets neither, and has to
-/// allocate a worktree before it can change anything. This is the same
-/// boundary [`workspace::prepare`] builds for an agent process, applied to a
-/// resident actor's single command; [`writable_repository_roots`] is the same
-/// decision for the process case.
-///
-/// The boundary itself is built per command rather than once, because it
-/// carries the working directory: a command that names its own directory has
-/// to be wrapped in a boundary rooted there, or the wrapper's `--chdir` puts
-/// it somewhere else than it asked for.
+/// Resolve command mounts from the exact actor's worktree grant and custody.
+/// Repository authority writes the source, root allocations, and shared Git
+/// metadata. A bound actor writes only its own checkout and that metadata;
+/// inspection-only actors get no writable repository roots. Child checkouts
+/// remain protected even when the root can write its own allocations.
 fn resident_command_roots(
     authority: &ActorWorktreeAuthority,
     worktrees: &WorktreeManager,
     source: &Path,
     actor: ActorRef,
-) -> ResidentCommandRoots {
+) -> Result<ResidentCommandRoots, exomonad_worktree::WorktreeError> {
     let custody = authority
         .bound_worktree(actor.into())
         .and_then(|id| worktrees.registry().get(&id).ok().flatten())
         .map(|receipt| receipt.cwd);
-    let mut writable = Vec::new();
-    if let Some(worktree) = &custody {
-        writable.push(worktree.clone());
-        // A linked worktree's refs and objects live in the source
-        // repository's git directory, so a publication is a write there.
-        writable.push(source.join(".git"));
-    }
-    ResidentCommandRoots {
+    let git_common_dir = exomonad_worktree::git::inspect::git_common_dir(worktrees.git(), source)?;
+    let root_allocations = worktrees.root_allocations();
+    let grant = authority.grant(actor.into());
+    let root = grant == ActorWorktreeGrant::Repository;
+    let writable = writable_repository_roots(
+        root,
+        if custody.is_some() && grant != ActorWorktreeGrant::RepositoryReadOnly {
+            exomonad_actor::WorkspaceAccess::WritableBound
+        } else {
+            exomonad_actor::WorkspaceAccess::InspectOnly
+        },
+        source,
+        custody.as_deref(),
+        &git_common_dir,
+        Some(root_allocations.managed_root()),
+    );
+    Ok(ResidentCommandRoots {
         directory: custody.clone().unwrap_or_else(|| source.to_owned()),
         protected: vec![
             source.to_owned(),
             worktrees.managed_root().to_owned(),
-            worktrees.root_allocations().managed_root().to_owned(),
+            root_allocations.managed_root().to_owned(),
+            git_common_dir,
         ],
         writable,
         custody: custody.is_some(),
-    }
+    })
 }
 
 /// The roots a resident actor's commands are confined to, and the directory
@@ -10539,8 +10543,7 @@ struct ResidentCommandRoots {
     directory: PathBuf,
     protected: Vec<PathBuf>,
     writable: Vec<PathBuf>,
-    /// Whether this actor holds a worktree. False means nothing in the
-    /// repository is writable to it.
+    /// Whether this actor holds an exclusive worktree binding.
     custody: bool,
 }
 
@@ -10554,7 +10557,6 @@ struct ResidentCommandRoots {
 /// stay under the managed root, which is read-only to everyone including the
 /// root: the root reads a child's work through the shared Git namespace and
 /// typed observation, never by writing in the child's checkout.
-#[cfg(feature = "codex-compat")]
 fn writable_repository_roots(
     root: bool,
     workspace_access: exomonad_actor::WorkspaceAccess,
