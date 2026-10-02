@@ -14776,6 +14776,7 @@ mod request_tests {
             })
             .await
             .expect("public baseline after machine registry admission");
+        assert!(before.machine_incarnation.is_none());
         let manifest_before = std::fs::read(&manifest).unwrap();
         let tools = workbench
             .prepare_tools(context.clone(), 1, vec![])
@@ -14785,22 +14786,29 @@ mod request_tests {
         let installation_scope = tools._installation_scope.scope();
         assert_ne!(installation_scope, context.placement.lexical_scope);
         let cleanup_owner = owner.clone();
-        let admission = workbench
+        let (admission, installed_public) = workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
-                assert_eq!(
-                    session.public_visibility_snapshot_in(context.placement.lexical_scope),
-                    Some(before)
-                );
+                let after = session
+                    .public_visibility_snapshot_in(context.placement.lexical_scope)
+                    .unwrap();
+                // The first prepared install creates the machine identity.
+                // Every declaration, binding, source and visibility fence
+                // still belongs to the unchanged durable public surface.
+                assert!(after.machine_incarnation.is_some());
+                let mut expected = before;
+                expected.machine_incarnation = after.machine_incarnation;
+                assert_eq!(after, expected);
                 assert_eq!(std::fs::read(&manifest).unwrap(), manifest_before);
                 assert!(session
                     .public_visibility_snapshot_in(installation_scope)
                     .is_some());
-                session
+                let admission = session
                     .begin_durable_private_execution(&owner, context.placement.lexical_scope)
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })
+                    })?;
+                Ok((admission, after))
             })
             .await
             .expect("ordinary private notebook admission after tool installation");
@@ -14838,6 +14846,10 @@ mod request_tests {
         workbench
             .access
             .with_machine(context, move |session, context, _| {
+                assert_eq!(
+                    session.public_visibility_snapshot_in(context.placement.lexical_scope),
+                    Some(installed_public)
+                );
                 let _next = session
                     .begin_durable_private_execution(
                         &cleanup_owner,
