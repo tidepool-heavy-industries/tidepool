@@ -49,7 +49,8 @@ editing their text.
 
 Launching actor-owned background work does not prevent a normally completed
 cell from committing. The editing computation itself must finish successfully;
-a yielded or cancelled invocation does not commit unfinished edits.
+an invocation that transfers its reply, backgrounds its own computation or is
+cancelled does not commit unfinished edits.
 
 Imports persist for later cells. Leading `LANGUAGE` and `OPTIONS_GHC` pragmas are
 normalized by GHC and apply only to this cell. Put neither pragmas nor imports
