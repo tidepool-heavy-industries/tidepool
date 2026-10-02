@@ -156,7 +156,7 @@ impl CapturedHostTransport {
                     "{receipt}"
                 );
                 assert_eq!(receipt["items"][0]["status"], "committed", "{receipt}");
-                assert_eq!(receipt["items"][0]["output"], "42", "{receipt}");
+                assert_eq!(receipt["publication"]["status"], "published", "{receipt}");
                 assert_eq!(
                     receipt["items"][0]["terminalTransfer"], "replyAccepted",
                     "{receipt}"
