@@ -1,4 +1,4 @@
-pub(super) use super::command_test_backend::TestCommands;
+use super::command_test_support::TestCommands;
 use super::test_campaign::TestCampaign;
 use super::tests::{dispatch_haskell_script, dispatch_lookup};
 use super::*;

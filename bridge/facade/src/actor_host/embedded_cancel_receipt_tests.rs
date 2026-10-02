@@ -1,4 +1,4 @@
-use super::super::{command_test_backend::TestCommands, test_campaign::TestCampaign};
+use super::super::{command_test_support::TestCommands, test_campaign::TestCampaign};
 use super::*;
 use harness::{
     item::{Item, ToolKind},

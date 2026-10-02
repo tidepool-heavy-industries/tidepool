@@ -126,7 +126,7 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
         "launch",
         ToolArguments::Structured(serde_json::json!({"cmd":"custom", "yield_time_ms":30000})),
     ));
-    let backend = super::command_jobs_tests::TestCommands::completed("custom-handler-output");
+    let backend = super::command_test_support::TestCommands::completed("custom-handler-output");
     super::command_jobs_tests::backend_request(&mut campaign)
         .await
         .supply(Ok(backend));

@@ -71,10 +71,13 @@ model polling or forwarding actor.
 Starting with no output is ordinary progress. Readable-but-empty output has byte
 positions; an unavailable-output error is different and keeps the same job.
 
-Direct execution defaults to 1024 MiB and waits until terminal completion,
-preserving the invocation and presenting output once. Explicit `yield_time_ms`
-(0..300000) requests bounded observation without automatic notification; if the
-job is still live, the tool detaches it to actor-owned lifetime before returning.
+The direct `bash` tool defaults to 1024 MiB. Haskell commands built with
+`Cmd.argv` or a Bash quotation (`[bash|...|]`) default to 256 MiB. Set an
+explicit limit for builds and tests. The direct tool waits until terminal
+completion, preserving the invocation and presenting output once. An explicit
+`yield_time_ms` (0..300000) requests bounded observation without automatic
+notification; if the job is still live, the tool detaches it to actor-owned
+lifetime before returning.
 `background: true` starts actor-owned work and returns immediately with completion
 delivery; focus, yield and output-budget presentation options do not apply there.
 In Haskell, `Cmd.observe`, `Cmd.observeWith` and `Cmd.observeCompletion`
@@ -152,6 +155,9 @@ Command reports omit source provenance unless requested. Wrap a command in
 `Cmd.withSource` when its report needs the starting directory, Git revision and
 dirty state; this runs a separate admitted source probe before the command.
 Ordinary commands avoid that extra process.
+The direct `bash` tool's `background: true` path requests source capture for its
+completion notice, so it runs the extra probe. `Cmd.background` does so only
+when its command is wrapped in `Cmd.withSource`.
 
 Commands are reusable values. Quotations preserve literal Bash, including
 multiline scripts, heredocs and indentation. Haskell does not interpolate shell
@@ -163,7 +169,10 @@ let preview path = Cmd.withArguments [path] [bash|sed -n '1,20p' -- "$1"|]
 Cmd.describe (preview "a path; not shell syntax")
 ```
 
-`Cmd.argv [program,arg1,arg2]` bypasses Bash. `Cmd.inDirectory` and
+`Cmd.argv [program,arg1,arg2]` constructs arguments without shell parsing or
+interpolation. Before execution, selected Git `reset`, `rebase`, `branch`, and
+`push` forms are currently wrapped in Bash to enforce the discard hold, so those
+commands may not reach the backend unchanged. `Cmd.inDirectory` and
 `Cmd.withEnvironment` customize intent. An omitted directory means the actor's
 own workspace, and relative paths start there. For an actor with an agent
 process of its own that workspace is its sandbox; an actor started with
@@ -186,8 +195,8 @@ worktree does not waive it.
 An actor with no process of its own also has no terminal: run its commands
 with piped or closed input, never `TerminalInput`.
 
-Ordinary commands use 1024 MiB. Choose realistic explicit memory for builds/tests,
-e.g. `job <- Cmd.start (withMemory (GiB 8) [bash|cargo build|])`.
+Choose realistic explicit memory for builds/tests, e.g.
+`job <- Cmd.start (withMemory (GiB 8) [bash|cargo build|])`.
 `start` returns immediately; admission queues automatically. Memory is a hard
 limit and admission weight. `traverse Cmd.run commands` runs sequentially to
 terminal completion. To start all first, retain `jobs <- traverse Cmd.start commands`,
@@ -198,10 +207,11 @@ owned invocation stops its unfinished commands.
 `Cmd.cancel job` requests cancellation; status/await reports outcome and cleanup.
 Live handles do not promise recovery after host restart.
 
-Completed results capture up to 1 MiB per stream. Automatic display has a shared
-64 KiB budget per Haskell tool response; shortening display does not discard captured
-data. `inspectFull` also has a display allowance; use pages or Haskell projections
-for larger values. Foreground observations skip fully displayed pages; shortened captures remain
+Completed Haskell results capture up to 1 MiB per stream. Automatic display has
+a shared 64 KiB budget per Haskell tool response; shortening display does not
+discard captured data. `inspectFull` also has a display allowance; use pages or
+Haskell projections for larger values. Foreground observations skip fully
+displayed pages; shortened captures remain
 available for explicit navigation. Explicit reads do not consume output. Read without executing again:
 
 ```haskell
@@ -219,11 +229,12 @@ end while running differs from terminal EOF. Valid UTF-8 is preserved across
 forward page boundaries; invalid or lost boundary bytes have replacement text
 and explicit lossiness. Complete-stdout extraction rejects lossy content.
 
-Retention keeps a 16 MiB prefix plus 256 KiB tail per stream, subject to a
-128 MiB owner budget and the latest 32 completed jobs. Completed logs can be
-evicted; active streams continue draining when retention fills. A reported gap
-cannot be repaired by expanding display. Choose a workspace log file for larger
-or longer-lived evidence. Partial text is diagnostic data, not complete JSON.
+When commands use the `HostCommand` backend, each stream retains a rolling 4 MiB
+and reads report dropped bytes. Other backends may retain output differently;
+treat reported gaps and unavailable reads as authoritative. Display limits do
+not enlarge retention. Write larger or longer-lived evidence to a workspace log
+file.
+Partial text is diagnostic data, not complete JSON.
 
 `Cmd.withStdin` provides a pipe; `Cmd.withTerminal` provides a PTY initially sized
 to the owning TUI. Retain the job for `Cmd.sendInput`, `Cmd.closeInput` and

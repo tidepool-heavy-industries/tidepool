@@ -1,7 +1,8 @@
-use std::sync::Arc;
+//! Shared command backend for actor-host tests.
 
 use exomonad_actor::command_jobs::{CommandBackend, CommandControl};
 use parking_lot::Mutex;
+use std::sync::Arc;
 use tidepool_bridge_effects::{
     CommandCleanup, CommandError, CommandOutcome, CommandOutput, CommandPage, CommandPosition,
     CommandResult, CommandSpec, CommandStatus, CommandStream,
@@ -17,7 +18,7 @@ pub(super) struct TestCommands {
     /// Nonzero selects `CommandOutOfMemory(mib)` over the exit-code outcome —
     /// this backend bypasses real resource admission entirely, so an OOM
     /// outcome has to be injected directly to exercise how it presents.
-    pub(super) oom_mib: std::sync::atomic::AtomicI64,
+    oom_mib: std::sync::atomic::AtomicI64,
     pub(super) degraded_output: std::sync::atomic::AtomicBool,
     pub(super) finish: watch::Sender<bool>,
     pub(super) cancelled: std::sync::atomic::AtomicBool,
@@ -26,11 +27,11 @@ pub(super) struct TestCommands {
     pub(super) controls: Mutex<Vec<CommandControl>>,
     pub(super) fail_input: std::sync::atomic::AtomicBool,
     pub(super) fail_close: std::sync::atomic::AtomicBool,
-    pub(super) output_entered: tokio::sync::Notify,
-    pub(super) hold_output: watch::Sender<bool>,
+    output_entered: tokio::sync::Notify,
+    hold_output: watch::Sender<bool>,
     pub(super) output_budgets: Mutex<Vec<usize>>,
     pub(super) slice_reads: std::sync::atomic::AtomicUsize,
-    pub(super) short_slice_read: std::sync::atomic::AtomicUsize,
+    short_slice_read: std::sync::atomic::AtomicUsize,
     pub(super) hang_cancel: std::sync::atomic::AtomicBool,
 }
 impl TestCommands {
@@ -50,6 +51,7 @@ impl TestCommands {
     /// elapses: for a test that needs a command whose actual execution
     /// occupies measurable wall time, rather than one that is already
     /// finished before anything observes it.
+    #[cfg(feature = "codex-compat")]
     pub(super) fn completed_after(delay: std::time::Duration, stdout: &str) -> Arc<Self> {
         let backend = Self::new();
         *backend.stdout.lock() = stdout.into();
@@ -67,23 +69,28 @@ impl TestCommands {
         self.specs.lock().len()
     }
 
+    #[cfg(feature = "codex-compat")]
     pub(super) fn control_count(&self) -> usize {
         self.controls.lock().len()
     }
 
+    #[cfg(feature = "codex-compat")]
     pub(super) fn output_budgets(&self) -> Vec<usize> {
         self.output_budgets.lock().clone()
     }
 
+    #[cfg(feature = "codex-compat")]
     pub(super) fn finish(&self) {
         self.finish.send_replace(true);
     }
 
+    #[cfg(feature = "codex-compat")]
     pub(super) fn set_exit_code(&self, exit_code: i64) {
         self.exit_code
             .store(exit_code, std::sync::atomic::Ordering::Release);
     }
 
+    #[cfg(feature = "codex-compat")]
     pub(super) fn set_output_unavailable(&self) {
         self.output_unavailable
             .store(true, std::sync::atomic::Ordering::Release);
@@ -116,6 +123,7 @@ impl TestCommands {
 
     /// A command finished by the resource owner killing it for memory, with
     /// `mib` as the applied cap the model-facing heading should name.
+    #[cfg(feature = "codex-compat")]
     pub(super) fn completed_oom(mib: i64) -> Arc<Self> {
         let backend = Self::new();
         backend
@@ -128,11 +136,13 @@ impl TestCommands {
     /// A `control(.., Cancel)` call on this backend never resolves. Exercises
     /// the actor-turn bound wrapping that call, which must not let a stuck
     /// backend freeze the actor.
+    #[cfg(feature = "codex-compat")]
     pub(super) fn hang_cancel(&self) {
         self.hang_cancel
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
+    #[cfg(feature = "codex-compat")]
     pub(super) fn shorten_slice_read(&self, read: usize) {
         self.slice_reads
             .store(0, std::sync::atomic::Ordering::Release);

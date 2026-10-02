@@ -157,6 +157,9 @@ Reports omit source provenance unless requested. Wrap a command in
 `Cmd.withSource` when its report needs the starting directory, Git revision and
 dirty state; this runs a separate admitted source probe before the command.
 Ordinary `Cmd.run`, `Cmd.start` and `Cmd.background` avoid that extra process.
+The direct `bash` tool's `background: true` path requests source capture for its
+completion notice, so it runs the extra probe; `Cmd.background` does so only when
+the command is wrapped in `Cmd.withSource`.
 
 For retained command-evidence composition see the compiled
 `.exomonad/workspace/checks/background-command-example.hs`. Record-actor handlers
