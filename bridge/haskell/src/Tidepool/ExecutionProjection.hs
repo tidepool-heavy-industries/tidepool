@@ -261,6 +261,7 @@ projectPreparedModuleGroupsFor purpose context prepared selection = traverse pro
   where
     identities = buildTopIdentityMap [prepared]
     originals = pmBindings prepared
+    evidenceIndex = indexPreparedEvidence prepared
     ordinalByFirst = Map.fromList
       [ (getKey (varUnique first), fromIntegral ordinal)
       | (ordinal, (binding, _)) <- zip [0 :: Int ..] originals
@@ -279,8 +280,8 @@ projectPreparedModuleGroupsFor purpose context prepared selection = traverse pro
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
     projectOne item@(binding, _) = do
       case [ srMessage rejection
-           | rejection <- pmSiteRejections prepared
-           , varUnique (srBinder rejection) `elem` map varUnique (topBinders binding)
+           | rejection <- selectOwnedEvidence (topBinders binding)
+               (evidenceRejectionsByOwner evidenceIndex)
            , not (skippedFromRecovery context (srBinder rejection)) ] of
         message : _ -> Left (RejectedTypedSite (Text.pack message))
         [] -> pure ()
@@ -301,11 +302,12 @@ projectPreparedModuleGroupsFor purpose context prepared selection = traverse pro
               then Set.singleton owner else Set.empty)
             (projectionFormattingAuthority context) (projectionTimeAuthority context)
             (projectionJsonAuthority context) (projectionTextUnit context) outside purpose
+      evidence <- selectPreparedEvidence evidenceIndex (topBinders binding)
       ((groups, types, sites, verbSites, jsonLayout), final) <- runStateT
-        (do validatePreparedEvidence context [onlyGroup]
+        (do validatePreparedEvidence context [onlyGroup] [evidence]
             preallocate [onlyGroup]
             groups <- projectModule onlyGroup
-            (types, sites, verbSites) <- lowerPreparedEvidence context [onlyGroup]
+            (types, sites, verbSites) <- lowerPreparedEvidence context [onlyGroup] [evidence]
             jsonLayout <- traverse (traverse internConstructor . jsonAuthorityLayout)
               (projectionJsonAuthority context)
             pure (groups, types, sites, verbSites, jsonLayout)) initial
@@ -363,10 +365,11 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
       -- standing from the retained one), but nothing here recovers its body.
       projectable = map (dropRetainedTops context) modules
   ((bindingGroups, programTypes, programSites, programVerbSites, programJsonLayout), final) <- runStateT
-    (do validatePreparedEvidence context projectable
+    (do evidence <- lift (traverse preparedEvidence projectable)
+        validatePreparedEvidence context projectable evidence
         preallocate projectable
         groups <- concat <$> mapM projectModule projectable
-        (types, sites, verbSites) <- lowerPreparedEvidence context projectable
+        (types, sites, verbSites) <- lowerPreparedEvidence context projectable evidence
         jsonLayout <- traverse (traverse internConstructor . jsonAuthorityLayout)
           (projectionJsonAuthority context)
         pure (groups, types, sites, verbSites, jsonLayout)) initial
@@ -894,6 +897,51 @@ preallocate modules = do
 projectModule :: PreparedModule -> P [Group TopBinding]
 projectModule = mapM (projectTop . fst) . pmBindings
 
+-- One module projection owns this immutable index. Its graph stays lazy so
+-- groups without typed sites do not force an otherwise unused full graph.
+data PreparedEvidenceIndex = PreparedEvidenceIndex
+  { evidenceGraph :: IntMap.IntMap TypePolicy.TypeNodeG
+  , evidenceSitesByOwner :: Map Word64 [(Int, PreparedSite)]
+  , evidenceRejectionsByOwner :: Map Word64 [(Int, SiteRejection)]
+  }
+
+data SelectedPreparedEvidence = SelectedPreparedEvidence
+  { selectedEvidenceGraph :: IntMap.IntMap TypePolicy.TypeNodeG
+  , selectedEvidenceSites :: [PreparedSite]
+  }
+
+indexPreparedEvidence :: PreparedModule -> PreparedEvidenceIndex
+indexPreparedEvidence prepared = PreparedEvidenceIndex
+  { evidenceGraph = IntMap.fromAscList
+      (zip [0 :: Int ..] (TypePolicy.tgNodes (pmTypeGraph prepared)))
+  , evidenceSitesByOwner = Map.fromListWith (<>)
+      [ (getKey (varUnique (psOwner site)), [(ordinal, site)])
+      | (ordinal, site) <- zip [0 :: Int ..] (pmPreparedSites prepared) ]
+  , evidenceRejectionsByOwner = Map.fromListWith (<>)
+      [ (getKey (varUnique (srBinder rejection)), [(ordinal, rejection)])
+      | (ordinal, rejection) <- zip [0 :: Int ..] (pmSiteRejections prepared) ]
+  }
+
+selectPreparedEvidence :: PreparedEvidenceIndex -> [Id]
+  -> Either ProjectionError SelectedPreparedEvidence
+selectPreparedEvidence index binders = do
+  let sites = selectOwnedEvidence binders (evidenceSitesByOwner index)
+      roots = concat [ psWireNode site : psInputNodes site | site <- sites ]
+  graph <- selectTypeGraph (evidenceGraph index) roots
+  pure (SelectedPreparedEvidence graph sites)
+
+-- Original ordinals recover module row order even for recursive groups whose
+-- binders are encountered in a different order.
+selectOwnedEvidence :: [Id] -> Map Word64 [(Int, a)] -> [a]
+selectOwnedEvidence binders rowsByOwner = IntMap.elems (IntMap.fromList
+  [ row
+  | owner <- Set.toList (Set.fromList (map (getKey . varUnique) binders))
+  , row <- Map.findWithDefault [] owner rowsByOwner ])
+
+preparedEvidence :: PreparedModule -> Either ProjectionError SelectedPreparedEvidence
+preparedEvidence prepared = selectPreparedEvidence (indexPreparedEvidence prepared)
+  [ binder | (binding, _) <- pmBindings prepared, binder <- topBinders binding ]
+
 -- | Lower only evidence owned by the executable tops retained in each module.
 -- Graph ids are module-local during elaboration; this pass compacts reachable
 -- nodes in module/original order and rebases every edge into one program table.
@@ -901,9 +949,9 @@ projectModule = mapM (projectTop . fst) . pmBindings
 -- ('lowerAuxiliaryRootEvidence'); synthetic reply sites for the program's
 -- request constructors follow that ('lowerVerbEvidence').
 lowerPreparedEvidence :: ProjectionContext -> [PreparedModule]
-  -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
-lowerPreparedEvidence context modules = do
-  (moduleNodes, moduleSites) <- foldM lowerOne ([], []) modules
+  -> [SelectedPreparedEvidence] -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
+lowerPreparedEvidence context modules evidence = do
+  (moduleNodes, moduleSites) <- foldM lowerOne ([], []) evidence
   auxNodes <- lowerAuxiliaryRootEvidence context modules (length moduleNodes)
   (verbNodes, verbRows, verbSites) <-
     lowerVerbEvidence (Set.unions (map pmEffectRequestTypeIds modules))
@@ -916,12 +964,10 @@ lowerPreparedEvidence context modules = do
       ("duplicate selected prepared site id " <> Text.pack (show duplicate))
     [] -> pure (moduleNodes <> auxNodes <> verbNodes, sites, verbSites)
  where
-  lowerOne (priorNodes, priorSites) prepared = do
-    let selected = selectedPreparedSites prepared
-        roots = concat
-          [ psWireNode site : psInputNodes site | site <- selected ]
-    (lowered, rebase) <- lowerTypeGraph (length priorNodes)
-      (TypePolicy.tgNodes (pmTypeGraph prepared)) roots
+  lowerOne (priorNodes, priorSites) selectedEvidence = do
+    let selected = selectedEvidenceSites selectedEvidence
+    (lowered, rebase) <- lowerSelectedTypeGraph (length priorNodes)
+      (selectedEvidenceGraph selectedEvidence)
     rows <- traverse (\site -> do
           wire <- rebase (psWireNode site)
           inputs <- traverse rebase (psInputNodes site)
@@ -939,29 +985,14 @@ lowerPreparedEvidence context modules = do
 -- lowering any one graph. Representation recovery may roll one graph's local
 -- state back; a conflict in that graph must still reject the complete program
 -- in either encounter order. Publication remains owned by 'internConstructor'.
-validatePreparedEvidence :: ProjectionContext -> [PreparedModule] -> P ()
-validatePreparedEvidence context modules = do
-  moduleEvidence <- lift . fmap concat . traverse evidenceForModule $ modules
+validatePreparedEvidence :: ProjectionContext -> [PreparedModule]
+  -> [SelectedPreparedEvidence] -> P ()
+validatePreparedEvidence context modules evidence = do
+  let moduleEvidence = concatMap
+        (constructorsForSelectedTypeGraph . selectedEvidenceGraph) evidence
   (auxiliaryNodes, auxiliaryRoots) <- auxiliaryRootTypeGraph context modules
   auxiliaryEvidence <- lift (constructorsForTypeGraph auxiliaryNodes auxiliaryRoots)
   validateConstructorEvidence (moduleEvidence <> auxiliaryEvidence)
- where
-  evidenceForModule prepared =
-    constructorsForTypeGraph
-      (TypePolicy.tgNodes (pmTypeGraph prepared))
-      (concat [ psWireNode site : psInputNodes site
-              | site <- selectedPreparedSites prepared ])
-
-selectedPreparedSites :: PreparedModule -> [PreparedSite]
-selectedPreparedSites prepared =
-  let owners = mkUniqSet
-        [ varUnique binder
-        | (binding, _) <- pmBindings prepared
-        , binder <- topBinders binding
-        ]
-  in filter
-    (\site -> elementOfUniqSet (varUnique (psOwner site)) owners)
-    (pmPreparedSites prepared)
 
 -- | Force-intern type evidence for every admitted auxiliary root's own
 -- answer type, the same way a declared site's answer type is interned
@@ -1055,10 +1086,23 @@ lowerVerbEvidence effectRequestTypeIds base = do
 lowerTypeGraph :: Int -> [TypePolicy.TypeNodeG] -> [TypePolicy.TypeNodeId]
   -> P ([TypeNode], TypePolicy.TypeNodeId -> P TypeNodeId)
 lowerTypeGraph base nodes roots = do
-  let graphNodes = IntMap.fromAscList (zip [0 :: Int ..] nodes)
-  reachable <- lift (reachableTypeNodes graphNodes roots)
-  let ordered = [ TypePolicy.TypeNodeId (fromIntegral index)
-                | index <- IntMap.keys graphNodes, Set.member index reachable ]
+  selected <- lift (selectTypeGraph (IntMap.fromAscList (zip [0 :: Int ..] nodes)) roots)
+  lowerSelectedTypeGraph base selected
+
+-- Select only reachable keys, preserving the graph's original order without
+-- scanning every module node. Empty roots grant no evidence and need no graph.
+selectTypeGraph :: IntMap.IntMap TypePolicy.TypeNodeG -> [TypePolicy.TypeNodeId]
+  -> Either ProjectionError (IntMap.IntMap TypePolicy.TypeNodeG)
+selectTypeGraph _ [] = Right IntMap.empty
+selectTypeGraph nodes roots = do
+  reachable <- reachableTypeNodes nodes roots
+  pure (IntMap.fromAscList
+    [ (index, nodes IntMap.! index) | index <- Set.toAscList reachable ])
+
+lowerSelectedTypeGraph :: Int -> IntMap.IntMap TypePolicy.TypeNodeG
+  -> P ([TypeNode], TypePolicy.TypeNodeId -> P TypeNodeId)
+lowerSelectedTypeGraph base graphNodes = do
+  let ordered = map (TypePolicy.TypeNodeId . fromIntegral) (IntMap.keys graphNodes)
       mapping = Map.fromList
         [ (old, TypeNodeId (fromIntegral (base + offset)))
         | (offset, old) <- zip [0 :: Int ..] ordered ]
@@ -1070,12 +1114,12 @@ lowerTypeGraph base nodes roots = do
 
 constructorsForTypeGraph :: [TypePolicy.TypeNodeG] -> [TypePolicy.TypeNodeId]
   -> Either ProjectionError [DataCon]
-constructorsForTypeGraph nodes roots = do
-  let graphNodes = IntMap.fromAscList (zip [0 :: Int ..] nodes)
-  reachable <- reachableTypeNodes graphNodes roots
-  pure (concatMap nodeConstructors
-    [ node | (index, node) <- IntMap.toAscList graphNodes
-           , Set.member index reachable ])
+constructorsForTypeGraph nodes roots =
+  constructorsForSelectedTypeGraph <$>
+    selectTypeGraph (IntMap.fromAscList (zip [0 :: Int ..] nodes)) roots
+
+constructorsForSelectedTypeGraph :: IntMap.IntMap TypePolicy.TypeNodeG -> [DataCon]
+constructorsForSelectedTypeGraph = concatMap nodeConstructors . IntMap.elems
  where
   nodeConstructors node = case node of
     TypePolicy.DataG _ _ _ rows -> map fst rows

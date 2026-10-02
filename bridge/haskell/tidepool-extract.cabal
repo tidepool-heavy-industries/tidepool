@@ -257,6 +257,7 @@ test-suite execution-schema-projection
     CallerResultProjectionTest
     DeferredFunctionProjectionTest
     ExecutionProjectionTest
+    ModuleEvidenceProjectionTest
   build-depends:
     base >= 4.20 && < 5,
     bytestring,
