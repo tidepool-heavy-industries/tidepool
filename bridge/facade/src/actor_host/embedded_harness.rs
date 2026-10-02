@@ -23,7 +23,7 @@ use harness::{
     model::{AgentPath, ConversationIdentity, OperationId},
     provider::{
         CallContext, CancellationAcknowledgment, CancellationOwner, JobHandle, Provider,
-        ProviderError, ToolFailure,
+        ProviderCompletion, ProviderError, ToolFailure,
     },
     store::Store,
     turn::JobScheduler,
@@ -31,6 +31,7 @@ use harness::{
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 
+use super::cell_context::{EmbeddedContextBinding, ModelResolver};
 use super::embedded_policy::{EmbeddedPolicyInstallation, EmbeddedPolicySnapshot};
 
 struct StoreAdmission {
@@ -47,6 +48,7 @@ pub(super) struct EmbeddedHarnessRuntime {
     scheduler: Arc<JobScheduler>,
     output_observer: OnceLock<harness::server::ServerControl>,
     recovery: OnceLock<Arc<super::embedded_recovery::EmbeddedApplicationRecovery>>,
+    context_models: Arc<OnceLock<ModelResolver>>,
 }
 
 impl EmbeddedHarnessRuntime {
@@ -58,12 +60,37 @@ impl EmbeddedHarnessRuntime {
             run: super::runtime_namespace(run_root),
             output_observer: OnceLock::new(),
             recovery: OnceLock::new(),
+            context_models: Arc::new(OnceLock::new()),
             store: Arc::new(Store::open(harness_root.join("store.sqlite"))?),
             scheduler: Arc::new(
                 JobScheduler::new(concurrent_jobs)
                     .map_err(|error| EmbeddedError::Binding(error.to_string()))?,
             ),
         })
+    }
+
+    pub(super) fn configure_context_models(
+        &self,
+        config: &super::ActorHostConfig,
+    ) -> Result<(), String> {
+        let config = config.clone();
+        self.context_models
+            .set(Arc::new(move |selection| {
+                if selection.trim().is_empty() {
+                    return Err("next model must be nonempty".into());
+                }
+                let configured = config
+                    .workspace_inputs
+                    .as_ref()
+                    .is_some_and(|workspace| workspace.models.contains_key(selection));
+                let model = if configured {
+                    exomonad_actor::Model::Alias(selection.to_owned())
+                } else {
+                    exomonad_actor::Model::Literal(selection.to_owned())
+                };
+                super::resolve_model(&config, &model)
+            }))
+            .map_err(|_| "context model policy already configured".into())
     }
 
     pub(super) fn configure_output_observer(
@@ -148,14 +175,17 @@ impl EmbeddedHarnessRuntime {
         self.prepare_application(actor_identity, &identity)?;
         let (wakes, incoming) = mpsc::unbounded_channel();
         let round_control = Arc::new(EmbeddedRoundControl::default());
-        let host = Arc::new(EmbeddedHostActor::new(
-            identity,
-            actor,
-            installation,
-            self.store.clone(),
-            wakes,
-            round_control.clone(),
-        )?);
+        let host = Arc::new(
+            EmbeddedHostActor::new(
+                identity,
+                actor,
+                installation,
+                self.store.clone(),
+                wakes,
+                round_control.clone(),
+            )?
+            .with_context_models(self.context_models.clone()),
+        );
         let conversation = Arc::new(Conversation::attach(
             self.store.clone(),
             host.clone(),
@@ -200,14 +230,17 @@ impl EmbeddedHarnessRuntime {
         self.prepare_application(actor_identity, &identity)?;
         let (wakes, incoming) = mpsc::unbounded_channel();
         let round_control = Arc::new(EmbeddedRoundControl::default());
-        let host = Arc::new(EmbeddedHostActor::new(
-            identity,
-            actor,
-            installation,
-            self.store.clone(),
-            wakes,
-            round_control.clone(),
-        )?);
+        let host = Arc::new(
+            EmbeddedHostActor::new(
+                identity,
+                actor,
+                installation,
+                self.store.clone(),
+                wakes,
+                round_control.clone(),
+            )?
+            .with_context_models(self.context_models.clone()),
+        );
         // The embedded root also records an empty contract. This installation
         // has no authoritative checkout revision to record for the child.
         let conversation = Arc::new(Conversation::from_checkpoint(
@@ -432,9 +465,15 @@ pub(super) struct EmbeddedHostActor {
     wakes: mpsc::UnboundedSender<DurableMailboxWake>,
     round_control: Arc<EmbeddedRoundControl>,
     next_surface: AtomicU64,
+    context_models: Arc<OnceLock<ModelResolver>>,
 }
 
 impl EmbeddedHostActor {
+    fn with_context_models(mut self, models: Arc<OnceLock<ModelResolver>>) -> Self {
+        self.context_models = models;
+        self
+    }
+
     pub(super) fn new(
         identity: HostIdentity,
         actor: LocalActorRef,
@@ -460,6 +499,7 @@ impl EmbeddedHostActor {
             wakes,
             round_control,
             next_surface: AtomicU64::new(1),
+            context_models: Arc::new(OnceLock::new()),
         })
     }
 }
@@ -478,6 +518,17 @@ impl HostActor for EmbeddedHostActor {
         let original = original_operation(&self.identity, operation)?;
         self.installation
             .complete(tidepool_runtime::session::WorkbenchForkBoundary::Hosted(
+                original,
+            ))
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    async fn output_aborted(&self, operation: &OperationId) -> Result<(), String> {
+        let original = original_operation(&self.identity, operation)?;
+        self.installation
+            .abort(tidepool_runtime::session::WorkbenchForkBoundary::Hosted(
                 original,
             ))
             .await
@@ -513,6 +564,7 @@ impl HostActor for EmbeddedHostActor {
         let dispatcher: Arc<dyn Provider> = Arc::new(EmbeddedDispatcher {
             identity: self.identity.clone(),
             issuer: self.actor.identity(),
+            context_models: self.context_models.clone(),
             snapshot,
             store: self.store.clone(),
         });
@@ -550,6 +602,7 @@ impl HostActor for EmbeddedHostActor {
 
 #[derive(Clone)]
 struct EmbeddedDispatcher {
+    context_models: Arc<OnceLock<ModelResolver>>,
     identity: HostIdentity,
     issuer: ActorRef,
     snapshot: Arc<EmbeddedPolicySnapshot>,
@@ -608,6 +661,7 @@ struct EmbeddedCheckpointCapture {
     identity: HostIdentity,
     issuer: ActorRef,
     operation: OperationId,
+    context_head: Option<harness::model::RequestId>,
 }
 
 impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
@@ -626,10 +680,18 @@ impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
             "name": name,
             "operation": self.operation,
         });
-        let cuts = self
-            .store
-            .capture_checkpoint_cuts(&self.operation, &metadata, Arc::new(()))
-            .map_err(|_| HostedCheckpointCaptureError::CaptureFailed)?;
+        let cuts = match &self.context_head {
+            Some(head) => self.store.capture_checkpoint_cuts_at_head(
+                &self.operation,
+                head,
+                &metadata,
+                Arc::new(()),
+            ),
+            None => self
+                .store
+                .capture_checkpoint_cuts(&self.operation, &metadata, Arc::new(())),
+        }
+        .map_err(|_| HostedCheckpointCaptureError::CaptureFailed)?;
         Ok(HostedCheckpointAttachment::captured(Arc::new(
             EmbeddedHostedCheckpoint {
                 issuer: self.issuer,
@@ -655,7 +717,7 @@ impl EmbeddedDispatcher {
         name: &str,
         arguments: ToolArguments,
         context: CallContext,
-        capture_checkpoints: bool,
+        context_binding: Option<Arc<dyn exomonad_actor::HostedContextBinding>>,
     ) -> Result<Value, ProviderError> {
         let operation = context.operation.as_ref().ok_or_else(|| {
             ProviderError::Tool("embedded dispatch requires an exact operation".into())
@@ -667,12 +729,16 @@ impl EmbeddedDispatcher {
             return Err(ProviderError::Tool("foreign embedded call context".into()));
         }
         let invocation_context = self.context(operation)?;
-        let checkpoint_capture = (capture_checkpoints && name == "haskell").then(|| {
+        let checkpoint_capture = self.snapshot.implementation(name).map(|_| {
             Arc::new(EmbeddedCheckpointCapture {
                 store: self.store.clone(),
                 identity: self.identity.clone(),
                 issuer: self.issuer,
                 operation: operation.clone(),
+                context_head: context
+                    .context
+                    .as_ref()
+                    .map(|snapshot| snapshot.head.clone()),
             }) as Arc<dyn HostedCheckpointCapture>
         });
         self.snapshot
@@ -681,6 +747,7 @@ impl EmbeddedDispatcher {
                 arguments,
                 invocation_context,
                 checkpoint_capture,
+                context_binding,
             )
             .await
             .map_err(provider_tool_error)
@@ -707,12 +774,77 @@ fn provider_tool_error(error: ResidentToolError) -> ProviderError {
 
 #[async_trait::async_trait]
 impl Provider for EmbeddedDispatcher {
+    fn holds_job_capacity(&self) -> bool {
+        // The actor owns execution admission. Parked cells may await independent
+        // model invocations that need this same scheduler's provider slots.
+        false
+    }
+
     fn tools(&self) -> Vec<Value> {
         self.snapshot.tools().to_vec()
     }
 
     fn cancellation_owner(&self) -> Option<Arc<dyn CancellationOwner>> {
         Some(Arc::new(self.clone()))
+    }
+
+    async fn complete_call(
+        &self,
+        name: &str,
+        input: harness::item::ToolInput,
+        context: CallContext,
+    ) -> ProviderCompletion {
+        let binding = match context.context.as_ref() {
+            Some(snapshot) => {
+                let Some(operation) = context.operation.as_ref() else {
+                    return ProviderCompletion::unedited(Err(
+                        "context dispatch requires an exact operation".into(),
+                    ));
+                };
+                if &snapshot.operation != operation {
+                    return ProviderCompletion::unedited(Err(
+                        "context snapshot belongs to another operation".into(),
+                    ));
+                }
+                let invocation = match self.context(operation) {
+                    Ok(invocation) => invocation,
+                    Err(error) => {
+                        return ProviderCompletion::unedited(Err(error.into_tool_failure()))
+                    }
+                };
+                let resolver = self.context_models.get().cloned().unwrap_or_else(|| {
+                    Arc::new(|_| {
+                        Err("next-model selection requires admitted workspace policy".into())
+                    })
+                });
+                Some(Arc::new(EmbeddedContextBinding::new(
+                    invocation, snapshot, resolver,
+                )))
+            }
+            None => None,
+        };
+        let arguments = match input {
+            harness::item::ToolInput::Function(arguments) => ToolArguments::Structured(arguments),
+            harness::item::ToolInput::Custom(source) => ToolArguments::Raw(source),
+        };
+        let authority = binding
+            .as_ref()
+            .map(|binding| binding.clone() as Arc<dyn exomonad_actor::HostedContextBinding>);
+        let result = self
+            .dispatch(name, arguments, context, authority)
+            .await
+            .map_err(ProviderError::into_tool_failure);
+        match binding {
+            Some(binding) => {
+                let (full_success, context) = binding.completion();
+                ProviderCompletion {
+                    result,
+                    full_success,
+                    context,
+                }
+            }
+            None => ProviderCompletion::unedited(result),
+        }
     }
 
     async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
@@ -727,7 +859,7 @@ impl Provider for EmbeddedDispatcher {
         arguments: Value,
         context: CallContext,
     ) -> Result<Value, ProviderError> {
-        self.dispatch(name, ToolArguments::Structured(arguments), context, false)
+        self.dispatch(name, ToolArguments::Structured(arguments), context, None)
             .await
     }
 
@@ -737,7 +869,7 @@ impl Provider for EmbeddedDispatcher {
         input: String,
         context: CallContext,
     ) -> Result<Value, ProviderError> {
-        self.dispatch(name, ToolArguments::Raw(input), context, true)
+        self.dispatch(name, ToolArguments::Raw(input), context, None)
             .await
     }
 }

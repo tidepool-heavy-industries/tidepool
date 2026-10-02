@@ -210,6 +210,7 @@ impl RunningBrowserHost {
                 return Err(errors.join("; "));
             }
         };
+        service.runtime.configure_context_models(&campaign.config)?;
         service.set_test_transport(Arc::clone(transport));
         let runtime = Arc::clone(&service.runtime);
 

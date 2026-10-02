@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 #[path = "m1_host_fixture.rs"]
-mod host_fixture;
+pub(super) mod host_fixture;
 use host_fixture::{cell_output_matches, RunningBrowserHost};
 
 #[path = "m1_browser_process.rs"]

@@ -12,12 +12,16 @@ mod background_command_example_tests;
 mod call_timing_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod cell_compile_cost_tests;
+mod cell_context;
 mod cell_model;
 #[cfg(all(test, feature = "codex-compat"))]
 pub(crate) mod command_jobs_tests;
 mod commands;
+mod context_wire;
 mod effect_vocabulary;
 pub(crate) use effect_vocabulary::exomonad_effect_declarations;
+#[cfg(test)]
+mod context_transaction_acceptance_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod custody_tests;
 #[cfg(all(test, feature = "codex-compat"))]
@@ -2817,6 +2821,10 @@ async fn run_owned(
         forest.set_source_layers(layers.clone());
     }
     if let (Some(service), Some(settings)) = (&embedded_service, &config.embedded) {
+        service
+            .runtime
+            .configure_context_models(&config)
+            .map_err(runtime_error)?;
         forest = forest
             .with_cell_model_factory(cell_model::admitted_factory(service, settings, &config));
     }
@@ -4725,7 +4733,12 @@ async fn run_interactive_applications(
                         .runtime
                         .store()
                         .embedded_round_frontier(identity)
-                        .map(|frontier| frontier.pending_head.or(frontier.settled_head).map(|request| request.0))
+                        .map(|frontier| {
+                            frontier
+                                .pending_head
+                                .or(frontier.settled_head)
+                                .map(|request| request.0)
+                        })
                 },
                 |actor| !embedded_live.contains(&actor),
             )
@@ -7218,13 +7231,7 @@ async fn launch_prepared_interactive_application(
     let service = hosted_retirement::start_with_resources(
         &hosted_slot,
         actor.clone(),
-        installation
-            .policy
-            .tools()
-            .iter()
-            .filter(|tool| tool.name() != exomonad_actor::HASKELL_TOOL)
-            .cloned()
-            .collect(),
+        installation.policy.tools().iter().cloned().collect(),
         binding_path.clone(),
         expected_resume.clone(),
         listener,

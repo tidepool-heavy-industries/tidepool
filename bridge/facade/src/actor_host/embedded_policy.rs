@@ -3,8 +3,8 @@ use std::{collections::HashMap, sync::Arc};
 use harness::finalize::FunctionToolSchema;
 
 use exomonad_actor::{
-    ActorRef, HostedCheckpointCapture, LocalResidentInstallation, ResidentToolEndpoint,
-    ResidentToolError, ResidentToolFuture,
+    ActorRef, HostedCheckpointCapture, HostedContextBinding, LocalResidentInstallation,
+    ResidentToolEndpoint, ResidentToolError, ResidentToolFuture,
 };
 use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
 use serde_json::{json, Value};
@@ -40,6 +40,13 @@ impl EmbeddedPolicyInstallation {
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,
     ) -> ResidentToolFuture {
         self.policy.complete_boxed(boundary)
+    }
+
+    pub(super) fn abort(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> ResidentToolFuture {
+        self.policy.abort_boxed(boundary)
     }
 
     pub(super) fn request_snapshot(&self) -> Result<EmbeddedPolicySnapshot, ResidentToolError> {
@@ -101,6 +108,7 @@ impl EmbeddedPolicySnapshot {
         arguments: ToolArguments,
         context: ToolInvocationContext,
         checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
+        context_binding: Option<Arc<dyn HostedContextBinding>>,
     ) -> ResidentToolFuture {
         let arguments = match arguments {
             ToolArguments::Structured(value) => {
@@ -119,14 +127,23 @@ impl EmbeddedPolicySnapshot {
             }
             raw => raw,
         };
-        self.policy.dispatch_with_checkpoint_boxed(
+        self.policy.dispatch_with_context_boxed(
             ToolInvocation {
                 context: Some(context),
                 name,
                 arguments,
             },
             checkpoint_capture,
+            context_binding,
         )
+    }
+
+    pub(super) fn implementation(&self, name: &str) -> Option<exomonad_tool::ToolImplementation> {
+        self.policy
+            .tools()
+            .iter()
+            .find(|tool| tool.name() == name)
+            .map(HostedTool::implementation)
     }
 
     pub(super) async fn cancel(
@@ -140,7 +157,17 @@ impl EmbeddedPolicySnapshot {
 fn project_tools(tools: &[HostedTool]) -> Result<EmbeddedToolProjection, String> {
     let mut projected = Vec::with_capacity(tools.len());
     let mut schemas = HashMap::new();
+    let mut scheduling = HashMap::new();
     for tool in tools {
+        scheduling.insert(
+            tool.name().to_owned(),
+            match tool.scheduling() {
+                exomonad_tool::ToolScheduling::Async => harness::provider::ToolScheduling::Async,
+                exomonad_tool::ToolScheduling::BeforeNextInference => {
+                    harness::provider::ToolScheduling::BeforeNextInference
+                }
+            },
+        );
         projected.push(match tool {
             HostedTool::Function(declaration) => {
                 let schema =
@@ -165,7 +192,7 @@ fn project_tools(tools: &[HostedTool]) -> Result<EmbeddedToolProjection, String>
             }),
         });
     }
-    let manifest = harness::embedding::EmbeddedToolManifest::new(projected)
+    let manifest = harness::embedding::EmbeddedToolManifest::with_scheduling(projected, scheduling)
         .map_err(|error| error.to_string())?;
     Ok(EmbeddedToolProjection {
         manifest: Arc::new(manifest),
@@ -221,10 +248,16 @@ mod tests {
     fn declared_tools() -> Vec<HostedTool> {
         vec![
             HostedTool::Custom(CustomToolDeclaration {
+                schedule: Default::default(),
+                implementation: Default::default(),
+                effect_keys: Vec::new(),
                 name: "haskell".into(),
                 description: "Run a notebook cell".into(),
             }),
             HostedTool::Function(ToolDeclaration {
+                schedule: Default::default(),
+                implementation: Default::default(),
+                effect_keys: Vec::new(),
                 name: "lookup".into(),
                 description: "Look up a value".into(),
                 input_schema: json!({"type": "object", "properties": {}}),
@@ -352,6 +385,7 @@ mod tests {
                     ToolArguments::Structured(json!({(field):null})),
                     context(),
                     None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -381,6 +415,9 @@ mod tests {
     #[test]
     fn unsupported_installed_schema_refuses_request_before_dispatch() {
         let unsupported = HostedTool::Function(ToolDeclaration {
+            schedule: Default::default(),
+            implementation: Default::default(),
+            effect_keys: Vec::new(),
             name: "unsupported".into(),
             description: "Unsupported input constraint".into(),
             input_schema: json!({"type":"object","properties":{"value":{"type":"string","pattern":".*"}}}),
@@ -400,6 +437,9 @@ mod tests {
     #[tokio::test]
     async fn ambiguous_optional_null_arguments_are_refused_before_host_dispatch() {
         let ambiguous = HostedTool::Function(ToolDeclaration {
+            schedule: Default::default(),
+            implementation: Default::default(),
+            effect_keys: Vec::new(),
             name: "ambiguous".into(),
             description: "Overlapping union input".into(),
             input_schema: json!({
@@ -447,6 +487,7 @@ mod tests {
                 ToolArguments::Raw("1".into()),
                 context(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -469,6 +510,7 @@ mod tests {
                 ToolArguments::Raw("λ = 1".into()),
                 context(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -484,6 +526,7 @@ mod tests {
                 "lookup".into(),
                 ToolArguments::Structured(json!({"key": "x"})),
                 context(),
+                None,
                 None,
             )
             .await
@@ -501,6 +544,7 @@ mod tests {
                     "haskell".into(),
                     ToolArguments::Raw("again".into()),
                     context(),
+                    None,
                     None,
                 )
                 .await,
