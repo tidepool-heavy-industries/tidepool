@@ -55,6 +55,7 @@ async fn accepted_native_reply_publication_refusal_settles_request_and_retires_a
         for import in [
             "qualified Tidepool.Actor as Mailbox",
             "Tidepool.Agent.Reply (Replies)",
+            "Tidepool.Agent.Watch (Watches)",
             "Tidepool.Agent.Ref (AgentProtocol(..))",
             "qualified Tidepool.Agent.Ref as AgentRef",
             "qualified Tidepool.Actors.Internal.Agent as Agents",
@@ -104,9 +105,17 @@ async fn accepted_native_reply_publication_refusal_settles_request_and_retires_a
         .await
         .expect("typed request submitted to retained child receiver");
         assert_eq!(submission.status, WorkbenchRunStatus::Committed, "{submission:?}");
-        let pending = forest.environment.requests.status_for(requester.identity()).pending_responses;
-        assert_eq!(pending.len(), 1, "one original typed request");
-        let request = pending[0].0;
+        let status = forest.environment.requests.status_for(requester.identity());
+        let unavailable_terminals = status.unavailable_responses.iter().map(|(request, _, _)| {
+            let target = forest.environment.requests.target_for(*request);
+            let terminal = target.and_then(|target| forest.directory.resolve(target))
+                .and_then(|actor| actor.terminal().get());
+            (*request, target, terminal)
+        }).collect::<Vec<_>>();
+        assert_eq!(status.pending_responses.len(), 1,
+            "one original typed request; submission={submission:?}; ready={:?}; unavailable={:?}; unavailable_terminals={unavailable_terminals:?}",
+            status.ready_responses, status.unavailable_responses);
+        let request = status.pending_responses[0].0;
         let target = forest.environment.requests.target_for(request).expect("exact request target");
         let child = forest.directory.resolve(target).expect("retained native child");
         loop {
