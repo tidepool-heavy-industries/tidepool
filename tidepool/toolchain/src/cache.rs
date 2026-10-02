@@ -336,7 +336,7 @@ impl ImportQualifier {
     }
 }
 
-const GENERATED_SOURCE: &str = "@generated-source";
+pub(crate) const GENERATED_SOURCE: &str = "@generated-source";
 
 impl ModuleEvidence {
     /// In evidence issued by `from_worker`, this marks the exact request
@@ -344,6 +344,47 @@ impl ModuleEvidence {
     pub(crate) fn is_generated_source(&self) -> bool {
         self.source == Path::new(GENERATED_SOURCE)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum DependencyEvidenceFailure {
+    Header,
+    Source {
+        index: usize,
+        reason: SourceWitnessFailure,
+    },
+    GeneratedSourceMissing,
+    Module {
+        index: usize,
+    },
+    Import {
+        module: usize,
+        index: usize,
+    },
+    Resolution {
+        index: usize,
+        reason: ResolutionWitnessFailure,
+    },
+    ImportResolution {
+        module: usize,
+        index: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum SourceWitnessFailure {
+    Malformed,
+    Unavailable,
+    Changed { expected: String, actual: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum ResolutionWitnessFailure {
+    Malformed,
+    Duplicate,
+    SelectedSource,
+    NonAbsoluteCandidate { index: usize },
+    NegativeCandidateUnavailable { index: usize },
 }
 
 impl DependencyEvidence {
@@ -379,50 +420,71 @@ impl DependencyEvidence {
     /// Validate contents and negative witnesses. IO errors are misses, including
     /// inaccessible candidates: absence must be known, not guessed.
     pub fn valid(&self, source: &str) -> bool {
+        self.validate(source).is_ok()
+    }
+
+    pub(crate) fn validate(&self, source: &str) -> Result<(), DependencyEvidenceFailure> {
         if self.version != 4
             || !self.cache_safe
             || self.sources.is_empty()
             || self.modules.is_empty()
         {
-            return false;
+            return Err(DependencyEvidenceFailure::Header);
         }
         let mut paths = std::collections::HashSet::new();
         let mut target = false;
-        for item in &self.sources {
+        for (index, item) in self.sources.iter().enumerate() {
             if !paths.insert(&item.path) || item.sha256.len() != 64 {
-                return false;
+                return Err(DependencyEvidenceFailure::Source {
+                    index,
+                    reason: SourceWitnessFailure::Malformed,
+                });
             }
             let digest = if item.path == Path::new(GENERATED_SOURCE) {
                 target = true;
                 hex_digest(&Sha256::digest(source.as_bytes()))
             } else {
                 if !item.path.is_absolute() {
-                    return false;
+                    return Err(DependencyEvidenceFailure::Source {
+                        index,
+                        reason: SourceWitnessFailure::Malformed,
+                    });
                 }
                 let Ok(bytes) = fs::read(&item.path) else {
-                    return false;
+                    return Err(DependencyEvidenceFailure::Source {
+                        index,
+                        reason: SourceWitnessFailure::Unavailable,
+                    });
                 };
                 hex_digest(&Sha256::digest(bytes))
             };
             if digest != item.sha256 {
-                return false;
+                return Err(DependencyEvidenceFailure::Source {
+                    index,
+                    reason: SourceWitnessFailure::Changed {
+                        expected: item.sha256.clone(),
+                        actual: digest,
+                    },
+                });
             }
         }
         if !target {
-            return false;
+            return Err(DependencyEvidenceFailure::GeneratedSourceMissing);
         }
         let mut modules = std::collections::HashSet::new();
-        for module in &self.modules {
+        for (module_index, module) in self.modules.iter().enumerate() {
             if module.unit.is_empty()
                 || module.module.is_empty()
                 || !paths.contains(&module.source)
                 || !modules.insert((&module.unit, &module.module, module.boot))
                 || module.boot != (module.product == ProductAvailability::Boot)
             {
-                return false;
+                return Err(DependencyEvidenceFailure::Module {
+                    index: module_index,
+                });
             }
             let mut imports = std::collections::HashSet::new();
-            for imported in &module.imports {
+            for (import_index, imported) in module.imports.iter().enumerate() {
                 if imported.module.is_empty()
                     || !imported.qualifier.valid()
                     || (imported.qualifier.is_external_package() && imported.selected.is_some())
@@ -432,18 +494,24 @@ impl DependencyEvidence {
                         .as_ref()
                         .is_some_and(|path| !paths.contains(path))
                 {
-                    return false;
+                    return Err(DependencyEvidenceFailure::Import {
+                        module: module_index,
+                        index: import_index,
+                    });
                 }
             }
         }
         let mut resolutions = std::collections::HashMap::new();
-        for resolution in &self.resolutions {
+        for (index, resolution) in self.resolutions.iter().enumerate() {
             if resolution.module.is_empty()
                 || !resolution.qualifier.valid()
                 || (resolution.qualifier.is_external_package() != resolution.candidates.is_empty())
                 || (resolution.qualifier.is_external_package() && resolution.selected.is_some())
             {
-                return false;
+                return Err(DependencyEvidenceFailure::Resolution {
+                    index,
+                    reason: ResolutionWitnessFailure::Malformed,
+                });
             }
             if resolutions
                 .insert(
@@ -452,38 +520,59 @@ impl DependencyEvidence {
                 )
                 .is_some()
             {
-                return false;
+                return Err(DependencyEvidenceFailure::Resolution {
+                    index,
+                    reason: ResolutionWitnessFailure::Duplicate,
+                });
             }
             if let Some(selected) = &resolution.selected {
                 if resolution.candidates.last() != Some(selected) || !paths.contains(selected) {
-                    return false;
+                    return Err(DependencyEvidenceFailure::Resolution {
+                        index,
+                        reason: ResolutionWitnessFailure::SelectedSource,
+                    });
                 }
             }
-            for candidate in &resolution.candidates {
+            for (candidate_index, candidate) in resolution.candidates.iter().enumerate() {
                 if !candidate.is_absolute() {
-                    return false;
+                    return Err(DependencyEvidenceFailure::Resolution {
+                        index,
+                        reason: ResolutionWitnessFailure::NonAbsoluteCandidate {
+                            index: candidate_index,
+                        },
+                    });
                 }
                 if Some(candidate) == resolution.selected.as_ref() {
                     continue;
                 }
                 match fs::metadata(candidate) {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    _ => return false,
+                    _ => {
+                        return Err(DependencyEvidenceFailure::Resolution {
+                            index,
+                            reason: ResolutionWitnessFailure::NegativeCandidateUnavailable {
+                                index: candidate_index,
+                            },
+                        })
+                    }
                 }
             }
         }
-        for module in &self.modules {
-            for imported in &module.imports {
+        for (module_index, module) in self.modules.iter().enumerate() {
+            for (import_index, imported) in module.imports.iter().enumerate() {
                 if resolutions
                     .get(&(&imported.qualifier, &imported.module, imported.boot))
                     .copied()
                     != Some(&imported.selected)
                 {
-                    return false;
+                    return Err(DependencyEvidenceFailure::ImportResolution {
+                        module: module_index,
+                        index: import_index,
+                    });
                 }
             }
         }
-        true
+        Ok(())
     }
 
     /// A source-path witness cannot prove GHC's package lookup result. The

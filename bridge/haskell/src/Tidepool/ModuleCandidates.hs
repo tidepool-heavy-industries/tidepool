@@ -18,8 +18,10 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
+import qualified Data.IntMap.Strict as IntMap
+import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
-import System.Directory (getFileSize)
+import System.IO (IOMode(ReadMode), withBinaryFile)
 import System.FilePath (isAbsolute)
 import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), RuntimeRep(..), Signature(..), ResultContract(..) )
@@ -96,16 +98,15 @@ maxCandidates = 128
 readModuleCandidates :: FilePath -> IO (Either String [ModuleCandidate])
 readModuleCandidates path = do
   result <- try (do
-    size <- getFileSize path
-    if size > maxManifestBytes
+    bytes <- withBinaryFile path ReadMode $ \handle ->
+      BS.hGet handle (fromInteger maxManifestBytes + 1)
+    if toInteger (BS.length bytes) > maxManifestBytes
       then pure (Left "candidate manifest exceeds four MiB")
-      else do
-        bytes <- BS.readFile path
-        pure $ case deserialiseFromBytes decodeManifest (BL.fromStrict bytes) of
-          Left failure -> Left (show failure)
-          Right (remaining, candidates)
-            | BL.null remaining -> Right candidates
-            | otherwise -> Left "candidate manifest has trailing bytes")
+      else pure $ case deserialiseFromBytes decodeManifest (BL.fromStrict bytes) of
+        Left failure -> Left (show failure)
+        Right (remaining, candidates)
+          | BL.null remaining -> Right candidates
+          | otherwise -> Left "candidate manifest has trailing bytes")
     :: IO (Either IOException (Either String [ModuleCandidate]))
   pure $ case result of
     Left failure -> Left (show failure)
@@ -117,14 +118,20 @@ decodeManifest = do
   magic <- decodeString
   unless (magic == "TPMCAN") (fail "candidate manifest has wrong magic")
   version <- decodeString
-  unless ((version == "6" && count == 3) || (version == "7" && count == 4))
+  unless (version == "8" && count == 6)
     (fail "unsupported candidate manifest version or framing")
+  symbols <- decodeTable $ do
+    identity <- decodeIdentity
+    pure (identity, identitySize identity)
+  globals <- decodeTable $ do
+    global <- decodeGlobal symbols
+    pure (global, globalSize global)
   total <- decodeListLen
   when (total > maxCandidates) (fail "too many module candidates")
-  candidates <- replicateM total decodeCandidate
+  (candidates,_) <- decodeCandidates total symbols globals maxManifestBytes
   let owners = Set.fromList [(candidateUnit c, candidateModule c) | c <- candidates]
   unless (Set.size owners == length candidates) (fail "duplicate module candidate")
-  if version == "6" then pure candidates else do
+  do
     (graphs,references) <- decodeExecutionSources
     let offered = Map.fromList [(candidateOriginalIdentity candidate,candidate) | candidate <- candidates]
         available = Map.fromList [(executionGraphSha256 graph,graph) | graph <- graphs]
@@ -143,14 +150,47 @@ decodeManifest = do
         Map.lookup (candidateUnit candidate,candidateModule candidate) byOwner}
       | candidate <- candidates]
 
-decodeCandidate :: Decoder s ModuleCandidate
-decodeCandidate = do
+type InventoryTable a = IntMap.IntMap (a, Integer)
+
+decodeTable :: Decoder s (a, Integer) -> Decoder s (InventoryTable a)
+decodeTable parse = do
+  total <- decodeListLen
+  when (total > 65536) (fail "candidate inventory table exceeds bound")
+  let go index table
+        | index == total = pure table
+        | otherwise = do
+            value <- parse
+            go (index + 1) (IntMap.insert index value table)
+  go 0 IntMap.empty
+
+decodeCandidates :: Int -> InventoryTable SymbolIdentity -> InventoryTable CandidateGlobal
+  -> Integer -> Decoder s ([ModuleCandidate], Integer)
+decodeCandidates total symbols globals = go total []
+  where
+    go 0 values budget = pure (reverse values,budget)
+    go remaining values budget = do
+      (candidate,next) <- decodeCandidate symbols globals budget
+      go (remaining - 1) (candidate:values) next
+
+decodeCandidate :: InventoryTable SymbolIdentity -> InventoryTable CandidateGlobal
+  -> Integer -> Decoder s (ModuleCandidate, Integer)
+decodeCandidate symbols globals budget = do
   count <- decodeListLen
   unless (count == 14) (fail "module candidate must have fourteen fields")
   let text = T.unpack <$> decodeString
-  candidate <- ModuleCandidate <$> text <*> text <*> text
-    <*> text <*> text <*> text <*> text <*> text <*> text
-    <*> decodeImports <*> decodeGroups <*> text <*> text <*> text <*> pure Nothing
+  unit <- text
+  name <- text
+  source <- text
+  sourceSha <- text
+  interface <- text
+  interfaceSha <- text
+  version <- text
+  productSha <- text
+  evidenceSha <- text
+  imports <- decodeImports
+  (groups,next) <- decodeGroups symbols globals budget
+  candidate <- ModuleCandidate unit name source sourceSha interface interfaceSha
+    version productSha evidenceSha imports groups <$> text <*> text <*> text <*> pure Nothing
   unless (not (null (candidateUnit candidate))
       && not (null (candidateModule candidate))
       && isAbsolute (candidateSource candidate)
@@ -164,26 +204,105 @@ decodeCandidate = do
       && isDigest (candidatePackageImportsSha256 candidate)
       && isAbsolute (candidateProductPath candidate))
     (fail "invalid module candidate identity or digest")
-  pure candidate
+  pure (candidate,next)
 
-decodeGroups :: Decoder s [CandidateGroup]
-decodeGroups = do
+decodeGroups :: InventoryTable SymbolIdentity -> InventoryTable CandidateGlobal
+  -> Integer -> Decoder s ([CandidateGroup], Integer)
+decodeGroups symbols globals budget = do
   total <- decodeListLen
   when (total > 65536) (fail "too many original groups")
-  replicateM total $ do
-    count <- decodeListLen
-    unless (count == 3) (fail "original group must have three fields")
-    ordinal <- decodeWord
-    binders <- boundedList 65536 decodeIdentity
-    globals <- boundedList 65536 decodeGlobal
-    pure (CandidateGroup ordinal binders globals)
+  start <- chargeExpanded budget (uintSize (toInteger total))
+  let go 0 groups remaining = pure (reverse groups,remaining)
+      go count groups remaining = do
+        fields <- decodeListLen
+        unless (fields == 3) (fail "original group must have three fields")
+        ordinal <- decodeWord
+        afterHeader <- chargeExpanded remaining (1 + uintSize (toInteger ordinal))
+        (binders,afterBinders) <- decodeReferences symbols afterHeader
+        (originalGlobals,afterGlobals) <- decodeReferences globals afterBinders
+        go (count - 1) (CandidateGroup ordinal binders originalGlobals:groups) afterGlobals
+  go total [] start
 
-decodeGlobal :: Decoder s CandidateGlobal
-decodeGlobal = do
+-- Charge full legacy values before allocating each resolved list cell. The
+-- IntMap entries share immutable identities and signatures across candidates.
+decodeReferences :: InventoryTable a -> Integer -> Decoder s ([a], Integer)
+decodeReferences table budget = do
+  total <- decodeListLen
+  when (total > 65536) (fail "candidate inventory exceeds bound")
+  start <- chargeExpanded budget (uintSize (toInteger total))
+  let go 0 values remaining = pure (reverse values,remaining)
+      go count values remaining = do
+        (value,bytes) <- decodeReference table
+        next <- chargeExpanded remaining bytes
+        go (count - 1) (value:values) next
+  go total [] start
+
+decodeReference :: InventoryTable a -> Decoder s (a,Integer)
+decodeReference table = do
+  index <- decodeWord
+  when (index >= 65536) (fail "candidate inventory index exceeds bound")
+  maybe (fail "candidate inventory index is unavailable") pure
+    (IntMap.lookup (fromIntegral index) table)
+
+decodeGlobal :: InventoryTable SymbolIdentity -> Decoder s CandidateGlobal
+decodeGlobal symbols = do
   count <- decodeListLen
   unless (count == 5) (fail "global inventory must have five fields")
-  CandidateGlobal <$> decodeIdentity <*> decodeRep <*> nullable decodeSignature
+  (identity,_) <- decodeReference symbols
+  CandidateGlobal identity <$> decodeRep <*> nullable decodeSignature
     <*> decodeBool <*> nullable decodeWord
+
+chargeExpanded :: Integer -> Integer -> Decoder s Integer
+chargeExpanded remaining bytes
+  | bytes < 0 || bytes > remaining = fail "expanded candidate inventory exceeds four MiB"
+  | otherwise = pure (remaining - bytes)
+
+-- Canonical CBOR size of the old, fully expanded group inventory. Counts are
+-- Integer so repeated references cannot wrap the aggregate admission bound.
+uintSize :: Integer -> Integer
+uintSize value
+  | value <= 23 = 1
+  | value <= 255 = 2
+  | value <= 65535 = 3
+  | value <= 4294967295 = 5
+  | otherwise = 9
+
+textSize :: T.Text -> Integer
+textSize value = let bytes = toInteger (BS.length (TE.encodeUtf8 value))
+  in uintSize bytes + bytes
+
+identitySize :: SymbolIdentity -> Integer
+identitySize identity = 1 + sum (map textSize
+  [symbolUnit identity,symbolModule identity,symbolNamespace identity,symbolOccurrence identity])
+  + maybe 1 textSize (symbolRecordParent identity)
+
+repSize :: RuntimeRep -> Integer
+repSize rep =
+  let (tag,bits) = case rep of
+        VoidRep -> ("void",0)
+        LiftedRefRep -> ("lifted",0)
+        UnliftedRefRep -> ("unlifted",0)
+        AddressRep -> ("address",0)
+        IntRep width -> ("int",toInteger width)
+        WordRep width -> ("word",toInteger width)
+        FloatRep width -> ("float",toInteger width)
+  in 1 + textSize (T.pack tag) + uintSize bits
+
+signatureSize :: Signature -> Integer
+signatureSize signature = let
+    arguments = signatureArguments signature
+    (tag,results) = case signatureResults signature of
+      Returns values -> ("returns",values)
+      NoSuccess -> ("no_success",[])
+      CallerResult -> ("caller_result",[])
+    repsSize values = uintSize (toInteger (length values)) + sum (map repSize values)
+  in 1 + repsSize arguments + 1 + textSize (T.pack tag) + repsSize results
+
+globalSize :: CandidateGlobal -> Integer
+globalSize global = 1 + identitySize (candidateGlobalIdentity global)
+  + repSize (candidateGlobalRep global)
+  + maybe 1 signatureSize (candidateGlobalSignature global)
+  + 1 + maybe 1 (uintSize . toInteger) (candidateGlobalGeneration global)
 
 decodeIdentity :: Decoder s SymbolIdentity
 decodeIdentity = do

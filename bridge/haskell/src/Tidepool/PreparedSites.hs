@@ -16,7 +16,7 @@ module Tidepool.PreparedSites
 
 import Control.Monad.State.Strict
 import Data.Bits ((.&.), (.|.), xor)
-import Data.List (find)
+import Data.List (find, nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -38,7 +38,7 @@ import GHC.Core.Type
   , isLiftedTypeKind, typeKind )
 import GHC.Core.TyCon (TyCon, isClassTyCon, tyConArity, tyConName)
 import GHC.Core.DataCon (DataCon, dataConOrigResTy)
-import GHC.Driver.Env (HscEnv, hscEPS, hsc_HPT, lookupType)
+import GHC.Driver.Env (HscEnv, hscEPS, hsc_HPT, hsc_home_unit, lookupType)
 import GHC.Types.TyThing.Ppr (pprTyThingInContext)
 import GHC.Types.TyThing (TyThing (..))
 import GHC.Iface.Type (ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
@@ -52,9 +52,10 @@ import GHC.Data.Maybe (MaybeErr(Succeeded, Failed))
 import GHC.Types.PkgQual (PkgQual(NoPkgQual))
 import GHC.Iface.Env (lookupOrig)
 import GHC.Iface.Load (importDecl)
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), eltsHpt)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), eltsHpt, lookupHpt)
+import GHC.Unit.Home (isHomeUnit)
 import GHC.Unit.Finder (FindResult(Found), findImportedModule)
-import GHC.Unit.Module (mkModuleName, moduleName, moduleNameString)
+import GHC.Unit.Module (mkModuleName, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Module.ModDetails (md_insts, md_types)
 import GHC.Unit.Module.ModIface (mi_module)
 import GHC.Types.TypeEnv (typeEnvIds)
@@ -313,23 +314,30 @@ siteWireType authority spec answer = case vsWireSource spec of
       (responseResultTyCon authority)
     Right (mkTyConApp response [answer])
 
--- | Exact generated siblings present in one tidied home module.
+-- | Exact generated siblings present in one tidied home module. Merging these
+-- maps in dependency order gives later modules the real imported Ids without
+-- consulting interface unfoldings or reconstructing names.
 resolvePreparedSiblings :: [CoreBind] -> Map String Id
-resolvePreparedSiblings = resolveSiblingIds . concatMap bindersOf
+resolvePreparedSiblings = resolvePreparedSiblingIds . concatMap bindersOf
 
--- | Recover nominal sibling Ids from an already-admitted defining interface.
--- Captured originals and certified candidates have no fresh Core in this
--- request. Their interface still supplies the same typed Id; no unfolding is
--- loaded and no source or executable authority is added here.
-resolvePreparedInterfaceSiblings :: HomeModInfo -> Map String Id
-resolvePreparedInterfaceSiblings hmi = resolveSiblingIds
+-- | Hydrated original modules supply typed sibling authority even when their
+-- executable bodies are recovered from native products instead of prepared
+-- again. Read only defining Ids from the current HPT; reexports and interface
+-- unfoldings cannot manufacture a sibling.
+resolvePreparedInterfaceSiblings :: HscEnv -> Map String Id
+resolvePreparedInterfaceSiblings env = resolvePreparedSiblingIds
   [ binder
-  | binder <- typeEnvIds (md_types (hm_details hmi))
-  , nameModule_maybe (idName binder) == Just (mi_module (hm_iface hmi))
+  | name <- nub (map vsSitedModule sitedVerbs)
+  , Just home <- [lookupHpt (hsc_HPT env) (mkModuleName name)]
+  , let owner = mi_module (hm_iface home)
+  , moduleName owner == mkModuleName name
+  , isHomeUnit (hsc_home_unit env) (moduleUnit owner)
+  , binder <- typeEnvIds (md_types (hm_details home))
+  , nameModule_maybe (idName binder) == Just owner
   ]
 
-resolveSiblingIds :: [Id] -> Map String Id
-resolveSiblingIds identifiers = Map.fromList
+resolvePreparedSiblingIds :: [Id] -> Map String Id
+resolvePreparedSiblingIds identifiers = Map.fromList
   [ (vsName spec, binder)
   | spec <- sitedVerbs
   , binder : _ <- [filter (isSibling spec) identifiers]
