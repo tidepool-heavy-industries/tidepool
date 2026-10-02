@@ -50,6 +50,8 @@ TEST_ONLY_SOURCES = {
         'tidepool/runtime/src/session/fixtures/compiled-cell-local-fixity.hs',
         'tidepool/runtime/src/session/fixtures/compiled-cell-mixed-original.hs',
         'tidepool/runtime/src/session/fixtures/compiled-cell-native-binding-declaration.hs',
+        'tidepool/runtime/src/session/fixtures/compiled-cell-native-binding-support.hs',
+        'tidepool/runtime/src/session/fixtures/checked-native-support.hs',
         'tidepool/runtime/src/session/fixtures/compiled-cell-record-selector.hs',
         'tidepool/runtime/src/session/fixtures/compiled-cell-simple.hs',
         'tidepool/runtime/src/session/fixtures/constraint-tuple-G1.hs',

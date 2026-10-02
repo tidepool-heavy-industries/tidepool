@@ -1130,6 +1130,24 @@ fn following_declaration_retains_original_native_binding_inventory() {
         &ScalePublication::Ephemeral,
     );
     assert_eq!(resident.current_binding_in(public, "x").unwrap(), original);
+    std::fs::write(
+        root.path().join("HiddenValSupport.hs"),
+        include_str!("fixtures/checked-native-support.hs"),
+    )
+    .unwrap();
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "following_support_declaration",
+        include_str!("fixtures/compiled-cell-native-binding-support.hs"),
+        1,
+        Some("1"),
+        &ScalePublication::Ephemeral,
+    );
+    assert_eq!(resident.current_binding_in(public, "x").unwrap(), original);
 }
 
 #[test]
