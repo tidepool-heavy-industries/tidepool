@@ -38,6 +38,19 @@ contains compiled examples of this workflow. `setNextModel` takes `Text`: the
 host resolves a configured alias first, then treats an unmatched value as a
 literal model identifier.
 
+Repeated context reads in one invocation see its staged edits. Saving a
+`Context` binding saves data, not edit authority: passing that value to
+`putContext` in a later synchronous invocation intentionally replaces that
+invocation's editable prefix. Its current call, completion and later arrivals
+remain protected. After completion, the editing exchange becomes eligible for
+curation by the next invocation. `editableTexts` skips native evidence; inspect
+`blockKind` and use `toNotes` to convert selected completed exchanges before
+editing their text.
+
+Launching actor-owned background work does not prevent a normally completed
+cell from committing. The editing computation itself must finish successfully;
+a yielded or cancelled invocation does not commit unfinished edits.
+
 Imports persist for later cells. Leading `LANGUAGE` and `OPTIONS_GHC` pragmas are
 normalized by GHC and apply only to this cell. Put neither pragmas nor imports
 after executable source. CPP and custom preprocessors are unavailable. Cells do
