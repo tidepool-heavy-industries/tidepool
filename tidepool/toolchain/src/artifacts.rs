@@ -116,6 +116,9 @@ pub struct YieldSite {
 }
 
 impl YieldSite {
+    pub fn same_metadata(&self, other: &Self) -> bool {
+        self.metadata_digest() == other.metadata_digest()
+    }
     pub(crate) fn metadata_digest(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         fn text(hasher: &mut Sha256, value: &str) {
@@ -275,7 +278,7 @@ impl YieldSites {
         let mut by_site: HashMap<u64, YieldSite> = HashMap::new();
         for site in sites {
             match by_site.get(&site.site) {
-                Some(previous) if previous.metadata_digest() != site.metadata_digest() => {
+                Some(previous) if !previous.same_metadata(&site) => {
                     return Err(YieldSiteCollision {
                         site: site.site,
                         first: Box::new(previous.clone()),
