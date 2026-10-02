@@ -74,15 +74,16 @@ pub enum ToolContractError {
 }
 
 /// Validate before publishing declarations or the dispatcher root. The base
-/// list is the same typed authority used to compile this exact installation.
+/// is the complete intersection of role grants and actual interpreter support,
+/// observed on the machine that compiles this exact installation.
 pub(crate) fn validate_installation(
     tools: &[ToolDeclaration],
     slots: &[String],
     slot_effect_keys: &BTreeMap<String, Vec<ToolEffectKey>>,
-    granted_effects: &[ActorEffectKey],
+    admitted_base: &[ActorEffectKey],
     installed_support: &[ToolEffectKey],
 ) -> Result<(), ToolContractError> {
-    let base: Vec<_> = granted_effects
+    let base: Vec<_> = admitted_base
         .iter()
         .copied()
         .map(ToolEffectKey::Actor)
@@ -108,7 +109,7 @@ pub(crate) fn validate_installation(
             &tool.name,
             tool.schedule,
             &tool.effect_keys,
-            granted_effects,
+            admitted_base,
             installed_support,
         )?;
     }
@@ -135,7 +136,7 @@ pub(crate) fn validate_installation(
             slot,
             ToolScheduling::Async,
             keys,
-            granted_effects,
+            admitted_base,
             installed_support,
         )?;
     }
@@ -291,5 +292,33 @@ mod tests {
             validate_installation(&[], &["afterTool".into()], &slot, &[], &[context]),
             Err(ToolContractError::CanonicalRow("afterTool".into()))
         );
+    }
+    #[test]
+    fn canonical_rows_follow_the_exact_admitted_base() {
+        let support = [
+            ActorEffectKey::Console.into(),
+            ToolEffectKey::ContextReadWrite,
+        ];
+        let mut async_tool = native(ToolScheduling::Async, vec![ActorEffectKey::Console.into()]);
+        async_tool.implementation = ToolImplementation::ResidentHandler;
+        validate(async_tool.clone(), &[ActorEffectKey::Console], &support).unwrap();
+        let mut sync_tool = async_tool.clone();
+        sync_tool.schedule = ToolScheduling::BeforeNextInference;
+        sync_tool
+            .effect_keys
+            .insert(0, ToolEffectKey::ContextReadWrite);
+        validate(sync_tool, &[ActorEffectKey::Console], &support).unwrap();
+        // A descriptor compiled against the wider role cannot be paired with
+        // the dispatcher compiled against the narrower supported base.
+        async_tool.effect_keys.push(ActorEffectKey::Source.into());
+        assert!(matches!(
+            validate(async_tool, &[ActorEffectKey::Console], &support),
+            Err(ToolContractError::CanonicalRow(_))
+        ));
+        let selected = native(ToolScheduling::Async, vec![ActorEffectKey::Source.into()]);
+        assert!(matches!(
+            validate(selected, &[ActorEffectKey::Console], &support),
+            Err(ToolContractError::Ungranted { .. })
+        ));
     }
 }
