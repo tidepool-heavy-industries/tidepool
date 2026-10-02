@@ -302,7 +302,7 @@ validateExecutionSources scope graphs = do
 revalidateExactScope :: HscEnv -> ExactScope -> IO (Either String ())
 revalidateExactScope env scope = do
   result <- try (do
-    bytes <- BS.readFile (scopeManifestPath scope)
+    bytes <- readBoundedFile (scopeManifestPath scope) (4 * 1024 * 1024)
     unless (digest bytes == scopeRequestSha256 scope) (fail "exact scope request changed")
     mapM_ checkInterface (scopeInterfaces scope)
     mapM_ checkProduct (scopeProducts scope)
