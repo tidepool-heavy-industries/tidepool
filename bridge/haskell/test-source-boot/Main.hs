@@ -143,10 +143,10 @@ counterTotal name = sum . counterValues name
 exactCompilationCacheSafety
   :: FilePath -> BS.ByteString -> Either String (Maybe Bool)
 exactCompilationCacheSafety expectedSource bytes = do
-  (remaining, term) <- case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
+  (remaining, term) <- case deserialiseFromBytes decodeTerm (BSL.fromStrict bytes) of
     Left failure -> Left ("invalid exact compilation receipt CBOR: " ++ show failure)
     Right decoded -> Right decoded
-  unless (BL.null remaining) (Left "exact compilation receipt has trailing CBOR bytes")
+  unless (BSL.null remaining) (Left "exact compilation receipt has trailing CBOR bytes")
   case term of
     TList (TString "TPEXACTCOMPILE" : TString version : fields)
       | version /= "2" -> Left ("unsupported exact compilation receipt schema " ++ T.unpack version)
