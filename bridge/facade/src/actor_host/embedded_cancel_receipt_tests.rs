@@ -100,9 +100,29 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
         .await
         .unwrap();
     let backend = command_jobs_tests::TestCommands::completed("cancellation-prefix");
-    command_jobs_tests::backend_request(&mut campaign)
-        .await
-        .supply(Ok(backend.clone()));
+    loop {
+        let request = campaign
+            .next_deployment(
+                "prefix command backend",
+                Duration::from_secs(120),
+                |event| match event {
+                    exomonad_actor::LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                    other => Err(other),
+                },
+            )
+            .await;
+        match request.purpose {
+            exomonad_actor::command_jobs::CommandBackendPurpose::Command => {
+                request.supply(Ok(backend.clone()));
+                break;
+            }
+            exomonad_actor::command_jobs::CommandBackendPurpose::SourceProbe => {
+                request.supply(Ok(command_jobs_tests::TestCommands::completed(
+                    "/work/tree\n0123456789abcdef0123456789abcdef01234567\nclean\n",
+                )));
+            }
+        }
+    }
     let context = ToolInvocationContext {
         origin: exomonad_tool::ToolInvocationOrigin::Model(
             original_operation(&identity, &operation).unwrap(),
