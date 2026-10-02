@@ -3,13 +3,15 @@
 -- from an interface left by an earlier edit.
 module Tidepool.PreparedRecovery
   ( RecoveryFailure(..), RecoveredClosure(..), recoverPreparedClosure
-  , newPreparedRecovery, newPreparedRecoveryWithCached, newPreparedRecoveryWithPackageRoots
+  , newPreparedRecovery, newPreparedRecoveryWithPackageRoots
+  , PreparedRecovery, preparedRecoveryClosure, growPreparedRecovery
   , insertGroup
   ) where
 
 import Control.Exception (evaluate, throwIO)
 import Control.Monad (foldM, unless, when)
 import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.List (sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Maybe (isJust)
@@ -76,12 +78,20 @@ instance Show RecoveryFailure where
 data RecoveredClosure = RecoveredClosure
   { closureModules :: [PreparedModule]
   , closureFailures :: [RecoveryFailure]
-  -- | Per-target evidence that recovered-module facts came from the request's
-  -- immutable body-set memo.  This is intentionally target-local: no target's
-  -- reachability or accounting is ever retained.
+  -- | Per-segment evidence of reuse from the request's immutable body-set
+  -- memo. Reachability and accounting are never shared between targets.
   , closureFactCacheHits :: Int
   -- | Final target-local closure over the modules in 'closureModules'.
   , closureReachability :: PreparedReachability
+  }
+
+-- | One target's closed recovery state. The only continuation admits more
+-- package roots under the same home graph, exact interfaces and authority.
+-- State is captured immutably, so another target cannot inherit its attempts,
+-- failures, prepared body sets or reachability.
+data PreparedRecovery = PreparedRecovery
+  { preparedRecoveryClosure :: RecoveredClosure
+  , growPreparedRecovery :: [Id] -> IO PreparedRecovery
   }
 
 -- | Diagnostic split of 'prepared_recover' (flat sub-phases, summed over
@@ -117,33 +127,25 @@ recoverPreparedClosure env cache ownerCache bodyCache context home = do
   recover <- newPreparedRecovery env cache ownerCache bodyCache context home
   recover (projectionEntry context)
 
--- | One immutable home graph and authority context per multi-target request.
--- Only the entry changes between invocations; each target keeps its own exact
--- reachability and recovered body set. Reference facts for the unchanged home
--- bindings are shared, while replaced recovered modules invalidate their facts.
+-- | Each entry starts an isolated target closure; only immutable facts are
+-- shared between targets. Use the package-root factory when continuing one.
 newPreparedRecovery :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> PreparedBodyCache -> ProjectionContext -> [PreparedModule]
   -> IO (SymbolIdentity -> IO RecoveredClosure)
-newPreparedRecovery env cache ownerCache bodyCache baseContext home =
-  newPreparedRecoveryWithCached env cache ownerCache bodyCache Set.empty baseContext home
+newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
+  recover <- newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache
+    Set.empty baseContext home []
+  pure (fmap preparedRecoveryClosure . recover)
 
--- Certified cached homes supply their original binder definitions through
--- exact neutral products. They are external references for this projection;
--- only the worker's accepted candidate set may populate this parameter.
-newPreparedRecoveryWithCached :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
-  -> PreparedBodyCache -> Set.Set (String, String) -> ProjectionContext
-  -> [PreparedModule] -> IO (SymbolIdentity -> IO RecoveredClosure)
-newPreparedRecoveryWithCached env cache ownerCache bodyCache certifiedHomes baseContext home =
-  newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache certifiedHomes baseContext home []
-
--- Only demanded original-group package globals enter these additional roots.
--- They seed exact recovery even when target optimization removed every use.
+-- | Share immutable facts between targets; continue only within one target.
+-- Roots affect seeds and selection, not module facts. Authority remains fixed;
+-- a replaced exact body set still invalidates facts through 'preparedBodyKey'.
+-- Certified homes come only from admitted original products; package roots
+-- come from the emitted-global demand of those exact original groups.
 newPreparedRecoveryWithPackageRoots :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> PreparedBodyCache -> Set.Set (String, String) -> ProjectionContext
-  -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO RecoveredClosure)
-newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache certifiedHomes initialContext home roots = do
-  let baseContext = initialContext { projectionAuxiliaryRoots =
-        projectionAuxiliaryRoots initialContext ++ map preparedRootIdentity roots }
+  -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO PreparedRecovery)
+newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache certifiedHomes baseContext home initialRoots = do
   timing <- readTimingEnabled
   checking <- isJust <$> lookupEnv "TIDEPOOL_RECOVERY_CHECK"
   let factsOf prepared =
@@ -156,134 +158,147 @@ newPreparedRecoveryWithPackageRoots env cache ownerCache bodyCache certifiedHome
   -- them.  This memo deliberately lives outside the entry closure.
   factsMemo <- newIORef Map.empty
   pure $ \entry -> do
-    let context = baseContext { projectionEntry = entry }
-        seedList = nonDetEltsUniqSet (addListToUniqSet (preparedSeedUniques context home)
-          (map varUnique roots))
-    factHits <- newIORef (0 :: Int)
-    let factsFor prepared = do
-          memo <- readIORef factsMemo
-          case Map.lookup (preparedBodyKey prepared) memo of
-            Just hit -> pure (hit, True)
-            Nothing -> do
-              let fresh = factsOf prepared
-              modifyIORef' factsMemo (Map.insert (preparedBodyKey prepared) fresh)
-              pure (fresh, False)
-        roundReferences reach entries =
-          let reached = reachedUniques reach
-              kept binding =
-                any ((`elementOfUniqSet` reached) . varUnique) (topBinders binding)
-          in combinePreparedTargetReferences context (admittedTops reach) kept
-               [(prepared, references) | (prepared, (references, _)) <- entries]
-    spent <- newIORef (Spent 0 0 0 0 0 0 0)
     let homeOwners = Set.fromList (map pmModule home)
-        includeRoots reach references = Map.elems (Map.fromList
-          [(varName binder, binder)
-          | binder <- references ++ roots
-          , not (elementOfUniqSet (varUnique binder) (admittedTops reach))])
-        charge f = modifyIORef' spent f
-        go attempted groups prepared failures admitted previousReach = do
-          let modules = home ++ Map.elems prepared
-          -- Forced here rather than left to 'roundReferences': the per-module
-          -- facts are the memoized half of this phase and the round-invariant
-          -- one, so charging them separately is what says whether a round costs
-          -- what it discovers or what it re-walks.
-          (recovered, factsMs) <- timeSection $ do
-            entries <- mapM (\m -> do
-              (facts, hit) <- factsFor m
-              when hit (modifyIORef' factHits (+ 1))
-              pure (m, facts)) (Map.elems prepared)
-            mapM_ (\(_, (references, reach)) -> do
-              _ <- evaluate (sum (map length (Map.elems references)))
-              evaluate (sum (map (length . snd) reach))) entries
-            pure entries
-          let entries = homeFacts ++ recovered
-          (reach, reachMs) <- timeSection $ do
-            -- Only what this round admitted enters the walk: the closure and
-            -- the dependency relation carry over from the previous round.
-            let admittedFacts =
-                  [ reach | (preparedEntry, (_, reach)) <- entries
-                  , Set.member (pmModule preparedEntry) admitted ]
-                extended = admitReachFacts seedList admittedFacts previousReach
-            _ <- evaluate (sizeUniqSet (reachedUniques extended))
-            _ <- evaluate (sizeUniqSet (admittedTops extended))
-            pure extended
-          (references, refsMs) <- timeSection $ do
-            refs <- evaluate (includeRoots reach (roundReferences reach entries))
-            _ <- evaluate (length refs)
-            when checking $ do
-              let expected = includeRoots reach (preparedTargetReferences context modules)
-              unless (Set.fromList (map (getKey . varUnique) refs) == Set.fromList (map (getKey . varUnique) expected)) $
-                throwIO (userError ("recovery reachability diverged from identity selection: "
-                  ++ show (length refs) ++ " vs " ++ show (length expected) ++ " references"))
-            pure refs
-          charge (\s -> s { spentFacts = spentFacts s + factsMs
-                          , spentReach = spentReach s + reachMs
-                          , spentRefs = spentRefs s + refsMs
-                          , spentRounds = spentRounds s + 1 })
-          let pending = filter (\binder -> not (Set.member (varName binder) attempted)
-                  && typePrimRep_maybe (idType binder) /= Just [])
-                references
-          if null pending
-            then do
-              Spent factsTotal reachTotal refsTotal lookupTotal prepareTotal rounds
-                preparedModules <- readIORef spent
-              emitDetailPhase timing "prepared_recover" "prepared_recover_facts" factsTotal
-              emitDetailPhase timing "prepared_recover" "prepared_recover_reach" reachTotal
-              emitDetailPhase timing "prepared_recover" "prepared_recover_refs" refsTotal
-              emitDetailPhase timing "prepared_recover" "prepared_recover_lookup" lookupTotal
-              emitDetailPhase timing "prepared_recover" "prepared_recover_prepare" prepareTotal
-              emitCount timing "prepared_recover_rounds" rounds
-              emitCount timing "prepared_recover_module_preparations" preparedModules
-              hits <- readIORef factHits
-              pure (RecoveredClosure modules failures hits reach)
-            else do
-              ((nextGroups, dirty, nextFailures), lookupMs) <- timeSection $ foldM
-                (lookupOne cache homeOwners) (groups, Set.empty, failures) pending
-              ((nextPrepared, finalFailures), prepareMs) <- timeSection $ foldM
-                (prepareOne nextGroups) (prepared, nextFailures) (Set.toAscList dirty)
-              charge (\s -> s { spentLookup = spentLookup s + lookupMs
-                              , spentPrepare = spentPrepare s + prepareMs
-                              , spentPreparations =
-                                  spentPreparations s + fromIntegral (Set.size dirty) })
-              go (Set.union attempted (Set.fromList (map varName pending)))
-                nextGroups nextPrepared finalFailures dirty reach
-        lookupOne _cacheRef homeOwnersRef (groups, dirty, failures) binder
-          | Just _ <- wiredInErrorKind binder = pure (groups, dirty, failures)
-          | Just _ <- deferredFunction binder = pure (groups, dirty, failures)
-          | Just owner <- nameModule_maybe (varName binder)
-          , (unitString (moduleUnit owner), moduleNameString (moduleName owner))
-              `Set.member` certifiedHomes = pure (groups, dirty, failures)
-          | maybe False (`Set.member` homeOwnersRef) (nameModule_maybe (varName binder)) =
-              pure (groups, dirty, failures ++ [MissingHomeImplementation (varName binder)])
-          | otherwise = do
-              found <- recoverExactBody env cache binder
-              pure $ case found of
-                ExactBody owner group _ ->
-                  (Map.alter (Just . insertGroup group . maybe [] id) owner groups,
-                   Set.insert owner dirty, failures)
-                MissingExactBody name reason ->
-                  (groups, dirty, failures ++ [MissingImplementation name reason])
-                BodyInterfaceFailure owner reason ->
-                  (groups, dirty, failures ++ [InterfaceLoadingFailure owner reason])
-                BodyTypeMismatch _ name requested candidate fallback ->
-                  let fallbackText = maybe "" ("; fallback: " ++) fallback
-                      reason = "requested type " ++ requested
-                        ++ "; candidate type " ++ candidate ++ fallbackText
-                  in (groups, dirty
-                    , failures ++ [IncompatibleImplementation name reason])
-                UnsupportedBodyCapability name ->
-                  (groups, dirty, failures ++ [UnsupportedExternalCapability name])
-        prepareOne groups (prepared, failures) owner = do
-          result <- prepareRecoveredBodies env ownerCache bodyCache owner
-            (Map.findWithDefault [] owner groups)
-          case result of
-            Right modul -> do
-              pure
-                ( Map.insert owner modul prepared
-                , filter (not . preparationFailureFor owner) failures
-                )
-            Left failure -> pure (prepared, failures ++ [DefiningPreparationFailure failure])
-    go Set.empty Map.empty Map.empty [] homeOwners emptyPreparedReachability
+        run roots carriedAttempts carriedGroups carriedModules carriedFailures carriedOwners carriedReach = do
+          let context = baseContext
+                { projectionEntry = entry
+                , projectionAuxiliaryRoots = projectionAuxiliaryRoots baseContext
+                    ++ map preparedRootIdentity roots
+                }
+              seedList = nonDetEltsUniqSet (addListToUniqSet (preparedSeedUniques context home)
+                (map varUnique roots))
+          factHits <- newIORef (0 :: Int)
+          let factsFor prepared = do
+                memo <- readIORef factsMemo
+                case Map.lookup (preparedBodyKey prepared) memo of
+                  Just hit -> pure (hit, True)
+                  Nothing -> do
+                    let fresh = factsOf prepared
+                    modifyIORef' factsMemo (Map.insert (preparedBodyKey prepared) fresh)
+                    pure (fresh, False)
+              roundReferences reach entries =
+                let reached = reachedUniques reach
+                    kept binding =
+                      any ((`elementOfUniqSet` reached) . varUnique) (topBinders binding)
+                in combinePreparedTargetReferences context (admittedTops reach) kept
+                     [(prepared, references) | (prepared, (references, _)) <- entries]
+          spent <- newIORef (Spent 0 0 0 0 0 0 0)
+          let includeRoots reach references = Map.elems (Map.fromList
+                [(varName binder, binder)
+                | binder <- references ++ roots
+                , not (elementOfUniqSet (varUnique binder) (admittedTops reach))])
+              charge f = modifyIORef' spent f
+              go attempted groups prepared failures admitted previousReach = do
+                let modules = home ++ Map.elems prepared
+                -- Forced here rather than left to 'roundReferences': the per-module
+                -- facts are the memoized half of this phase and the round-invariant
+                -- one, so charging them separately is what says whether a round costs
+                -- what it discovers or what it re-walks.
+                (recovered, factsMs) <- timeSection $ do
+                  entries <- mapM (\m -> do
+                    (facts, hit) <- factsFor m
+                    when hit (modifyIORef' factHits (+ 1))
+                    pure (m, facts)) (Map.elems prepared)
+                  mapM_ (\(_, (references, reach)) -> do
+                    _ <- evaluate (sum (map length (Map.elems references)))
+                    evaluate (sum (map (length . snd) reach))) entries
+                  pure entries
+                let entries = homeFacts ++ recovered
+                (reach, reachMs) <- timeSection $ do
+                  -- Only what this round admitted enters the walk: the closure and
+                  -- the dependency relation carry over from the previous round.
+                  let admittedFacts =
+                        [ reach | (preparedEntry, (_, reach)) <- entries
+                        , Set.member (pmModule preparedEntry) admitted ]
+                      extended = admitReachFacts seedList admittedFacts previousReach
+                  _ <- evaluate (sizeUniqSet (reachedUniques extended))
+                  _ <- evaluate (sizeUniqSet (admittedTops extended))
+                  pure extended
+                (references, refsMs) <- timeSection $ do
+                  refs <- evaluate (includeRoots reach (roundReferences reach entries))
+                  _ <- evaluate (length refs)
+                  when checking $ do
+                    let expected = includeRoots reach (preparedTargetReferences context modules)
+                    unless (Set.fromList (map (getKey . varUnique) refs) == Set.fromList (map (getKey . varUnique) expected)) $
+                      throwIO (userError ("recovery reachability diverged from identity selection: "
+                        ++ show (length refs) ++ " vs " ++ show (length expected) ++ " references"))
+                  pure refs
+                charge (\s -> s { spentFacts = spentFacts s + factsMs
+                                , spentReach = spentReach s + reachMs
+                                , spentRefs = spentRefs s + refsMs
+                                , spentRounds = spentRounds s + 1 })
+                let pending = filter (\binder -> not (Set.member (varName binder) attempted)
+                        && typePrimRep_maybe (idType binder) /= Just [])
+                      references
+                if null pending
+                  then do
+                    Spent factsTotal reachTotal refsTotal lookupTotal prepareTotal rounds
+                      preparedModules <- readIORef spent
+                    emitDetailPhase timing "prepared_recover" "prepared_recover_facts" factsTotal
+                    emitDetailPhase timing "prepared_recover" "prepared_recover_reach" reachTotal
+                    emitDetailPhase timing "prepared_recover" "prepared_recover_refs" refsTotal
+                    emitDetailPhase timing "prepared_recover" "prepared_recover_lookup" lookupTotal
+                    emitDetailPhase timing "prepared_recover" "prepared_recover_prepare" prepareTotal
+                    emitCount timing "prepared_recover_rounds" rounds
+                    emitCount timing "prepared_recover_module_preparations" preparedModules
+                    hits <- readIORef factHits
+                    pure (PreparedRecovery
+                      (RecoveredClosure modules failures hits reach)
+                      (\extra -> run (Map.elems (Map.fromList
+                          [(preparedRootIdentity root, root) | root <- roots ++ extra]))
+                        attempted groups prepared failures Set.empty reach))
+                  else do
+                    ((nextGroups, dirty, nextFailures), lookupMs) <- timeSection $ foldM
+                      (lookupOne cache homeOwners) (groups, Set.empty, failures) pending
+                    ((nextPrepared, finalFailures), prepareMs) <- timeSection $ foldM
+                      (prepareOne nextGroups) (prepared, nextFailures) (Set.toAscList dirty)
+                    charge (\s -> s { spentLookup = spentLookup s + lookupMs
+                                    , spentPrepare = spentPrepare s + prepareMs
+                                    , spentPreparations =
+                                        spentPreparations s + fromIntegral (Set.size dirty) })
+                    go (Set.union attempted (Set.fromList (map varName pending)))
+                      nextGroups nextPrepared finalFailures dirty reach
+              lookupOne _cacheRef homeOwnersRef (groups, dirty, failures) binder
+                | Just _ <- wiredInErrorKind binder = pure (groups, dirty, failures)
+                | Just _ <- deferredFunction binder = pure (groups, dirty, failures)
+                | Just owner <- nameModule_maybe (varName binder)
+                , (unitString (moduleUnit owner), moduleNameString (moduleName owner))
+                    `Set.member` certifiedHomes = pure (groups, dirty, failures)
+                | maybe False (`Set.member` homeOwnersRef) (nameModule_maybe (varName binder)) =
+                    pure (groups, dirty, failures ++ [MissingHomeImplementation (varName binder)])
+                | otherwise = do
+                    found <- recoverExactBody env cache binder
+                    pure $ case found of
+                      ExactBody owner group _ ->
+                        (Map.alter (Just . insertGroup group . maybe [] id) owner groups,
+                         Set.insert owner dirty, failures)
+                      MissingExactBody name reason ->
+                        (groups, dirty, failures ++ [MissingImplementation name reason])
+                      BodyInterfaceFailure owner reason ->
+                        (groups, dirty, failures ++ [InterfaceLoadingFailure owner reason])
+                      BodyTypeMismatch _ name requested candidate fallback ->
+                        let fallbackText = maybe "" ("; fallback: " ++) fallback
+                            reason = "requested type " ++ requested
+                              ++ "; candidate type " ++ candidate ++ fallbackText
+                        in (groups, dirty
+                          , failures ++ [IncompatibleImplementation name reason])
+                      UnsupportedBodyCapability name ->
+                        (groups, dirty, failures ++ [UnsupportedExternalCapability name])
+              prepareOne groups (prepared, failures) owner = do
+                -- A target can admit the same exact body set in different
+                -- root-growth rounds. Preparation order follows exact symbols,
+                -- preserving each authoritative recursive group intact.
+                result <- prepareRecoveredBodies env ownerCache bodyCache owner
+                  (sortOn (map preparedRootIdentity . binders) (Map.findWithDefault [] owner groups))
+                case result of
+                  Right modul -> do
+                    pure
+                      ( Map.insert owner modul prepared
+                      , filter (not . preparationFailureFor owner) failures
+                      )
+                  Left failure -> pure (prepared, failures ++ [DefiningPreparationFailure failure])
+          go carriedAttempts carriedGroups carriedModules carriedFailures carriedOwners carriedReach
+    run initialRoots Set.empty Map.empty Map.empty [] homeOwners emptyPreparedReachability
 
 -- | The recovered-body cache's exact group identity.  It is deliberately more
 -- specific than the owner: recovery can prepare the same owner repeatedly as

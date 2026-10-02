@@ -16,7 +16,6 @@ module Tidepool.Binders
   , turnKindWireName
   , parseTurnKind
   , StmtBinders(..)
-  , extractStmtBinders
   , classifyWithFlags
   , classifyBlock
   , renderVerdictsJson
@@ -38,6 +37,7 @@ module Tidepool.Binders
   , omitCellGenericDeclarations
   , omitCellDisplayDeclarations
   , declarationSourceWithTemplate
+  , declarationSourceWithTemplateFlags
   , renderDeclarationForTemplate
   , splitCellWithFlags
   , CellAnalysisItem(..)
@@ -45,6 +45,7 @@ module Tidepool.Binders
   , analyzeCellWithFlags
   , analyzeCell
   , analyzeOrderedCell
+  , defaultParserDynFlags
   , renderCellCheckSource
   , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
   , CheckedBinderPin(..)
@@ -792,6 +793,14 @@ analyzeCellUsing ordered template source = do
     dflags <- getSessionDynFlags
     liftIO (analyzeCellWithGrouping ordered dflags template source)
 
+-- | Obtain the parser defaults for one request. Parse-only operations need
+-- 'DynFlags', not a live compiler session; request owners can share this value
+-- across several such operations.
+defaultParserDynFlags :: IO DynFlags
+defaultParserDynFlags = do
+  libdir <- getLibdir
+  runGhc (Just libdir) getSessionDynFlags
+
 -- | Extract the same located header for a declaration turn without
 -- reclassifying the already-checked declaration body.
 declarationSourceWithTemplate
@@ -800,16 +809,20 @@ declarationSourceWithTemplate template source = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
-    liftIO $ do
-      flags <- cellEffectiveFlags dflags template source
-      pure $ do
-        effective <- flags
-        lexical <- splitCellWithFlags effective source
-        (prologue, _, bodyItems) <- collectPrologue effective lexical
-        let firstBodyLine = case bodyItems of
-              item : _ -> cellStartLine (cellSourceSpan item)
-              [] -> maxBound
-        pure (DeclarationSource prologue (blankBeforeLine firstBodyLine source))
+    liftIO (declarationSourceWithTemplateFlags dflags template source)
+
+declarationSourceWithTemplateFlags
+  :: DynFlags -> String -> String -> IO (Either CellSplitError DeclarationSource)
+declarationSourceWithTemplateFlags dflags template source = do
+  flags <- cellEffectiveFlags dflags template source
+  pure $ do
+    effective <- flags
+    lexical <- splitCellWithFlags effective source
+    (prologue, _, bodyItems) <- collectPrologue effective lexical
+    let firstBodyLine = case bodyItems of
+          item : _ -> cellStartLine (cellSourceSpan item)
+          [] -> maxBound
+    pure (DeclarationSource prologue (blankBeforeLine firstBodyLine source))
 
 renderDeclarationForTemplate :: String -> DeclarationSource -> Either String String
 renderDeclarationForTemplate template source = do
@@ -1064,9 +1077,8 @@ templateSelectorWireName SExpr        = "expr"
 -- parser (parse-only, no typecheck), letting GHC be the single authority for
 -- the decl/bind/expr split (the Rust runtime never parses Haskell itself).
 -- Session-independent: takes no session action itself, so both
--- 'extractStmtBinders' (one src, one session) and 'classifyBlock' (N srcs,
--- one session) can share it — they cannot fork the verdict a src gets
--- because there is exactly one place the parse happens.
+-- Turn and block-classify modes share it — they cannot fork the verdict a
+-- source gets because there is exactly one place the parse happens.
 --
 -- DECLARATION CONTEXT FIRST, then statement context. A top-level declaration
 -- (@f x = e@, a signature @f :: T@, a bare @x = 5@) parses as a decl but fails
@@ -1110,24 +1122,9 @@ statementHasLocalFixity flags source = case lexTokenStream (initParserOpts flags
     fixityToken ITinfixr = True
     fixityToken _ = False
 
--- | Boot a GHC session and classify one turn's source. A SUBSTEP, not a whole
--- timed unit: it emits no phases of its own — a phase's owner has to be whatever knows it
--- is a whole unit, and both surviving callers ('runTurnMode''s classify
--- substep, and the block-classify unit wrapping a batch of these) time it
--- themselves. The 'evaluate' force stays: the caller's phase measures wall
--- clock around this call, and an unforced thunk would let that phase measure
--- nothing.
-extractStmtBinders :: String -> IO StmtBinders
-extractStmtBinders src = do
-  libdir <- getLibdir
-  runGhc (Just libdir) $ do
-    dflags <- getSessionDynFlags
-    liftIO (evaluate (classifyWithFlags dflags src))
-
--- | Classify a whole BLOCK of turns in one process: boot exactly ONE GHC
--- session (unlike N calls to 'extractStmtBinders', which would boot N), then
--- run 'classifyWithFlags' once per item against that single session's
--- 'DynFlags'. This IS a whole timed unit — the @--classify@ CLI mode — so unlike
+-- | Classify a whole BLOCK of turns with one parser-defaults session, then run
+-- 'classifyWithFlags' once per item against those 'DynFlags'. This IS a whole
+-- timed unit — the @--classify@ CLI mode — so unlike
 -- the substep it DOES take the timing flag and emit its own phases:
 -- @startup@ around 'getLibdir', @ghc_session@ around 'getSessionDynFlags',
 -- and @classify@ around the N forced parses (one phase for the whole batch,

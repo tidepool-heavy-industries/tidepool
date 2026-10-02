@@ -1,10 +1,9 @@
-# Worked cells
+# Worked notebook cells
 
-Six cells, each kept because it shows a technique rather than a result. They are
-reference to copy from, not modules to import — the programs themselves are in
-`exomonad/examples/workspace/.exomonad/Project/`.
+These are reference cells to copy into a resident workbench, not modules to import.
+Load the `exomonad-jev` skill for question-writing and packet composition.
 
-Every one of them assumes this helper. Declare it once in your session:
+Some cells assume this shared helper; declare it once in the workbench:
 
 ```haskell
 sh :: Member Commands effs => [Text] -> Eff effs Text
@@ -13,65 +12,18 @@ sh args = do
   pure (either (const "") id (Cmd.stdout r))
 ```
 
-`Cmd.quiet` is the point of it. Without that wrapper a cell's result carries
-every byte the command printed, and a cell can succeed, pay for its model calls,
-and show you almost none of its answer.
+`Cmd.quiet` keeps full command output out of the cell's displayed result.
 
-## What each one is for
+- `12-termination.hs`: compares four question formulations over identical state.
+- `33-threeway.hs`: classifies recorded check failures with bounded semantic choices.
+- `35-threeway-fair.hs`: compares alternatives using the same check evidence.
+- `37-reflect-intent.hs`: separates instructions, actor history, and repository evidence.
+- `52-question-self-lint.hs`: scores question wording before asking the question.
+- `dispatch-tidepool.hs`: applies the dispatch pattern to repository evidence.
 
-**`dispatch-tidepool.hs` — a typed action dispatcher whose alternatives carry
-real commands.** The alternative the model picks *is* the command that runs, so
-there is no model turn between choosing and fetching. Each alternative also names
-what the state currently lacks, which is why a loop built from this does not
-repeat itself: satisfying one removes its own reason to be chosen.
-
-It asks about a real change here — commit `7a48345d6`, which changed
-`update_request` so a success carries its delivery instead of an `Option` — and
-every one of its four commands returns real evidence from this repository.
-
-A defect is left in deliberately: it truncates each fetch before feeding it back
-into its own observations, which can delete the deciding line. Fix that first if
-you build a loop on it.
-
-**`33-threeway.hs` beside `35-threeway-fair.hs` — the same program before and
-after one wording repair.** Keep them together; this is the worked example of
-debugging a semantic program. The only difference is that in the second, all four
-alternatives describe what the state field contains. The ambiguous case goes from
-confidently wrong to right at mass and confidence 1.00. The lesson generalises:
-mixed vocabulary across alternatives produces a confident wrong answer, not a
-weak one.
-
-**`37-reflect-intent.hs` — an agent's own history answering what the diagnostics
-cannot.** Three separate named fields for instructions, history and repository
-evidence. Evidence alone refuses; the history reaches the right answer; off-task
-history returns `unresolved` rather than inventing something.
-
-**`12-termination.hs` — four forms of one question in a single packet over
-identical state.** The cheapest way to diagnose a question that is behaving oddly.
-
-**`52-question-self-lint.hs` — a packet that scores your own questions before you
-send them.** One axis, "states the deciding fact", separated measured-weak from
-measured-strong wordings at 0.20 against 0.45.
-
-## About the fixtures
-
-`fixtures/` holds real recorded output — three failing checks and one worker's
-seventeen real steps — from a small demo application this project used as a
-dogfood target. They are kept because they are genuine artifacts rather than
-invented ones, and because a compiler's own words are what the questions are
-about. The paths inside them name that application's files, not this one's.
-
-The cells that read those fixtures run here unchanged, and ask about those
-artifacts, which is coherent — the questions are about a compiler's own words and
-the fixtures are where those words are.
-
-The cells that walked live git were not carried over by repointing them. A prior
-attempt substituted a commit and path mechanically but left the question about
-an item limit while reading a commit about request updates. Those unrun cells
-were retired in plan triage because they had no production consumer.
-`dispatch-tidepool.hs` is a coherent invocation of the same pattern against this
-repository, written rather than substituted. It has not been executed, so its
-wording is deliberate and its numbers are unmeasured.
-
-Read `.exomonad/plans/README.md` for what is specific to working in this repository,
-and load the `exomonad-jev` skill for the question-writing rules.
+`fixtures/` contains recorded diagnostics from a demo application; paths inside
+those outputs belong to that application. The cells that read these files expect
+them at `.exomonad/plans/examples/fixtures/`. Historical observations are not
+current accuracy measurements; `dispatch-tidepool.hs` has no retained execution
+result. Use the pinned workspace guide and root contributor rules for current
+execution and verification requirements.

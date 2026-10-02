@@ -1596,15 +1596,9 @@ fn single_stdlib_advice(message: &str) -> Option<std::borrow::Cow<'static, str>>
     None
 }
 
-/// `Data.Text` vocabulary a cell can write bare — `Tidepool.Prelude`
-/// re-exports each of these unqualified, so the ONLY reason GHC would call
-/// one not in scope is a cell reaching for the wrong qualifier. Sibling
-/// authored project modules (`.exomonad/Project/*.hs`) commonly write
-/// `import qualified Data.Text as Text`, so a fresh-context child with no
-/// session history to show it otherwise guesses the same qualifier
-/// (`Text.pack`) against a cell preamble whose actual qualified alias is
-/// `T` — the "21 of 124 cell rejections in run 8a782b2b involved Text"
-/// evidence (`plans/next-wave-inputs.md`, wave-3 section).
+/// Text vocabulary re-exported unqualified by Tidepool.Prelude. The cell
+/// preamble uses `T` for qualified operations; these names support diagnostics
+/// for mistaken qualifiers such as `Text.pack`.
 const TEXT_VOCAB_NAMES: &[&str] = &[
     "Text",
     "pack",

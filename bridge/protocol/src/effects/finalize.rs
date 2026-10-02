@@ -78,11 +78,8 @@ pub fn finalize() -> Effect {
                     rust: RustBinding::HaskellValue,
                 },
             ],
-            // `a` is finalize's own "return type" — genuinely free, never
-            // actually returned (the send diverges via suspension), left
-            // INDEPENDENT of `v` on purpose (see `exomonad/harness/CLAUDE.md`'s
-            // "Answer contracts" section). Matches the hand-written
-            // `FinalizeWith`'s `ret "a"` exactly.
+            // Finalize suspends without returning, so its result type `a`
+            // is independent of the answer type `v`.
             ret: HsType::Var("a"),
             errors: None,
             handling: HandlingClass::Finalize,

@@ -165,6 +165,8 @@ pub(super) struct ProgramPlan<'a> {
     pub thunks: BTreeMap<ValueId, ThunkPlan<'a>>,
     pub top_bindings: BTreeMap<ValueId, &'a HeapBinding>,
     pub constructors: Vec<Arc<ObjectDescriptor>>,
+    /// Pins the immutable role binding whose address JSON calls embed.
+    pub json_layout: Option<Box<super::json::BoundJsonLayout>>,
     /// Stable native environment offsets for every descriptor this code emits.
     pub descriptor_slots: BTreeMap<usize, usize>,
     /// Each constructor family's descriptors in declaration order, for
@@ -515,6 +517,7 @@ impl<'a> ProgramPlan<'a> {
         for pap in pap_layouts.values_mut() {
             pap.descriptor_slot = descriptor_slots[&pap.descriptor.initial_header_word()];
         }
+        let json_layout = super::json::bind_layout(&program, &constructors)?;
         Ok(Self {
             program,
             functions,
@@ -522,6 +525,7 @@ impl<'a> ProgramPlan<'a> {
             value_reps: values,
             top_bindings,
             constructors,
+            json_layout,
             descriptor_slots,
             constructor_families,
             boxed_array: Arc::clone(&externals.boxed_array),

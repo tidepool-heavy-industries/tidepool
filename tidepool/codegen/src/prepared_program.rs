@@ -433,6 +433,8 @@ pub struct CompiledProgram {
     pub(crate) pipeline: CodegenPipeline,
     pub(crate) entries: BTreeMap<ValueId, CompiledEntry>,
     pub(crate) descriptors: Vec<Arc<ObjectDescriptor>>,
+    /// Owns the immutable role binding embedded by this image's JSON intrinsics.
+    _json_layout: Option<Box<json::BoundJsonLayout>>,
     pub(crate) descriptor_registry: BTreeMap<usize, DescriptorMetadata>,
     pub(crate) descriptor_slots: BTreeMap<usize, usize>,
     pub(crate) statics: StaticImage,
@@ -526,7 +528,7 @@ pub(crate) struct TopExport {
 //     `compile_with` mutates them, and `get_finalized_function`'s raw code
 //     pointer is a stable address into memory this program's `Drop` alone
 //     frees.
-//   - `definition_facts`, `descriptors`, `descriptor_registry`, `statics`, `top_slots`,
+//   - `definition_facts`, `descriptors`, `_json_layout`, `descriptor_registry`, `statics`, `top_slots`,
 //     `import_slots`, `interned_constructors`, `byte_tops`, `externals`,
 //     `heap_top_specs`, `callables`, `thunk_entries`:
 //     plain owned data (`Vec`/`BTreeMap`/`Arc<..>` of `Send + Sync` content,
@@ -1411,6 +1413,7 @@ impl CompiledProgram {
             pipeline,
             entries,
             descriptors,
+            _json_layout: plan.json_layout,
             descriptor_registry,
             descriptor_slots: plan.descriptor_slots,
             statics,

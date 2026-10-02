@@ -73,18 +73,8 @@ fn eval_import_lines(user_library: bool, hides: PreludeHides) -> Vec<&'static st
         // decl modules can import the SAME types and define effectful verbs.
         "import Tidepool.Effects",
         "import qualified Tidepool.Data.Text as T",
-        // `Text` (the type) already reaches every cell unqualified through
-        // `Tidepool.Prelude`'s own re-export, but a fresh-context child has
-        // no session history showing that — it sees only the `T` alias in
-        // its own preamble text and, echoing sibling project code that
-        // writes `import qualified Data.Text as Text`, guesses the wrong
-        // qualifier (`Text.pack`) instead of writing `Text` bare or `T.pack`.
-        // Importing the type by name here too documents the alias at its
-        // own import line, independent of the Prelude's own export list.
-        // Same underlying `Data.Text.Text`/`Data.Text.Internal.Text` entity
-        // as Prelude's re-export, so this is not an ambiguous-occurrence
-        // collision (found live: 21 of 124 cell rejections in run 8a782b2b
-        // involved Text — see plans/next-wave-inputs.md, wave-3 section).
+        // Name the unqualified type beside the T alias so the cell preamble
+        // exposes both spellings without relying on Prelude re-exports.
         "import Data.Text (Text)",
         "import qualified Data.Map.Strict as Map",
         // Merge/reconcile API (merge, zipWithMatched, …) — strict, matches Map.
@@ -931,7 +921,7 @@ pub(crate) fn extract_sigs(src: &str) -> Vec<String> {
 /// Parse the `module Library ( module A, module B, … ) where` re-export list
 /// to learn which verb modules are actually IN SCOPE bare (the auto-imported
 /// `Library` facade re-exports a curated subset — sibling modules like
-/// `RustAudit`/`MechDemo` are excluded, usually because their names would clash).
+/// `RustAudit` are excluded, usually because their names would clash).
 /// Returns the set of re-exported module stems, or `None` if no `Library.hs` is
 /// found / its export list can't be parsed (callers fall back to listing all).
 fn library_inscope_modules(

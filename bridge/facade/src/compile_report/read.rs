@@ -6,14 +6,9 @@
 //! handles both a harness `transcript.jsonl` and this crate's own
 //! `eval-failures.jsonl` — see [`crate::compile_report`]'s module doc):
 //!
-//! - **`answerer_round`** — `exomonad_harness::selfharness::observer::Event`'s
-//!   `AnswererRound{node,site,round,error}` variant, as written to
-//!   `transcript.jsonl`. That type derives `Serialize` only (not
-//!   `Deserialize`) and this crate's spec forbids touching
-//!   `exomonad/harness/src`, so the three fields this report needs are read
-//!   by hand off `serde_json::Value` — the same shape
-//!   `tidepool-handlers::handlers::journal::JournalEntry::from_json` already
-//!   uses to fold a foreign JSONL schema it does not own the Rust type for.
+//! - **`answerer_round`** — legacy transcript rows with
+//!   `{node, site, round, error}` fields, decoded structurally from
+//!   `serde_json::Value`.
 //! - **eval-failure rows** — this crate's own `{ts_ms, op, class, phase,
 //!   detail}` shape, written by `tidepool-mcp`'s eval-surface logging (see
 //!   `tidepool_toolchain::paths::eval_failure_log_path`).

@@ -1,7 +1,7 @@
 module Main (main) where
 
 import Codec.CBOR.Read (deserialiseFromBytes)
-import Codec.CBOR.Encoding (encodeListLen, encodeString)
+import Codec.CBOR.Encoding (encodeBytes, encodeListLen, encodeString, encodeWord64)
 import Codec.CBOR.Term (Term(..), decodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (bracket)
@@ -9,11 +9,14 @@ import Control.Monad (forM_, unless)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Text qualified as T
-import Data.Word (Word64)
+import Data.Word (Word32, Word64)
 import System.Environment (getArgs)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (openBinaryTempFile, hClose)
-import Tidepool.ExecutionEncode (encodeWireProgram)
+import Tidepool.ExecutionEncode
+  ( encodeWireProgram, encodeProjectedGroup, encodeModuleProducts
+  , prepareModuleProductEncoding, moduleProductInput, moduleProductBytes
+  , encodeModuleProductInventory )
 import Tidepool.ExecutionSchema
 import Tidepool.ModuleCandidates (readModuleCandidates)
 
@@ -71,6 +74,7 @@ candidateManifestChecks = do
 main :: IO ()
 main = do
   candidateManifestChecks
+  moduleProductEncodingChecks
   arguments <- getArgs
   let first = encodeWireProgram representative
       second = encodeWireProgram representative
@@ -195,6 +199,74 @@ main = do
       topRoots = topBodyIndices twoBodies
   assert (length (bodyFrames twoBodies) == 2 && topRoots == [0, 1])
     "top-level bodies do not share the program arena"
+
+moduleProductEncodingChecks :: IO ()
+moduleProductEncodingChecks = do
+  let firstGroup = projectedGroup 7 (representativeWith
+        (Let (NonRecursive (HeapBinding (ValueId 8)
+          (Thunk (SignatureId 1) Memoize [] (Return [])))) (Return [])))
+      secondGroup = projectedGroup 2 evidenceRepresentative
+      inputs =
+        [ ("m3-fixture", "Fixture", BS.pack [0, 255, 1], [firstGroup, secondGroup])
+        , ("m3-fixture", "Empty", BS.empty, [])
+        , ("other-unit", "Fixture", BS.pack [2, 3], [secondGroup])
+        ]
+      firstProduct = prepareModuleProductEncoding ("m3-fixture", "Fixture", BS.pack [0, 255, 1], [firstGroup, secondGroup])
+      products = firstProduct : map prepareModuleProductEncoding (drop 1 inputs)
+      aggregate = encodeModuleProductInventory products
+  assert (aggregate == legacyModuleProducts inputs
+      && aggregate == encodeModuleProducts inputs)
+    "retained module inventory changed canonical aggregate bytes"
+  forM_ (zip inputs products) $ \(input, encodedProduct) -> do
+    assert (moduleProductInput encodedProduct == input)
+      "retained encoding changed original product evidence"
+    assert (moduleProductBytes encodedProduct == legacyModuleProducts [input])
+      "retained singleton changed canonical module bytes and hash input"
+  let modules = termList (termList (decode aggregate) !! 2)
+      groupBytes = case modules of
+        firstModule : _ -> termList (termList firstModule !! 3)
+        [] -> []
+  assert (groupBytes == map (TBytes . encodeProjectedGroup) [firstGroup, secondGroup])
+    "retained inventory changed original group order or payload bytes"
+  assert (aggregate /= moduleProductBytes firstProduct)
+    "aggregate module framing was replaced by a singleton document"
+  let changedInterface = prepareModuleProductEncoding
+        ("m3-fixture", "Fixture", BS.pack [0, 255, 2], [firstGroup, secondGroup])
+      changedOrder = prepareModuleProductEncoding
+        ("m3-fixture", "Fixture", BS.pack [0, 255, 1], [secondGroup, firstGroup])
+  assert (moduleProductBytes changedInterface /= moduleProductBytes firstProduct
+      && moduleProductBytes changedOrder /= moduleProductBytes firstProduct)
+    "retained encoding lost exact interface or original group order identity"
+  assert (encodeModuleProductInventory [] == legacyModuleProducts [])
+    "empty retained inventory changed its canonical envelope"
+  let lazyProduct = prepareModuleProductEncoding
+        ("m3-fixture", "Lazy", BS.singleton 42,
+          [firstGroup { projectedBody = error "metadata inspection demanded group encoding" }])
+      (unit, name, interface, groups) = moduleProductInput lazyProduct
+  assert (unit == "m3-fixture" && name == "Lazy" && interface == BS.singleton 42
+      && map projectedOriginalOrdinal groups == [7])
+    "retaining canonical bytes eagerly demanded projected bodies"
+
+-- The pre-retention TPMOD framing is an independent byte-equivalence oracle.
+legacyModuleProducts :: [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])] -> BS.ByteString
+legacyModuleProducts modules = toStrictByteString
+  (encodeListLen 3 <> encodeString "TPMOD" <> encodeWord64 1
+    <> encodeListLen (fromIntegral (length modules))
+    <> foldMap (\(unit, name, interface, groups) ->
+      encodeListLen 4 <> encodeString unit <> encodeString name <> encodeBytes interface
+        <> encodeListLen (fromIntegral (length groups))
+        <> foldMap (encodeBytes . encodeProjectedGroup) groups) modules)
+
+projectedGroup :: Word32 -> WireProgram -> ProjectedGroup
+projectedGroup ordinal program = ProjectedGroup ordinal
+  [identity | group <- programBindings program
+    , TopBinding identity _ <- case group of
+        NonRecursive binding -> [binding]
+        Recursive bindings -> bindings]
+  (ProjectedGroupBody (programEnvelope program) (programSignatures program)
+    (programGlobals program) (programConstructors program) (programOperations program)
+    (programBindings program) (programTypes program) (programSites program)
+    (programVerbSites program) (programJsonLayout program))
 
 decode :: BS.ByteString -> Term
 decode bytes = case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of

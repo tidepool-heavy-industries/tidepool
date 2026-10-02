@@ -68,8 +68,7 @@ proposals distinct. Measure product progress and orchestration improvements
 separately, carry unresolved questions forward, and judge changes by subsequent
 behavior. Useful procedures become authored programs; missing capabilities can
 justify new primitives. [The RSI loop](docs/rsi-loop.md) describes the working
-pattern; [the plan index](plans/README.md) separates current obligations from
-retained experimental evidence.
+pattern.
 
 ## System 1 is a program, not another chat
 
@@ -374,8 +373,7 @@ compilation cost; installed tools and hooks avoid that cost per invocation.
 Bring a real task, build a better way to do it, and make that part of the
 harness. That is how we develop Tidepool.
 
-See [AGENTS.md](AGENTS.md) for contributor guidance and
-[plans/README.md](plans/README.md) for active work.
+See [AGENTS.md](AGENTS.md) for contributor guidance.
 
 | Area | Source |
 | --- | --- |

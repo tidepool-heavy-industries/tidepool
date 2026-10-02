@@ -26,7 +26,7 @@ A hook may prune only the exact retained output handle it receives.
 
 The effect is opt-in and requires the admitted cell service. These seeds are not
 advertised in the always-loaded prompts until that engine hook passes joined
-acceptance; see `plans/model-call-integration-handoff.md`. They have native Haskell
+acceptance. They have native Haskell
 compile coverage; native contract tests execute callbacks in the caller effect
 row. This is separate from resident/JIT and live-provider acceptance.
 

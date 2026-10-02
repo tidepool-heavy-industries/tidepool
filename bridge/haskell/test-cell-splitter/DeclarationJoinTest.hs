@@ -408,7 +408,7 @@ originalProductRootsProofWith projectedDemand = do
       input = candidate "Caller" [CandidateGroup 2 [caller] [imported source Nothing]]
       other = candidate "Unused" [CandidateGroup 7 [identity "main" "Unused" "entry"]
         [imported unused Nothing]]
-      roots targets = requiredOriginalPackageGlobals [] [parserCandidate, input, other] targets
+      roots = requiredOriginalPackageGlobals [] [parserCandidate, input, other]
   let retainedRoots retained targets = requiredOriginalPackageGlobalsWithRetained [] [parserCandidate, input, other] [] retained targets
   unless (retainedRoots (Set.singleton package) [global caller] == Right [])
     (fail "retained package import reopened original executable recovery")
@@ -422,23 +422,30 @@ originalProductRootsProofWith projectedDemand = do
     (fail "package root selection inferred a different unit from occurrence")
   unless (roots [(global caller) { Execution.globalRequiredGeneration = Just 7 }] == Right [])
     (fail "retained generation reopened original implementation closure")
-  case requiredOriginalPackageGlobals [] [parserCandidate, parserCandidate] [global caller] of
+  let duplicateRoots = requiredOriginalPackageGlobals [] [parserCandidate, parserCandidate]
+  forM_ [[global caller], []] $ \targets -> case duplicateRoots targets of
     Left _ -> pure ()
     Right _ -> fail "duplicate original binder was accepted in package root inventory"
   let failedOwner = ("main", "Broken", Left "fixture projection failure")
       broken = identity "main" "Broken" "entry"
-  unless (requiredOriginalPackageGlobals [failedOwner] [parserCandidate, input] [global caller]
-          == Right [package])
+      failedRoots = requiredOriginalPackageGlobals [failedOwner] [parserCandidate, input]
+  unless (failedRoots [global caller] == Right [package])
     (fail "unrelated fresh product miss became fatal")
+  case failedRoots [global broken] of
+    Left reason | "fixture projection failure" `isInfixOf` reason -> pure ()
+    _ -> fail "reusing original inventory lost a newly demanded failed owner"
   case requiredOriginalPackageGlobalsWithRetained [failedOwner] [] [] (Set.singleton package) [global broken] of
     Left reason | "fixture projection failure" `isInfixOf` reason -> pure ()
     _ -> fail "reached failed fresh home owner lost its projection diagnostic"
   let newlyReached = identity "main" "Later" "entry"
       later = candidate "Later" [CandidateGroup 3 [newlyReached] [imported unused Nothing]]
-      first = requiredOriginalPackageGlobals [] [parserCandidate, input, later] [global caller]
-      second = requiredOriginalPackageGlobals [] [parserCandidate, input, later]
-        [global caller, global newlyReached]
-  unless (first == Right [package] && second == Right (sort [package, unused]))
+      growingRoots = requiredOriginalPackageGlobals [] [parserCandidate, input, later]
+      first = growingRoots [global caller]
+      second = growingRoots [global caller, global newlyReached]
+      reversed = growingRoots [global newlyReached, global caller, global caller]
+      laterOnly = growingRoots [global newlyReached]
+  unless (first == Right [package] && second == Right (sort [package, unused])
+      && reversed == second && laterOnly == Right [unused])
     (fail "recovery-induced source global did not extend exact package roots")
   let dictionary = identity "main" "Tidepool.Aeson.FromJSON" "dictionary"
       envelope = Execution.ProgramEnvelope 14 (fromString "ghc-9.12-prepared-stg") (fromString "ghc-9.12.2") 8

@@ -1,9 +1,9 @@
 # Typed ambiguity diagnostics: pending compiler-owner repair
 
-Status: source proposal, not implemented or accepted. The diagnostic carrier
-repair preserves compiler failure class, phase, and artifact ownership; it does
-not change same-cell ambiguity retry. This work waits for the retained-package
-compiler repair and belongs to the existing compiler diagnostic owner.
+Replace the rendered-diagnostic parser used by same-cell ambiguity retry with
+typed GHC candidate identities. The existing compiler diagnostic owner must
+carry that evidence through the report and Rust decoder before replacing the
+retry predicate; rendered text remains human advice.
 
 ## Current production boundary
 

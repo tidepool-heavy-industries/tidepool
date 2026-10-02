@@ -76,7 +76,7 @@ nothing, when a workspace is already there. It writes:
 |---|---|
 | `.exomonad/config.toml` | generated model defaults, source roots (`.` and `workspace`), modules, checks, and the jev-dsl flake source |
 | `.exomonad/AgentSpec.hs` | generated project agent spec: tool declarations and the after-tool hook |
-| `.exomonad/prompts/`, `.exomonad/plans/` | project-owned starter prompts and plans |
+| `.exomonad/prompts/` | project-owned starter prompts |
 | `.exomonad/workspace/` | pinned Git submodule from `tidepool-heavy-industries/exomonad-default-workspace` with shared Haskell modules, checks, and skills |
 | `.agents/skills/` | links into `.exomonad/workspace/skills/`, where the client looks for skills |
 | `flake.nix`, `flake.lock` | only when the project has none: one input, pinning jev-dsl |
@@ -212,8 +212,7 @@ exomonad init
 The first live run is operator-driven: start it when ready, open the browser
 listener reported by the host, authenticate using the configured mode, and submit
 the root task there. Embedded implementation and focused checks do not by
-themselves establish full engine acceptance; see the
-[current delivery status](../../plans/README.md). Selecting this backend for a
+themselves establish full engine acceptance. Selecting this backend for a
 workspace does not change the generated default or publish a release.
 
 `exomonad init` scaffolds nothing. With no workspace it stops and says to run

@@ -4,7 +4,10 @@
 -- The reader owns validation; this module preserves the already-normalized
 -- table order and uses only definite-length arrays and primitive leaves.
 module Tidepool.ExecutionEncode
-  ( encodeWireProgram, encodeProjectedGroup, encodeModuleProducts ) where
+  ( encodeWireProgram, encodeProjectedGroup, encodeModuleProducts
+  , ModuleProductEncoding, prepareModuleProductEncoding
+  , moduleProductInput, moduleProductBytes, encodeModuleProductInventory
+  ) where
 
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
@@ -81,18 +84,41 @@ encodeProjectedGroup group = toStrictByteString $ array
 -- inhabit the same bounded document, so a cache owner cannot pair a group's
 -- definitions with a different GHC interface by listing separate files.
 encodeModuleProducts :: [(Text, Text, ByteString, [ProjectedGroup])] -> ByteString
-encodeModuleProducts modules = toStrictByteString $ array
+encodeModuleProducts = encodeModuleProductInventory . map prepareModuleProductEncoding
+
+-- | Retain canonical group bytes and the singleton document with the original
+-- product owner. Fields stay lazy: inspecting owner/interface/group evidence
+-- must not demand serialization, and an aggregate inventory need not demand
+-- singleton documents. This value has the same lifetime as its product.
+data ModuleProductEncoding = ModuleProductEncoding
+  { moduleProductInput :: (Text, Text, ByteString, [ProjectedGroup])
+  , moduleProductGroupBytes :: [ByteString]
+  , moduleProductBytes :: ByteString
+  }
+
+prepareModuleProductEncoding :: (Text, Text, ByteString, [ProjectedGroup]) -> ModuleProductEncoding
+prepareModuleProductEncoding originalProduct@(_, _, _, groups) = encoded
+ where
+  encoded = ModuleProductEncoding originalProduct (map encodeProjectedGroup groups)
+    (encodeModuleProductInventory [encoded])
+
+-- | Aggregate and singleton TPMOD documents share group payloads, while each
+-- preserves its own module-list framing and exact interface bytes.
+encodeModuleProductInventory :: [ModuleProductEncoding] -> ByteString
+encodeModuleProductInventory modules = toStrictByteString $ array
   [ encodeString "TPMOD"
   , encodeWord64 1
   , list encodeModule modules
   ]
  where
-  encodeModule (unit, name, interface, groups) = array
-    [ encodeString unit
-    , encodeString name
-    , encodeBytes interface
-    , list (encodeBytes . encodeProjectedGroup) groups
-    ]
+  encodeModule encodedProduct =
+    let (unit, name, interface, _) = moduleProductInput encodedProduct
+    in array
+      [ encodeString unit
+      , encodeString name
+      , encodeBytes interface
+      , list encodeBytes (moduleProductGroupBytes encodedProduct)
+      ]
 
 array :: [Encoding] -> Encoding
 array fields = encodeListLen (fromIntegral (length fields)) <> fold fields

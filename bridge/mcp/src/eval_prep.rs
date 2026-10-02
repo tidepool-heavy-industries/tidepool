@@ -1324,9 +1324,7 @@ mod tests {
 
         // A shim whose OWN row omits Finalize entirely still resolves `finalize`
         // as a name (it's in Core) — only `Member (Finalize v) effs` fails to
-        // solve, which is a GHC compile concern this pure test doesn't reach;
-        // `exomonad/harness/tests/agent_stack_scoping.rs` is the real-compile
-        // proof of that half.
+        // solve, which is a GHC compile concern this pure test doesn't reach.
         let shim = effects_shim_module_source(&[crate::askuser_decl()], &crate::RowArgs::default());
         assert!(shim.contains("type M = Eff '[AskUser]"), "{shim}");
     }

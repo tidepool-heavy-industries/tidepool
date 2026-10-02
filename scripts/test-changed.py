@@ -21,9 +21,12 @@ EXTRACTOR_FREE = (
     "tidepool-codegen",
 )
 
-# Retained reference source has no supported build or test obligation.
+# Deleted reference trees can still appear in diffs against older baselines.
+# They have no supported build or test obligation.
 RETIRED_SOURCES = (
     Path("exomonad/harness"), Path("exomonad/web"),
+    Path("exomonad/harness-dogfooding"), Path("exomonad/examples/harness"),
+    Path("codex-handoff/luna6-vibe-bugs"), Path(".tidepool/attic/MechDemo.hs"),
 )
 
 

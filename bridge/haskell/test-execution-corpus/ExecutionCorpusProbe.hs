@@ -21,7 +21,6 @@ import GHC.Types.Basic (FunctionOrData(IsFunction))
 import GHC.Types.CostCentre (dontCareCCS)
 import GHC.Types.Id (mkSysLocal)
 import GHC.Types.Literal (Literal(LitLabel))
-import GHC.Types.Name.Env (emptyNameEnv)
 import GHC.Types.Unique (mkUniqueGrimily)
 import GHC.Types.Var.Set (emptyDVarSet)
 import GHC.Unit.Module (mkModuleName)
@@ -381,7 +380,7 @@ inventorySelfTest assert = do
       body = StgCase (StgOpApp first [] intPrimTy) caseBinder PolyAlt
         [GenStgAlt DEFAULT [] (StgOpApp second [StgLitArg label] intPrimTy)]
       rhs = StgRhsClosure emptyDVarSet dontCareCCS ReEntrant [] body intPrimTy
-      facts = extractPreparedFacts modul emptyNameEnv
+      facts = extractPreparedFacts modul
         [StgTopLifted (StgNonRec topBinder rhs)]
       rendered = renderPreparedFactsForTest modul facts
   assert "inventory retains both nested unsupported operations"

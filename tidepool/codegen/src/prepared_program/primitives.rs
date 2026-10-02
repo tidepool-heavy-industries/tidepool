@@ -925,7 +925,7 @@ pub(super) fn emit_operation(
     boxed_array: &tidepool_heap::execution_descriptor::ObjectDescriptor,
     mut_var: &tidepool_heap::execution_descriptor::ObjectDescriptor,
     bytes_array: &tidepool_heap::execution_descriptor::ObjectDescriptor,
-    json_layout: Option<&tidepool_repr::execution_schema::JsonLayout>,
+    json_layout: Option<&super::json::BoundJsonLayout>,
     constructors: &[std::sync::Arc<tidepool_heap::execution_descriptor::ObjectDescriptor>],
 ) -> Result<Option<Vec<ir::Value>>, super::CompileError> {
     match operation {
@@ -1171,7 +1171,7 @@ pub(super) fn emit_operation(
                 pipeline,
                 vmctx,
                 bytes_array,
-                *layout,
+                layout,
                 (left, right),
                 arguments,
                 constructors,
@@ -1180,15 +1180,7 @@ pub(super) fn emit_operation(
         }
         PrimitiveOperation::EncodeJson => {
             let layout = json_layout.ok_or(super::CompileError::MissingJsonLayout)?;
-            super::json::emit_encode_json(
-                builder,
-                pipeline,
-                vmctx,
-                *layout,
-                arguments,
-                constructors,
-            )
-            .map(Some)
+            super::json::emit_encode_json(builder, pipeline, vmctx, layout, arguments).map(Some)
         }
         PrimitiveOperation::Raise => {
             super::no_success::emit_terminal(
