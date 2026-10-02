@@ -5,6 +5,7 @@ import Control.Monad (unless)
 import Data.ByteString qualified as BS
 import Data.List (isInfixOf, nub, sort)
 import Data.String (fromString)
+import Data.Set qualified as Set
 import Data.Text qualified as Text
 import GHC (moduleNameString)
 import GHC.Builtin.Types (boolTy)
@@ -102,9 +103,10 @@ projectEntry result modul entry retained =
 projectEntryWithJsonAuthority :: JsonAuthority -> PreparedPipelineResult
   -> String -> String -> Either Projection.ProjectionError Schema.WireProgram
 projectEntryWithJsonAuthority authority result modul entry =
-  Projection.projectPreparedTarget context (pprModules result)
- where
-  context = Projection.ProjectionContext
+  Projection.projectPreparedTarget (jsonProjectionContext authority modul entry) (pprModules result)
+
+jsonProjectionContext :: JsonAuthority -> String -> String -> Projection.ProjectionContext
+jsonProjectionContext authority modul entry = Projection.ProjectionContext
     { Projection.projectionProfile = "ghc-9.12-prepared-stg"
     , Projection.projectionToolchain = "ghc-9.12.2"
     , Projection.projectionTarget =
@@ -166,6 +168,9 @@ verifyJsonDependencyAuthority dir = do
   trusted <- runPipelineSelected PreparedStg fixture ["test-prepared-stg", "lib"]
   trustedAuthority <- resolveJsonAuthority (prHscEnv (pprPipelineResult trusted))
   assert (trustedAuthority /= Nothing) "shipped JSON dependency graph lacks authority"
+  trustedOwner <- maybe (ioError (userError "installed JSON owners did not resolve")) pure
+    trustedAuthority
+  verifyJsonLayoutDemand trustedOwner trusted
   source <- readFile "lib/Tidepool/Aeson/Scientific.hs"
   let shadow = Text.replace "coefficient (Scientific c _) = c"
         "coefficient (Scientific c _) = c + 1" (Text.pack source)
@@ -212,6 +217,74 @@ verifyJsonDependencyAuthority dir = do
     outcome -> ioError (userError
       ("JSON authority admitted a home-shadowed Either dependency: "
         ++ either show (const "projected") outcome))
+
+verifyJsonLayoutDemand :: JsonAuthority -> PreparedPipelineResult -> IO ()
+verifyJsonLayoutDemand authority result = do
+  let context = jsonProjectionContext authority "JsonAuthorityContract" "unrelated"
+      plain = context { Projection.projectionJsonAuthority = Nothing }
+      project = Projection.projectPreparedTarget
+      require :: Show failure => String -> Either failure value -> IO value
+      require label = either (ioError . userError . ((label ++ ": ") ++) . show) pure
+  unrelated <- require "unrelated target" (project context (pprModules result))
+  plainUnrelated <- require "unrelated target without authority" (project plain (pprModules result))
+  assert (unrelated == plainUnrelated)
+    "unused JSON authority changed an unrelated executable's declarations or bytes"
+  prepared <- case filter ((== "JsonAuthorityContract") . moduleNameString . moduleName . pmModule)
+      (pprModules result) of
+    [value] -> pure value
+    _ -> ioError (userError "JSON demand fixture lacks its prepared owner")
+  let selectionFor owner occurrences = Just (Set.fromList [ fromIntegral ordinal
+        | (ordinal, (binding, _)) <- zip [0 :: Int ..] (pmBindings owner)
+        , any ((`elem` occurrences) . occNameString . nameOccName . idName)
+            (Projection.topBinders binding) ])
+      selection = selectionFor prepared ["unrelated"]
+  groups <- require "unrelated original group"
+    (Projection.projectPreparedModuleGroupsSelected context prepared selection)
+  plainGroups <- require "unrelated original group without authority"
+    (Projection.projectPreparedModuleGroupsSelected plain prepared selection)
+  assert (not (null groups) && groups == plainGroups)
+    "unused JSON authority changed an original group's declarations or ordinals"
+  hostGroups <- require "host original groups"
+    (Projection.projectPreparedModuleGroupsSelected context prepared
+      (selectionFor prepared ["hostValue"]))
+  assert (length hostGroups == 1 && all
+      ((/= Nothing) . Schema.projectedJsonLayout . Schema.projectedBody) hostGroups)
+    "JSON host original group omitted authenticated roles"
+  valueModule <- case filter ((== "Tidepool.Aeson.Value") . moduleNameString . moduleName . pmModule)
+      (pprModules result) of
+    [value] -> pure value
+    _ -> ioError (userError "JSON demand fixture lacks its authenticated Value module")
+  jsonGroups <- require "intrinsic original groups"
+    (Projection.projectPreparedModuleGroupsSelected context valueModule
+      (selectionFor valueModule ["encodeValue", "eitherDecodeValue"]))
+  assert (length jsonGroups == 2 && all
+      ((/= Nothing) . Schema.projectedJsonLayout . Schema.projectedBody) jsonGroups)
+    "JSON intrinsic original groups omitted authenticated roles"
+  mapM_ (\entry -> do
+      program <- require entry (projectEntryWithJsonAuthority authority result "JsonAuthorityContract" entry)
+      assert (Schema.programJsonLayout program /= Nothing)
+        (entry ++ ": omitted required JSON layout"))
+    ["result", "encodeOnly", "decodeOnly", "hostValue", "polymorphicValue"]
+  mapM_ (\entry -> do
+      program <- require entry (projectEntryWithJsonAuthority authority result "JsonAuthorityContract" entry)
+      assert (any isJsonOperation (Schema.programOperations program))
+        (entry ++ ": intrinsic regression fixture lacks JSON operations")) ["encodeOnly", "decodeOnly"]
+  host <- require "host carrier" (projectEntryWithJsonAuthority authority result "JsonAuthorityContract" "hostValue")
+  assert (not (any isJsonOperation (Schema.programOperations host)))
+    "host carrier regression fixture unexpectedly uses JSON operations"
+  let nestedContext = context { Projection.projectionAuxiliaryRoots =
+        [Schema.SymbolIdentity "main" "JsonAuthorityContract" "value" "nestedValue" Nothing] }
+  nested <- require "nested JSON evidence" (project nestedContext (pprModules result))
+  assert (Schema.programJsonLayout nested /= Nothing)
+    "nested JSON type evidence omitted authenticated roles"
+  assert (not (null (Schema.programTypes nested))
+      && not (any isJsonOperation (Schema.programOperations nested)))
+    "nested type regression fixture unexpectedly requires JSON operations"
+ where
+  isJsonOperation declaration = case Schema.operationIdentity declaration of
+    Schema.JsonDecodeIdentity{} -> True
+    Schema.JsonEncodeIdentity -> True
+    _ -> False
 
 -- An O0 bytecode interface exposes a private helper that the prepared O2 body
 -- removes. Importers must receive the prepared owner's interface, including on
@@ -555,6 +628,13 @@ main :: IO ()
 main = do
   args <- getArgs
   case args of
+    ["--json-authority"] -> do
+      tmp <- getTemporaryDirectory
+      let work = tmp </> "tidepool-json-authority-test"
+      bracket
+        (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
+        removePathForcibly
+        verifyJsonDependencyAuthority
     ["--retained-scope"] -> do
       tmp <- getTemporaryDirectory
       let work = tmp </> "tidepool-retained-scope-test"

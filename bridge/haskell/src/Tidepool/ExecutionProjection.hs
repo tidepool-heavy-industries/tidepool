@@ -67,6 +67,7 @@ import GHC.Stg.Syntax
 import GHC.Stg.Syntax qualified as Stg
 import GHC.StgToCmm.Closure (importedIdLFInfo)
 import GHC.StgToCmm.Types (LambdaFormInfo(..))
+import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.Demand (splitDmdSig)
 import GHC.Types.Literal (LitNumType(..), Literal(..), literalType)
 import GHC.Types.Id (idDmdSig, isDeadEndId, isDataConWorkId_maybe)
@@ -105,7 +106,7 @@ import Tidepool.PreparedFormatting
   (FormattingAuthority, FormattingSpec(..), FormattingIntrinsic(..), classifyFormatting)
 import Tidepool.PreparedTime (TimeAuthority, TimeSpec(..), classifyTime)
 import Tidepool.PreparedJson
-  ( JsonAuthority, JsonSpec(..), classifyJson, jsonAuthorityLayout )
+  ( JsonAuthority, JsonSpec(..), classifyJson, jsonAuthorityLayout, jsonValueLayoutForType )
 
 data ProjectionContext = ProjectionContext
   { projectionProfile :: Text
@@ -318,8 +319,7 @@ projectPreparedModuleGroupsFor purpose context prepared selection = traverse pro
             preallocate [onlyGroup]
             groups <- projectModule onlyGroup
             (types, sites, verbSites) <- lowerPreparedEvidence context [onlyGroup] [evidence]
-            jsonLayout <- traverse (traverse internConstructor . jsonAuthorityLayout)
-              (projectionJsonAuthority context)
+            jsonLayout <- lowerJsonLayout [onlyGroup]
             pure (groups, types, sites, verbSites, jsonLayout)) initial
       pure ProjectedGroup
         { projectedOriginalOrdinal = ordinal
@@ -380,8 +380,7 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
         preallocate projectable
         groups <- concat <$> mapM projectModule projectable
         (types, sites, verbSites) <- lowerPreparedEvidence context projectable evidence
-        jsonLayout <- traverse (traverse internConstructor . jsonAuthorityLayout)
-          (projectionJsonAuthority context)
+        jsonLayout <- lowerJsonLayout projectable
         pure (groups, types, sites, verbSites, jsonLayout)) initial
   entryTop <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
     pure (findTop bindingGroups)
@@ -419,6 +418,37 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
     groupItems (NonRecursive top) = [top]
     groupItems (Recursive tops) = tops
     topSymbol (TopBinding symbol _) = symbol
+
+-- JSON operations, structural answers and host mounts consume authenticated
+-- roles. A host carrier can have a Value root without constructing a Value or
+-- declaring a site, so its binder type must also retain the layout. Unrelated
+-- original groups need neither the roles nor their constructor declarations.
+lowerJsonLayout :: [PreparedModule] -> P (Maybe (JsonLayout ConstructorId))
+lowerJsonLayout modules = do
+  authority <- gets jsonAuthority
+  case authority of
+    Nothing -> pure Nothing
+    Just owner -> do
+      emittedOperations <- gets operationDecls
+      admittedConstructors <- gets constructors
+      let layout = jsonAuthorityLayout owner
+          valueTyCon = dataConTyCon (jsonObject layout)
+          needsOperations = any (isJsonOperation . operationIdentity) emittedOperations
+          needsConstructors = any ((== valueTyCon) . dataConTyCon . fst) admittedConstructors
+          needsHostRoot = any (isValueResult owner)
+            [ binder | prepared <- modules, (binding, _) <- pmBindings prepared
+                     , binder <- topBinders binding ]
+      if needsOperations || needsConstructors || needsHostRoot
+        then Just <$> traverse internConstructor layout
+        else pure Nothing
+ where
+  isJsonOperation Schema.JsonDecodeIdentity{} = True
+  isJsonOperation Schema.JsonEncodeIdentity = True
+  isJsonOperation _ = False
+  isValueResult authority binder =
+    let (_, _, body) = tcSplitSigmaTy (varType binder)
+        result = snd (splitFunTys body)
+    in isJust (jsonValueLayoutForType authority (unwrapType result))
 
 -- | Project only the supplied top-level closure reachable from the selected
 -- entry. Package imports remain explicit globals for atomic linking. This
