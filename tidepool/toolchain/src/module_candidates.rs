@@ -5,9 +5,9 @@ use ciborium::value::Value;
 use serde::{Deserialize, Serialize};
 
 mod candidate_diagnostics;
-pub(crate) mod dependencies;
 #[cfg(test)]
 mod codec_measurement;
+pub(crate) mod dependencies;
 pub(crate) mod deployment;
 mod inventory;
 mod shared_evidence;
@@ -1231,7 +1231,7 @@ pub(crate) fn module_version_for_product(
 fn ordinary_records(
     endpoint_identity: &[u8],
     include: &[PathBuf],
-    exact_disjoint: bool,
+    exact_context: bool,
 ) -> Option<Vec<Record>> {
     let include = context_paths(include)?;
     let producer_dir = record_dir(endpoint_identity);
@@ -1271,8 +1271,8 @@ fn ordinary_records(
         headers_read += 1;
         header_bytes += file.stream_position().ok()?;
         if header.endpoint != endpoint_identity
-            || (!exact_disjoint && header.include != include)
-            || (exact_disjoint && !current_source_matches(&header.module, &header.source, &include))
+            || (!exact_context && header.include != include)
+            || (exact_context && !current_source_matches(&header.module, &header.source, &include))
         {
             continue;
         }
@@ -1344,13 +1344,13 @@ pub(crate) fn select(
 /// Exact owners and planned generated modules are issued by the owning compile
 /// request after its context and checked values have been admitted.
 #[derive(Debug)]
-pub(crate) struct ExactCandidateExclusions {
+pub(crate) struct ExactCandidateContext {
     protected: BTreeSet<(String, String)>,
     reserved: BTreeSet<String>,
     originals: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
 }
 
-impl ExactCandidateExclusions {
+impl ExactCandidateContext {
     pub(crate) fn new(protected: BTreeSet<(String, String)>, reserved: BTreeSet<String>) -> Self {
         Self {
             protected,
@@ -1367,7 +1367,7 @@ impl ExactCandidateExclusions {
         self
     }
 
-    fn excludes(&self, unit: &str, module: &str) -> bool {
+    fn excludes_root(&self, unit: &str, module: &str) -> bool {
         self.protected
             .contains(&(unit.to_owned(), module.to_owned()))
             || self.reserved.contains(module)
@@ -1384,20 +1384,20 @@ pub(crate) fn select_configured(
     select_configured_inner(endpoint_identity, include, scratch, None)
 }
 
-pub(crate) fn select_configured_disjoint(
+pub(crate) fn select_configured_in_context(
     endpoint_identity: &[u8],
     include: &[PathBuf],
     scratch: &Path,
-    exclusions: &ExactCandidateExclusions,
+    context: &ExactCandidateContext,
 ) -> Result<Option<CandidateSet>, deployment::ModulePackageError> {
-    select_configured_inner(endpoint_identity, include, scratch, Some(exclusions))
+    select_configured_inner(endpoint_identity, include, scratch, Some(context))
 }
 
 fn select_configured_inner(
     endpoint_identity: &[u8],
     include: &[PathBuf],
     scratch: &Path,
-    exclusions: Option<&ExactCandidateExclusions>,
+    context: Option<&ExactCandidateContext>,
 ) -> Result<Option<CandidateSet>, deployment::ModulePackageError> {
     let started = std::time::Instant::now();
     let package = crate::toolchain::configured_module_package()?;
@@ -1411,16 +1411,16 @@ fn select_configured_inner(
         .map(|(r, _)| (r.unit.clone(), r.module.clone()))
         .collect();
     records.extend(
-        ordinary_records(endpoint_identity, include, exclusions.is_some())
+        ordinary_records(endpoint_identity, include, context.is_some())
             .unwrap_or_default()
             .into_iter()
             .filter(|r| !deployed.contains(&(r.unit.clone(), r.module.clone())))
             .map(|r| (r, CandidateOrigin::Ordinary)),
     );
-    let selected = select_records_inner(endpoint_identity, include, scratch, records, exclusions);
+    let selected = select_records_inner(endpoint_identity, include, scratch, records, context);
     tracing::info!(target: "tidepool_toolchain::module_candidates",
         phase = "candidate_selection", elapsed_ms = started.elapsed().as_millis() as u64,
-        exact_disjoint = exclusions.is_some(),
+        exact_context = context.is_some(),
         offered = selected.as_ref().map_or(0, |set| set.by_owner.len()));
     if has_package && selected.is_none() {
         return Err(deployment::ModulePackageError::Format(
@@ -1445,7 +1445,7 @@ fn select_records_inner(
     include: &[PathBuf],
     scratch: &Path,
     records: Vec<(Record, CandidateOrigin)>,
-    exclusions: Option<&ExactCandidateExclusions>,
+    context: Option<&ExactCandidateContext>,
 ) -> Option<CandidateSet> {
     let include = context_paths(include)?;
     let requirements = crate::prepared_artifact::production_requirements().ok()?;
@@ -1464,10 +1464,10 @@ fn select_records_inner(
             || record.version != RECORD_VERSION
             || record.endpoint != endpoint_identity
             || (matches!(origin, CandidateOrigin::Ordinary)
-                && exclusions.is_none()
+                && context.is_none()
                 && record.include != include)
             || record.source.is_relative()
-            || exclusions.is_some_and(|e| e.excludes(&record.unit, &record.module))
+            || context.is_some_and(|e| e.excludes_root(&record.unit, &record.module))
         {
             continue;
         }
@@ -1592,8 +1592,8 @@ fn select_records_inner(
         phase = "candidate_record_validation", validation_ms = validation_elapsed.as_millis() as u64,
         product_decode_ms = decode_elapsed.as_millis() as u64, decoded_product_bytes = decoded_bytes,
         validated = validated.len());
-    if let Some(exclusions) = exclusions {
-        retain_closed_disjoint(&mut validated, exclusions, &include);
+    if let Some(context) = context {
+        retain_compatible_dependencies(&mut validated, context, &include);
     }
     let mut inventory = inventory::InventoryTables::new(
         validated
@@ -1701,7 +1701,7 @@ fn select_records_inner(
     }
     retain_closed_execution_capabilities(
         &mut by_owner,
-        exclusions.map_or(&[], |exclusions| exclusions.originals.as_slice()),
+        context.map_or(&[], |context| context.originals.as_slice()),
     );
     let graph_bytes = by_owner
         .values()
@@ -1780,7 +1780,6 @@ fn select_records_inner(
 
 #[derive(Clone, Copy, Debug)]
 enum CandidateExecutionUnavailable {
-    OriginalClosureUnavailable,
     ManifestBound,
 }
 
@@ -1788,90 +1787,18 @@ fn retain_closed_execution_capabilities(
     bundles: &mut BTreeMap<(String, String), CandidateBundle>,
     originals: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
 ) {
-    let mut owners: BTreeMap<_, _> = bundles
-        .values()
-        .map(|bundle| {
-            (
-                (bundle.owner.unit.clone(), bundle.owner.module.clone()),
-                bundle.owner.clone(),
-            )
-        })
-        .collect();
-    let mut graphs: BTreeMap<_, _> = bundles
-        .values()
-        .filter_map(|bundle| {
-            bundle.original_execution.as_ref().map(|proof| {
-                (
-                    (bundle.owner.unit.clone(), bundle.owner.module.clone()),
-                    (bundle.owner.clone(), Arc::clone(&proof.graph)),
-                )
-            })
-        })
-        .collect();
-    for original in originals {
-        let key = (
-            original.owner().unit.clone(),
-            original.owner().module.clone(),
-        );
-        if owners
-            .get(&key)
-            .is_some_and(|owner| owner != original.owner())
-        {
-            continue;
-        }
-        owners.insert(key.clone(), original.owner().clone());
-        if let Some(graph) = original.execution_source() {
-            graphs.insert(key, (original.owner().clone(), Arc::clone(graph)));
-        }
-    }
+    let inventory =
+        dependencies::CandidateDependencyInventory::from_candidates(bundles.values(), originals);
     for bundle in bundles.values_mut() {
         let Some(proof) = bundle.original_execution.as_ref() else {
             continue;
         };
-        let mut pending = vec![(bundle.owner.clone(), Arc::clone(&proof.graph))];
-        let mut seen = BTreeSet::new();
-        let mut closed = true;
-        while let Some((owner, graph)) = pending.pop() {
-            if !seen.insert((
-                owner.unit.clone(),
-                owner.module.clone(),
-                owner.module_version.0,
-                owner.skinny_iface_sha256,
-                owner.product_sha256,
-                graph.digest(),
-            )) {
-                continue;
-            }
-            if !graph.eligible_execution_root(&owner)
-                || graph.required_source_owners(&owner).iter().any(|required| {
-                    owners.get(&(required.unit.clone(), required.module.clone())) != Some(required)
-                })
-            {
-                closed = false;
-                break;
-            }
-            for (required, digest) in graph.required_original_graphs(&owner) {
-                let Some((selected, required_graph)) =
-                    graphs.get(&(required.unit.clone(), required.module.clone()))
-                else {
-                    closed = false;
-                    break;
-                };
-                if selected != &required || required_graph.digest() != digest {
-                    closed = false;
-                    break;
-                }
-                pending.push((required, Arc::clone(required_graph)));
-            }
-            if !closed {
-                break;
-            }
-        }
-        bundle.execution_admitted = closed;
-        if !closed {
-            tracing::debug!(target: "tidepool_toolchain::module_candidates", unit = bundle.owner.unit.as_str(),
-                module = bundle.owner.module.as_str(), reason = ?CandidateExecutionUnavailable::OriginalClosureUnavailable,
-                "candidate retains native products without execution capability");
+        let result = inventory.verify(&bundle.owner, &proof.graph);
+        bundle.execution_admitted = result.is_ok();
+        if let Err(reason) = result {
+            tracing::debug!(target: "tidepool_toolchain::module_candidates",
+                unit = bundle.owner.unit.as_str(), module = bundle.owner.module.as_str(),
+                ?reason, "candidate retains native products without execution capability");
         }
     }
 }
@@ -1928,40 +1855,93 @@ pub(crate) fn package_edge_matches(
     }
 }
 
-/// Remove vertices until every remaining home edge names another offered body
-/// at the exact source path selected in its original evidence.
-
-fn retain_closed_disjoint(
+/// Keep the greatest closed subset whose dependencies are compatible with
+/// either another candidate or an already selected immutable original.
+fn retain_compatible_dependencies(
     candidates: &mut BTreeMap<(String, String), ValidatedCandidate>,
-    exclusions: &ExactCandidateExclusions,
+    context: &ExactCandidateContext,
     include: &[PathBuf],
 ) {
+    use dependencies::{CandidateDependencyInventory, DependencyKind};
     loop {
+        let inventory = CandidateDependencyInventory::new(
+            candidates
+                .values()
+                .map(|(record, _, _, _)| {
+                    (
+                        record.original_owner.owner(),
+                        record.execution_source.clone(),
+                        DependencyKind::Candidate,
+                    )
+                })
+                .chain(context.originals.iter().map(|original| {
+                    (
+                        original.owner().clone(),
+                        original.execution_source().cloned(),
+                        DependencyKind::Original,
+                    )
+                })),
+        );
         let rejected: Vec<_> = candidates
             .iter()
-            .filter_map(|(key, (record, _, _, package_roots))| {
-                let owner = record.evidence.modules.iter().find(|m| {
+            .filter_map(|(key, (record, _, _, packages))| {
+                let owner = record.original_owner.owner();
+                let originals = match &record.execution_source {
+                    Some(graph) => match inventory.direct_originals(&owner, graph) {
+                        Ok(originals) => originals,
+                        Err(reason) => {
+                            tracing::debug!(target: "tidepool_toolchain::module_candidates",
+                            unit = owner.unit.as_str(), module = owner.module.as_str(),
+                            ?reason, "candidate dependency proof refused");
+                            return Some(key.clone());
+                        }
+                    },
+                    None => BTreeMap::new(),
+                };
+                // Generated modules are reserved even if an old recipe happens
+                // to contain a matching product for the same spelling.
+                if originals
+                    .keys()
+                    .any(|(_, module)| context.reserved.contains(module))
+                {
+                    return Some(key.clone());
+                }
+                let source_owner = record.evidence.modules.iter().find(|m| {
                     m.unit == record.unit
                         && m.module == record.module
                         && !m.boot
                         && absolute(&m.source).as_ref() == Some(&record.source)
                 });
-                let closed = owner.is_some_and(|owner| {
-                    owner.imports.iter().all(|edge| {
+                let closed = source_owner.is_some_and(|source_owner| {
+                    source_owner.imports.iter().all(|edge| {
                         use crate::cache::ImportQualifier;
+                        if edge.boot {
+                            return false;
+                        }
                         if edge.selected.is_none() {
-                            return !edge.boot
-                                && package_edge_matches(edge, package_roots)
-                                && (!matches!(edge.qualifier, ImportQualifier::Unqualified)
+                            if package_edge_matches(edge, packages) {
+                                return !matches!(edge.qualifier, ImportQualifier::Unqualified)
                                     || matches!(
                                         current_home_path(&edge.module, include),
                                         Ok(None)
-                                    ));
-                        }
-                        // Boot interfaces do not yet carry an authenticated body pair
-                        // in this offer. Keep ordinary SOURCE reuse separate.
-                        if edge.boot {
-                            return false;
+                                    );
+                            }
+                            // A pathless home edge needs the graph's exact owner
+                            // proof; its module spelling cannot grant authority.
+                            return originals
+                                .keys()
+                                .filter(|(unit, module)| {
+                                    module == &edge.module
+                                        && match &edge.qualifier {
+                                            ImportQualifier::Unqualified => true,
+                                            ImportQualifier::ThisUnit(requested) => {
+                                                unit == requested
+                                            }
+                                            ImportQualifier::OtherUnit(_) => false,
+                                        }
+                                })
+                                .count()
+                                == 1;
                         }
                         let Some(selected) = edge.selected.as_ref().and_then(|p| absolute(p))
                         else {
@@ -1969,7 +1949,7 @@ fn retain_closed_disjoint(
                         };
                         let mut matches = record.evidence.modules.iter().filter(|m| {
                             m.module == edge.module
-                                && m.boot == edge.boot
+                                && !m.boot
                                 && absolute(&m.source).as_ref() == Some(&selected)
                                 && match &edge.qualifier {
                                     ImportQualifier::ThisUnit(unit) => &m.unit == unit,
@@ -1980,14 +1960,18 @@ fn retain_closed_disjoint(
                         let Some(dependency) = matches.next() else {
                             return false;
                         };
-                        if matches.next().is_some()
-                            || exclusions.excludes(&dependency.unit, &dependency.module)
+                        if matches.next().is_some() || context.reserved.contains(&dependency.module)
                         {
                             return false;
                         }
-                        candidates
-                            .get(&(dependency.unit.clone(), dependency.module.clone()))
-                            .is_some_and(|(body, _, _, _)| body.source == selected)
+                        let dependency_key = (dependency.unit.clone(), dependency.module.clone());
+                        if originals.contains_key(&dependency_key) {
+                            return true;
+                        }
+                        !context.protected.contains(&dependency_key)
+                            && candidates
+                                .get(&dependency_key)
+                                .is_some_and(|(body, _, _, _)| body.source == selected)
                     })
                 });
                 (!closed).then(|| key.clone())
@@ -2906,10 +2890,10 @@ mod tests {
         assert!(record.evidence.valid(&record.target_source));
     }
 
-    fn select_disjoint_records(
+    fn select_context_records(
         scratch: &Path,
         records: Vec<Record>,
-        exclusions: &ExactCandidateExclusions,
+        context: &ExactCandidateContext,
     ) -> CandidateSet {
         select_records_inner(
             b"endpoint",
@@ -2919,7 +2903,7 @@ mod tests {
                 .into_iter()
                 .map(|r| (r, CandidateOrigin::Ordinary))
                 .collect(),
-            Some(exclusions),
+            Some(context),
         )
         .unwrap()
     }
@@ -2934,11 +2918,9 @@ mod tests {
         let d = candidate_fixture(root.path(), "D");
         import_candidate(&mut b, &c);
         import_candidate(&mut a, &b);
-        let exclusions = ExactCandidateExclusions::new(
-            BTreeSet::from([("u".into(), "C".into())]),
-            BTreeSet::new(),
-        );
-        let selected = select_disjoint_records(scratch.path(), vec![a, b, c, d], &exclusions);
+        let context =
+            ExactCandidateContext::new(BTreeSet::from([("u".into(), "C".into())]), BTreeSet::new());
+        let selected = select_context_records(scratch.path(), vec![a, b, c, d], &context);
         assert_eq!(
             selected.by_owner.keys().cloned().collect::<Vec<_>>(),
             vec![("u".into(), "D".into())]
@@ -2956,6 +2938,105 @@ mod tests {
         assert_eq!(
             row[6].as_text(),
             Some(hex(&bundle.owner.module_version.0).as_str())
+        );
+    }
+
+    #[test]
+    fn exact_candidates_reuse_a_dependency_original_without_offering_its_root() {
+        use crate::declaration_join::ExactModuleIdentity;
+        use crate::execution_source::{
+            CertifiedExecutionSourceGraph, ExecutionSourceAdmission, ExecutionSourceGraphInput,
+        };
+        use crate::recovery_artifacts::CertifiedRecoveryProduct;
+        let root = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let mut a = candidate_fixture(root.path(), "A");
+        let b = candidate_fixture(root.path(), "B");
+        import_candidate(&mut a, &b);
+        let owners = vec![computed_owner(&a), computed_owner(&b)];
+        let input = root.path().join("Input.hs");
+        fs::write(&input, &a.target_source).unwrap();
+        let ExecutionSourceAdmission::Available(graph) =
+            CertifiedExecutionSourceGraph::admit(ExecutionSourceGraphInput {
+                producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    &a.endpoint,
+                ),
+                semantic_sha256: None,
+                include: &a.include,
+                source_path: &input,
+                source: &a.target_source,
+                evidence: &a.evidence,
+                exact_imports: &BTreeMap::new(),
+                owners: &owners,
+                fresh_owners: &owners
+                    .iter()
+                    .map(|owner| ExactModuleIdentity {
+                        unit: owner.unit.clone(),
+                        module: owner.module.clone(),
+                    })
+                    .collect(),
+                retained_sources: &BTreeMap::new(),
+                packages: &BTreeMap::new(),
+            })
+            .unwrap()
+        else {
+            panic!("fixture graph unavailable")
+        };
+        a.original_certification = crate::certified_products::bind_home_execution_source(
+            &crate::certified_products::encode_home_certification(
+                &owners[0],
+                &[],
+                &BTreeMap::new(),
+            )
+            .unwrap(),
+            &owners[0],
+            graph.digest(),
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        a.execution_source_sha256 = Some(graph.digest());
+        a.execution_source = Some(graph);
+        let original = CertifiedRecoveryProduct::from_certification(
+            owners[1].clone(),
+            b.interface.clone(),
+            b.products.clone(),
+            b.package_imports.clone(),
+            crate::certified_products::encode_home_certification(&owners[1], &[], &BTreeMap::new())
+                .unwrap(),
+        );
+        let context =
+            ExactCandidateContext::new(BTreeSet::from([("u".into(), "B".into())]), BTreeSet::new())
+                .with_originals(vec![original]);
+        let selected = select_context_records(scratch.path(), vec![a.clone(), b.clone()], &context);
+        assert_eq!(
+            selected.by_owner.keys().cloned().collect::<Vec<_>>(),
+            vec![("u".into(), "A".into())]
+        );
+        assert_eq!(
+            selected.by_owner[&("u".into(), "A".into())].product_bytes,
+            a.products
+        );
+
+        // Missing original proof retains the old conservative refusal. A
+        // same-name candidate cannot replace the protected dependency.
+        let without_original =
+            ExactCandidateContext::new(context.protected.clone(), BTreeSet::new());
+        assert!(select_context_records(
+            scratch.path(),
+            vec![a.clone(), b.clone()],
+            &without_original
+        )
+        .by_owner
+        .is_empty());
+        // A planned generated module cannot be satisfied by an old original.
+        let reserved = ExactCandidateContext {
+            reserved: BTreeSet::from(["B".into()]),
+            ..context
+        };
+        assert!(
+            select_context_records(scratch.path(), vec![a, b], &reserved)
+                .by_owner
+                .is_empty()
         );
     }
 
@@ -2988,11 +3069,11 @@ mod tests {
             .make_mut()
             .modules
             .extend(hidden.evidence.modules.clone());
-        let exclusions = ExactCandidateExclusions::new(
+        let context = ExactCandidateContext::new(
             BTreeSet::from([("u".into(), "Hidden".into())]),
             BTreeSet::new(),
         );
-        let selected = select_disjoint_records(scratch.path(), vec![a, b, hidden], &exclusions);
+        let selected = select_context_records(scratch.path(), vec![a, b, hidden], &context);
         assert_eq!(
             selected.by_owner.keys().cloned().collect::<Vec<_>>(),
             vec![("u".into(), "B".into())]
@@ -3006,15 +3087,15 @@ mod tests {
         let mut a = candidate_fixture(root.path(), "A");
         let b = candidate_fixture(root.path(), "B");
         import_candidate(&mut a, &b);
-        let empty = ExactCandidateExclusions::new(BTreeSet::new(), BTreeSet::new());
+        let empty = ExactCandidateContext::new(BTreeSet::new(), BTreeSet::new());
         assert!(
-            select_disjoint_records(scratch.path(), vec![a.clone()], &empty)
+            select_context_records(scratch.path(), vec![a.clone()], &empty)
                 .by_owner
                 .is_empty()
         );
-        let reserved = ExactCandidateExclusions::new(BTreeSet::new(), BTreeSet::from(["B".into()]));
+        let reserved = ExactCandidateContext::new(BTreeSet::new(), BTreeSet::from(["B".into()]));
         assert!(
-            select_disjoint_records(scratch.path(), vec![a.clone(), b.clone()], &reserved)
+            select_context_records(scratch.path(), vec![a.clone(), b.clone()], &reserved)
                 .by_owner
                 .is_empty()
         );
@@ -3025,7 +3106,7 @@ mod tests {
         ambiguous.unit = "another-unit".into();
         a.evidence.make_mut().modules.push(ambiguous);
         assert!(a.evidence.valid(&a.target_source));
-        let selected = select_disjoint_records(scratch.path(), vec![a, b], &empty);
+        let selected = select_context_records(scratch.path(), vec![a, b], &empty);
         assert_eq!(selected.by_owner.len(), 1);
         assert!(selected.by_owner.contains_key(&("u".into(), "B".into())));
     }
@@ -3092,7 +3173,7 @@ mod tests {
             expected.push(version_hash(&record));
             publish(&record);
         }
-        let exclusions = ExactCandidateExclusions::new(BTreeSet::new(), BTreeSet::new());
+        let context = ExactCandidateContext::new(BTreeSet::new(), BTreeSet::new());
         for (include, version) in [&full, &narrow, &reversed].into_iter().zip(expected) {
             for disjoint in [false, true] {
                 let records = ordinary_records(b"endpoint", include, disjoint).unwrap();
@@ -3104,7 +3185,7 @@ mod tests {
                         .into_iter()
                         .map(|record| (record, CandidateOrigin::Ordinary))
                         .collect(),
-                    disjoint.then_some(&exclusions),
+                    disjoint.then_some(&context),
                 )
                 .unwrap();
                 assert_eq!(
@@ -3139,7 +3220,7 @@ mod tests {
                 .into_iter()
                 .map(|record| (record, CandidateOrigin::Ordinary))
                 .collect(),
-            Some(&exclusions),
+            Some(&context),
         )
         .unwrap();
         assert!(
@@ -3181,7 +3262,7 @@ mod tests {
         let records = ordinary_records(b"endpoint", &include, true).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(version_hash(&records[0]), original_version);
-        let exclusions = ExactCandidateExclusions::new(BTreeSet::new(), BTreeSet::new());
+        let context = ExactCandidateContext::new(BTreeSet::new(), BTreeSet::new());
         let selected = select_records_inner(
             b"endpoint",
             &include,
@@ -3190,7 +3271,7 @@ mod tests {
                 .into_iter()
                 .map(|r| (r, CandidateOrigin::Ordinary))
                 .collect(),
-            Some(&exclusions),
+            Some(&context),
         )
         .unwrap();
         assert_eq!(selected.by_owner.len(), 1);
@@ -3336,19 +3417,17 @@ mod tests {
                 candidates: vec![root.path().join("Data/List.hs")],
             });
         record.original_owner = OriginalOwner::from_owner(&computed_owner(&record));
-        let empty = ExactCandidateExclusions::new(BTreeSet::new(), BTreeSet::new());
+        let empty = ExactCandidateContext::new(BTreeSet::new(), BTreeSet::new());
         assert_eq!(
-            select_disjoint_records(scratch.path(), vec![record.clone()], &empty)
+            select_context_records(scratch.path(), vec![record.clone()], &empty)
                 .by_owner
                 .len(),
             1
         );
         record.package_imports = package_imports("u", "Library", &[0x42]);
-        assert!(
-            select_disjoint_records(scratch.path(), vec![record], &empty)
-                .by_owner
-                .is_empty()
-        );
+        assert!(select_context_records(scratch.path(), vec![record], &empty)
+            .by_owner
+            .is_empty());
         let rows = sidecar.as_array_mut().unwrap()[3].as_array_mut().unwrap();
         let mut other = rows[0].clone();
         other.as_array_mut().unwrap()[0] = Value::Text("other".into());
@@ -3425,9 +3504,9 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let mut record = candidate_fixture(root.path(), "A");
         record.version = 5;
-        let empty = ExactCandidateExclusions::new(BTreeSet::new(), BTreeSet::new());
+        let empty = ExactCandidateContext::new(BTreeSet::new(), BTreeSet::new());
         assert!(
-            select_disjoint_records(scratch.path(), vec![record.clone()], &empty)
+            select_context_records(scratch.path(), vec![record.clone()], &empty)
                 .by_owner
                 .is_empty()
         );
@@ -3442,11 +3521,9 @@ mod tests {
         }
         record.products.clear();
         ciborium::ser::into_writer(&value, &mut record.products).unwrap();
-        assert!(
-            select_disjoint_records(scratch.path(), vec![record], &empty)
-                .by_owner
-                .is_empty()
-        );
+        assert!(select_context_records(scratch.path(), vec![record], &empty)
+            .by_owner
+            .is_empty());
     }
 
     fn select_in(root: &Path, scratch: &Path) -> Option<CandidateSet> {
@@ -3551,9 +3628,9 @@ mod tests {
         .unwrap();
         fs::write(&record_path, encode_record(&record).unwrap()).unwrap();
         let exact_record = read_record_path(&record_path).unwrap();
-        let empty = ExactCandidateExclusions::new(BTreeSet::new(), BTreeSet::new());
+        let empty = ExactCandidateContext::new(BTreeSet::new(), BTreeSet::new());
         assert!(
-            select_disjoint_records(scratch.path(), vec![exact_record], &empty)
+            select_context_records(scratch.path(), vec![exact_record], &empty)
                 .by_owner
                 .is_empty()
         );

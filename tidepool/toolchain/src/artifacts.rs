@@ -544,10 +544,10 @@ fn immutable_candidates_in_context(
                 .map(|owner| (owner.unit.clone(), owner.module.clone())),
         );
     }
-    let exclusions = module_candidates::ExactCandidateExclusions::new(protected, reserved)
+    let exclusions = module_candidates::ExactCandidateContext::new(protected, reserved)
         .with_originals(context.recovery_products());
     Ok(
-        module_candidates::select_configured_disjoint(producer, include, scratch, &exclusions)?
+        module_candidates::select_configured_in_context(producer, include, scratch, &exclusions)?
             .map(Arc::new),
     )
 }
