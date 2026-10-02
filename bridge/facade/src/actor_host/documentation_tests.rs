@@ -422,30 +422,21 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
         "{missing_binding:?}"
     );
 
-    let prefix_failure =
-        dispatch_haskell_script(root.as_ref(), include_str!("notebook_prefix_failure.hs")).await;
-    assert_eq!(prefix_failure["status"], "rejected", "{prefix_failure:?}");
+    let rejected = dispatch_haskell_script(
+        root.as_ref(),
+        include_str!("notebook_prefix_compile_failure.hs"),
+    )
+    .await;
+    assert_eq!(rejected["status"], "rejected", "{rejected}");
     assert_eq!(
-        prefix_failure["summary"], "0 declarations, 4 statements, 0 expressions",
-        "{prefix_failure:?}"
+        rejected["items"][0]["failureLayer"], "compile",
+        "{rejected}"
     );
-    let items = prefix_failure["items"].as_array().unwrap();
-    assert_eq!(items.len(), 4, "{prefix_failure:?}");
-    assert_eq!(items[0]["status"], "committed", "{prefix_failure:?}");
-    assert_eq!(items[1]["status"], "committed", "{prefix_failure:?}");
-    assert_eq!(items[2]["status"], "rejected", "{prefix_failure:?}");
-    assert_eq!(items[3]["status"], "notRun", "{prefix_failure:?}");
-    assert!(items.iter().all(|item| item["kind"] == "statement"));
-
-    let recovered = committed(root.as_ref(), "prefixValue\n").await;
-    assert_eq!(recovered["items"][0]["output"], "41", "{recovered:?}");
-    let missing_tail = dispatch_haskell_script(root.as_ref(), "tailValue\n").await;
-    assert_eq!(missing_tail["status"], "rejected", "{missing_tail:?}");
-    assert!(
-        missing_tail.to_string().contains("tailValue")
-            && missing_tail.to_string().contains("not in scope"),
-        "{missing_tail:?}"
-    );
+    for binding in ["actorsBeforeFailure", "prefixValue", "tailValue"] {
+        let missing = dispatch_haskell_script(root.as_ref(), binding).await;
+        assert_eq!(missing["status"], "rejected", "{missing}");
+        assert!(missing.to_string().contains("not in scope"), "{missing}");
+    }
 
     committed(root.as_ref(), "shadowed <- pure (1 :: Int)\n").await;
     let shadowed = committed(root.as_ref(), "shadowed <- pure (2 :: Int)\nshadowed\n").await;
@@ -459,28 +450,12 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
 async fn notebook_failed_cells_preserve_completed_native_prefix() {
     let campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.as_ref();
-    let failed = dispatch_haskell_script(policy, include_str!("notebook_prefix_failure.hs")).await;
-    assert_eq!(failed["status"], "rejected", "{failed}");
-    let items = failed["items"].as_array().unwrap();
-    assert_eq!(items.len(), 4, "{failed}");
-    assert_eq!(items[0]["status"], "committed", "{failed}");
-    assert_eq!(items[1]["status"], "committed", "{failed}");
-    assert_eq!(items[2]["status"], "rejected", "{failed}");
-    assert_eq!(items[3]["status"], "notRun", "{failed}");
-    let recovered = committed(policy, "prefixValue").await;
-    assert_eq!(recovered["items"][0]["output"], "41", "{recovered}");
-    let missing_tail = dispatch_haskell_script(policy, "tailValue").await;
-    assert_eq!(missing_tail["status"], "rejected", "{missing_tail}");
-    assert!(
-        missing_tail.to_string().contains("not in scope"),
-        "{missing_tail}"
-    );
     let failed = super::test_campaign::dispatch_haskell_script_result(
         policy,
-        include_str!("notebook_prefix_runtime_failure.hs"),
+        include_str!("notebook_prefix_failure.hs"),
     )
     .await
-    .expect_err("later native item must fail");
+    .expect_err("the pattern match fails after completed native bindings");
     let exomonad_actor::ResidentToolError::Invocation(
         exomonad_actor::KernelInvocationFailure::Workbench(failure),
     ) = failed
@@ -493,16 +468,24 @@ async fn notebook_failed_cells_preserve_completed_native_prefix() {
             .as_ref()
             .expect("native failure diagnostic")
             .phase,
-        tidepool_toolchain::failclass::Phase::Run
+        tidepool_toolchain::failclass::Phase::Run,
     );
-    assert!(failure.receipts.iter().any(|receipt| receipt
-        .installed_bindings
-        .iter()
-        .any(|name| name == "runtimePrefix")));
-    let recovered = committed(policy, "runtimePrefix").await;
-    assert_eq!(recovered["items"][0]["output"], "51", "{recovered}");
-    let missing_tail = dispatch_haskell_script(policy, "runtimeTail").await;
-    assert_eq!(missing_tail["status"], "rejected", "{missing_tail}");
+    for binding in ["actorsBeforeFailure", "prefixValue"] {
+        assert!(
+            failure.receipts.iter().any(|receipt| receipt
+                .installed_bindings
+                .iter()
+                .any(|name| name == binding)),
+            "{failure}"
+        );
+    }
+    let recovered = committed(policy, "prefixValue").await;
+    assert_eq!(recovered["items"][0]["output"], "41", "{recovered}");
+    for binding in ["impossible", "tailValue"] {
+        let missing = dispatch_haskell_script(policy, binding).await;
+        assert_eq!(missing["status"], "rejected", "{missing}");
+        assert!(missing.to_string().contains("not in scope"), "{missing}");
+    }
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
