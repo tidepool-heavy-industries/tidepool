@@ -164,7 +164,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             .unwrap();
         assert!(reference.execution_source.is_some());
         let recovered =
-            tidepool_toolchain::declaration_context::ExactDeclarationContext::capture_recovery(
+            tidepool_toolchain::declaration_join::ExactDeclarationContext::capture_recovery(
                 durable.path(),
                 &references,
                 &[],
