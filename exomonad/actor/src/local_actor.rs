@@ -2698,10 +2698,11 @@ fn retain_unconfirmed_exit(terminal: &RetainedActorExit, actor: ActorRef, detail
     }
 }
 
-/// Admitted workbench requests and settlement do not require a resident
-/// receiver. Their queued forms retain the same admission boundary.
+/// Hosted invocations and settlement do not require a resident receiver.
+/// Their queued forms retain the same admission boundary.
 enum DeferredControl {
     Workbench,
+    HostedInvocation,
     HostedSettlement,
     RouteSettlement,
     Shutdown,
@@ -2710,6 +2711,9 @@ enum DeferredControl {
 fn deferred_control(message: &KernelMessage) -> Option<DeferredControl> {
     match message {
         KernelMessage::Workbench { .. } => Some(DeferredControl::Workbench),
+        KernelMessage::Tool { .. } | KernelMessage::ToolWithHostedCheckpoint { .. } => {
+            Some(DeferredControl::HostedInvocation)
+        }
         KernelMessage::ToolCompleted {
             boundary: tidepool_runtime::session::WorkbenchForkBoundary::Route { .. },
             ..
@@ -3878,6 +3882,76 @@ mod tests {
             .send_message(KernelMessage::ReleaseFork { release })
             .expect("release child");
         machine
+    }
+
+    #[tokio::test]
+    async fn hosted_tools_queued_during_child_initialization_settle_without_receiver() {
+        struct UnavailableCapture;
+        impl crate::HostedCheckpointCapture for UnavailableCapture {
+            fn capture(
+                &self,
+                _: &str,
+                _: &tidepool_runtime::session::WorkbenchForkBoundary,
+            ) -> Result<crate::HostedCheckpointAttachment, crate::HostedCheckpointCaptureError>
+            {
+                Err(crate::HostedCheckpointCaptureError::Unavailable)
+            }
+        }
+
+        let mut fixture = behavior(false);
+        fixture.behavior.mailbox_ready = false;
+        let probe = kernel_probe(false);
+        fixture.behavior.kernel_probe = Some(probe.clone());
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        let _machine = send_kernel_release(&actor);
+        probe.first.0.notified().await;
+        let (plain_tx, mut plain_rx) = oneshot::channel();
+        let (captured_tx, mut captured_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Tool {
+                invocation: tool_invocation("plain"),
+                reply: plain_tx.into(),
+            })
+            .unwrap();
+        actor
+            .address()
+            .send_message(KernelMessage::ToolWithHostedCheckpoint {
+                invocation: tool_invocation("captured"),
+                capture: Arc::new(UnavailableCapture),
+                reply: captured_tx.into(),
+            })
+            .unwrap();
+        // The seal acknowledges both preceding deliveries while initialization
+        // remains exclusive. Their admission is rechecked when it finishes.
+        actor.seal_hosted_work().await.unwrap();
+        assert!(matches!(
+            plain_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            captured_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        probe.first.1.notify_one();
+        probe.next.0.notified().await;
+        probe.next.1.notify_one();
+        for receive in [plain_rx, captured_rx] {
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(2), receive).await.unwrap().unwrap(),
+                Err(KernelInvocationFailure::Rejected { detail, .. })
+                    if detail == "hosted work admission is sealed"
+            ));
+        }
+        assert_eq!(&*fixture.calls.lock(), &["kernel-first", "kernel-last"]);
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "tool initialization queue checked".into(),
+            })
+            .await
+            .unwrap();
+        task.await.unwrap();
     }
 
     #[tokio::test]
@@ -5428,7 +5502,8 @@ mod tests {
 
     #[tokio::test]
     async fn one_actor_never_reenters_while_an_operation_is_pending() {
-        let fixture = behavior(false);
+        let mut fixture = behavior(false);
+        fixture.behavior.mailbox_ready = false;
         let (actor, task) = spawn_local_actor(None, fixture.behavior)
             .await
             .expect("spawn");
@@ -5453,7 +5528,14 @@ mod tests {
         assert_eq!(&*fixture.calls.lock(), &["first-start"]);
         fixture.release.notify_one();
         assert_eq!(first_rx.await.expect("first reply").unwrap(), "first");
-        assert_eq!(second_rx.await.expect("second reply").unwrap(), "second");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), second_rx)
+                .await
+                .expect("queued native tool resumes without a mailbox receiver")
+                .expect("second reply")
+                .unwrap(),
+            "second"
+        );
         assert_eq!(
             &*fixture.calls.lock(),
             &["first-start", "first-end", "second"]
