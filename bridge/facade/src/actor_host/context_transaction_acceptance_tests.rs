@@ -320,6 +320,7 @@ async fn resident_sync_context_failure_keeps_prefix_model_and_defers_children() 
 #[tokio::test]
 async fn resident_sync_context_cancel_discards_staging_and_never_launches_children() {
     let (_files, fixture, mut rounds) = start().await;
+    let root_identity = fixture.campaign.actor.identity();
     let setup = next_round(&mut rounds).await;
     setup.cell(
         "context-setup",
@@ -373,12 +374,9 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
         .context_request_state(&operation.request, &conversation_identity)
         .unwrap();
     fixture
-        .campaign
-        .actor
-        .shutdown(ActorTerminal {
-            kind: ActorExitKind::Cancelled,
-            summary: "acceptance cancels the staged synchronous invocation".into(),
-        })
+        .runtime
+        .scheduler()
+        .cancel(&operation)
         .await
         .unwrap();
     let settled = tokio::time::timeout(
@@ -392,11 +390,19 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
         matches!(settled, harness::turn::JobOutput::Cancelled),
         "{settled:?}"
     );
-    let after = store
-        .context_request_state(&operation.request, &conversation_identity)
-        .unwrap();
+    let successor = next_round(&mut rounds).await;
+    assert!(
+        successor.is_root(),
+        "cancelled invocation launched a deferred child"
+    );
+    assert_eq!(successor.request.model, "test-model");
+    assert!(has_user_text(&successor.request, "parent-original"));
+    assert!(!has_user_text(&successor.request, "must-not-publish"));
+    let after = root_context_state(&fixture);
     assert_eq!(after.generation, before.generation);
     assert_eq!(after.model, before.model);
+    assert_eq!(fixture.campaign.actor.identity(), root_identity);
+    assert!(fixture.campaign.actor.terminal().get().is_none());
     let prefix = |history: Vec<(harness::model::RequestId, harness::item::ItemHash, Item)>| {
         history
             .into_iter()
@@ -404,6 +410,7 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
             .collect::<Vec<_>>()
     };
     assert_eq!(prefix(after.history), prefix(before.history));
+    successor.finish();
     assert!(
         tokio::time::timeout(Duration::from_millis(200), rounds.recv())
             .await
