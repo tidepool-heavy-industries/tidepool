@@ -660,11 +660,13 @@ impl ExtractCmd {
         self
     }
 
-    /// Declare `identity` an executable import already retained at
-    /// `generation`: the projection excludes its own body from recovery and
+    /// Tag an executable demand for `identity` at `generation`: the
+    /// projection excludes its own body from recovery and
     /// declares it as a global carrying that generation, even when its
     /// defining module is compiled alongside this request as a home module.
-    /// Repeatable; a later call for the same identity wins.
+    /// This metadata grants no lexical import or live runtime root. Repeatable;
+    /// a later call for the same identity wins. Exact offers reject conflicts
+    /// against their authenticated original demand tags before execution.
     pub fn retained_generation(&mut self, identity: SymbolIdentity, generation: u64) -> &mut Self {
         self.request.retained_generation(identity, generation);
         self

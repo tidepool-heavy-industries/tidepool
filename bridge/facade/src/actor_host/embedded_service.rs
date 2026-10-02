@@ -8,8 +8,8 @@ use harness::{
     model::{AgentPath, Effort},
     server::{QueuedCommand, ServerConfig, ServerControl, SessionSecret},
     transport::{
-        auth::{ChatGptPlanAuth, CodexFileAuth},
         Auth, AuthCredentials, ResponsesClient, ResponsesProtocol, ResponsesRoute, TransportError,
+        auth::{ChatGptPlanAuth, CodexFileAuth},
     },
 };
 use tokio::{
@@ -578,7 +578,9 @@ where
             .map(|envelope| harness::mailbox::DurableMailboxWake {
                 envelope_id: envelope.id,
             });
-        if first.is_none() && frontier.pending_head.is_none() {
+        if first.is_none()
+            && (frontier.pending_interruption.is_some() || frontier.pending_head.is_none())
+        {
             tokio::select! {
                 biased;
                 changed = cancellation.changed() => {
@@ -642,6 +644,19 @@ where
             Ok(completion) => (Some(completion.head_request), false, false, None),
             Err(harness::engine::EngineError::RequestRejected { head_request, .. }) => {
                 (Some(head_request), false, true, None)
+            }
+            Err(harness::engine::EngineError::InterruptedModelRound {
+                head_request,
+                cause,
+            }) => {
+                // Engine has confirmed cleanup and retained this pending head.
+                // A stream failure alone never authorizes another provider
+                // request. Durable explicit input triggers existing recovery,
+                // which reconciles retained claims without dispatching them.
+                tracing::warn!(?actor, ?head_request, %cause, "embedded provider round interrupted; awaiting explicit input");
+                recovering = true;
+                lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
+                continue;
             }
             Err(error) => {
                 let (head, cleanup) = cancelled_round(error, head.clone())?;

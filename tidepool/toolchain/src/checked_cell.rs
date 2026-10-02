@@ -420,6 +420,8 @@ pub struct CheckedValueArtifact {
     path: std::path::PathBuf,
     digest: String,
     authority: Option<([u8; 32], [u8; 32])>,
+    certified_interface: Option<Arc<crate::recovery_artifacts::CertifiedValueInterface>>,
+    artifact_view: Option<crate::artifact_inventory::ArtifactView>,
 }
 
 /// The exact checked interface bytes named by one compiler authorization.
@@ -485,6 +487,8 @@ impl CheckedValueInputs {
                 bytes,
                 path,
                 authority: None,
+                certified_interface: None,
+                artifact_view: None,
             }));
         }
         Ok(Arc::new(Self {
@@ -574,11 +578,20 @@ impl CheckedValueInputs {
         &self,
         generation: u64,
         cell: &ExactCheckedCell,
+        context: &Arc<crate::declaration_context::ExactDeclarationContext>,
     ) -> Result<Arc<CheckedValueArtifact>, CompileError> {
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation));
         let path = self.root().join(owner.relative_hi_path());
         let bytes: Arc<[u8]> = read(&path, 32 * 1024 * 1024)?.into();
         let digest = hash(&bytes);
+        let certificate = certify_value_interface(cell.producer, owner, &path, &bytes)?;
+        let context = (**context).clone().extend_with_value_interfaces(
+            std::slice::from_ref(&certificate),
+            context.lexical_graph().to_vec(),
+        )?;
+        let artifact_view = context
+            .artifact_view()
+            .select_roots(vec![certificate.artifact_id()])?;
         self.output_files_hashed.fetch_add(1, Ordering::Relaxed);
         self.output_bytes_hashed
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -589,6 +602,8 @@ impl CheckedValueInputs {
             bytes,
             path,
             authority: Some((cell.producer, cell.receipt_digest)),
+            certified_interface: Some(certificate),
+            artifact_view: Some(artifact_view),
         }))
     }
 }
@@ -604,6 +619,20 @@ impl CheckedValueArtifact {
         self.authority.is_some()
     }
 
+    pub fn certified_interface(
+        &self,
+    ) -> Option<&Arc<crate::recovery_artifacts::CertifiedValueInterface>> {
+        self.certified_interface.as_ref()
+    }
+
+    pub(crate) fn artifact_view(
+        &self,
+    ) -> Result<&crate::artifact_inventory::ArtifactView, CompileError> {
+        self.artifact_view
+            .as_ref()
+            .ok_or_else(|| failure("value interface has no original artifact closure"))
+    }
+
     fn authorization(&self) -> Value {
         array([
             text("main"),
@@ -612,6 +641,38 @@ impl CheckedValueArtifact {
             text(&self.digest),
         ])
     }
+}
+
+pub(crate) fn certify_value_interface(
+    producer: [u8; 32],
+    owner: tidepool_repr::SessionModule,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<Arc<crate::recovery_artifacts::CertifiedValueInterface>, CompileError> {
+    let requirements = decode(&read(path.with_extension("hi.requirements"), 4 << 20)?)?;
+    let requirements = list(&requirements, 16384)?
+        .iter()
+        .map(|value| {
+            let fields = row(value, 2)?;
+            Ok(crate::declaration_join::ExactModuleIdentity {
+                unit: string(&fields[0])?.to_owned(),
+                module: string(&fields[1])?.to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    Ok(Arc::new(
+        crate::recovery_artifacts::CertifiedValueInterface::from_checked_compilation(
+            producer,
+            crate::declaration_join::ExactModuleIdentity {
+                unit: "main".into(),
+                module: owner.module_name(),
+            },
+            bytes.to_vec(),
+            read(path.with_extension("hi.packages"), 4 << 20)?,
+            requirements,
+        )
+        .map_err(failure)?,
+    ))
 }
 
 #[derive(Debug)]
@@ -1098,6 +1159,7 @@ impl CheckedDisplayOffer {
         request: &str,
         source: &str,
         target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
+        artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
     ) -> Result<Arc<ExactCompiledDisplay>, CompileError> {
         let receipt = decode(&read(root.join("checked-display.cbor"), 4 * 1024 * 1024)?)?;
         let fields = row(&receipt, 8)?;
@@ -1147,12 +1209,11 @@ impl CheckedDisplayOffer {
                 return Err(failure("display binder has another reserved native owner"));
             }
         }
-        let interface = self
-            .capture
-            .item
-            .cell
-            .value_inputs
-            .capture_output(self.generation, &self.capture.item.cell)?;
+        let interface = self.capture.item.cell.value_inputs.capture_output(
+            self.generation,
+            &self.capture.item.cell,
+            artifact_context,
+        )?;
         Ok(Arc::new(ExactCompiledDisplay {
             capture: self.capture.clone(),
             target: target.clone(),
@@ -1302,11 +1363,17 @@ impl ExactCompiledPrefix {
             .planned_declaration()
             .ok_or_else(|| failure("completed declaration has no original certificate"))?;
         let baseline = &self.cell.declaration_context;
-        let mut lexical = baseline
+        let inherited = baseline
             .lexical_graph()
             .iter()
             .filter(|node| !node.owner.module.starts_with("Tidepool.Session."))
-            .map(|node| (node.owner.clone(), node.imports.clone()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let surface = certificate.shared_source_lexical_surface(&inherited)?;
+        let mut lexical = surface
+            .lexical
+            .into_iter()
+            .map(|node| (node.owner, node.imports))
             .collect::<BTreeMap<_, _>>();
         let mut roots = baseline
             .lexical_graph()
@@ -1314,57 +1381,13 @@ impl ExactCompiledPrefix {
             .filter(|node| node.owner.module.starts_with("Tidepool.Session."))
             .flat_map(|node| node.imports.iter().cloned())
             .collect::<Vec<_>>();
+        roots.extend(surface.roots);
+        roots.sort();
+        roots.dedup();
         let owner = crate::declaration_join::ExactModuleIdentity {
             unit: certificate.product().owner().unit.clone(),
             module: certificate.product().owner().module.clone(),
         };
-        let imports = certificate
-            .original_home_imports()
-            .map(|(owner, edges)| (owner, edges))
-            .collect::<BTreeMap<_, _>>();
-        let original = imports
-            .get(&owner)
-            .ok_or_else(|| failure("original declaration has no exact import evidence"))?;
-        let new_roots = original
-            .iter()
-            .filter(|owner| !owner.module.starts_with("Tidepool.Session."))
-            .cloned()
-            .collect::<Vec<_>>();
-        roots.extend(new_roots.clone());
-        roots.sort();
-        roots.dedup();
-        let mut pending = new_roots;
-        let mut visited = BTreeSet::new();
-        while let Some(owner) = pending.pop() {
-            if !visited.insert(owner.clone()) {
-                continue;
-            }
-            let edges = imports
-                .get(&owner)
-                .copied()
-                .or_else(|| lexical.get(&owner).map(Vec::as_slice))
-                .ok_or_else(|| {
-                    failure("completed declaration shared import lacks exact source evidence")
-                })?
-                .to_vec();
-            if edges
-                .iter()
-                .any(|edge| edge.module.starts_with("Tidepool.Session."))
-            {
-                return Err(failure(
-                    "completed shared source imports an unselected session owner",
-                ));
-            }
-            pending.extend(edges.clone());
-            if lexical
-                .insert(owner, edges.clone())
-                .is_some_and(|prior| prior != edges)
-            {
-                return Err(failure(
-                    "completed declaration changes an admitted lexical edge",
-                ));
-            }
-        }
         lexical.insert(owner, roots);
         let expected = (**baseline).clone().extend(
             std::slice::from_ref(certificate),
@@ -1860,6 +1883,7 @@ pub(crate) fn seal_checked_fold(
     generation: u64,
     source: &str,
     target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
+    artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
 ) -> Result<Arc<ExactCompiledItem>, CompileError> {
     cell.revalidate(producer, &context)?;
     if cell.items.len() != 1
@@ -1882,7 +1906,7 @@ pub(crate) fn seal_checked_fold(
         is_program: false,
         settled_values: CheckedSettledValues::default(),
     }
-    .seal(root, request, source, target)
+    .seal(root, request, source, target, artifact_context)
 }
 
 #[derive(Clone, Debug)]
@@ -1998,6 +2022,7 @@ impl CheckedItemOffer {
         request: &str,
         source: &str,
         target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
+        artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
     ) -> Result<Arc<ExactCompiledItem>, CompileError> {
         let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
         let fields = row(&receipt, 8)?;
@@ -2059,12 +2084,11 @@ impl CheckedItemOffer {
             _ => return Err(failure("compiled turn kind differs from checked item")),
         };
         let value_interface = if !expected_binders.is_empty() {
-            Some(
-                self.item
-                    .cell
-                    .value_inputs
-                    .capture_output(self.generation, &self.item.cell)?,
-            )
+            Some(self.item.cell.value_inputs.capture_output(
+                self.generation,
+                &self.item.cell,
+                artifact_context,
+            )?)
         } else {
             None
         };

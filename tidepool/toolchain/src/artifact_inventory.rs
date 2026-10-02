@@ -889,14 +889,17 @@ impl ArtifactView {
                 parents: vec![self.clone(), other.clone()],
             })))
         } else {
-            self.0.inventory.admit(
+            let mut roots = self.roots();
+            roots.extend(other.roots());
+            let merged = self.0.inventory.admit(
                 self,
                 other
                     .entries()
                     .iter()
                     .map(|entry| entry.as_ref().clone())
                     .collect(),
-            )
+            )?;
+            merged.select_roots(roots)
         }
     }
     pub(crate) fn entries(&self) -> Vec<Arc<ArtifactEntry>> {
@@ -1035,6 +1038,40 @@ mod tests {
         assert_eq!(inventory.node_count(), 0);
         // The temporary inspection owner may retain bytes, never graph authority.
         assert_eq!(original.descriptor.owner, module("Original"));
+    }
+    #[test]
+    fn cross_inventory_merge_keeps_hidden_dependencies_out_of_selected_roots() {
+        let destination = ArtifactInventory::default();
+        let existing = destination
+            .admit(&destination.empty_view(), vec![entry("Existing", &[])])
+            .unwrap();
+        let source = ArtifactInventory::default();
+        let support = entry("Support", &["Hidden"]);
+        let support_id = support.descriptor.id;
+        let history = source
+            .admit(
+                &source.empty_view(),
+                vec![support, entry("Hidden", &[]), entry("Unrelated", &[])],
+            )
+            .unwrap();
+        let selected = history.select_roots(vec![support_id]).unwrap();
+        let merged = existing.merge(&selected).unwrap();
+        let mut roots = merged
+            .root_entries()
+            .iter()
+            .map(|entry| entry.descriptor.owner.module.clone())
+            .collect::<Vec<_>>();
+        roots.sort();
+        assert_eq!(roots, ["Existing", "Support"]);
+        assert_eq!(merged.descriptors().len(), 3);
+        assert_eq!(merged.dependencies().len(), 1);
+        drop(existing);
+        drop(selected);
+        drop(history);
+        assert_eq!(source.node_count(), 0);
+        assert_eq!(destination.node_count(), 3);
+        drop(merged);
+        assert_eq!(destination.node_count(), 0);
     }
     #[test]
     fn reclamation_metrics_follow_last_reader_and_selected_closure() {

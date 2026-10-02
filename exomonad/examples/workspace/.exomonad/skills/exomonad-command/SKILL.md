@@ -8,6 +8,11 @@ contains literal Bash, including multiline scripts and heredocs; optional fields
 select workdir, environment, memory, PTY, and stdin. Haskell `Cmd` composes the same
 command owner when results feed a program.
 
+For Haskell composition, prefer `Cmd.bashCommand script` when the script is a
+`Text` value. It uses the same Bash command owner without executing a quasiquoter
+at compile time. Bash quotations remain convenient for raw multiline literals,
+but require the compiler to provision executable quotation dependencies.
+
 Call `bash` with:
 
 ```json
@@ -72,7 +77,7 @@ Starting with no output is ordinary progress. Readable-but-empty output has byte
 positions; an unavailable-output error is different and keeps the same job.
 
 The direct `bash` tool defaults to 1024 MiB. Haskell commands built with
-`Cmd.argv` or a Bash quotation (`[bash|...|]`) default to 256 MiB. Set an
+`Cmd.argv`, `Cmd.bashCommand` or a Bash quotation (`[bash|...|]`) default to 256 MiB. Set an
 explicit limit for builds and tests. The direct tool waits until terminal
 completion, preserving the invocation and presenting output once. An explicit
 `yield_time_ms` (0..300000) requests bounded observation without automatic

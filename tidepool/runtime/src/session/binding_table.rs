@@ -154,6 +154,16 @@ impl BindingIndex {
             .and_then(RetainedValueInterface::bytes)
     }
 
+    pub(super) fn checked_value_artifact(
+        &self,
+        module: SessionModule,
+    ) -> Option<&Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
+        match self.value_interfaces.get(&module.module_name())? {
+            RetainedValueInterface::Certified(artifact) => Some(artifact),
+            _ => None,
+        }
+    }
+
     pub(super) fn mark_legacy_interface(&mut self, module: SessionModule) {
         let name = module.module_name();
         if self.is_module_live(&name) {
