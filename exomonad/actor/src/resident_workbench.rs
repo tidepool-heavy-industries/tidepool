@@ -3181,6 +3181,14 @@ pub enum ResidentActorWorkbenchError {
     /// variant proves that it did.
     #[error("resident workbench execution failed after delivering a response: {0}")]
     Delivered(ResidentError),
+    /// A completed machine prefix could not be published after the authored
+    /// cell had already failed. The original failure remains authoritative.
+    #[error("{original}; completed-prefix publication also failed: {publication}")]
+    PrefixPublication {
+        #[source]
+        original: Box<ResidentActorWorkbenchError>,
+        publication: Box<ResidentActorWorkbenchError>,
+    },
     /// An earlier cell hit an integrity failure; this actor's machine refuses
     /// all further execution.
     #[error(
@@ -3221,10 +3229,17 @@ pub enum ResidentActorWorkbenchError {
 }
 
 impl ResidentActorWorkbenchError {
+    pub(crate) fn primary_failure(&self) -> &Self {
+        match self {
+            Self::PrefixPublication { original, .. } => original.primary_failure(),
+            original => original,
+        }
+    }
+
     pub(crate) fn failure_diagnostic(
         &self,
     ) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
-        match self {
+        match self.primary_failure() {
             Self::Compile(error) => Some(classify_compile(error)),
             Self::CellCheck(failure) => Some(classify_compile(&failure.error)),
             Self::CompileInfrastructure(diagnostic) => Some(diagnostic.clone()),

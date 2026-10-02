@@ -1,4 +1,5 @@
 use super::*;
+use tidepool_runtime::session::ResidentError;
 
 fn receipt(status: WorkbenchItemStatus) -> WorkbenchItemReceipt {
     WorkbenchItemReceipt {
@@ -84,4 +85,48 @@ fn prefix_publication_preserves_failed_cell_eligibility_and_cancellation_veto() 
         tidepool_runtime::session::PublicationCancellation::RequestedBeforeCommit
     );
     assert!(cancelled.claim_commit().is_none());
+}
+
+#[test]
+fn prefix_publication_failure_retains_original_run_diagnostic_and_secondary_cause() {
+    let original = ResidentActorWorkbenchError::Delivered(ResidentError::Run(
+        tidepool_runtime::RuntimeError::Jit(tidepool_effect::error::EffectError::Handler(
+            "native failure after delivered response".into(),
+        )),
+    ));
+    let diagnostic = original.failure_diagnostic().unwrap();
+    let failure = WorkbenchExecutionFailure {
+        receipts: vec![receipt(WorkbenchItemStatus::Committed)],
+        failed_index: 1,
+        total: 3,
+        source: original,
+    };
+    let failed = private_publication_failure(
+        Err(failure),
+        ResidentActorWorkbenchError::ActorProtocol("manifest rename failed".into()),
+    );
+    let retained = failed.source.failure_diagnostic().unwrap();
+    assert_eq!(retained.phase, tidepool_toolchain::failclass::Phase::Run);
+    assert_eq!(retained.class, diagnostic.class);
+    assert_eq!(retained.message, diagnostic.message);
+    assert!(matches!(
+        failed.source.primary_failure(),
+        ResidentActorWorkbenchError::Delivered(_)
+    ));
+    assert_eq!(
+        resident_actor_failure_layer(&failed.source),
+        Some(WorkbenchFailureLayer::Effect)
+    );
+    assert!(failed
+        .source
+        .to_string()
+        .contains("native failure after delivered response"));
+    assert!(failed.source.to_string().contains("manifest rename failed"));
+    assert!(
+        matches!(failed.source, ResidentActorWorkbenchError::PrefixPublication { publication, .. }
+        if matches!(*publication, ResidentActorWorkbenchError::ActorProtocol(_)))
+    );
+    assert_eq!(failed.receipts.len(), 1);
+    assert_eq!(failed.failed_index, 1);
+    assert_eq!(failed.total, 3);
 }

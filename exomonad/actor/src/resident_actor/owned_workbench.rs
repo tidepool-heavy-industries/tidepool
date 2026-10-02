@@ -2055,7 +2055,13 @@ fn private_publication_failure(
             total: response.total,
             source,
         },
-        Err(failure) => WorkbenchExecutionFailure { source, ..failure },
+        Err(failure) => WorkbenchExecutionFailure {
+            source: ResidentActorWorkbenchError::PrefixPublication {
+                original: Box::new(failure.source),
+                publication: Box::new(source),
+            },
+            ..failure
+        },
     }
 }
 

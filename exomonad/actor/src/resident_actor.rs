@@ -1045,7 +1045,7 @@ fn reload_receipt(outcome: &str, started: std::time::Instant, lines: Vec<String>
 fn resident_actor_failure_layer(
     error: &ResidentActorWorkbenchError,
 ) -> Option<WorkbenchFailureLayer> {
-    match error {
+    match error.primary_failure() {
         ResidentActorWorkbenchError::Compile(_)
         | ResidentActorWorkbenchError::CellCheck(_)
         | ResidentActorWorkbenchError::CompileInfrastructure(_) => {
@@ -1471,19 +1471,29 @@ where
             Some(cleanup),
         ) => Err(failed_checkpoint_cleanup_response(response, cleanup)),
     };
-    let result = result.map_err(|failure| match failure.source {
-        ResidentActorWorkbenchError::ToolDispatch(error) => KernelInvocationFailure::Rejected {
-            actor: context.actor,
-            detail: error.to_string(),
-        },
-        source => KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
+    let result = result.map_err(|failure| {
+        let source = failure.source;
+        if matches!(
+            source.primary_failure(),
+            ResidentActorWorkbenchError::ToolDispatch(_)
+        ) {
+            let detail = match &source {
+                ResidentActorWorkbenchError::ToolDispatch(error) => error.to_string(),
+                _ => source.to_string(),
+            };
+            return KernelInvocationFailure::Rejected {
+                actor: context.actor,
+                detail,
+            };
+        }
+        KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
             actor: context.actor,
             receipts: failure.receipts,
             failed_index: failure.failed_index,
             total: failure.total,
             diagnostic: source.failure_diagnostic(),
             detail: source.to_string(),
-        }),
+        })
     });
     WorkbenchFinalizationResult {
         result,
