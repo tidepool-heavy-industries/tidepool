@@ -58,7 +58,7 @@ impl Provider for HeldDispatch {
 
 #[tokio::test]
 async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abort() {
-    let mut campaign = TestCampaign::start_with_shell().await;
+    let mut campaign = TestCampaign::start().await;
     let identity = HostIdentity {
         run: "cancelled-prefix-run".into(),
         actor: AgentPath("/root".into()),
