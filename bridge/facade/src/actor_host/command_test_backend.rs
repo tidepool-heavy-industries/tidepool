@@ -6,32 +6,32 @@ use tidepool_bridge_effects::{
     CommandCleanup, CommandError, CommandOutcome, CommandOutput, CommandPage, CommandPosition,
     CommandResult, CommandSpec, CommandStatus, CommandStream,
 };
-use tokio::sync::{watch, Notify};
+use tokio::sync::watch;
 
 pub(super) struct TestCommands {
-    specs: Mutex<Vec<CommandSpec>>,
-    stdout: Mutex<String>,
-    stderr: Mutex<String>,
-    exit_code: std::sync::atomic::AtomicI64,
-    script_exit_code: Mutex<Option<(String, i64)>>,
+    pub(super) specs: Mutex<Vec<CommandSpec>>,
+    pub(super) stdout: Mutex<String>,
+    pub(super) stderr: Mutex<String>,
+    pub(super) exit_code: std::sync::atomic::AtomicI64,
+    pub(super) script_exit_code: Mutex<Option<(String, i64)>>,
     /// Nonzero selects `CommandOutOfMemory(mib)` over the exit-code outcome —
     /// this backend bypasses real resource admission entirely, so an OOM
     /// outcome has to be injected directly to exercise how it presents.
-    oom_mib: std::sync::atomic::AtomicI64,
-    degraded_output: std::sync::atomic::AtomicBool,
-    finish: watch::Sender<bool>,
-    cancelled: std::sync::atomic::AtomicBool,
-    output_unavailable: std::sync::atomic::AtomicBool,
-    output_pending: std::sync::atomic::AtomicBool,
-    controls: Mutex<Vec<CommandControl>>,
-    fail_input: std::sync::atomic::AtomicBool,
-    fail_close: std::sync::atomic::AtomicBool,
-    output_entered: tokio::sync::Notify,
-    hold_output: watch::Sender<bool>,
-    output_budgets: Mutex<Vec<usize>>,
-    slice_reads: std::sync::atomic::AtomicUsize,
-    short_slice_read: std::sync::atomic::AtomicUsize,
-    hang_cancel: std::sync::atomic::AtomicBool,
+    pub(super) oom_mib: std::sync::atomic::AtomicI64,
+    pub(super) degraded_output: std::sync::atomic::AtomicBool,
+    pub(super) finish: watch::Sender<bool>,
+    pub(super) cancelled: std::sync::atomic::AtomicBool,
+    pub(super) output_unavailable: std::sync::atomic::AtomicBool,
+    pub(super) output_pending: std::sync::atomic::AtomicBool,
+    pub(super) controls: Mutex<Vec<CommandControl>>,
+    pub(super) fail_input: std::sync::atomic::AtomicBool,
+    pub(super) fail_close: std::sync::atomic::AtomicBool,
+    pub(super) output_entered: tokio::sync::Notify,
+    pub(super) hold_output: watch::Sender<bool>,
+    pub(super) output_budgets: Mutex<Vec<usize>>,
+    pub(super) slice_reads: std::sync::atomic::AtomicUsize,
+    pub(super) short_slice_read: std::sync::atomic::AtomicUsize,
+    pub(super) hang_cancel: std::sync::atomic::AtomicBool,
 }
 impl TestCommands {
     pub(super) fn completed(stdout: &str) -> Arc<Self> {

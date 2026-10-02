@@ -2,7 +2,7 @@ pub(super) use super::command_test_backend::TestCommands;
 use super::test_campaign::TestCampaign;
 use super::tests::{dispatch_haskell_script, dispatch_lookup};
 use super::*;
-use exomonad_actor::command_jobs::CommandBackendPurpose;
+use exomonad_actor::command_jobs::{CommandBackendPurpose, CommandControl};
 use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 use tidepool_bridge_effects::*;
 
