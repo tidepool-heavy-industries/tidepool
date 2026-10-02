@@ -205,6 +205,16 @@ fn reasoning_item(call_id: &str) -> Item {
 }
 
 fn raw_request_items(fixture: &RunningBrowserHost, request: &ResponsesRequest) -> Vec<Item> {
+    raw_request_history(fixture, request)
+        .into_iter()
+        .map(|(_, _, item)| item)
+        .collect()
+}
+
+fn raw_request_history(
+    fixture: &RunningBrowserHost,
+    request: &ResponsesRequest,
+) -> Vec<(harness::model::RequestId, harness::item::ItemHash, Item)> {
     let run = runtime_namespace(&fixture.campaign.config.run_root);
     let actor_and_incarnation = request
         .session_id
@@ -225,12 +235,7 @@ fn raw_request_items(fixture: &RunningBrowserHost, request: &ResponsesRequest) -
         .pending_head
         .or(frontier.settled_head)
         .expect("the observed provider request has admitted history");
-    store
-        .context_history(&head)
-        .unwrap()
-        .into_iter()
-        .map(|(_, _, item)| item)
-        .collect()
+    store.context_history(&head).unwrap()
 }
 
 fn assert_portable_exchange(request: &ResponsesRequest, raw: &[Item], call_id: &str, tool: &str) {
@@ -289,6 +294,26 @@ fn assert_portable_exchange(request: &ResponsesRequest, raw: &[Item], call_id: &
         let expected = serde_json::to_string(&visible).unwrap();
         assert!(note.contains(&expected), "missing {expected} in {note}");
     }
+}
+
+fn assert_native_exchange_preserved(request: &ResponsesRequest, raw: &[Item], call_id: &str) {
+    let reasoning = reasoning_item(call_id);
+    assert!(raw.contains(&reasoning));
+    assert!(request.input.contains(&reasoning));
+    let call = raw
+        .iter()
+        .find(|item| {
+            matches!(
+                item.0["type"].as_str(),
+                Some("custom_tool_call" | "function_call")
+            ) && item.0["call_id"] == call_id
+        })
+        .unwrap_or_else(|| panic!("canonical history omitted native call {call_id}"));
+    assert!(
+        request.input.contains(call),
+        "projection changed native call {call_id}: {:?}",
+        request.input
+    );
 }
 
 fn context_operations(output: &Value) -> Vec<&Value> {
@@ -472,6 +497,100 @@ fn root_context_state(fixture: &RunningBrowserHost) -> harness::context::Context
             },
         )
         .unwrap()
+}
+
+#[tokio::test]
+async fn resident_sync_native_trim_preserves_reasoning_and_deferred_child_bindings() {
+    const TRIMMED: &str = "[Trimmed: repetitive build output]\nBuild succeeded.";
+    let (_files, mut fixture, mut rounds) = start().await;
+    let setup = next_round(&mut rounds).await;
+    setup.cell_with_reasoning(
+        "native-trim-setup",
+        include_str!("fixtures/context_acceptance_native_trim_setup.hs"),
+    );
+    let parent = next_round(&mut rounds).await;
+    assert!(parent.is_root());
+    let original_output = retained_output_item(&parent.request.input, "native-trim-setup").clone();
+    let original_output_hash = raw_request_history(&fixture, &parent.request)
+        .into_iter()
+        .find(|(_, _, item)| item == &original_output)
+        .expect("setup result has canonical history")
+        .1;
+    assert!(original_output.0["output"]
+        .as_str()
+        .unwrap()
+        .contains("native-trim-result-tail"));
+    let before = root_context_state(&fixture);
+    parent.cell_with_reasoning(
+        "native-trim-parent",
+        include_str!("fixtures/context_acceptance_native_trim_parent.hs"),
+    );
+
+    let mut child_sessions = BTreeSet::new();
+    let mut root_committed = false;
+    let mut children_committed = 0;
+    while !root_committed || children_committed != 2 {
+        let round = next_round_with_state(&mut rounds, &mut fixture).await;
+        let raw = raw_request_items(&fixture, &round.request);
+        assert_eq!(round.request.model, "test-model");
+        assert_native_exchange_preserved(&round.request, &raw, "native-trim-setup");
+        assert_native_exchange_preserved(&round.request, &raw, "native-trim-parent");
+        assert_eq!(
+            retained_output_item(&raw, "native-trim-setup"),
+            &original_output,
+            "trimming altered the canonical result"
+        );
+        let output_hash = raw_request_history(&fixture, &round.request)
+            .into_iter()
+            .find(|(_, _, item)| item == &original_output)
+            .expect("trimmed result retains its canonical history")
+            .1;
+        assert_eq!(output_hash, original_output_hash);
+        let projected_output = retained_output_item(&round.request.input, "native-trim-setup");
+        assert_eq!(projected_output.0["output"], TRIMMED);
+        let mut expected_output = original_output.clone();
+        expected_output.0["output"] = json!(TRIMMED);
+        assert_eq!(projected_output, &expected_output);
+
+        if round.is_root() {
+            assert!(
+                !root_committed,
+                "parent inferred twice before another input"
+            );
+            successful_output_items(&raw, "native-trim-parent");
+            assert_eq!(
+                round
+                    .request
+                    .input
+                    .iter()
+                    .rev()
+                    .find_map(Item::configuration_effort),
+                Some(harness::model::Effort::High)
+            );
+            let after = root_context_state(&fixture);
+            assert_eq!(after.generation, before.generation + 1);
+            assert_eq!(after.model.as_deref(), Some("test-model"));
+            root_committed = true;
+            round.finish();
+        } else if child_sessions.insert(round.request.session_id.clone()) {
+            assert!(child_sessions.len() <= 2, "launched an unexpected child");
+            successful_output_items(&raw, "native-trim-parent");
+            round.cell(
+                "native-trim-child",
+                include_str!("fixtures/context_acceptance_native_trim_child.hs"),
+            );
+        } else {
+            let output = successful_output_items(&raw, "native-trim-child");
+            assert_eq!(
+                output["items"].as_array().unwrap().last().unwrap()["output"],
+                "43"
+            );
+            children_committed += 1;
+            round.finish();
+        }
+    }
+    assert_eq!(child_sessions.len(), 2);
+    fixture.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -666,7 +785,7 @@ async fn resident_sync_context_failure_keeps_prefix_model_and_defers_children() 
     let parent = next_round(&mut rounds).await;
     successful_output(&parent.request, "context-setup");
     let before = root_context_state(&fixture);
-    parent.cell(
+    parent.cell_with_reasoning(
         "context-failure",
         include_str!("fixtures/context_acceptance_failure.hs"),
     );
@@ -678,6 +797,21 @@ async fn resident_sync_context_failure_keeps_prefix_model_and_defers_children() 
     assert_eq!(successor.request.model, "test-model");
     assert!(has_user_text(&successor.request, "parent-original"));
     assert!(!has_user_text(&successor.request, "must-not-publish"));
+    let raw = raw_request_items(&fixture, &successor.request);
+    assert_native_exchange_preserved(&successor.request, &raw, "context-failure");
+    assert_eq!(
+        successor
+            .request
+            .input
+            .iter()
+            .rev()
+            .find_map(Item::configuration_effort),
+        before
+            .history
+            .iter()
+            .rev()
+            .find_map(|(_, _, item)| item.configuration_effort())
+    );
     let after = root_context_state(&fixture);
     assert_eq!(after.generation, before.generation);
     assert_eq!(after.model, before.model);
@@ -810,7 +944,7 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
     );
     let parent = next_round(&mut rounds).await;
     successful_output(&parent.request, "context-setup");
-    parent.cell(
+    parent.cell_with_reasoning(
         "context-cancel",
         include_str!("fixtures/context_acceptance_cancel.hs"),
     );
@@ -888,6 +1022,21 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
     assert_eq!(successor.request.model, "test-model");
     assert!(has_user_text(&successor.request, "parent-original"));
     assert!(!has_user_text(&successor.request, "must-not-publish"));
+    let raw = raw_request_items(&fixture, &successor.request);
+    assert_native_exchange_preserved(&successor.request, &raw, "context-cancel");
+    assert_eq!(
+        successor
+            .request
+            .input
+            .iter()
+            .rev()
+            .find_map(Item::configuration_effort),
+        before
+            .history
+            .iter()
+            .rev()
+            .find_map(|(_, _, item)| item.configuration_effort())
+    );
     let terminal = retained_output(&successor.request, "context-cancel");
     assert_context_operations_uncommitted(&terminal);
     if let Some(receipt) = terminal.get("receipt") {
