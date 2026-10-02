@@ -54,6 +54,7 @@ async fn accepted_native_reply_publication_refusal_settles_request_and_retires_a
         let mut preamble = tidepool_mcp::build_preamble(&declarations, false);
         for import in [
             "qualified Tidepool.Actor as Mailbox",
+            "Tidepool.Agent.Reply (Replies)",
             "Tidepool.Agent.Ref (AgentProtocol(..))",
             "qualified Tidepool.Agent.Ref as AgentRef",
             "qualified Tidepool.Actors.Internal.Agent as Agents",
@@ -79,13 +80,19 @@ async fn accepted_native_reply_publication_refusal_settles_request_and_retires_a
             crate::Incarnation::FIRST,
         );
         let requester = forest
-            .new_workbench("terminal-transfer-requester".into(), crate::EffectiveRole::root())
+            .new_workbench(
+                "terminal-transfer-requester".into(),
+                crate::EffectiveRole::root().with_effect_keys(vec![
+                    crate::ActorEffectKey::Actor,
+                    crate::ActorEffectKey::Replies,
+                ]),
+            )
             .await
             .expect("requesting workbench");
         let setup = execute(&requester, include_str!("terminal_transfer_setup.hs"), None)
             .await
             .expect("native receiving child admitted");
-        assert_eq!(setup.status, WorkbenchRunStatus::Committed);
+        assert_eq!(setup.status, WorkbenchRunStatus::Committed, "{setup:?}");
 
         // Setup has fully committed and its cell cleanup has run before the
         // child receiver is used. A parent-owned startup hole cannot pass this.
@@ -96,7 +103,7 @@ async fn accepted_native_reply_publication_refusal_settles_request_and_retires_a
         )
         .await
         .expect("typed request submitted to retained child receiver");
-        assert_eq!(submission.status, WorkbenchRunStatus::Committed);
+        assert_eq!(submission.status, WorkbenchRunStatus::Committed, "{submission:?}");
         let pending = forest.environment.requests.status_for(requester.identity()).pending_responses;
         assert_eq!(pending.len(), 1, "one original typed request");
         let request = pending[0].0;
