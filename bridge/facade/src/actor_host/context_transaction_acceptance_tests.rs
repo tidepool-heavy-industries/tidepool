@@ -468,6 +468,11 @@ async fn resident_sync_context_failure_keeps_prefix_model_and_defers_children() 
     assert_eq!(after.generation, before.generation);
     assert_eq!(after.model, before.model);
     let terminal = retained_output(&successor.request, "context-failure");
+    assert_eq!(
+        terminal["failure"]["phase"],
+        tidepool_toolchain::failclass::Phase::Run.tag(),
+        "{terminal}"
+    );
     assert!(terminal
         .to_string()
         .contains("intentional context transaction failure"));
