@@ -78,7 +78,10 @@ fn materialization_bytes(entries: &[Arc<ArtifactEntry>]) -> u64 {
 
 /// Execution recipes are selected by original artifact custody. A digest can
 /// check a selected graph but cannot discover a source owner or grant visibility.
-fn execution_scope_value(entries: &[Arc<ArtifactEntry>]) -> Option<Value> {
+fn execution_scope_value(
+    entries: &[Arc<ArtifactEntry>],
+    root: &Path,
+) -> Result<Option<Value>, CompileError> {
     let originals = entries
         .iter()
         .filter_map(|entry| match &entry.payload {
@@ -95,10 +98,10 @@ fn execution_scope_value(entries: &[Arc<ArtifactEntry>]) -> Option<Value> {
         .map(|graph| (graph.digest(), graph))
         .collect::<BTreeMap<_, _>>();
     if graphs.is_empty() {
-        return None;
+        return Ok(None);
     }
     if !execution_graphs_fit(graphs.values().map(|graph| graph.as_ref())) {
-        return None;
+        return Ok(None);
     }
     let mut roots = Vec::new();
     let mut admitted_graphs = BTreeSet::new();
@@ -159,21 +162,22 @@ fn execution_scope_value(entries: &[Arc<ArtifactEntry>]) -> Option<Value> {
             ]));
         }
     }
-    Some(Value::Array(vec![
+    Ok(Some(Value::Array(vec![
         Value::Array(
             graphs
                 .into_iter()
                 .filter(|(digest, _)| admitted_graphs.contains(digest))
                 .map(|(digest, graph)| {
-                    Value::Array(vec![
-                        text(hex(&digest)),
-                        Value::Bytes(graph.bytes().to_vec()),
-                    ])
+                    let path = root.join(format!("execution-{}.cbor", hex(&digest)));
+                    // The request owner captures each distinct graph once. Its digest
+                    // and exact original references are sealed by the scope manifest.
+                    std::fs::write(&path, graph.bytes())?;
+                    Ok(Value::Array(vec![text(hex(&digest)), path_value(&path)?]))
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, CompileError>>()?,
         ),
         Value::Array(roots),
-    ]))
+    ])))
 }
 
 fn encode_scope_manifest(
@@ -184,7 +188,7 @@ fn encode_scope_manifest(
     let has_execution_scope = execution_scope.is_some();
     let has_authorization = authorization.is_some();
     fields[1] = text(if has_execution_scope {
-        "5"
+        "6"
     } else if has_authorization {
         "4"
     } else {
@@ -196,19 +200,9 @@ fn encode_scope_manifest(
     } else if let Some(authorization) = authorization {
         fields.push(authorization);
     }
-    let mut value = Value::Array(fields);
+    let value = Value::Array(fields);
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&value, &mut bytes).map_err(failure)?;
-    if bytes.len() > EXACT_SCOPE_BYTES_LIMIT && has_execution_scope {
-        let fields = value.as_array_mut().expect("closed scope encoding");
-        fields[1] = text(if has_authorization { "4" } else { "2" });
-        fields.remove(7);
-        if !has_authorization {
-            fields.pop();
-        }
-        bytes.clear();
-        ciborium::ser::into_writer(&value, &mut bytes).map_err(failure)?;
-    }
     if bytes.len() > EXACT_SCOPE_BYTES_LIMIT {
         return Err(failure("scope manifest exceeds four MiB"));
     }
@@ -1944,7 +1938,7 @@ impl ExactDeclarationContext {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let execution_scope = execution_scope_value(&entries);
+        let execution_scope = execution_scope_value(&entries, root)?;
         let fields = vec![
             text("TPEXACTSCOPE"),
             text("2"),
@@ -3522,7 +3516,9 @@ mod tests {
         let (graph, owners) = crate::execution_source::test_graph(source.path());
         let a = execution_entry(owners[0].clone(), graph.clone());
         let b = execution_entry(owners[1].clone(), graph.clone());
-        let scope = execution_scope_value(&[a, b.clone()]).unwrap();
+        let scope = execution_scope_value(&[a, b.clone()], source.path())
+            .unwrap()
+            .unwrap();
         let rows = scope.as_array().unwrap();
         assert_eq!(rows[0].as_array().unwrap().len(), 1);
         assert_eq!(rows[1].as_array().unwrap().len(), 2);
@@ -3532,10 +3528,12 @@ mod tests {
             graph.digest(),
         );
         let a = execution_entry(owners[0].clone(), graph_a);
-        let scope = execution_scope_value(&[a.clone(), b.clone()]).unwrap();
+        let scope = execution_scope_value(&[a.clone(), b.clone()], source.path())
+            .unwrap()
+            .unwrap();
         assert_eq!(scope.as_array().unwrap()[0].as_array().unwrap().len(), 2);
         assert_eq!(scope.as_array().unwrap()[1].as_array().unwrap().len(), 2);
-        let scope = execution_scope_value(&[a]).unwrap();
+        let scope = execution_scope_value(&[a], source.path()).unwrap().unwrap();
         assert!(
             scope.as_array().unwrap()[1].as_array().unwrap().is_empty(),
             "a graph digest cannot discover a missing original owner"
@@ -3544,8 +3542,12 @@ mod tests {
         wrong.module_version = tidepool_repr::execution_schema::ModuleVersion([99; 32]);
         let graph_a =
             crate::execution_source::test_graph_requiring_original(&graph, &wrong, graph.digest());
-        let scope =
-            execution_scope_value(&[execution_entry(owners[0].clone(), graph_a), b]).unwrap();
+        let scope = execution_scope_value(
+            &[execution_entry(owners[0].clone(), graph_a), b],
+            source.path(),
+        )
+        .unwrap()
+        .unwrap();
         let roots = scope.as_array().unwrap()[1].as_array().unwrap();
         assert_eq!(
             roots.len(),
@@ -3556,7 +3558,9 @@ mod tests {
         let large =
             crate::execution_source::test_graph_with_large_origin(&graph, EXACT_SCOPE_BYTES_LIMIT);
         assert!(
-            execution_scope_value(&[execution_entry(owners[0].clone(), large)]).is_none(),
+            execution_scope_value(&[execution_entry(owners[0].clone(), large)], source.path())
+                .unwrap()
+                .is_none(),
             "an oversized optional recipe cannot reject native/interface context preparation"
         );
         let megabyte = crate::execution_source::test_graph_with_large_origin(&graph, 1 << 20);
@@ -3605,11 +3609,15 @@ mod tests {
             Arc::new(ArtifactEntry::original([7; 32], product, vec![]).unwrap())
         };
         let b1 = native_entry(owners[1].clone());
-        let scope = execution_scope_value(&[Arc::clone(&a), Arc::clone(&b1)]).unwrap();
+        let scope = execution_scope_value(&[Arc::clone(&a), Arc::clone(&b1)], source.path())
+            .unwrap()
+            .unwrap();
         assert_eq!(scope.as_array().unwrap()[1].as_array().unwrap().len(), 1);
         let mut changed = owners[1].clone();
         changed.module_version = ModuleVersion([99; 32]);
-        let scope = execution_scope_value(&[Arc::clone(&a), native_entry(changed)]).unwrap();
+        let scope = execution_scope_value(&[Arc::clone(&a), native_entry(changed)], source.path())
+            .unwrap()
+            .unwrap();
         assert!(scope.as_array().unwrap()[1].as_array().unwrap().is_empty());
         assert!(
             scope.as_array().unwrap()[0].as_array().unwrap().is_empty(),
@@ -3619,12 +3627,14 @@ mod tests {
             unreachable!()
         };
         assert!(Arc::ptr_eq(original.execution_source().unwrap(), &graph));
-        let scope = execution_scope_value(&[a, b1]).unwrap();
+        let scope = execution_scope_value(&[a, b1], source.path())
+            .unwrap()
+            .unwrap();
         assert_eq!(scope.as_array().unwrap()[1].as_array().unwrap().len(), 1);
     }
 
     #[test]
-    fn execution_manifest_uses_production_wire_and_preserves_legacy_fallback() {
+    fn execution_manifest_separates_graph_budget_and_never_erases_authority() {
         use crate::cache::{
             DependencyEvidence, ModuleEvidence, ProductAvailability, SourceEvidence,
         };
@@ -3639,11 +3649,11 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let source_root = root.join("source");
         std::fs::create_dir_all(&source_root).unwrap();
-        let generated = "module Target where\n";
+        let generated = format!("module Target where\n--{}\n", "x".repeat(2300000));
         let authored = "module A where\n";
         let target_path = source_root.join("Target.hs");
         let source_path = source_root.join("A.hs");
-        std::fs::write(&target_path, generated).unwrap();
+        std::fs::write(&target_path, &generated).unwrap();
         std::fs::write(&source_path, authored).unwrap();
         let product = support_product("A");
         let owner = product.owner().clone();
@@ -3681,7 +3691,7 @@ mod tests {
             semantic_sha256: None,
             include: &[source_root],
             source_path: &target_path,
-            source: generated,
+            source: &generated,
             evidence: &evidence,
             owners: std::slice::from_ref(&owner),
             fresh_owners: &BTreeSet::from([identity(&owner.unit, &owner.module)]),
@@ -3723,13 +3733,47 @@ mod tests {
         let value: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         let fields = value.as_array().unwrap();
         assert_eq!(fields.len(), 9);
-        assert_eq!(fields[1], text("5"));
+        assert_eq!(fields[1], text("6"));
         assert_eq!(fields[8], Value::Null);
         assert_eq!(
             fields[7].as_array().unwrap()[1].as_array().unwrap().len(),
             1
         );
         std::fs::write(root.join("execution-source.cbor"), graph.bytes()).unwrap();
+        let graph_row = &fields[7].as_array().unwrap()[0].as_array().unwrap()[0];
+        let graph_path = graph_row.as_array().unwrap()[1].as_text().unwrap();
+        assert_eq!(std::fs::read(graph_path).unwrap(), graph.bytes());
+        let mut inflated = fields[..7].to_vec();
+        let interfaces = inflated[4].as_array_mut().unwrap();
+        for index in 0..4000 {
+            interfaces.push(Value::Array(vec![
+                text("fixture"),
+                text(format!("Padding{index}{}", "X".repeat(550))),
+                text(root.join(format!("padding-{index}.hi")).to_str().unwrap()),
+                text(hex(&[0; 32])),
+                Value::Array(vec![]),
+                text(
+                    root.join(format!("padding-{index}.packages"))
+                        .to_str()
+                        .unwrap(),
+                ),
+                text(hex(&[0; 32])),
+            ]));
+        }
+        let inflated_bytes =
+            encode_scope_manifest(inflated, Some(fields[7].clone()), None).unwrap();
+        assert!(graph.bytes().len() < EXACT_SCOPE_BYTES_LIMIT);
+        assert!(inflated_bytes.len() < EXACT_SCOPE_BYTES_LIMIT);
+        assert!(graph.bytes().len() + inflated_bytes.len() > EXACT_SCOPE_BYTES_LIMIT);
+        let inflated_value: Value = ciborium::de::from_reader(inflated_bytes.as_slice()).unwrap();
+        assert_eq!(inflated_value.as_array().unwrap()[7], fields[7]);
+        std::fs::write(root.join("ordinary/budget-scope.cbor"), &inflated_bytes).unwrap();
+        println!(
+            "scope6 independent budgets: metadata={} graph={} combined={}",
+            inflated_bytes.len(),
+            graph.bytes().len(),
+            inflated_bytes.len() + graph.bytes().len()
+        );
 
         let base = fields[..7].to_vec();
         let authorization = Value::Array(vec![
@@ -3753,17 +3797,16 @@ mod tests {
                 Value::Bytes(vec![0; EXACT_SCOPE_BYTES_LIMIT - 32]),
                 Value::Array(vec![]),
             ]);
-            assert_eq!(
-                encode_scope_manifest(base.clone(), Some(overflow), authorization.clone()).unwrap(),
-                legacy,
-                "combined metadata and optional recipe overflow preserves legacy native fields"
+            assert!(
+                encode_scope_manifest(base.clone(), Some(overflow), authorization.clone()).is_err(),
+                "metadata overflow must never erase admitted execution authority"
             );
             let with_recipe =
                 encode_scope_manifest(base.clone(), Some(fields[7].clone()), authorization.clone())
                     .unwrap();
             let decoded: Value = ciborium::de::from_reader(with_recipe.as_slice()).unwrap();
             let decoded = decoded.as_array().unwrap();
-            assert_eq!(decoded[1], text("5"));
+            assert_eq!(decoded[1], text("6"));
             assert_eq!(decoded[8], authorization.unwrap_or(Value::Null));
         }
     }
