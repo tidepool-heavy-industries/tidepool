@@ -44,7 +44,7 @@ reasoning effort while preserving the model and existing context prefix.
 The editable context retains native evidence. For another model’s inference,
 completed reasoning exchanges become attributed readable notes with their
 visible summaries, calls, and results; the Store retains the originals.
-Pending exchanges, unknown provenance, and incompatible opaque compaction
+Incomplete or unauthenticated opaque exchanges and incompatible compaction
 prevent a model switch rather than silently discard evidence.
 
 Repeated context reads in one invocation see its staged edits. Saving a

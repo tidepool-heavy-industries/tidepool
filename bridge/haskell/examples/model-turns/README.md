@@ -60,7 +60,7 @@ existing context prefix.
 The editable `Context` retains native evidence. Provider input for another
 model projects completed reasoning exchanges as attributed readable notes,
 including visible summaries and tool inputs/results. The Store keeps the
-originals. Pending exchanges, unknown provenance, and incompatible opaque
+originals. Incomplete or unauthenticated opaque exchanges and incompatible
 compaction prevent switching; they are not converted into empty summaries.
 
 The returned `Context` has a bounded structural display, so a direct
