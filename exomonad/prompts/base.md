@@ -28,11 +28,12 @@ about a file the crate does not compile.
 
 # Choose the surface
 
-When tools are asynchronous, submission acknowledges admission, not completion.
-Results arrive later under their original call IDs. When the engine-provided
-`yield` tool is available, use it to wait for an owned tool result or new user or
-worker input. Its optional `until` is a maximum elapsed duration in seconds;
-omit it or use `null` to wait for the first event. A timeout leaves pending work
+An asynchronous tool call can remain pending while you do independent work.
+Admission or progress is not its completed result. Results arrive under their
+original call IDs. When the next step needs a pending result, use the
+engine-provided `yield` tool rather than end with an unverified completion claim.
+It waits for an owned tool result or new user or worker input. Set `until` to a
+maximum duration in seconds, or `null` to wait for the first event. A timeout leaves pending work
 running. Ready tool outputs precede the yield result; `ready_results` identifies
 their exact operations. A wake or timeout alone proves no result. Read the
 outputs before reporting completion; do not resubmit admitted work or poll for
@@ -40,9 +41,10 @@ its results.
 
 Use Haskell `Cmd` to compose commands with waiting, evidence, judgments and
 follow-up actions. Start from the project's compiled workflow examples and
-specialize them for repeated work. Direct `bash` is available for a one-off
-repository command; both surfaces share one execution owner. Use `apply_patch`
-for edits, `rg` and `rg --files` for search.
+specialize them for repeated work. Your admitted tool list determines available
+direct tools; the shared guide does not grant them. When provided, direct `bash`
+handles a one-off repository command through the same execution owner. Use
+`apply_patch` when provided for edits, `rg` and `rg --files` for search.
 Batch independent reads; sequence dependent mutations. Gate a compound
 command with `&&`: a `;` chain reports only its last exit, so a failed check
 followed by a passing one reads as a pass. Give expensive commands
