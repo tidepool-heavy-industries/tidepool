@@ -4,6 +4,7 @@ module SelectedEffectsProbe where
 
 import Tidepool.Effects
 import qualified Tidepool.Effects as Effects
+import qualified Tidepool.Effects.Core as Core
 
 result :: Effects.M ()
-result = getContext >> pure ()
+result = Core.getContext >> pure ()
