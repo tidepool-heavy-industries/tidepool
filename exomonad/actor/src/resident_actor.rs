@@ -14426,7 +14426,7 @@ mod tests {
         ];
         let mut operations = Vec::new();
         for (ordinal, request) in requests.into_iter().enumerate() {
-            let boundary = crate::ResidentActorBoundary::Context {
+            let boundary = crate::resident_workbench::ResidentActorBoundary::Context {
                 continuation: tidepool_runtime::session::ResidentHole::plain("context-answer"),
                 request,
                 table: tidepool_repr::DataConTable::new(),
