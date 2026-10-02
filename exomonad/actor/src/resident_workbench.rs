@@ -764,9 +764,15 @@ type HostCarrierCache =
 /// installs the supplied actor context before invoking its operation, so a
 /// child cannot leak its lexical scope, runtime resource scope, or principal into the
 /// next parent or sibling entry.
+///
+/// An immutable observation of the actual handler instances in a checkout.
+pub type HandlerEffectSupport<H> =
+    Arc<dyn Fn(&H) -> Vec<exomonad_tool::ToolEffectKey> + Send + Sync + 'static>;
+
 struct ResidentMachineAccess<H, O> {
     machines: Arc<ActorMachineRegistry<H, O>>,
     source: ActorWorkbenchSource,
+    handler_effect_support: HandlerEffectSupport<H>,
     /// Builds a fresh, idle machine for a session id this host has decided
     /// deserves its own — installed once by the composition root; `None`
     /// keeps every launch on the shared session, unchanged, which is also
@@ -863,6 +869,7 @@ impl<H, O> ResidentMachineAccess<H, O> {
         Self {
             machines,
             source,
+            handler_effect_support: Arc::new(|_| Vec::new()),
             child_session_factory: None,
             child_bootstrap_program: None,
             image_registry: None,
@@ -885,6 +892,7 @@ impl<H, O> ResidentMachineAccess<H, O> {
         Self {
             machines: Arc::clone(&self.machines),
             source: self.source.clone(),
+            handler_effect_support: self.handler_effect_support.clone(),
             child_session_factory: self.child_session_factory.clone(),
             child_bootstrap_program: self.child_bootstrap_program.clone(),
             image_registry: self.image_registry.clone(),
@@ -2164,29 +2172,39 @@ impl From<IntrospectionNameQuery> for tidepool_runtime::session::NameQuery {
 /// The one nominal roster for requests interpreted at actor execution
 /// boundaries. Generated request enums own constructor recognition and field
 /// shape; this sum owns orchestration routing.
-enum ResidentRequest {
-    Console(crate::generated::console::ConsoleReq),
-    Sleep(crate::generated::sleep::SleepReq),
-    Commands(crate::generated::commands::CommandsReq),
-    Notifications(crate::generated::notifications::NotificationsReq),
-    Jev(crate::generated::jev::JevReq),
-    Model(crate::generated::model_call::ModelReq),
-    Context(crate::ContextReq),
-    Actor(crate::generated::actor::ActorReq),
-    ActorContext(crate::generated::actor_context::ActorContextReq),
-    AgentControl(crate::generated::agent_control::AgentControlReq),
-    AgentInspection(crate::generated::agent_inspection::AgentInspectionReq),
-    Lookup(crate::generated::lookup::LookupReq),
-    Introspection(crate::generated::introspection::IntrospectionReq),
-    AgentLaunch(crate::generated::agent_launch::AgentLaunchReq),
-    Forks(crate::generated::forks::ForksReq),
-    ActorKernel(crate::generated::actor_kernel::ActorKernelReq),
-    ActorLocal(crate::generated::actor_local::ActorLocalReq),
-    AgentTools(crate::generated::agent_tools::AgentToolsReq),
-    AgentSession(crate::generated::agent_session::AgentSessionReq),
-    Reflect(crate::generated::reflect::ReflectReq),
-    Replies(RepliesReq),
-    Watches(WatchesReq),
+macro_rules! resident_request_roster {
+    ($($variant:ident($request:ty) => $key:expr,)*) => {
+        enum ResidentRequest { $($variant($request),)* }
+
+        pub(crate) fn intrinsic_effect_families() -> Vec<exomonad_tool::ToolEffectKey> {
+            [$($key,)*].into_iter().flatten().collect()
+        }
+    };
+}
+
+resident_request_roster! {
+    Console(crate::generated::console::ConsoleReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Console)),
+    Sleep(crate::generated::sleep::SleepReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Sleep)),
+    Commands(crate::generated::commands::CommandsReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Commands)),
+    Notifications(crate::generated::notifications::NotificationsReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Notifications)),
+    Jev(crate::generated::jev::JevReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Jev)),
+    Model(crate::generated::model_call::ModelReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::ModelCall)),
+    Context(crate::ContextReq) => None,
+    Actor(crate::generated::actor::ActorReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Actor)),
+    ActorContext(crate::generated::actor_context::ActorContextReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::ActorContext)),
+    AgentControl(crate::generated::agent_control::AgentControlReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::AgentControl)),
+    AgentInspection(crate::generated::agent_inspection::AgentInspectionReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::AgentInspection)),
+    Lookup(crate::generated::lookup::LookupReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Lookup)),
+    Introspection(crate::generated::introspection::IntrospectionReq) => None,
+    AgentLaunch(crate::generated::agent_launch::AgentLaunchReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::AgentLaunch)),
+    Forks(crate::generated::forks::ForksReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Forks)),
+    ActorKernel(crate::generated::actor_kernel::ActorKernelReq) => None,
+    ActorLocal(crate::generated::actor_local::ActorLocalReq) => None,
+    AgentTools(crate::generated::agent_tools::AgentToolsReq) => None,
+    AgentSession(crate::generated::agent_session::AgentSessionReq) => None,
+    Reflect(crate::generated::reflect::ReflectReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Reflect)),
+    Replies(RepliesReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Replies)),
+    Watches(WatchesReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Watches)),
 }
 
 impl ResidentRequest {
@@ -2507,9 +2525,21 @@ impl<H, O> ResidentActorRunner<H, O> {
         }
     }
 
+    /// Inspect support from this checkout's actual handler stack, including
+    /// the distinct stack constructed for a dedicated child session.
+    #[must_use]
+    pub fn with_handler_effect_support(
+        mut self,
+        observer: impl Fn(&H) -> Vec<exomonad_tool::ToolEffectKey> + Send + Sync + 'static,
+    ) -> Self {
+        self.access.handler_effect_support = Arc::new(observer);
+        self
+    }
+
     /// Install the composition root's child-session factory. Omitted, every
     /// launch keeps running on the session that admitted it — today's
-    /// behavior, unchanged.
+    /// Install the composition root's child-session factory. Omitted, every
+    /// launch keeps running on the session that admitted it.
     #[must_use]
     pub fn with_child_session_factory(mut self, factory: ChildSessionFactory<H, O>) -> Self {
         self.access.child_session_factory = Some(factory);
@@ -3026,6 +3056,20 @@ impl<H, O> ResidentActorWorkbench<H, O> {
             compilation_authority: None,
             private_execution: None,
         }
+    }
+
+    pub(crate) fn with_intrinsic_effect_support(
+        mut self,
+        keys: Vec<exomonad_tool::ToolEffectKey>,
+    ) -> Self {
+        let mut support = self.access.source.installed_effect_support.to_vec();
+        for key in keys {
+            if !support.contains(&key) {
+                support.push(key);
+            }
+        }
+        self.access.source.installed_effect_support = support.into();
+        self
     }
 
     #[must_use]
@@ -3619,7 +3663,8 @@ where
                 items: Vec::new(),
             };
             let publication_resolved = resolved;
-            let installed_effect_support = source.installed_effect_support.clone();
+            let installed_effect_support = source.installed_effect_support().to_vec();
+            let handler_effect_support = self.access.handler_effect_support.clone();
             // Compile with the resident machine checked out only for the
             // snapshot and the install-and-run step (`begin_fragment_split`),
             // released for the GHC compile in between. The suspension this
@@ -3689,6 +3734,12 @@ where
                             slots,
                             slot_effect_keys,
                         } = decode_installation(installation)?;
+                        let mut installed_effect_support = installed_effect_support.to_vec();
+                        for key in handler_effect_support(session.handlers()) {
+                            if !installed_effect_support.contains(&key) {
+                                installed_effect_support.push(key);
+                            }
+                        }
                         crate::tool_contract::validate_installation(
                             &tools,
                             &slots,

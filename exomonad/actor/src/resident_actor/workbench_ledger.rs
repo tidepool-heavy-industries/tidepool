@@ -6,6 +6,13 @@ struct WorkbenchExecutionRecord {
     state: WorkbenchExecutionState,
     invocation_work: Option<Arc<InvocationWork>>,
     context_terminal: Option<(crate::CellExit, Arc<crate::WorkbenchExecutionControl>)>,
+    boundary_abort: Option<BoundaryAbortCleanup>,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct BoundaryAbortCleanup {
+    pub children: Vec<ActorRef>,
+    pub scopes: Vec<tidepool_codegen::scope::ScopeId>,
 }
 
 #[derive(Clone)]
@@ -143,6 +150,7 @@ impl WorkbenchExecutions {
                 state: WorkbenchExecutionState::Unconfirmed,
                 invocation_work: None,
                 context_terminal: None,
+                boundary_abort: None,
             },
         );
     }
@@ -160,6 +168,10 @@ impl WorkbenchExecutions {
             .0
             .get(&key)
             .and_then(|record| record.invocation_work.clone());
+        let boundary_abort = self
+            .0
+            .get(&key)
+            .and_then(|record| record.boundary_abort.clone());
         let context_terminal = self
             .0
             .get(&key)
@@ -174,8 +186,48 @@ impl WorkbenchExecutions {
                 },
                 invocation_work,
                 context_terminal,
+                boundary_abort,
             },
         );
+    }
+
+    pub(super) fn boundary_abort(
+        &self,
+        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> Option<BoundaryAbortCleanup> {
+        self.0.iter().find_map(|(key, record)| match key {
+            WorkbenchReplayKey::Hosted(invocation)
+                if invocation.is_original_invocation() && invocation.matches_boundary(boundary) =>
+            {
+                record.boundary_abort.clone()
+            }
+            _ => None,
+        })
+    }
+
+    pub(super) fn retain_boundary_abort(
+        &mut self,
+        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        cleanup: BoundaryAbortCleanup,
+    ) -> Result<(), KernelBehaviorError> {
+        let record = self.0.iter_mut().find_map(|(key, record)| match key {
+            WorkbenchReplayKey::Hosted(invocation)
+                if invocation.is_original_invocation() && invocation.matches_boundary(boundary) =>
+            {
+                Some(record)
+            }
+            _ => None,
+        });
+        if let Some(record) = record {
+            record.boundary_abort = Some(cleanup);
+            return Ok(());
+        }
+        if cleanup.children.is_empty() && cleanup.scopes.is_empty() {
+            return Ok(());
+        }
+        Err(KernelBehaviorError {
+            detail: "output abort has no exact admitted invocation owner".into(),
+        })
     }
 
     pub(super) fn retain_context_terminal(
@@ -381,6 +433,54 @@ mod tests {
             completed.lookup(&WorkbenchExecutionId::from_digest([8; 16]), &request, None),
             Ok(None)
         );
+    }
+
+    #[test]
+    fn context_terminal_gates_deferred_publication_and_late_cancellation() {
+        let invocation = crate::resident_tools::WorkbenchCallKey::from(
+            exomonad_tool::ToolInvocationContext::external(
+                "thread".into(),
+                "turn".into(),
+                "call".into(),
+                Some("call".into()),
+                None,
+            ),
+        );
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "thread".into(),
+            "turn".into(),
+            "call".into(),
+        );
+        let execution = WorkbenchExecutionId::from_digest([9; 16]);
+        let request =
+            WorkbenchRequest::from_cell_input("pure ()").with_execution_id(execution.clone());
+        let mut journal = WorkbenchExecutions::default();
+        journal.begin(&execution, request, Some(&invocation));
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let mut exit = crate::CellExit {
+            execution: execution.clone(),
+            cause: crate::CellExitCause::FullReturn,
+            cleanup_confirmed: false,
+        };
+        journal.retain_context_terminal(
+            &execution,
+            Some(&invocation),
+            exit.clone(),
+            control.clone(),
+        );
+        assert!(!journal.context_allows_publication(&boundary));
+        exit.cleanup_confirmed = true;
+        journal.retain_context_terminal(&execution, Some(&invocation), exit, control.clone());
+        assert!(journal.context_allows_publication(&boundary));
+        control.publication_decision().claim_commit().unwrap();
+        assert!(!control.request_cancellation());
+        assert!(!journal.context_allows_publication(&boundary));
+        let sibling = tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "thread".into(),
+            "turn".into(),
+            "sibling".into(),
+        );
+        assert!(journal.context_allows_publication(&sibling));
     }
 
     #[test]

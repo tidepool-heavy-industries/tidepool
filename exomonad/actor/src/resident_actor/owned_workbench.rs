@@ -1732,6 +1732,7 @@ where
             .unwrap_or_else(crate::WorkbenchExecutionControl::untracked);
         let invocation = owned.state.effects.invocation_work.clone();
         let model = owned.state.effects.model.clone();
+        let boundary = owned.state.effects.publication.boundary().cloned();
         let observed_child = pending.wait.observe_after_resume();
         Self::owned_step_task(
             owned,
@@ -1745,6 +1746,7 @@ where
                     commands_permitted,
                     invocation,
                     model,
+                    boundary,
                 ))
             },
             move |behavior, _kernel, mut owned, result| {
@@ -2059,6 +2061,7 @@ async fn await_effect<H, O>(
     commands_permitted: bool,
     invocation: Arc<InvocationWork>,
     model: Option<Arc<dyn crate::CellModelBinding>>,
+    boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
 ) -> commands::CommandResolution
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -2110,7 +2113,7 @@ where
                 .await
         }
         OwnedWorkbenchWait::Watch(poll) => {
-            request_wait::await_watch(environment, kernel, context, control, poll).await
+            request_wait::await_watch(environment, kernel, context, control, poll, boundary).await
         }
         OwnedWorkbenchWait::Sleep {
             continuation,
@@ -2349,6 +2352,7 @@ mod authority_tests {
         let source = crate::CheckpointSourceLayer::default();
         let mut async_context = context();
         async_context.haskell_effects_alias = "'[Replies]".into();
+        async_context.source_layer = Arc::from([]);
         let mut sync_context = async_context.clone();
         sync_context.haskell_effects_alias = "'[ContextReadWrite, Replies]".into();
         let (_, asynchronous) =

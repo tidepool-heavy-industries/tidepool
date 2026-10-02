@@ -224,6 +224,7 @@ where
             .environment
             .runner
             .application_workbench()
+            .with_intrinsic_effect_support(self.environment.intrinsic_effect_support())
             .with_compilation_authority(authority);
         let granted_effects = self.descriptor.effective_role().effect_keys().to_vec();
         Self::owned_step_task(

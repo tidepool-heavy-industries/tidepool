@@ -28,6 +28,7 @@ mod replacement;
 mod request_wait;
 mod status_rendering;
 mod terminal_wait;
+mod tool_support;
 mod workbench_ledger;
 
 #[cfg(test)]
@@ -1929,19 +1930,17 @@ impl<H, O> ResidentKernelBehavior<H, O> {
 
     fn pending_in_tool_block(
         &self,
+        owner: ActorRef,
         effect_owner: &CurrentEffectOwner<'_>,
         target: ActorRef,
     ) -> bool {
-        effect_owner
-            .publication()
-            .boundary()
-            .is_some_and(|boundary| {
-                !matches!(
-                    boundary,
-                    tidepool_runtime::session::WorkbenchForkBoundary::Execution { .. }
-                )
-            })
-            && self.environment.fork_groups.is_pending_child(target)
+        request_wait::guard_deferred_target(
+            &self.environment.fork_groups,
+            owner,
+            effect_owner.publication().boundary(),
+            target,
+        )
+        .is_err()
     }
 
     fn capture_exit_target(
@@ -1950,9 +1949,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         effect_owner: &CurrentEffectOwner<'_>,
         target: ActorRef,
     ) -> Result<crate::RetainedActorExit, ResidentActorWorkbenchError> {
-        if self.pending_in_tool_block(effect_owner, target) {
+        if self.pending_in_tool_block(kernel.identity(), effect_owner, target) {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "child starts after this tool block completes; register a watch or wait in a later tool invocation".into(),
+                "child starts after this invocation settles; wait in a later invocation".into(),
             ));
         }
         let actor = kernel.resolve(target).ok_or_else(|| {
@@ -3292,7 +3291,7 @@ where
         target: ActorRef,
         request: MailboxValue,
     ) -> Result<MailboxValue, ResidentCallError> {
-        if self.pending_in_tool_block(&effect_owner, target) {
+        if self.pending_in_tool_block(context.actor, &effect_owner, target) {
             return Err(ResidentCallError::Call(KernelCallFailure::Handler {
                 actor: target,
                 detail: "child starts after this tool block completes; register a watch or call it in a later tool invocation".into(),
@@ -5367,6 +5366,15 @@ where
                     .await
             }),
             ResidentActorBoundary::Poll(poll) => Box::pin(async move {
+                request_wait::guard_deferred_target(
+                    &self.environment.fork_groups,
+                    context.actor,
+                    effect_owner.publication().boundary(),
+                    poll.target,
+                )
+                .map_err(|refusal| {
+                    ResidentActorWorkbenchError::ActorProtocol(refusal.to_string())
+                })?;
                 let terminal = kernel
                     .resolve(poll.target)
                     .and_then(|target| target.terminal().get());
@@ -5804,6 +5812,7 @@ where
                     context.clone(),
                     control,
                     poll,
+                    effect_owner.publication().boundary().cloned(),
                 ))
             }
             other => Box::pin(async move {
@@ -6113,7 +6122,11 @@ where
         })?;
         self.spec_installs = 1;
         let prepare_started = std::time::Instant::now();
-        let application_workbench = self.environment.runner.application_workbench();
+        let application_workbench = self
+            .environment
+            .runner
+            .application_workbench()
+            .with_intrinsic_effect_support(self.environment.intrinsic_effect_support());
         let compiled_tools = application_workbench
             .prepare_tools(
                 context.clone(),
@@ -7393,6 +7406,15 @@ where
                                 })
                             }
                             ResidentActorBoundary::Poll(poll) => {
+                                request_wait::guard_deferred_target(
+                                    &self.environment.fork_groups,
+                                    context.actor,
+                                    execution_state.publication.boundary(),
+                                    poll.target,
+                                )
+                                .map_err(|refusal| {
+                                    ResidentActorWorkbenchError::ActorProtocol(refusal.to_string())
+                                })?;
                                 let terminal = kernel
                                     .resolve(poll.target)
                                     .and_then(|target| target.terminal().get());
@@ -9820,15 +9842,27 @@ where
                 return Ok(());
             }
             let context = self.context(kernel.identity());
-            let retired =
-                self.environment
+            let retained = self.workbench_executions.lock().boundary_abort(&boundary);
+            let mut cleanup = retained.unwrap_or_else(|| {
+                let scopes = self
+                    .environment
                     .fork_groups
-                    .settle_checkpoints(context.actor, &boundary, false);
-            let children = self
-                .environment
-                .fork_groups
-                .abort_unpublished_at_boundary(context.actor, &boundary);
-            for child in children {
+                    .settle_checkpoints(context.actor, &boundary, false)
+                    .into_iter()
+                    .filter_map(|(session, scope)| {
+                        (session == context.placement.session).then_some(scope)
+                    })
+                    .collect();
+                let children = self
+                    .environment
+                    .fork_groups
+                    .abort_unpublished_at_boundary(context.actor, &boundary);
+                workbench_ledger::BoundaryAbortCleanup { children, scopes }
+            });
+            self.workbench_executions
+                .lock()
+                .retain_boundary_abort(&boundary, cleanup.clone())?;
+            while let Some(child) = cleanup.children.last().copied() {
                 if let Some(child) = kernel.resolve(child) {
                     child
                         .shutdown(ActorTerminal {
@@ -9838,20 +9872,20 @@ where
                         .await
                         .map_err(Self::failure)?;
                 }
+                cleanup.children.pop();
+                self.workbench_executions
+                    .lock()
+                    .retain_boundary_abort(&boundary, cleanup.clone())?;
             }
             self.environment
                 .runner
-                .retire_fork_scopes(
-                    context.clone(),
-                    retired
-                        .into_iter()
-                        .filter_map(|(session, scope)| {
-                            (session == context.placement.session).then_some(scope)
-                        })
-                        .collect(),
-                )
+                .retire_fork_scopes(context.clone(), cleanup.scopes.clone())
                 .await
                 .map_err(Self::failure)?;
+            cleanup.scopes.clear();
+            self.workbench_executions
+                .lock()
+                .retain_boundary_abort(&boundary, cleanup)?;
             self.settled_fork_boundaries.push(boundary);
             Ok(())
         })
