@@ -2228,10 +2228,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                             .collect::<Vec<_>>()
                             .join(", "),
                     ),
-                    exomonad_tool::ToolImplementation::ResidentHandler => format!(
-                        "(ContextReadWrite ': {})",
-                        self.descriptor.effective_role().haskell_effects_type(),
-                    ),
+                    exomonad_tool::ToolImplementation::ResidentHandler => installed_tools
+                        .as_ref()
+                        .and_then(|lease| lease.tools())
+                        .expect("selected retained handler checked")
+                        .dispatcher_effects
+                        .clone(),
                 };
             }
         }

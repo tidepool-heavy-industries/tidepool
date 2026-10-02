@@ -482,6 +482,8 @@ impl ActorWorkbenchSource {
 pub(crate) struct ResidentWorkbenchTools {
     pub(crate) declarations: Vec<exomonad_tool::HostedTool>,
     pub(crate) dispatch: Arc<RootCustody>,
+    /// Exact installer row retained with its rooted dispatcher.
+    pub(crate) dispatcher_effects: String,
     /// Which slots the installed record fills, by name, as the same compile
     /// declared them.
     pub(crate) slots: Vec<String>,
@@ -3627,12 +3629,42 @@ where
         Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
     > {
         Box::pin(async move {
+            let source_support = self.access.source.installed_effect_support().to_vec();
+            let observer = self.access.handler_effect_support.clone();
+            let admitted_support = self
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    let mut support = source_support;
+                    for key in observer(session.handlers()) {
+                        if !support.contains(&key) {
+                            support.push(key);
+                        }
+                    }
+                    Ok(support)
+                })
+                .await?;
+            let admitted_base: Vec<_> = granted_effects
+                .into_iter()
+                .filter(|key| admitted_support.contains(&exomonad_tool::ToolEffectKey::Actor(*key)))
+                .collect();
+            let authored_effects = format!(
+                "'[{}]",
+                admitted_base
+                    .iter()
+                    .map(|key| key.haskell_name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let dispatcher_effects = format!("(Tidepool.Effects.Core.AgentTools ': Tidepool.Effects.Core.ContextReadWrite ': {authored_effects})");
             let resolved = self.resolve_spec(&context);
             let revision = resolved.source_revision();
-            let entry = resolved
-                .entry
-                .clone()
-                .unwrap_or_else(|| "Tidepool.Agent.Contract.defaultWorkbenchSpec".into());
+            let entry = resolved.entry.clone().unwrap_or_else(|| {
+                if admitted_support.contains(&exomonad_tool::ToolEffectKey::ContextReadWrite) {
+                    "Tidepool.Agent.Contract.defaultWorkbenchSpec".into()
+                } else {
+                    "Tidepool.Agent.Contract.defaultAsyncWorkbenchSpec".into()
+                }
+            });
             let mut source = self.access.source.clone();
             // A spec found by convention is named by no configured key, so its
             // module is not in the shared workbench vocabulary; the fragment that
@@ -3647,9 +3679,8 @@ where
                 .extend_text("qualified Tidepool.Agent.Contract");
             source.preamble =
                 insert_preamble_imports(&source.preamble, "qualified Tidepool.Effects.Core").into();
-            let authored_effects = context.haskell_effects_alias.clone();
             let mut compile_context = context.clone();
-            compile_context.haskell_effects_alias = format!("(Tidepool.Effects.Core.AgentTools ': Tidepool.Effects.Core.ContextReadWrite ': {authored_effects})");
+            compile_context.haskell_effects_alias = dispatcher_effects.clone();
             let block = ParsedBlock {
                 ordinal: 1,
                 total: 1,
@@ -3744,7 +3775,7 @@ where
                             &tools,
                             &slots,
                             &slot_effect_keys,
-                            &granted_effects,
+                            &admitted_base,
                             &installed_effect_support,
                         )
                         .map_err(|error| {
@@ -3810,6 +3841,7 @@ where
                     Ok(ResidentWorkbenchTools {
                         declarations,
                         dispatch: Arc::new(dispatch),
+                        dispatcher_effects,
                         slots,
                         resolved: publication_resolved,
                         install,
