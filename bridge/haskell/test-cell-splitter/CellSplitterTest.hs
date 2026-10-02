@@ -94,16 +94,6 @@ runAllTests = do
   multilineLetCompilation
   renderNameErrorTeachesGroupPaths
   ambiguousOccurrenceHintCompilation
-
-requestOwnedParserDefaults :: IO ()
-requestOwnedParserDefaults = do
-  flags <- defaultParserDynFlags
-  declaration <- declarationSourceWithTemplateFlags flags checkTemplate
-    "import Data.List\nanswer = sort []\n"
-  case declaration of
-    Right source -> assertEqual "request-owned parser defaults imports" 1
-      (length (prologueImports (declarationPrologue source)))
-    Left failure -> fail ("request-owned parser defaults: " ++ renderCellSplitError failure)
   getArgs >>= \case
     [] -> pure ()
     ["--metadata"] -> metadataCompilation
@@ -116,6 +106,16 @@ requestOwnedParserDefaults = do
     ["--memo-lifecycle"] -> memoLifecycleCompilation
     ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
     _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --pin-imports, --path-insensitive-witness, --memo-lifecycle, or --structural-display EFFECTS_INCLUDE"
+
+requestOwnedParserDefaults :: IO ()
+requestOwnedParserDefaults = do
+  flags <- defaultParserDynFlags
+  declaration <- declarationSourceWithTemplateFlags flags checkTemplate
+    "import Data.List\nanswer = sort []\n"
+  case declaration of
+    Right source -> assertEqual "request-owned parser defaults imports" 1
+      (length (prologueImports (declarationPrologue source)))
+    Left failure -> fail ("request-owned parser defaults: " ++ renderCellSplitError failure)
 
 functionValueInterfaceCompilation :: IO ()
 functionValueInterfaceCompilation = bracket temporary removeDirectoryRecursive $ \root -> do

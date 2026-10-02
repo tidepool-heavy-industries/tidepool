@@ -939,19 +939,21 @@ runTurnMode compiler caches args path = do
     turnSrc   <- readFile path
     let templates = requestTurnTemplates args
     mVerdict  <- traverse parseTurnVerdictArg (requestTurnVerdict args)
-    parserFlags <- case mVerdict of
-      Nothing -> Just <$> defaultParserDynFlags
-      Just (StmtBinders { sbKind = KDecl }) -> Just <$> defaultParserDynFlags
-      Just _ -> pure Nothing
-    let requireParserFlags = maybe
-          (error "turn parser flags were not initialized") id parserFlags
     -- The parse emits no phases of its own. This mode times it as the single
     -- @classify@ phase, emitted
     -- only on the branch that actually classifies. With @--turn-verdict@
     -- supplied nothing is parsed, and an absent @classify@ row is the
     -- honest report rather than a phantom 0ms line.
-    sb        <- maybe (timePhase timing "classify"
-      (evaluate (classifyWithFlags requireParserFlags turnSrc))) return mVerdict
+    (parserFlags, sb) <- case mVerdict of
+      Just verdict@(StmtBinders { sbKind = KDecl }) -> do
+        flags <- defaultParserDynFlags
+        pure (Just flags, verdict)
+      Just verdict -> pure (Nothing, verdict)
+      Nothing -> do
+        flags <- defaultParserDynFlags
+        classified <- timePhase timing "classify"
+          (evaluate (classifyWithFlags flags turnSrc))
+        pure (Just flags, classified)
     exact <- traverse (\manifest -> readExactScope manifest >>= either fail pure) (requestSessionArtifacts args)
     let admittedItem = exact >>= scopeCheckedItem
     forM_ admittedItem $ \admission -> validateCheckedItemAdmission args admission turnSrc sb
@@ -970,7 +972,8 @@ runTurnMode compiler caches args path = do
           Just f  -> return f
           Nothing -> error "--turn: no --turn-template for kind decl"
         tmplSrc <- readFile tmplFile
-        declarationSource <- declarationSourceWithTemplateFlags requireParserFlags tmplSrc turnSrc
+        flags <- maybe defaultParserDynFlags pure parserFlags
+        declarationSource <- declarationSourceWithTemplateFlags flags tmplSrc turnSrc
           >>= either throwCellSplitError pure
         spliced <- either fail pure (renderDeclarationForTemplate tmplSrc declarationSource)
         (_spliced, modName, modulePath) <- writeSplicedModule outDir lastAttempt spliced
