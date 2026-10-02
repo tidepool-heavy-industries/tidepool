@@ -1196,13 +1196,15 @@ async fn inherited_command_helpers_start_fresh_jobs_in_each_callers_checkout() {
         &campaign.worktrees,
         campaign._repository.path(),
         campaign.actor.identity(),
-    );
+    )
+    .unwrap();
     let child_checkout = resident_command_roots(
         &campaign.authority,
         &campaign.worktrees,
         campaign._repository.path(),
         child.actor.identity(),
-    );
+    )
+    .unwrap();
     assert_eq!(root_checkout.directory, campaign._repository.path());
     assert_ne!(child_checkout.directory, root_checkout.directory);
     assert!(child_checkout.custody);

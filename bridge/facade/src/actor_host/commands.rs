@@ -478,10 +478,10 @@ impl HostCommandBackend {
                             "this actor cannot run a command in {}: {error}; it may run in {}{}",
                             directory.display(),
                             self.roots.directory.display(),
-                            if self.roots.custody {
+                            if !self.roots.writable.is_empty() {
                                 " and write there"
                             } else {
-                                ", and holds no worktree to write in"
+                                ", and has no repository write authority"
                             },
                         ),
                     )

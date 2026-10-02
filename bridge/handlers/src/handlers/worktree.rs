@@ -157,7 +157,8 @@ impl ActorWorktreeAuthority {
         owned
     }
 
-    fn grant(&self, principal: tidepool_repr::PrincipalId) -> ActorWorktreeGrant {
+    /// The host-installed resource grant for this exact actor incarnation.
+    pub fn grant(&self, principal: tidepool_repr::PrincipalId) -> ActorWorktreeGrant {
         // Bootstrap runs before actor identity is allocated. Authored turns
         // carry their exact actor principal and use only its installed grant.
         if principal == tidepool_repr::PrincipalId::SYSTEM {
