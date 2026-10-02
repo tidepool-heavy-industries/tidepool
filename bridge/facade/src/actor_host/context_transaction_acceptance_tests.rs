@@ -387,6 +387,7 @@ async fn start_with_spec(
         } else {
             "test-model"
         };
+        config.model = initial_model.into();
         let mut configuration =
             format!("[defaults]\nmodel='{initial_model}'\n[models]\nexecutor='gpt-6.1-sol'\n");
         if let Some(spec) = spec {
