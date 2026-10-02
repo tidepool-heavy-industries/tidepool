@@ -396,7 +396,10 @@ fn run_inspections_with_policy(
         command.inspection_strict();
     }
     let imports = match request.effects {
-        Some(_) => format!("{}\nqualified Data.Proxy\n", request.imports),
+        Some(_) => format!(
+            "{}\nqualified Data.Proxy\nqualified Tidepool.Effects.Core\n",
+            request.imports
+        ),
         None => request.imports.to_owned(),
     };
     let type_batch = request
@@ -1678,7 +1681,7 @@ mod tests {
     }
 
     #[test]
-    fn info_lookup_with_effect_row_uses_the_checked_row_sentinel() {
+    fn info_lookup_with_effect_row_imports_its_generated_qualified_names() {
         eval_harness::require_extract();
         let session = tempfile::tempdir().unwrap();
         let results = run_inspections(InspectionRequest {
@@ -1687,13 +1690,18 @@ mod tests {
                 "{-# LANGUAGE NoImplicitPrelude, DataKinds #-}\n",
                 "module Expr where\n",
                 "import Prelude\n",
+                "import qualified Tidepool.Effects.Core as LookupEffects\n",
+                "type ActorSurface = '[LookupEffects.AgentTools, LookupEffects.ContextReadWrite]\n",
             ),
             imports: "",
             include: &[],
             session_root: session.path(),
             inject_modules: &[],
             queries: &[InspectionQuery::Info("map".into())],
-            effects: Some("'[]"),
+            effects: Some(
+                "Tidepool.Effects.Core.AgentTools ': \
+                 Tidepool.Effects.Core.ContextReadWrite ': '[]",
+            ),
         })
         .unwrap();
 
