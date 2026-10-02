@@ -118,7 +118,7 @@ impl EmbeddedPolicySnapshot {
                         Err(error) => {
                             return Box::pin(async move {
                                 Err(ResidentToolError::InvalidInvocation(error.to_string()))
-                            })
+                            });
                         }
                     },
                     None => value,
@@ -463,6 +463,7 @@ mod tests {
                     "ambiguous".into(),
                     ToolArguments::Structured(json!({"choice":{"value":null}})),
                     context(),
+                    None,
                     None
                 )
                 .await,

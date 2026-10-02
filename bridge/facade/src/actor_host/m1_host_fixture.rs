@@ -8,7 +8,7 @@ const FOREST_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const HOSTED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const ABORT_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(super) fn cell_output_matches(
+pub(in crate::actor_host) fn cell_output_matches(
     item: &harness::item::Item,
     call_id: &str,
     expected: &str,
@@ -34,10 +34,10 @@ pub(super) fn cell_output_matches(
         })
 }
 
-pub(super) struct RunningBrowserHost {
-    pub(super) campaign: test_campaign::TestCampaign,
-    pub(super) runtime: Arc<embedded_harness::EmbeddedHarnessRuntime>,
-    pub(super) address: std::net::SocketAddr,
+pub(in crate::actor_host) struct RunningBrowserHost {
+    pub(in crate::actor_host) campaign: test_campaign::TestCampaign,
+    pub(in crate::actor_host) runtime: Arc<embedded_harness::EmbeddedHarnessRuntime>,
+    pub(in crate::actor_host) address: std::net::SocketAddr,
     shutdown: watch::Sender<Option<NativeRetirement>>,
     // Keep the root configuration watch alive for the entire host lifetime.
     _config_tx: watch::Sender<ActorHostConfig>,
@@ -60,7 +60,7 @@ impl Drop for RunningBrowserHost {
 }
 
 impl RunningBrowserHost {
-    pub(super) async fn cell_settlement_diagnostic(&self, call_id: &str) -> String {
+    pub(in crate::actor_host) async fn cell_settlement_diagnostic(&self, call_id: &str) -> String {
         let call = harness::model::CallId(call_id.into());
         let store = self.runtime.store();
         let Ok(claims) = store.claims(&call) else {
@@ -157,14 +157,14 @@ impl RunningBrowserHost {
         )
     }
 
-    pub(super) async fn start(
+    pub(in crate::actor_host) async fn start(
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         transport: &Arc<dyn harness::engine::ResponsesTransport>,
     ) -> Result<Self, String> {
         Self::start_configured(settings, transport, |_| {}).await
     }
 
-    pub(super) async fn start_configured(
+    pub(in crate::actor_host) async fn start_configured(
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         transport: &Arc<dyn harness::engine::ResponsesTransport>,
         configure: impl FnOnce(&mut ActorHostConfig),
@@ -342,7 +342,7 @@ impl RunningBrowserHost {
         Ok(running)
     }
 
-    pub(super) async fn stop(mut self) -> Result<(), String> {
+    pub(in crate::actor_host) async fn stop(mut self) -> Result<(), String> {
         let mut errors = Vec::new();
         self.finish(&mut errors).await;
         if errors.is_empty() {

@@ -45,6 +45,7 @@ mod embedded_projection;
 mod embedded_recovery;
 #[cfg(test)]
 mod embedded_recovery_tests;
+mod embedded_reflect;
 mod embedded_service;
 #[cfg(test)]
 mod embedded_shutdown_tests;
@@ -2805,12 +2806,23 @@ async fn run_owned(
         )?)
         .with_recovery_journal(actor_recovery.clone())
         .with_child_session_factory(child_session_factory)
+        .with_handler_effect_support(tidepool_mcp::InstalledEffectSupport::installed_effect_support)
         .with_image_registry(image_registry);
     #[cfg(feature = "codex-compat")]
     if let HostRuntimeMode::Codex(backend) = &runtime_backend {
         forest = forest.with_conversation_reader(conversation_reader(
             application_owners.clone(),
             backend.clone(),
+        ));
+    }
+    if let Some(service) = &embedded_service {
+        let recovery = actor_recovery.clone();
+        forest = forest.with_conversation_reader(embedded_reflect::conversation_reader(
+            service.runtime.store(),
+            Arc::new(move |actor| {
+                let conversation = recovery.active_application_conversation(actor)?;
+                embedded_recovery::identity_from_conversation(&conversation).ok()
+            }),
         ));
     }
     // No child bootstrap program: every launch stays on its launching
@@ -4358,7 +4370,16 @@ fn compile_root(
     // rather than a compile failure over a module nothing on its search path
     // defines. The same answer tells the agent so in its instructions.
     let jev = config.jev_surface() == prompt_catalog::JevSurface::Installed;
+    let context_support = if matches!(
+        config.backend,
+        crate::exomonad::HostBackendOptions::Embedded
+    ) {
+        vec![exomonad_tool::ToolEffectKey::ContextReadWrite]
+    } else {
+        Vec::new()
+    };
     let mut workbench = ActorWorkbenchSource::new(preamble, include)
+        .with_installed_effect_support(context_support)
         .with_imports(WORKBENCH_SURFACE_MODULE)
         .with_imports("qualified Tidepool.Actor.Record as R")
         .with_imports("qualified Tidepool.Command as Cmd");

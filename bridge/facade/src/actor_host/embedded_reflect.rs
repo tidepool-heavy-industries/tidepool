@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use exomonad_actor::{
-    ActorRef, ConversationReader, ConversationUnavailable, ConversationTurn, Role, TurnItem,
+    ActorRef, ConversationReader, ConversationRole as Role, ConversationTurn,
+    ConversationUnavailable, TurnItem,
 };
 use harness::{
     embedding::HostIdentity,
@@ -11,8 +12,6 @@ use harness::{
     model::{ConversationIdentity, RequestId},
     store::Store,
 };
-
-const MAX_RECENT_TURNS: usize = 100;
 
 pub(super) fn conversation_reader(
     store: Arc<Store>,
@@ -28,9 +27,7 @@ pub(super) fn conversation_reader(
             let Some(identity) = identity_for(actor) else {
                 return Err(ConversationUnavailable::Unbound);
             };
-            let head = store
-                .embedded_agent_head(&identity)
-                .map_err(unreadable)?;
+            let head = store.embedded_agent_head(&identity).map_err(unreadable)?;
             let Some(head) = head else {
                 return Ok(Vec::new());
             };
@@ -42,10 +39,7 @@ pub(super) fn conversation_reader(
             let state = store
                 .context_request_state(&head, &origin)
                 .map_err(unreadable)?;
-            Ok(recent_turns(
-                state.history,
-                count.min(MAX_RECENT_TURNS),
-            ))
+            Ok(recent_turns(state.history, count))
         })
     })
 }
@@ -64,7 +58,10 @@ fn recent_turns(
 
     let mut turns = Vec::new();
     for (request, _, item) in history.into_iter().rev() {
-        if turns.last().is_none_or(|turn: &ConversationTurn| turn.turn != request.0) {
+        if turns
+            .last()
+            .is_none_or(|turn: &ConversationTurn| turn.turn != request.0)
+        {
             if turns.len() == limit {
                 break;
             }
@@ -76,7 +73,11 @@ fn recent_turns(
             });
         }
         if let Some(item) = project_item(&item) {
-            turns.last_mut().expect("the request turn was just added").items.push(item);
+            turns
+                .last_mut()
+                .expect("the request turn was just added")
+                .items
+                .push(item);
         }
     }
     for turn in &mut turns {
