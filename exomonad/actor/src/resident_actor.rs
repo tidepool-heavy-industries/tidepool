@@ -13247,9 +13247,9 @@ mod tests {
         CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, InfoEntry,
         InspectionAvailability, InspectionResult, ResidentError, TurnClassification, TurnKind,
         TypeMatch, TypeMatchQuality, WorkbenchCellItemKind, WorkbenchExecutionId,
-        WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition,
-        WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchResponse, WorkbenchRunStatus,
-        WorkbenchTerminalTransfer,
+        WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
+        WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+        WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
     };
 
     #[test]
