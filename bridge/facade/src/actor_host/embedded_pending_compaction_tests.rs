@@ -263,6 +263,9 @@ async fn production_engine_carries_raw_and_typed_pending_calls_through_compactio
             HostedTool::Custom(CustomToolDeclaration {
                 name: "raw_hold".into(),
                 description: "Hold a raw call until the test releases it.".into(),
+                schedule: exomonad_tool::ToolScheduling::default(),
+                implementation: exomonad_tool::ToolImplementation::default(),
+                effect_keys: Vec::new(),
             }),
             HostedTool::Function(ToolDeclaration {
                 name: "typed_hold".into(),
@@ -275,6 +278,9 @@ async fn production_engine_carries_raw_and_typed_pending_calls_through_compactio
                 }),
                 output_schema: None,
                 kind: ToolKind::Call,
+                schedule: exomonad_tool::ToolScheduling::default(),
+                implementation: exomonad_tool::ToolImplementation::default(),
+                effect_keys: Vec::new(),
             }),
         ],
         releases: Arc::new(Mutex::new(HashMap::from([
@@ -503,6 +509,9 @@ async fn production_engine_compaction_failure_continues_once_then_cleans_pending
         tools: vec![HostedTool::Custom(CustomToolDeclaration {
             name: "raw_hold".into(),
             description: "Hold a raw call until the test releases it.".into(),
+            schedule: exomonad_tool::ToolScheduling::default(),
+            implementation: exomonad_tool::ToolImplementation::default(),
+            effect_keys: Vec::new(),
         })],
         releases: Arc::new(Mutex::new(HashMap::from([(
             "cleanup-after-failed-compaction".into(),

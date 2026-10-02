@@ -44,6 +44,9 @@ fn endpoint() -> Arc<GatedEndpoint> {
         tools: vec![HostedTool::Custom(CustomToolDeclaration {
             name: "haskell".into(),
             description: "Run Haskell".into(),
+            schedule: exomonad_tool::ToolScheduling::default(),
+            implementation: exomonad_tool::ToolImplementation::default(),
+            effect_keys: Vec::new(),
         })],
         entered: Arc::new(Semaphore::new(0)),
         release: Arc::new(Semaphore::new(0)),

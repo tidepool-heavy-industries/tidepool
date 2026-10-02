@@ -1313,6 +1313,9 @@ async fn hosted_lost_pending_shutdown_waiter_retains_real_operation() {
             vec![HostedTool::Custom(exomonad_tool::CustomToolDeclaration {
                 name: "unused".into(),
                 description: "No invocations supported by shutdown fixture".into(),
+                schedule: exomonad_tool::ToolScheduling::default(),
+                implementation: exomonad_tool::ToolImplementation::default(),
+                effect_keys: Vec::new(),
             })],
         )),
     )

@@ -1370,6 +1370,9 @@ pub(crate) mod tests {
             tools: vec![HostedTool::Custom(CustomToolDeclaration {
                 name: "haskell".into(),
                 description: "Run Haskell".into(),
+                schedule: exomonad_tool::ToolScheduling::default(),
+                implementation: exomonad_tool::ToolImplementation::default(),
+                effect_keys: Vec::new(),
             })],
         })
     }
@@ -1480,6 +1483,9 @@ pub(crate) mod tests {
                 tools: vec![HostedTool::Custom(CustomToolDeclaration {
                     name: "haskell".into(),
                     description: "Run Haskell".into(),
+                    schedule: exomonad_tool::ToolScheduling::default(),
+                    implementation: exomonad_tool::ToolImplementation::default(),
+                    effect_keys: Vec::new(),
                 })],
                 calls: Arc::clone(&calls),
             }),
@@ -1815,6 +1821,9 @@ pub(crate) mod tests {
             tools: vec![HostedTool::Custom(CustomToolDeclaration {
                 name: "haskell".into(),
                 description: "Run Haskell".into(),
+                schedule: exomonad_tool::ToolScheduling::default(),
+                implementation: exomonad_tool::ToolImplementation::default(),
+                effect_keys: Vec::new(),
             })],
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),
@@ -1939,6 +1948,9 @@ pub(crate) mod tests {
             tools: vec![HostedTool::Custom(CustomToolDeclaration {
                 name: "haskell".into(),
                 description: "Run Haskell".into(),
+                schedule: exomonad_tool::ToolScheduling::default(),
+                implementation: exomonad_tool::ToolImplementation::default(),
+                effect_keys: Vec::new(),
             })],
             outcome,
         })
@@ -2018,6 +2030,9 @@ pub(crate) mod tests {
             tools: vec![HostedTool::Custom(CustomToolDeclaration {
                 name: "haskell".into(),
                 description: "Run Haskell".into(),
+                schedule: exomonad_tool::ToolScheduling::default(),
+                implementation: exomonad_tool::ToolImplementation::default(),
+                effect_keys: Vec::new(),
             })],
             dispatches,
         })
@@ -2193,6 +2208,9 @@ pub(crate) mod tests {
                 }),
                 output_schema: None,
                 kind: exomonad_tool::ToolKind::Call,
+                schedule: exomonad_tool::ToolScheduling::default(),
+                implementation: exomonad_tool::ToolImplementation::default(),
+                effect_keys: Vec::new(),
             })],
         });
         let state = attached_state(endpoint).await;
@@ -2219,6 +2237,9 @@ pub(crate) mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                     output_schema: None,
                     kind: exomonad_tool::ToolKind::Call,
+                    schedule: exomonad_tool::ToolScheduling::default(),
+                    implementation: exomonad_tool::ToolImplementation::default(),
+                    effect_keys: Vec::new(),
                 })],
             });
             let state = attached_state(endpoint).await;
@@ -2238,6 +2259,9 @@ pub(crate) mod tests {
                 HostedTool::Custom(CustomToolDeclaration {
                     name: "execute".into(),
                     description: "Raw".into(),
+                    schedule: exomonad_tool::ToolScheduling::default(),
+                    implementation: exomonad_tool::ToolImplementation::default(),
+                    effect_keys: Vec::new(),
                 }),
                 HostedTool::Function(ToolDeclaration {
                     name: "execute".into(),
@@ -2245,6 +2269,9 @@ pub(crate) mod tests {
                     input_schema: serde_json::json!({"type":"object"}),
                     output_schema: None,
                     kind: exomonad_tool::ToolKind::Call,
+                    schedule: exomonad_tool::ToolScheduling::default(),
+                    implementation: exomonad_tool::ToolImplementation::default(),
+                    effect_keys: Vec::new(),
                 }),
             ],
         });
@@ -2585,6 +2612,9 @@ pub(crate) mod tests {
                     input_schema: serde_json::json!({"type":"object"}),
                     output_schema: None,
                     kind: exomonad_tool::ToolKind::Call,
+                    schedule: exomonad_tool::ToolScheduling::default(),
+                    implementation: exomonad_tool::ToolImplementation::default(),
+                    effect_keys: Vec::new(),
                 })],
             }),
             PathBuf::from("unused-binding"),
@@ -2610,6 +2640,9 @@ pub(crate) mod tests {
                 input_schema: serde_json::json!({"type": "object"}),
                 output_schema: None,
                 kind: exomonad_tool::ToolKind::Call,
+                schedule: exomonad_tool::ToolScheduling::default(),
+                implementation: exomonad_tool::ToolImplementation::default(),
+                effect_keys: Vec::new(),
             })],
         });
         let mismatch = call_haskell(
