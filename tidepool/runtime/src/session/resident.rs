@@ -8727,7 +8727,10 @@ mod authored_publication_tests {
             .unwrap();
         let d_owner = original_d.product().owner().clone();
         let intent = session
-            .freeze_private_execution(&d, super::ExecutionPublicationIntent::CompletedCell)
+            .freeze_private_execution(
+                &d,
+                crate::session::ExecutionPublicationIntent::CompletedCell,
+            )
             .unwrap();
         let ExecutionPublication::Declarations(base) = session
             .restage_execution_publication(owner.clone(), intent)
@@ -8797,7 +8800,10 @@ mod authored_publication_tests {
             "capture preserves full immutable original D"
         );
         let intent = session
-            .freeze_private_execution(&e, super::ExecutionPublicationIntent::CompletedCell)
+            .freeze_private_execution(
+                &e,
+                crate::session::ExecutionPublicationIntent::CompletedCell,
+            )
             .unwrap();
         let ExecutionPublication::Declarations(base) = session
             .restage_execution_publication(owner, intent)
