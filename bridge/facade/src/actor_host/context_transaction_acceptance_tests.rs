@@ -7,6 +7,7 @@ use harness::{
     model::AgentPath,
     transport::{ResponsesRequest, ResponsesTurn, TransportError},
 };
+use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 
 const CELL_TIMEOUT: Duration = Duration::from_secs(300);
