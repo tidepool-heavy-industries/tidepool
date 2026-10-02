@@ -166,17 +166,23 @@ impl InputFixture {
                 LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             )
             .unwrap();
-        assert!(matches!(
-            resident
-                .run_bind_with_sites(
-                    "nativeActivationReceiver",
-                    self.receiver.code(),
-                    &self.receiver_binder,
-                    self.receiver_generation,
-                )
-                .unwrap(),
-            ResidentOutcome::BindingsCommitted { .. }
-        ));
+        let outcome = resident
+            .run_bind_with_sites(
+                "nativeActivationReceiver",
+                self.receiver.code(),
+                &self.receiver_binder,
+                self.receiver_generation,
+            )
+            .expect("install the actual native protocol receiver");
+        assert!(
+            matches!(outcome, ResidentOutcome::Completed { .. }),
+            "single native binding completion: {outcome:?}"
+        );
+        assert!(resident
+            .state
+            .bindings()
+            .get(SessionVarId::from_extract(self.receiver_binder.var_id))
+            .is_some_and(|binding| binding.name.0 == self.receiver_binder.name));
         resident
     }
 
