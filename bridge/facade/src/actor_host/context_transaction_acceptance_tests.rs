@@ -375,7 +375,7 @@ async fn resident_sync_context_commits_before_deferred_children_and_child_model_
             let output = successful_output(&round.request, "context-child");
             assert_eq!(
                 output["items"].as_array().unwrap().last().unwrap()["output"],
-                "42"
+                "43"
             );
             children_committed += 1;
             round.finish();

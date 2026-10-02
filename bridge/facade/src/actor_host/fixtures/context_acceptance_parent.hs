@@ -11,3 +11,6 @@ do
   let second = withLifetime ActorOwned (withModel (Literal "test-model") (narrowed @'[Replies] @Text knownEffects (codingPolicy projectHead) (assignment secondLabel ("specialize this child" :: Text))))
   workers <- unfoldDeferred (batch ("context-acceptance" :: CampaignLabel) ("committed" :: ForkGroupLabel)) ((,) <$> child first <*> child second)
   pure True
+-- Deferred children inherit the final scope, including bindings made after admission.
+let curatedHelper value = retainedHelper value + 2 :: Int
+retainedValue <- pure (40 :: Int)
