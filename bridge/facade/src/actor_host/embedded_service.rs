@@ -7,7 +7,7 @@ use harness::{
     engine::EngineConfig,
     model::{AgentPath, Effort},
     server::{QueuedCommand, ServerConfig, ServerControl, SessionSecret},
-    transport::{auth::CodexFileAuth, ResponsesClient},
+    transport::{auth::CodexFileAuth, ResponsesClient, ResponsesProtocol},
 };
 use tokio::{
     net::TcpListener,
@@ -42,6 +42,11 @@ impl harness::server::BrowserPeerAuthenticator for TailscaleBrowserAuth {
                 }
             })
     }
+}
+
+pub(super) fn responses_client(auth_file: &Path) -> ResponsesClient<CodexFileAuth> {
+    ResponsesClient::new(CodexFileAuth::new(auth_file.to_path_buf()))
+        .with_protocol(ResponsesProtocol::Lite)
 }
 
 pub(super) struct EmbeddedService {
@@ -123,7 +128,9 @@ impl EmbeddedService {
             .with_public_origin_scheme(settings.public_origin_scheme.as_str())
             .map_err(str::to_owned)?;
         let server_config = match &settings.public_origin {
-            Some(origin) => server_config.with_public_origin(origin.clone()).map_err(str::to_owned)?,
+            Some(origin) => server_config
+                .with_public_origin(origin.clone())
+                .map_err(str::to_owned)?,
             None => server_config,
         };
         let server_config = match &settings.browser_auth {
@@ -475,7 +482,7 @@ pub(super) async fn drive_conversation(
         cancellation,
         lifecycle,
         actor_ref,
-        ResponsesClient::new(CodexFileAuth::new(settings.codex_auth_file.clone())),
+        responses_client(&settings.codex_auth_file),
     )
     .await
 }

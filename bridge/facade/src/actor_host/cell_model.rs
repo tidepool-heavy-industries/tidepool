@@ -7,7 +7,7 @@ use harness::{
     invocation::Limits,
     model::Effort,
     store::Store,
-    transport::{auth::CodexFileAuth, Auth, ResponsesClient},
+    transport::{auth::CodexFileAuth, Auth},
     turn::JobScheduler,
 };
 use tidepool_effect::{DeferredEffect, Response};
@@ -15,7 +15,10 @@ use tidepool_handlers::handlers::model::ModelService;
 use tidepool_repr::{DataConTable, PrincipalId};
 use tidepool_runtime::session::WorkbenchExecutionId;
 
-use super::{embedded_service::EmbeddedService, ActorHostConfig};
+use super::{
+    embedded_service::{responses_client, EmbeddedService},
+    ActorHostConfig,
+};
 use crate::{
     exomonad::EmbeddedLaunchConfig,
     model_turn::{CellModelService, ModelPolicy},
@@ -217,7 +220,7 @@ pub(super) fn admitted_factory(
             service.runtime.scheduler(),
             config.model.clone(),
             effort,
-            Arc::new(move || ResponsesClient::new(CodexFileAuth::new(auth_file.clone()))),
+            Arc::new(move || responses_client(&auth_file)),
         )
         .with_launch_config(config),
     )
