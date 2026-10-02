@@ -3,25 +3,32 @@
 
 module Main (main) where
 
-import Control.Monad (unless)
+import Control.Exception (bracket, evaluate, finally)
+import Control.Monad (forM, unless)
 import Control.Monad.IO.Class (liftIO)
+import Data.List (stripPrefix)
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text qualified as Text
 import GHC
 import GHC.Driver.Main (hscTidy)
 import GHC.Driver.Session (updOptLevel)
-import GHC.Builtin.Types (intTy)
+import GHC.Builtin.Types (intTy, boolTy)
 import GHC.Core (Bind(..), Expr(..))
-import GHC.Types.Id (mkVanillaGlobal)
+import GHC.Types.Id (mkVanillaGlobal, setIdType)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name (mkSystemName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Occurrence (mkVarOcc)
 import GHC.Types.Unique (mkUnique)
 import GHC.Types.Var (varName, varUnique)
+import GHC.Unit.Types (unitString)
 import GHC.Types.Unique.Set (elementOfUniqSet, nonDetEltsUniqSet)
 import GHC.Stg.Syntax qualified as Stg
-import System.Directory (getCurrentDirectory)
+import System.Directory (getCurrentDirectory, removeFile)
+import System.Environment (setEnv)
+import System.IO (openTempFile, stderr, hClose, hFlush, hSeek, hGetContents, SeekMode(..))
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 import System.Process (proc, readCreateProcessWithExitCode)
@@ -29,7 +36,8 @@ import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), preparedTopIdentities
   , prepareProjection, prepareProjectionWithReachability, projectSelected
   , projectPreparedTarget, preparedModuleReachFacts, preparedSeedUniques
-  , admitReachFacts, emptyPreparedReachability, reachedUniques )
+  , admitReachFacts, emptyPreparedReachability, reachedUniques
+  , preparedTargetReferences, preparedRootIdentity )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), Group(..), HeapBinding(..)
   , GlobalDecl(..), HeapRhs(..), SymbolIdentity(..), TargetDescriptor(..)
@@ -37,7 +45,10 @@ import Tidepool.ExecutionSchema
 import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
 import Tidepool.PreparedRecovery
   ( RecoveryFailure(..), RecoveredClosure(..), insertGroup
-  , recoverPreparedClosure, newPreparedRecovery )
+  , recoverPreparedClosure, newPreparedRecovery, newPreparedRecoveryWithPackageRoots
+  , preparedRecoveryClosure, growPreparedRecovery )
+import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
+import Tidepool.CertifiedProducts (resolvePackageGlobal)
 import Tidepool.PreparedStg
   ( PreparedCoverage(..), PreparedModule(..), RecoveredModuleFailure(..)
   , newPreparedBodyCache, prepareModule, unelaboratedModule )
@@ -119,7 +130,8 @@ main = do
       "recovery dropped an original prepared module"
     liftIO $ assertNullaryRecoveryProjection context closure
     liftIO $ incompleteSubsetContract home context
-    liftIO $ hidden_defining_module hsc context hidden
+    hiddenClosure <- liftIO $ hidden_defining_module hsc context hidden
+    liftIO $ growing_original_packages hsc context home hidden hiddenClosure closure
     liftIO $ retainedProjectionBoundary hsc context modules
     liftIO $ putStrLn "prepared recovery closure: ok"
   where
@@ -312,6 +324,167 @@ main = do
       assert (null finderResiduals)
         ("hidden defining module retained a finder residual: "
           ++ show finderResiduals)
+
+      pure closure
+
+    growing_original_packages hsc context home hidden hiddenClosure callerClosure = do
+      let identity prepared occurrence = case
+            [symbol | symbol <- either (error . show) id (preparedTopIdentities [prepared])
+            , symbolOccurrence symbol == occurrence] of
+              [symbol] -> symbol
+              found -> error ("unexpected original-package fixture identity: " ++ show found)
+          hiddenContext = context { projectionEntry = identity hidden "hiddenText" }
+          textRoots = [binder | binder <- preparedTargetReferences hiddenContext [hidden]
+            , occNameString (nameOccName (varName binder)) == "$fShowText"]
+      textRoot <- case textRoots of
+        [binder] -> pure binder
+        found -> fail ("expected one Text Show dictionary, got " ++ show (length found))
+      fstRoot <- case [binder | prepared <- closureModules callerClosure
+          , binder <- topBindersOfModule prepared
+          , occNameString (nameOccName (varName binder)) == "fst"] of
+        [binder] -> pure binder
+        found -> fail ("expected one recovered fst, got " ++ show (length found))
+      showPrepared <- case [prepared | prepared <- closureModules hiddenClosure
+          , moduleNameString (moduleName (pmModule prepared)) == "GHC.Internal.Show"] of
+        [prepared] -> pure prepared
+        found -> fail ("expected one recovered Show module, got " ++ show (length found))
+      let sourceRoot = identity home "homeValue"
+          entry = identity home "homeOther"
+          subset = home { pmCoverage = ExactBodySubset
+            , pmBindings = filter (any ((== "homeOther") . occNameString . nameOccName . varName)
+                . topBinders . fst) (pmBindings home) }
+          fixtureContext = context { projectionEntry = entry }
+          owner prepared = (unitString (moduleUnit (pmModule prepared)),
+            moduleNameString (moduleName (pmModule prepared)))
+          (showUnit, showName) = owner showPrepared
+          (homeUnit, homeName) = owner home
+          showBinders = either (error . show) id (preparedTopIdentities [showPrepared])
+          certified = Set.fromList [owner home, owner showPrepared]
+          -- Original outlines deliberately retain one package dependency per
+          -- group. The second original owner becomes demanded only after the
+          -- Text dictionary has been recovered and projected.
+          originals =
+            [(homeUnit, homeName, [(0, [sourceRoot], [(preparedRootIdentity textRoot, True)])]),
+             (showUnit, showName, [(0, showBinders, [(preparedRootIdentity fstRoot, True)])])]
+          project roots closed = either (fail . show) (pure . fst) $
+            prepareProjectionWithReachability
+              (fixtureContext { projectionAuxiliaryRoots = roots })
+              (closureModules closed) (closureReachability closed) >>= projectSelected
+          required program = either fail pure $
+            requiredOriginalPackageGlobalsWithRetained [] [] originals Set.empty (programGlobals program)
+          resolve roots = forM roots $ \symbol -> do
+            (binder, _) <- resolvePackageGlobal hsc symbol >>= either fail pure
+            assert (preparedRootIdentity binder == symbol) "fixture resolved a noncanonical package root"
+            pure binder
+      cache <- newFatIfaceCache
+      ownerCache <- newOwnerInterfaceCache
+      bodyCache <- newPreparedBodyCache
+      setEnv "TIDEPOOL_TIMING" "1"
+      factory <- newPreparedRecoveryWithPackageRoots hsc cache ownerCache bodyCache certified fixtureContext [subset] []
+      (initial, initialCount) <- measurePreparations (factory entry)
+      initialProgram <- project [] (preparedRecoveryClosure initial)
+      firstRoots <- required initialProgram
+      assert (firstRoots == [preparedRootIdentity textRoot]) "initial original group did not demand Text"
+      (first, firstCount) <- measurePreparations (resolve firstRoots >>= growPreparedRecovery initial)
+      firstProgram <- project firstRoots (preparedRecoveryClosure first)
+      secondDemand <- required firstProgram
+      let allRoots = Set.toAscList (Set.fromList (firstRoots ++ secondDemand))
+      assert (preparedRootIdentity fstRoot `elem` secondDemand && allRoots /= firstRoots)
+        "recovered Text code did not expose the second original group"
+      (final, finalCount) <- measurePreparations (resolve allRoots >>= growPreparedRecovery first)
+      finalProgram <- project allRoots (preparedRecoveryClosure final)
+      finalDemand <- required finalProgram
+      assert (all (`elem` allRoots) finalDemand) "two-round fixture did not close package demand"
+      -- Compare with the old outer loop at identical roots, graph and authority.
+      oldResults <- forM [[], firstRoots, allRoots] $ \roots -> do
+        binders <- resolve roots
+        restart <- newPreparedRecoveryWithPackageRoots hsc cache ownerCache bodyCache
+          certified fixtureContext [subset] binders
+        measurePreparations (fmap preparedRecoveryClosure (restart entry))
+      let oldClosures = map fst oldResults
+      oldPrograms <- sequence (zipWith project [[], firstRoots, allRoots] oldClosures)
+      assert (oldPrograms == [initialProgram, firstProgram, finalProgram])
+        "growing package recovery changed canonical projected programs"
+      let newClosures = map preparedRecoveryClosure [initial, first, final]
+          oldCount = sum (map snd oldResults)
+          newCount = initialCount + firstCount + finalCount
+      assert (newCount < oldCount) "continuation did not remove defining-module preparation calls"
+      assert (map closureFailures oldClosures == map closureFailures newClosures)
+        "continuation changed typed failure witnesses"
+      (repeated, repeatedCount) <- measurePreparations (resolve allRoots >>= growPreparedRecovery final)
+      assert (repeatedCount == 0)
+        "unchanged roots repeated defining-module preparation"
+      repeatedProgram <- project allRoots (preparedRecoveryClosure repeated)
+      assert (repeatedProgram == finalProgram) "unchanged roots changed canonical output"
+      isolated <- factory entry
+      isolatedProgram <- project [] (preparedRecoveryClosure isolated)
+      assert (isolatedProgram == initialProgram)
+        "fresh target inherited grown package roots or body sets"
+      let retainedContext = fixtureContext
+            { projectionRetainedGenerations = Map.singleton sourceRoot 11 }
+      retainedFactory <- newPreparedRecoveryWithPackageRoots hsc cache ownerCache bodyCache
+        certified retainedContext [subset] []
+      retained <- retainedFactory entry >>= (\state -> growPreparedRecovery state [fstRoot])
+      let retainedClosure = preparedRecoveryClosure retained
+      retainedProgram <- either (fail . show) (pure . fst) $
+        prepareProjectionWithReachability
+          (retainedContext { projectionAuxiliaryRoots = [preparedRootIdentity fstRoot] })
+          (closureModules retainedClosure) (closureReachability retainedClosure) >>= projectSelected
+      retainedDemand <- required retainedProgram
+      assert (null retainedDemand && any (\global -> globalIdentity global == sourceRoot
+          && globalRequiredGeneration global == Just 11) (programGlobals retainedProgram))
+        "root growth crossed a retained-generation original boundary"
+      -- Grow an existing owner in reverse root order. Its enlarged body set
+      -- must replace the old facts and retain both executable definitions.
+      let sndSymbol = (preparedRootIdentity fstRoot) { symbolOccurrence = "snd" }
+      sndRoots <- resolve [sndSymbol]
+      small <- growPreparedRecovery initial sndRoots
+      (expanded, expandedCount) <- measurePreparations (growPreparedRecovery small [fstRoot])
+      let sameOwnerRoots = Set.toAscList (Set.fromList [sndSymbol, preparedRootIdentity fstRoot])
+      expandedProgram <- project sameOwnerRoots (preparedRecoveryClosure expanded)
+      sameOwnerBinders <- resolve sameOwnerRoots
+      restartSameOwner <- newPreparedRecoveryWithPackageRoots hsc cache ownerCache bodyCache
+        certified fixtureContext [subset] sameOwnerBinders
+      restartedSameOwner <- preparedRecoveryClosure <$> restartSameOwner entry
+      restartedProgram <- project sameOwnerRoots restartedSameOwner
+      assert (expandedCount > 0) "larger exact body set did not reprepare its owner"
+      assert (expandedProgram == restartedProgram)
+        "same-owner root growth changed canonical output or reused stale body facts"
+      -- A failed exact Name remains attempted; growth cannot substitute a
+      -- compatible lookup later and erase its original type-mismatch witness.
+      bad <- growPreparedRecovery initial [setIdType fstRoot boolTy]
+      (retried, retriedCount) <- measurePreparations (growPreparedRecovery bad [fstRoot])
+      assert (any (\failure -> case failure of
+          IncompatibleImplementation name _ -> name == varName fstRoot
+          _ -> False) (closureFailures (preparedRecoveryClosure bad)))
+        "wrong-typed root did not retain an exact lookup failure"
+      assert (closureFailures (preparedRecoveryClosure retried)
+          == closureFailures (preparedRecoveryClosure bad)
+          && retriedCount == 0)
+        "root growth rescued a failed exact lookup"
+      putStrLn ("original package recovery: two expansions; preparation calls old="
+        ++ show oldCount ++ ", continued=" ++ show newCount)
+
+    -- Count the existing diagnostic owner instead of widening recovery's
+    -- result contract for instrumentation. The suite executes sequentially.
+    measurePreparations action = do
+      setEnv "TIDEPOOL_TIMING" "1"
+      bracket (openTempFile "/tmp" "tidepool-recovery-count")
+        (\(path, handle) -> hClose handle >> removeFile path) $ \(_, handle) -> do
+          result <- bracket (hDuplicate stderr) hClose $ \saved -> do
+            hDuplicateTo handle stderr
+            action `finally` (hFlush stderr >> hDuplicateTo saved stderr)
+          hFlush handle
+          hSeek handle AbsoluteSeek 0
+          diagnostics <- hGetContents handle
+          _ <- evaluate (length diagnostics)
+          let counts = [read count :: Integer
+                | line <- lines diagnostics
+                , let fields = words line
+                , "name=prepared_recover_module_preparations" `elem` fields
+                , field <- fields, Just count <- [stripPrefix "count=" field]]
+          assert (not (null counts)) "recovery emitted no preparation count"
+          pure (result, sum counts)
 
     topIsFst (binding, _) = any
       ((== "fst") . occNameString . nameOccName . varName)

@@ -75,7 +75,8 @@ import Tidepool.PreparedStg
   ( PreparedModule(..), PreparedBodyCache, newPreparedBodyCache
   , evictPreparedBodyMatching )
 import Tidepool.PreparedRecovery
-  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots )
+  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots
+  , preparedRecoveryClosure, growPreparedRecovery )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
 import Tidepool.CompileInput (writeCompileInputProof)
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
@@ -721,9 +722,8 @@ prepareArtifacts originalInterfaces caches input hscEnv interfaces modules targe
         | (owner, outcome) <- preparedModuleProductOutcomes products]
       originalPackageGlobals = requiredOriginalPackageGlobalsWithRetained
         originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
-      recovery roots = newPreparedRecoveryWithPackageRoots hscEnv (rcFatIface caches) (rcOwnerIface caches)
-        (rcPreparedBodies caches) certifiedHomes (contextFor firstTarget) modules roots
-  recover <- recovery []
+  recover <- newPreparedRecoveryWithPackageRoots hscEnv (rcFatIface caches) (rcOwnerIface caches)
+    (rcPreparedBodies caches) certifiedHomes (contextFor firstTarget) modules []
   artifacts <- forM targets $ \target -> do
     let context = contextFor target
     -- Package roots grow only from the finite exact original-group inventory.
@@ -731,8 +731,9 @@ prepareArtifacts originalInterfaces caches input hscEnv interfaces modules targe
     -- projected target before admitting the final executable closure.
     initial <- timePhase timing "prepared_recover"
       (recover (projectionEntry context))
-    let closePackages roots recovered = do
-          let finalContext = context
+    let closePackages roots recoveryState = do
+          let recovered = preparedRecoveryClosure recoveryState
+              finalContext = context
                 { projectionAuxiliaryRoots = projectionAuxiliaryRoots context ++ roots }
           selected <- timePhase timing "prepared_project" $
             requireProjection (prepareProjectionWithReachability finalContext
@@ -749,9 +750,8 @@ prepareArtifacts originalInterfaces caches input hscEnv interfaces modules targe
                 when (preparedRootIdentity identifier /= identity) $
                   ioError (userError "package recovery root differs from canonical original global")
                 pure identifier
-              withPackages <- recovery packageRoots
               next <- timePhase timing "prepared_recover_original_packages"
-                (withPackages (projectionEntry context))
+                (growPreparedRecovery recoveryState packageRoots)
               closePackages nextRoots next
     (recovered, program, constructors, roots) <- closePackages [] initial
     reportRecoveryResiduals target (closureFailures recovered)
