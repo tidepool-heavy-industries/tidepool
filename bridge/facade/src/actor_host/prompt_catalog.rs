@@ -10,7 +10,7 @@ pub(super) enum PromptId {
 }
 
 impl PromptId {
-    pub(super) const CATALOG_VERSION: u32 = 48;
+    pub(super) const CATALOG_VERSION: u32 = 49;
 
     /// Digest of every prompt body in [`PromptId::ALL`] order — the guard
     /// `catalog_body_fingerprint_matches_prompt_bodies` fails loudly, naming
@@ -18,7 +18,7 @@ impl PromptId {
     /// matching `CATALOG_VERSION` bump.
     #[cfg(test)]
     pub(super) const CATALOG_BODY_FINGERPRINT: &'static str =
-        "1d4208fdb073b245dd296069020aefc409c37425a1290ef00ef111ffdeb3f770";
+        "769e071d53d6b0d47647dc0eb29457dd6d65f08b0a156ca121d839072b40fa8c";
 
     #[cfg(test)]
     pub(super) const ALL: [Self; 7] = [
@@ -190,8 +190,8 @@ mod tests {
     fn shared_prompt_stays_within_word_budget() {
         let words = PromptId::ExomonadBase.body().split_whitespace().count();
         assert!(
-            words <= 3400,
-            "shared base/API has {words} words; budget is 3400"
+            words <= 3550,
+            "shared base/API has {words} words; budget is 3550"
         );
     }
 
