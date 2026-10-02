@@ -1,5 +1,3 @@
-{-# LANGUAGE PatternSynonyms #-}
-
 module ModuleEvidenceProjectionTest (verifyModuleEvidenceProjection) where
 
 import Control.Monad (forM_, unless)

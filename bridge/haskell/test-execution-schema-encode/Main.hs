@@ -211,28 +211,31 @@ moduleProductEncodingChecks = do
         , ("m3-fixture", "Empty", BS.empty, [])
         , ("other-unit", "Fixture", BS.pack [2, 3], [secondGroup])
         ]
-      products = map prepareModuleProductEncoding inputs
+      firstProduct = prepareModuleProductEncoding ("m3-fixture", "Fixture", BS.pack [0, 255, 1], [firstGroup, secondGroup])
+      products = firstProduct : map prepareModuleProductEncoding (drop 1 inputs)
       aggregate = encodeModuleProductInventory products
   assert (aggregate == legacyModuleProducts inputs
       && aggregate == encodeModuleProducts inputs)
     "retained module inventory changed canonical aggregate bytes"
-  forM_ (zip inputs products) $ \(input, product) -> do
-    assert (moduleProductInput product == input)
+  forM_ (zip inputs products) $ \(input, encodedProduct) -> do
+    assert (moduleProductInput encodedProduct == input)
       "retained encoding changed original product evidence"
-    assert (moduleProductBytes product == legacyModuleProducts [input])
+    assert (moduleProductBytes encodedProduct == legacyModuleProducts [input])
       "retained singleton changed canonical module bytes and hash input"
   let modules = termList (termList (decode aggregate) !! 2)
-      groupBytes = termList (termList (head modules) !! 3)
+      groupBytes = case modules of
+        firstModule : _ -> termList (termList firstModule !! 3)
+        [] -> []
   assert (groupBytes == map (TBytes . encodeProjectedGroup) [firstGroup, secondGroup])
     "retained inventory changed original group order or payload bytes"
-  assert (aggregate /= moduleProductBytes (head products))
+  assert (aggregate /= moduleProductBytes firstProduct)
     "aggregate module framing was replaced by a singleton document"
   let changedInterface = prepareModuleProductEncoding
         ("m3-fixture", "Fixture", BS.pack [0, 255, 2], [firstGroup, secondGroup])
       changedOrder = prepareModuleProductEncoding
         ("m3-fixture", "Fixture", BS.pack [0, 255, 1], [secondGroup, firstGroup])
-  assert (moduleProductBytes changedInterface /= moduleProductBytes (head products)
-      && moduleProductBytes changedOrder /= moduleProductBytes (head products))
+  assert (moduleProductBytes changedInterface /= moduleProductBytes firstProduct
+      && moduleProductBytes changedOrder /= moduleProductBytes firstProduct)
     "retained encoding lost exact interface or original group order identity"
   assert (encodeModuleProductInventory [] == legacyModuleProducts [])
     "empty retained inventory changed its canonical envelope"

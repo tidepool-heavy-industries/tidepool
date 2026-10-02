@@ -97,9 +97,9 @@ data ModuleProductEncoding = ModuleProductEncoding
   }
 
 prepareModuleProductEncoding :: (Text, Text, ByteString, [ProjectedGroup]) -> ModuleProductEncoding
-prepareModuleProductEncoding product@(_, _, _, groups) = encoded
+prepareModuleProductEncoding originalProduct@(_, _, _, groups) = encoded
  where
-  encoded = ModuleProductEncoding product (map encodeProjectedGroup groups)
+  encoded = ModuleProductEncoding originalProduct (map encodeProjectedGroup groups)
     (encodeModuleProductInventory [encoded])
 
 -- | Aggregate and singleton TPMOD documents share group payloads, while each
@@ -111,13 +111,13 @@ encodeModuleProductInventory modules = toStrictByteString $ array
   , list encodeModule modules
   ]
  where
-  encodeModule product =
-    let (unit, name, interface, _) = moduleProductInput product
+  encodeModule encodedProduct =
+    let (unit, name, interface, _) = moduleProductInput encodedProduct
     in array
       [ encodeString unit
       , encodeString name
       , encodeBytes interface
-      , list encodeBytes (moduleProductGroupBytes product)
+      , list encodeBytes (moduleProductGroupBytes encodedProduct)
       ]
 
 array :: [Encoding] -> Encoding

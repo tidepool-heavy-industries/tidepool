@@ -68,7 +68,7 @@ import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..)
-  , WireProgram(..), ProjectedGroup(..), SiteRow(..) )
+  , WireProgram(..), SiteRow(..) )
 import qualified Tidepool.ExecutionSchema as Execution
 import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
