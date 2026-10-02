@@ -60,6 +60,12 @@ impl Drop for RunningBrowserHost {
 }
 
 impl RunningBrowserHost {
+    pub(in crate::actor_host) async fn host_outcome(&mut self) -> Result<(), String> {
+        (&mut self.host)
+            .await
+            .map_err(|error| format!("embedded host task: {error}"))?
+    }
+
     pub(in crate::actor_host) async fn cell_settlement_diagnostic(&self, call_id: &str) -> String {
         let call = harness::model::CallId(call_id.into());
         let store = self.runtime.store();

@@ -87,20 +87,26 @@ async fn next_round(rounds: &mut mpsc::UnboundedReceiver<RequestedRound>) -> Req
 
 async fn next_round_with_state(
     rounds: &mut mpsc::UnboundedReceiver<RequestedRound>,
-    fixture: &RunningBrowserHost,
+    fixture: &mut RunningBrowserHost,
 ) -> RequestedRound {
     let root = fixture.campaign.actor.identity();
+    let forest = Arc::clone(&fixture.campaign.forest);
     let waiting = async {
         loop {
             tokio::select! {
-                round = rounds.recv() => return round.unwrap_or_else(|| {
-                    panic!(
-                        "scripted provider closed before native acceptance completed; graph={:?}",
-                        fixture.campaign.forest.inspect_host_graph()
-                    )
-                }),
+                biased;
+                outcome = fixture.host_outcome() => {
+                    panic!("embedded host stopped during child acceptance: {outcome:?}; graph={:?}", forest.inspect_host_graph());
+                }
+                round = rounds.recv() => match round {
+                    Some(round) => return round,
+                    None => {
+                        let host = tokio::time::timeout(Duration::from_secs(35), fixture.host_outcome()).await;
+                        panic!("scripted provider closed; host={host:?}; graph={:?}", forest.inspect_host_graph());
+                    }
+                },
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    let graph = fixture.campaign.forest.inspect_host_graph();
+                    let graph = forest.inspect_host_graph();
                     if let Some(child) = graph.iter().find(|node| {
                         node.actor != root
                             && node.terminal.as_ref().is_some_and(|terminal| {
@@ -118,7 +124,7 @@ async fn next_round_with_state(
         .unwrap_or_else(|_| {
             panic!(
                 "native actor did not reach the next model request; graph={:?}",
-                fixture.campaign.forest.inspect_host_graph()
+                forest.inspect_host_graph()
             )
         })
 }
@@ -318,7 +324,7 @@ fn root_context_state(fixture: &RunningBrowserHost) -> harness::context::Context
 
 #[tokio::test]
 async fn resident_sync_context_commits_before_deferred_children_and_child_model_switch() {
-    let (_files, fixture, mut rounds) = start().await;
+    let (_files, mut fixture, mut rounds) = start().await;
     let root_identity = fixture.campaign.actor.identity();
     let setup = next_round(&mut rounds).await;
     assert!(setup.is_root());
@@ -339,7 +345,7 @@ async fn resident_sync_context_commits_before_deferred_children_and_child_model_
     let mut root_committed = false;
     let mut children_committed = 0;
     while !root_committed || children_committed != 2 {
-        let round = next_round_with_state(&mut rounds, &fixture).await;
+        let round = next_round_with_state(&mut rounds, &mut fixture).await;
         if round.is_root() {
             assert!(
                 !root_committed,
