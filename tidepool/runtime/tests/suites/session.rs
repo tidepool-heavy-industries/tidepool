@@ -3,6 +3,8 @@
     clippy::expect_used,
     reason = "integration tests assert on known-good values; .clippy.toml allows this in test code"
 )]
+#[path = "../checked_quoter_program.rs"]
+mod checked_quoter_program;
 #[path = "../prepared_execution.rs"]
 mod prepared_execution;
 #[path = "../prepared_reply_types.rs"]

@@ -6,17 +6,22 @@ module Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
   , ExecutionSourceRef(..), decodeExecutionSources, executionIdentityKey
   , ExecutionSourceNode(..), ExecutionSourceFailure(..), executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure
+  , ExecutionSourceRecipe(..), issueExecutionSourceRecipe
+  , executionSourceProspectiveReferences
   ) where
 
 import Codec.CBOR.Decoding
 import Codec.CBOR.Read (deserialiseFromBytes)
-import Control.Monad (replicateM, unless, when)
+import Codec.CBOR.Encoding
+import Codec.CBOR.Write (toLazyByteString)
+import Control.Monad (replicateM, unless, when, forM)
 import Control.Exception (Exception)
 import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.List (nub, sort)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Numeric (showHex)
@@ -56,6 +61,105 @@ data ExecutionSourceGraph = ExecutionSourceGraph
   , executionGraphExactImports :: [((String, String), [(String, String)])]
   , executionGraphPackages :: [(String, String, FilePath, String)]
   }
+
+-- A successful compiler transaction supplies the same original recipe fields
+-- consumed by the wire decoder. Native/interface identities are the already
+-- retained products; this record grants no lexical imports.
+data ExecutionSourceRecipe = ExecutionSourceRecipe
+  { recipeProducer :: String
+  , recipeSemantic :: Maybe String
+  , recipeIncludes :: [FilePath]
+  , recipeGeneratedOrigin :: (FilePath, String)
+  , recipeEvidence :: DependencyEvidence
+  , recipeOwners :: [ExecutionSourceOwner]
+  , recipeExactImports :: [((String, String), [(String, String)])]
+  , recipePackages :: [(String, String, FilePath, String)]
+  }
+
+-- Local recipes share the existing encoding and admission decoder. Unsupported
+-- or oversized source evidence supplies no optional execution capability.
+issueExecutionSourceRecipe :: ExecutionSourceRecipe
+  -> Either ExecutionSourceFailure (Maybe ExecutionSourceGraph)
+issueExecutionSourceRecipe recipe
+  | not (dependencyCacheSafe evidence && dependencySelectionComplete evidence)
+      || not boundedRecipe = Right Nothing
+  | not completeOwners || not generatedMatches || not validOriginals || not validExactImports =
+      Left (ExecutionSourceIncomplete ("", "transaction execution recipe"))
+  | BS.length bytes > limit = Right Nothing
+  | otherwise = case deserialiseFromBytes (decodeGraph (digest bytes) bytes) (BL.fromStrict bytes) of
+      Right (remaining, graph) | BL.null remaining -> Right (Just graph)
+      _ -> Left (ExecutionSourceIncomplete ("", "transaction execution recipe"))
+  where
+    evidence = recipeEvidence recipe
+    limit = 4 * 1024 * 1024
+    ownerKeys = map (executionIdentityKey . executionOwnerIdentity) (recipeOwners recipe)
+    ownerSet = Set.fromList ownerKeys
+    sourceOwners = Set.fromList [(dependencyModuleUnit node,dependencyModuleName node)
+      | node <- dependencyModules evidence, not (dependencyModuleBoot node)]
+    completeOwners = ownerKeys == Set.toAscList ownerSet
+      && all (\node -> dependencyModuleBoot node || dependencyModuleProduct node /= ProductReady
+        || (dependencyModuleUnit node,dependencyModuleName node) `Set.member` ownerSet) (dependencyModules evidence)
+    validOriginals = recipeProducer recipe /= replicate 64 '0'
+      && all ((/= Just (replicate 64 '0')) . executionOwnerOriginalGraph) (recipeOwners recipe)
+    validExactImports = all (\(key, imports) -> key `Set.member` sourceOwners
+      && imports == Set.toAscList (Set.fromList imports)) (recipeExactImports recipe)
+    generatedMatches = case [row | row <- dependencySources evidence
+        , dependencySourcePath row == "@generated-source"] of
+      [row] -> dependencySourceSha256 row == digest (TE.encodeUtf8 (T.pack (snd (recipeGeneratedOrigin recipe))))
+      _ -> False
+    boundedRecipe = all (<= 4096)
+      [length (recipeIncludes recipe), length (recipeOwners recipe)
+      , length (dependencySources evidence), length (dependencyModules evidence)
+      , length (dependencyPackages evidence), length (recipePackages recipe)
+      , length (recipeExactImports recipe)]
+      && length (dependencyResolutions evidence) <= 65536
+      && all ((<= 4096) . length . dependencyResolutionCandidates) (dependencyResolutions evidence)
+      && all ((<= 4096) . length . dependencyModuleImports) (dependencyModules evidence)
+      && sum (map (length . dependencyModuleImports) (dependencyModules evidence)) <= 65536
+      && all ((<= 4096) . length . snd) (recipeExactImports recipe)
+      && sum (map (length . snd) (recipeExactImports recipe)) <= 65536
+    bytes = BL.toStrict (BL.take (fromIntegral limit + 1) (toLazyByteString encoding))
+    text' = encodeString . T.pack
+    list item values = encodeListLen (fromIntegral (length values)) <> foldMap item values
+    optional' item = maybe encodeNull item
+    ownerKey (unit, name) = encodeListLen 2 <> text' unit <> text' name
+    identity' original = text' (executionUnit original) <> text' (executionModule original)
+      <> text' (executionVersion original) <> text' (executionIfaceSha256 original)
+      <> text' (executionNativeSha256 original)
+    productKind = \case
+      ProductReady -> "ready"
+      ProductBoot -> "boot"
+      ProductInterfaceOnly -> "interface_only"
+      ProductMissingInterface -> "missing_interface"
+      ProductProjectionRejected -> "projection_rejected"
+    encoding = encodeListLen 11 <> text' "TPEXECUTIONSOURCE" <> encodeWord 1
+      <> text' "tidepool-ghc-pipeline-v1" <> text' (recipeProducer recipe)
+      <> optional' text' (recipeSemantic recipe) <> list text' (recipeIncludes recipe)
+      <> (let (path, source) = recipeGeneratedOrigin recipe
+          in encodeListLen 2 <> text' path <> text' source)
+      <> encodeListLen 6 <> encodeBool (dependencyCacheSafe evidence)
+      <> encodeBool (dependencySelectionComplete evidence)
+      <> list (\source -> encodeListLen 2 <> text' (dependencySourcePath source)
+          <> text' (dependencySourceSha256 source)) (dependencySources evidence)
+      <> list (\row -> encodeListLen 5 <> text' (dependencyResolutionQualifier row)
+          <> text' (dependencyResolutionModule row) <> encodeBool (dependencyResolutionBoot row)
+          <> optional' text' (dependencyResolutionSelected row)
+          <> list text' (dependencyResolutionCandidates row)) (dependencyResolutions evidence)
+      <> list (\node -> encodeListLen 6 <> text' (dependencyModuleUnit node)
+          <> text' (dependencyModuleName node) <> encodeBool (dependencyModuleBoot node)
+          <> text' (dependencyModuleSource node)
+          <> list (\edge -> encodeListLen 4 <> text' (dependencyImportQualifier edge)
+              <> text' (dependencyImportName edge) <> encodeBool (dependencyImportBoot edge)
+              <> optional' text' (dependencyImportSelected edge)) (dependencyModuleImports node)
+          <> text' (productKind (dependencyModuleProduct node))) (dependencyModules evidence)
+      <> list text' (dependencyPackages evidence)
+      <> list (\owner' -> encodeListLen 7 <> identity' (executionOwnerIdentity owner')
+          <> encodeBool (executionOwnerFresh owner')
+          <> optional' text' (executionOwnerOriginalGraph owner')) (recipeOwners recipe)
+      <> list (\(key, imports) -> encodeListLen 3 <> text' (fst key) <> text' (snd key)
+          <> list ownerKey imports) (recipeExactImports recipe)
+      <> list (\(unit, name, path, sha) -> encodeListLen 4 <> text' unit <> text' name
+          <> text' path <> text' sha) (recipePackages recipe)
 
 instance Eq ExecutionSourceGraph where
   left == right = executionGraphBytes left == executionGraphBytes right
@@ -104,8 +208,23 @@ executionSourceOriginalClosure :: [ExecutionSourceGraph] -> [ExecutionSourceRef]
 executionSourceOriginalClosure graphs references = walkExecutionSources graphs OriginalRecipeClosure
   [(executionRefIdentity reference,executionRefGraph reference) | reference <- references]
 
+-- A new local product need not have an executable source recipe. In this mode
+-- an explicitly absent capability is optional; promised original graphs still
+-- use the same strict traversal and cannot be silently discarded.
+executionSourceProspectiveReferences :: [ExecutionSourceGraph] -> [ExecutionSourceRef]
+  -> [ExecutionSourceRef] -> Either ExecutionSourceFailure [ExecutionSourceRef]
+executionSourceProspectiveReferences graphs inherited prospective = do
+  _ <- executionSourceOriginalClosure graphs inherited
+  concat <$> forM prospective (\reference ->
+    case walkExecutionSources graphs ProspectiveRecipeClosure
+        [(executionRefIdentity reference,executionRefGraph reference)] of
+      Left (ExecutionSourceUnavailable _) -> Right []
+      Left refusal -> Left refusal
+      Right _ -> Right [reference])
+
 data ExecutionRecipeSelection
   = OriginalRecipeClosure
+  | ProspectiveRecipeClosure
   | CurrentRecipeClosure (Map.Map (String,String) ExecutionSourceIdentity)
       (Map.Map (String,String) ExecutionSourceRef)
 
@@ -116,13 +235,16 @@ walkExecutionSources graphs selection pending = Map.elems . fst <$>
   where
     currentIdentity original = case selection of
       OriginalRecipeClosure -> Right ()
+      ProspectiveRecipeClosure -> Right ()
       CurrentRecipeClosure native _ -> unless
         (Map.lookup (executionIdentityKey original) native == Just original)
         (Left (ExecutionSourceUnavailable (executionIdentityKey original)))
     visit selected completed _ [] = Right (selected,completed)
     visit selected completed active ((original,sha) : rest) = do
       currentIdentity original
-      node <- executionSourceOriginalNode graphs original sha
+      node <- case executionSourceOriginalNodeWith prospective graphs original sha of
+        Left (ExecutionSourceUnsupported key) | prospective -> Left (ExecutionSourceUnavailable key)
+        result -> result
       let key = executionIdentityKey original
           recipe = (original,executionGraphSha256 (executionNodeGraph node))
       when (recipe `Set.member` active) (Left (ExecutionSourceConflicting key))
@@ -176,6 +298,7 @@ walkExecutionSources graphs selection pending = Map.elems . fst <$>
     suppliedOwner node key = case [owner' | owner' <- executionGraphOwners (executionNodeGraph node)
         , executionIdentityKey (executionOwnerIdentity owner') == key] of
       [owner'] -> Right owner'
+      [] | prospective -> Left (ExecutionSourceUnavailable key)
       _ -> Left (ExecutionSourceIncomplete key)
     dependency node key = do
       supplied <- suppliedOwner node key
@@ -185,13 +308,22 @@ walkExecutionSources graphs selection pending = Map.elems . fst <$>
         (True,Nothing) -> Right (original,executionGraphSha256 (executionNodeGraph node))
         (False,Just expected) -> case selection of
           OriginalRecipeClosure -> Right (original,expected)
+          ProspectiveRecipeClosure -> do
+            -- A retained digest promises a complete original closure. Only
+            -- newly encountered local capability gaps may be optional.
+            _ <- executionSourceOriginalClosure graphs [ExecutionSourceRef original expected]
+            Right (original,expected)
           CurrentRecipeClosure _ references -> do
             reference <- maybe (Left (ExecutionSourceUnavailable key)) Right (Map.lookup key references)
             unless (executionRefIdentity reference == original && executionRefGraph reference == expected)
               (Left (ExecutionSourceUnavailable key))
             Right (original,expected)
+        (False,Nothing) | prospective -> Left (ExecutionSourceUnavailable key)
         (False,Nothing) -> Left (ExecutionSourceMissing key)
         (True,Just _) -> Left (ExecutionSourceConflicting key)
+    prospective = case selection of
+      ProspectiveRecipeClosure -> True
+      _ -> False
     forMSelected node selected = mapM_ (\edge -> case dependencyImportSelected edge of
         Nothing -> Right ()
         Just path -> case Map.lookup
@@ -205,17 +337,22 @@ walkExecutionSources graphs selection pending = Map.elems . fst <$>
 -- authorize execution; executionSourceClosure checks the selected closure.
 executionSourceOriginalNode :: [ExecutionSourceGraph] -> ExecutionSourceIdentity
   -> String -> Either ExecutionSourceFailure ExecutionSourceNode
-executionSourceOriginalNode graphs = originalNode Set.empty
+executionSourceOriginalNode = executionSourceOriginalNodeWith False
+
+executionSourceOriginalNodeWith :: Bool -> [ExecutionSourceGraph] -> ExecutionSourceIdentity
+  -> String -> Either ExecutionSourceFailure ExecutionSourceNode
+executionSourceOriginalNodeWith prospective graphs = originalNode prospective Set.empty
   where
     graphMap = Map.fromList [(executionGraphSha256 graph,graph) | graph <- graphs]
-    originalNode seen original sha
+    originalNode optional seen original sha
       | sha `Set.member` seen = Left (ExecutionSourceConflicting key)
       | otherwise = do
           graph <- maybe (Left (ExecutionSourceMissing key)) Right (Map.lookup sha graphMap)
           owner' <- one key [owner' | owner' <- executionGraphOwners graph
             , executionOwnerIdentity owner' == original]
           case (executionOwnerFresh owner', executionOwnerOriginalGraph owner') of
-            (False, Just retained) -> originalNode (Set.insert sha seen) original retained
+            (False, Just retained) -> originalNode False (Set.insert sha seen) original retained
+            (False, Nothing) | optional -> Left (ExecutionSourceUnavailable key)
             (False, Nothing) -> Left (ExecutionSourceMissing key)
             (True, Just _) -> Left (ExecutionSourceConflicting key)
             (True, Nothing) -> do
