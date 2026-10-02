@@ -97,10 +97,7 @@ impl exomonad_actor::JevBackend for FixtureJev {
     fn ask(
         &self,
         _request: String,
-    ) -> futures_util::future::BoxFuture<
-        '_,
-        Result<String, exomonad_actor::JevCallFailure>,
-    > {
+    ) -> futures_util::future::BoxFuture<'_, Result<String, exomonad_actor::JevCallFailure>> {
         Box::pin(async {
             Ok(r#"{"model":"fixture","answers":{"value":{"type":"choice","choice":"yes","probabilities":{"yes":1.0,"no":0.0},"confidence":1.0}},"usage":{}}"#.into())
         })
