@@ -2720,7 +2720,7 @@ pub fn compile_activation_input(
             templates: &owner.templates,
             include: &include,
             session_root: view.session_root(),
-            inject_modules: snapshot.compiler_prefix().injected_modules(),
+            inject_modules: &snapshot.compiler_prefix().injected_modules(),
             gen: admission.generation().0,
             verdict: Some(TurnClassification {
                 kind: TurnKind::Bind,
