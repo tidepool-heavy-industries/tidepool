@@ -15,7 +15,7 @@ import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
 import Data.List (isInfixOf, isPrefixOf, sortOn, stripPrefix)
-import Data.Maybe (isJust, isNothing, maybeToList)
+import Data.Maybe (catMaybes, isJust, isNothing, maybeToList)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -139,6 +139,32 @@ counterValues name diagnostics = map parseCount matching
 
 counterTotal :: String -> String -> Integer
 counterTotal name = sum . counterValues name
+
+exactCompilationCacheSafety
+  :: FilePath -> BS.ByteString -> Either String (Maybe Bool)
+exactCompilationCacheSafety expectedSource bytes = do
+  (remaining, term) <- case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
+    Left failure -> Left ("invalid exact compilation receipt CBOR: " ++ show failure)
+    Right decoded -> Right decoded
+  unless (BL.null remaining) (Left "exact compilation receipt has trailing CBOR bytes")
+  case term of
+    TList (TString "TPEXACTCOMPILE" : TString version : fields)
+      | version /= "2" -> Left ("unsupported exact compilation receipt schema " ++ T.unpack version)
+      | length fields /= 8 -> Left ("exact compilation receipt v2 has "
+          ++ show (length fields + 2) ++ " fields; expected 10")
+      | otherwise -> case fields of
+          [_, _, TString source, _, _, TString facts, _, _]
+            | source /= T.pack expectedSource -> Right Nothing
+            | otherwise -> Just <$> dependencyCacheSafe facts
+          _ -> Left "exact compilation receipt v2 has invalid source or evidence fields"
+    _ -> Left "exact compilation receipt has an invalid tag or outer record"
+  where
+    dependencyCacheSafe facts = case stripPrefix "{\"version\":4,\"cache_safe\":" facts of
+      Nothing -> Left "exact compilation receipt has invalid dependency evidence v4 JSON"
+      Just value
+        | Just rest <- stripPrefix "false," value, not (null rest), last rest == '}' -> Right False
+        | Just rest <- stripPrefix "true," value, not (null rest), last rest == '}' -> Right True
+        | otherwise -> Left "dependency evidence v4 has no canonical cache_safe boolean"
 
 main :: IO ()
 main = getArgs >>= \case
@@ -2127,14 +2153,19 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
         && "tidepool-checked-loaded-source module=MetadataUntracked" `notElem` lines untrackedDiagnostics) $
       fail "untracked compile-time input was promoted to loaded metadata evidence"
     receipts <- listDirectory (work </> ".exact-compilations")
-    evidence <- forM receipts $ \entry -> do
+    receiptSafety <- fmap catMaybes $ forM receipts $ \entry -> do
       bytes' <- BS.readFile (work </> ".exact-compilations" </> entry </> "receipt.cbor")
-      pure $ case deserialiseFromBytes decodeTerm (BSL.fromStrict bytes') of
-        Right (_, TList [_, _, _, _, TString source, _, _, TString facts, _])
-          | source == T.pack (work </> "MetadataUntrackedTarget.hs") -> T.unpack facts
-        _ -> ""
-    unless (any (isInfixOf "\"cache_safe\":false") evidence) $
-      fail "untracked dependency was certified as cache safe"
+      either (fail . ("invalid exact compilation receipt " ++ entry ++ ": ")) pure $
+        exactCompilationCacheSafety (work </> "MetadataUntrackedTarget.hs") bytes'
+    case receiptSafety of
+      [cacheSafe] -> do
+        putStrLn ("untracked target receipt: schema=TPEXACTCOMPILE/2 fields=10 "
+          ++ "dependency_evidence=v4 cache_safe=" ++ show cacheSafe)
+        unless (not cacheSafe) $
+          fail "untracked dependency receipt marked dependency evidence cache_safe=true"
+      [] -> fail "no exact compilation v2 receipt matched the untracked target source"
+      _ -> fail ("multiple exact compilation receipts matched the untracked target: "
+        ++ show (length receiptSafety))
   putStrLn "exact loaded metadata: parity, source drift, quoter bytecode, hidden family and untracked input passed"
 
 -- Native candidates and exact owners bypass fresh preparation. Their defining
