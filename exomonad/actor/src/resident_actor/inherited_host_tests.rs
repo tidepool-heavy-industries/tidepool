@@ -32,7 +32,7 @@ fn child() -> ActorDescriptor {
         "group/child",
         crate::ActorPlacement {
             session: tidepool_repr::SessionId(8),
-            resource_scope: tidepool_repr::RealmId(3),
+            resource_scope: tidepool_codegen::suspension::RealmId(3),
             lexical_scope: tidepool_codegen::scope::ScopeId(1),
         },
     )
