@@ -27,7 +27,7 @@ service returns a typed boundary failure.
 
 Scaffold, admit ready parallel work and integrate checked results. Recursive
 owners use `Project.Work` policy and `Exomonad.Contrib.Routing`; see
-`RECURSIVE-WORK.md`. These primitives also support custom typed compositions.
+`RECURSIVE-WORK.md`. Use these primitives for custom compositions.
 
 ```haskell
 let task = "Remove the stale path and report the focused check." :: Text
@@ -54,8 +54,8 @@ Right captured <- checkpoint "feature-scaffold"
   <*> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (coding currentCheckout (assignment [label|consumer|] consumerTask))))
   <*> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (researching currentCheckout (assignment [label|contract-review|] reviewTask))))
 ```
-A later wave from the same actor uses `subgroup "wave-2"`: it nests under
-your own path, so you pass only the new segment, never your full path.
+For another wave, `subgroup "wave-2"` nests under your path; pass only the
+new segment.
 
 Immediate children can be awaited in their admission cell with
 `waitFor ((,) <$> awaitSettled parser <*> awaitSettled consumer)`, preserving the
