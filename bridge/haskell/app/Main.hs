@@ -59,7 +59,9 @@ import Tidepool.GhcPipeline
   , CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
   , cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, stripMonadHead, generatedScaffoldRecipe, activationPreviewInputType )
-import Tidepool.ExecutionEncode (encodeWireProgram, encodeModuleProducts)
+import Tidepool.ExecutionEncode
+  ( encodeWireProgram, ModuleProductEncoding, prepareModuleProductEncoding
+  , moduleProductInput, moduleProductBytes, encodeModuleProductInventory )
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelected, PreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedRootIdentity, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
@@ -595,7 +597,7 @@ writeCertifiedProducts originalInterfaces outDir hscEnv prepared productContext 
 
 data CertifiedOriginalProducts = CertifiedOriginalProducts
   { certifiedOriginalDependencies :: DependencyEvidence
-  , certifiedOriginalProducts :: [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
+  , certifiedOriginalProducts :: [ModuleProductEncoding]
   }
 
 writeCertifiedProductsKeeping
@@ -635,7 +637,7 @@ writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productC
     timeDetailPhase timing "module_products" "certify" $ do
       certified <- encodeCertifiedProducts hscEnv (pprAcceptedCandidates prepared)
         (compilationScope <$> pprExactCompilation prepared)
-        freshProducts [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
+        (map moduleProductInput freshProducts) [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
         finalDependencies productBytes evidenceBytes
       case certified of
         Right bytes -> BS.writeFile (outDir </> "certified-products.cbor") bytes
@@ -783,7 +785,7 @@ writeModuleProducts :: OriginalInterfaceArtifacts -> FilePath -> Maybe PreparedM
   -> Map.Map ModuleName ModIface
   -> Map.Map ModuleName PackageImportEvidence
   -> IO (Map.Map (String, String) ProductAvailability,
-         [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])])
+         [ModuleProductEncoding])
 writeModuleProducts _ _ Nothing _ _ = pure (Map.empty, [])
 writeModuleProducts originalInterfaces outDir (Just inventory) interfaces packageRoots = do
   timing <- readTimingEnabled
@@ -813,14 +815,14 @@ writeModuleProducts originalInterfaces outDir (Just inventory) interfaces packag
               sidecar = encodePackageImports iface roots
           when (BS.length sidecar > 4 * 1024 * 1024) $
             ioError (userError "direct package import witness exceeds four MiB")
-          pure (key, ProductReady, Just (T.pack (fst key),
-            T.pack (snd key), bytes, groups), Just sidecar)
+          pure (key, ProductReady, Just (prepareModuleProductEncoding (T.pack (fst key),
+            T.pack (snd key), bytes, groups)), Just sidecar)
   let products = [moduleProduct | (_, _, Just moduleProduct, _) <- outcomes]
       packageBundles =
         [(unit, moduleName', sidecar)
         | ((unit, moduleName'), _, Just _, Just sidecar) <- outcomes]
   timeDetailPhase timing "module_products" "encode_products" $
-    BS.writeFile (outDir </> "module-products.cbor") (encodeModuleProducts products)
+    BS.writeFile (outDir </> "module-products.cbor") (encodeModuleProductInventory products)
   timeDetailPhase timing "module_products" "encode_package_bundles" $
     BS.writeFile (outDir </> "module-package-imports.cbor")
     (toStrictByteString (encodeListLen 3
@@ -1747,13 +1749,14 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
   certified <- writeCertifiedProductsKeeping originalInterfaces directory environment prepared productContext artifacts
   let products = certifiedOriginalProducts certified
   supportScope <- retainProgramProducts (requestIncludes args) directory prepared certified reserved exact
-  (unit, interfaceBytes) <- case
-      [(T.unpack unit, bytes) | (unit, name, bytes, _) <- products, T.unpack name == reserved] of
+  originalProductEncoding <- case
+      [product' | product' <- products
+        , let (_, name, _, _) = moduleProductInput product', T.unpack name == reserved] of
     [value] -> pure value
     _ -> fail "planned original declaration has no unique prepared interface"
-  let originalProducts = [(unit',name,bytes,groups) | (unit',name,bytes,groups) <- products, T.unpack name == reserved]
-      originalBytes = encodeModuleProducts originalProducts
-      originalGroups' = concat [groups | (_,_,_,groups) <- originalProducts]
+  let (unitText, _, interfaceBytes, originalGroups') = moduleProductInput originalProductEncoding
+      unit = T.unpack unitText
+      originalBytes = moduleProductBytes originalProductEncoding
       productPath = directory </> "original.product.cbor"
   BS.writeFile productPath originalBytes
   requirements <- programInterfaceRequirements prepared unit reserved
@@ -1805,11 +1808,12 @@ retainProgramProducts includes directory prepared certified target initial = do
     (extendExactExecutionSources (concatMap fst parcels) (map snd parcels) promoted)
   retainFreshExecutionSources includes prepared certified target inherited
   where
-    products = [product' | product'@(_,owner,_,_) <- certifiedOriginalProducts certified
-      , T.unpack owner /= target]
+    products = [product' | product' <- certifiedOriginalProducts certified
+      , let (_, owner, _, _) = moduleProductInput product', T.unpack owner /= target]
     supportOwners = [(candidateUnit candidate,candidateModule candidate)
       | candidate <- pprAcceptedCandidates prepared]
-      ++ [(T.unpack unit,T.unpack owner) | (unit,owner,_,_) <- products]
+      ++ [(T.unpack unit,T.unpack owner) | product' <- products
+          , let (unit,owner,_,_) = moduleProductInput product']
     retainCached scope (index, candidate) = do
       let unit = candidateUnit candidate
           owner = candidateModule candidate
@@ -1864,8 +1868,9 @@ retainProgramProducts includes directory prepared certified target initial = do
                 fail "retained cached supporting original changed between cell slots"
               pure scope
         _ -> fail "cached source product conflicts with an admitted original owner"
-    retain scope (index, originalProduct@(unitText,ownerText,interfaceBytes,groups)) = do
-      let unit = T.unpack unitText
+    retain scope (index, originalProduct) = do
+      let (unitText,ownerText,interfaceBytes,groups) = moduleProductInput originalProduct
+          unit = T.unpack unitText
           owner = T.unpack ownerText
           admitted = [(exactUnit artifact,exactModule artifact) | (artifact,_,_) <- scopeInterfaces scope]
       when ((unit,owner) `elem` admitted) (fail "fresh source product replaces an admitted original owner")
@@ -1886,7 +1891,7 @@ retainProgramProducts includes directory prepared certified target initial = do
           productPath = stem ++ ".product.cbor"
           interface = ExactIfaceArtifact unit owner interfacePath (shaHex interfaceBytes) requirements
           packageBytes = encodePackageImports interface roots
-          productBytes = encodeModuleProducts [originalProduct]
+          productBytes = moduleProductBytes originalProduct
           original = ExactProduct unit owner
             (exactProgramProductVersionFromDigest scope unit owner sourceDigest interfaceBytes productBytes packageBytes)
             (shaHex interfaceBytes) (shaHex productBytes) productPath
@@ -1975,9 +1980,11 @@ retainFreshExecutionSources includes prepared certified target scope
   where
     evidence = certifiedOriginalDependencies certified
     fullProducts = certifiedOriginalProducts certified
-    supporting = [product' | product'@(_,owner,_,_) <- fullProducts, T.unpack owner /= target]
-    freshIdentity product'@(unitText,ownerText,interfaceBytes,_) = do
-      let unit = T.unpack unitText
+    supporting = [product' | product' <- fullProducts
+      , let (_,owner,_,_) = moduleProductInput product', T.unpack owner /= target]
+    freshIdentity product' = do
+      let (unitText,ownerText,interfaceBytes,_) = moduleProductInput product'
+          unit = T.unpack unitText
           owner = T.unpack ownerText
       sourceDigest <- case [dependencySourceSha256 source
           | node <- dependencyModules evidence
@@ -1989,7 +1996,7 @@ retainFreshExecutionSources includes prepared certified target scope
       packages <- maybe (fail "fresh execution original lacks package witness") pure
         (Map.lookup (mkModuleName owner) (pprPackageImports prepared))
       let interface = ExactIfaceArtifact unit owner "" (shaHex interfaceBytes) []
-          nativeBytes = encodeModuleProducts [product']
+          nativeBytes = moduleProductBytes product'
           packageBytes = encodePackageImports interface packages
           expected = ExecutionSourceIdentity unit owner
             (exactProgramProductVersionFromDigest scope unit owner sourceDigest interfaceBytes nativeBytes packageBytes)
