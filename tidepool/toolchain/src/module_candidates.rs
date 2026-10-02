@@ -26,7 +26,7 @@ use crate::cache::{DependencyEvidence, ProductAvailability};
 pub(crate) const RECORD_LIMIT: usize = 32 << 20;
 const MANIFEST_LIMIT: usize = 4 << 20;
 const CANDIDATE_LIMIT: usize = 128;
-const RECORD_DIR: &str = "module-candidates-v11";
+const RECORD_DIR: &str = "module-candidates-v12";
 const RECORD_MAGIC: &[u8; 8] = b"TPCRE10\n";
 const RECORD_VERSION: u32 = 9;
 const HEADER_LIMIT: usize = 64 << 10;
@@ -1050,6 +1050,16 @@ pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) {
         key_material.extend_from_slice(record.module.as_bytes());
         key_material.push(0);
         key_material.extend_from_slice(record.source.as_os_str().as_encoded_bytes());
+        // Lookup retains ordered include recipes and prefers an exact recipe
+        // for disjoint offers. Another recipe must not replace its dependency
+        // products while leaving the original importers in the store.
+        key_material.push(0);
+        key_material.extend_from_slice(&(record.include.len() as u64).to_be_bytes());
+        for root in &record.include {
+            let bytes = root.as_os_str().as_encoded_bytes();
+            key_material.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+            key_material.extend_from_slice(bytes);
+        }
         let key = sha(&key_material);
         let disposition =
             if tidepool_atomic_write::write_best_effort(&dir.join(format!("{key}.cbor")), &bytes)
@@ -3029,6 +3039,118 @@ mod tests {
             encode_record(record).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn publication_preserves_dependency_products_per_ordered_include_recipe() {
+        let cache = tempfile::tempdir().unwrap();
+        let sources = tempfile::tempdir().unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let mut importer = candidate_fixture(sources.path(), "Importer");
+        let dependency = candidate_fixture(sources.path(), "Dependency");
+        import_candidate(&mut importer, &dependency);
+        let sources = absolute(sources.path()).unwrap();
+        let extra = absolute(extra.path()).unwrap();
+        let full = vec![extra.clone(), sources.clone()];
+        let narrow = vec![sources.clone()];
+        let reversed = vec![sources, extra];
+        importer.include = full.clone();
+        unsafe {
+            std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
+        }
+        let publish = |record: &Record| {
+            let parsed = crate::certified_products::ParsedModuleProducts::decode(
+                &record.products,
+                &package_bundle(&record.unit, &record.module, &record.interface),
+            )
+            .unwrap();
+            let (_, publication) = prepare_publication(
+                &record.endpoint,
+                &record.include,
+                &record.evidence,
+                parsed,
+                &record.target_source,
+                CandidateVersionOrigin::Ordinary,
+                &[],
+            );
+            assert_eq!(publication.records.len(), 1);
+            publish_prepared(publication);
+        };
+        publish(&importer);
+        let mut expected = Vec::new();
+        for (include, interface) in [(&full, 0x42), (&narrow, 0x43), (&reversed, 0x44)] {
+            let mut record = dependency.clone();
+            record.include = include.clone();
+            record.interface = vec![interface];
+            record.products = product_bytes(&record.unit, &record.module, &record.interface);
+            record.package_imports =
+                package_imports(&record.unit, &record.module, &record.interface);
+            record.original_owner = OriginalOwner::from_owner(&computed_owner(&record));
+            expected.push(version_hash(&record));
+            publish(&record);
+        }
+        let exclusions = ExactCandidateExclusions::new(BTreeSet::new(), BTreeSet::new());
+        for (include, version) in [&full, &narrow, &reversed].into_iter().zip(expected) {
+            for disjoint in [false, true] {
+                let records = ordinary_records(b"endpoint", include, disjoint).unwrap();
+                let selected = select_records_inner(
+                    b"endpoint",
+                    include,
+                    scratch.path(),
+                    records
+                        .into_iter()
+                        .map(|record| (record, CandidateOrigin::Ordinary))
+                        .collect(),
+                    disjoint.then_some(&exclusions),
+                )
+                .unwrap();
+                assert_eq!(
+                    selected
+                        .by_owner
+                        .get(&("u".into(), "Dependency".into()))
+                        .expect("dependency survives publication under another recipe")
+                        .owner
+                        .module_version
+                        .0,
+                    version,
+                    "select the dependency from the exact ordered recipe"
+                );
+                if include == &full {
+                    assert!(selected
+                        .by_owner
+                        .contains_key(&("u".into(), "Importer".into())));
+                } else if !disjoint {
+                    assert!(!selected
+                        .by_owner
+                        .contains_key(&("u".into(), "Importer".into())));
+                }
+            }
+        }
+        fs::write(&dependency.source, "module Dependency where\nchanged\n").unwrap();
+        let records = ordinary_records(b"endpoint", &full, true).unwrap();
+        let selected = select_records_inner(
+            b"endpoint",
+            &full,
+            scratch.path(),
+            records
+                .into_iter()
+                .map(|record| (record, CandidateOrigin::Ordinary))
+                .collect(),
+            Some(&exclusions),
+        )
+        .unwrap();
+        assert!(
+            selected.by_owner.is_empty(),
+            "changed dependency invalidates its importer"
+        );
+        let old_namespace = cache.path().join("module-candidates-v11");
+        fs::rename(cache.path().join(RECORD_DIR), &old_namespace).unwrap();
+        assert!(ordinary_records(b"endpoint", &full, false)
+            .unwrap()
+            .is_empty());
+        assert!(old_namespace.is_dir(), "old records remain on disk");
     }
 
     #[test]
