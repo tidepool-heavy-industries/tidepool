@@ -13,7 +13,7 @@ import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
 import Data.List (isInfixOf, isPrefixOf, sortOn)
-import Data.Maybe (isJust, isNothing)
+import Data.Maybe (isJust, isNothing, maybeToList)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -22,7 +22,7 @@ import GHC.Core qualified as Core
 import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy)
 import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
 import GHC.Builtin.Types (liftedTypeKind)
-import GHC.Types.Var (mkTyVar)
+import GHC.Types.Var (mkTyVar, VarBndr(..))
 import GHC.Types.Name.Occurrence (mkTyVarOcc)
 import GHC.Types.SrcLoc (noSrcSpan)
 import Language.Haskell.Syntax.Specificity (ForAllTyFlag(..), Specificity(..))
@@ -1494,7 +1494,7 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
       alphaVariable unique name = mkTyVar (mkInternalName unique (mkTyVarOcc name) noSrcSpan) liftedTypeKind
       firstVariable = alphaVariable firstUnique "a"
       secondVariable = alphaVariable secondUnique "renamed"
-      alphaType variable = mkForAllTy variable (Invisible SpecifiedSpec)
+      alphaType variable = mkForAllTy (Bndr variable (Invisible SpecifiedSpec))
         (mkVisFunTyMany (mkTyVarTy variable) (mkTyVarTy variable))
   alphaFirst <- sealedBytes (alphaType firstVariable)
   alphaSecond <- sealedBytes (alphaType secondVariable)
@@ -1514,7 +1514,7 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   originalOwner <- ownerWitness "HostActivationOwnerOriginal.hs"
   changedOwner <- ownerWitness "HostActivationOwnerChanged.hs"
   unless (originalOwner /= changedOwner) $ fail "same original Name ignored changed owner interface"
-  forM_ destination $ \directory -> do
+  forM_ (maybeToList destination) $ \directory -> do
     createDirectoryIfMissing True directory
     forM_ [("original-input.cbor",originalBytes),("preview-input.cbor",actualBytes)
       ,("forward-function.cbor",forward),("backward-function.cbor",backward),("alpha-first.cbor",alphaFirst),("alpha-second.cbor",alphaSecond),("original-owner.cbor",originalOwner),("changed-owner.cbor",changedOwner)] $ \(name,bytes) ->
