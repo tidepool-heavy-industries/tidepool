@@ -18,6 +18,7 @@ rust_filegroup(
         "src/lib.rs": "tidepool/extract-cmd/src/lib.rs",
         "src/process.rs": "tidepool/extract-cmd/src/process.rs",
         "src/request.rs": "tidepool/extract-cmd/src/request.rs",
+        "src/test_fixtures/control_ack_worker.rs": "tidepool/extract-cmd/src/test_fixtures/control_ack_worker.rs",
     },
 )
 
@@ -54,6 +55,7 @@ rust_filegroup(
         "src/main.rs": "tidepool/extract-cmd/src/main.rs",
         "src/process.rs": "tidepool/extract-cmd/src/process.rs",
         "src/request.rs": "tidepool/extract-cmd/src/request.rs",
+        "src/test_fixtures/control_ack_worker.rs": "tidepool/extract-cmd/src/test_fixtures/control_ack_worker.rs",
     },
 )
 
@@ -93,6 +95,7 @@ rust_filegroup(
         "src/lib.rs": "tidepool/extract-cmd/src/lib.rs",
         "src/process.rs": "tidepool/extract-cmd/src/process.rs",
         "src/request.rs": "tidepool/extract-cmd/src/request.rs",
+        "src/test_fixtures/control_ack_worker.rs": "tidepool/extract-cmd/src/test_fixtures/control_ack_worker.rs",
     },
 )
 
