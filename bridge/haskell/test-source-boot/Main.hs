@@ -1313,6 +1313,16 @@ candidateCompactInventory = withScratch $ \work -> do
   let badGroup binders globalRefs = [fixtureCandidate "Fixture" [TList [TInt 91,TList binders,TList globalRefs]]]
   refuse "unavailable-symbol" "unavailable" (envelope symbols globalTable (badGroup [TInt 65535] []))
   refuse "unavailable-global" "unavailable" (envelope symbols globalTable (badGroup [] [TInt 65535]))
+  forM_ [("out-of-range",TInt 65536),("negative",TInt (-1))
+      ,("u64-max",TInteger (2 ^ (64 :: Int) - 1)),("beyond-u64",TInteger (2 ^ (64 :: Int)))] $ \(label,index) ->
+    forM_ [("symbol",badGroup [index] []),("global",badGroup [] [index])] $ \(kind,invalidRows) ->
+      readFixture (kind ++ "-" ++ label) (envelope symbols globalTable invalidRows) >>= \case
+        Left _ -> pure ()
+        Right _ -> fail ("candidate compact decoder accepted " ++ kind ++ " " ++ label ++ " index")
+  let danglingGlobals = TList [TList [TInt 65535,TList [TString "lifted",TInt 0],TNull,TBool False,TNull]]
+  refuse "dangling-global-symbol" "unavailable" (envelope symbols danglingGlobals rows)
+  refuse "duplicate-owner" "duplicate module candidate"
+    (envelope symbols globalTable (take 1 rows ++ take 1 rows))
   refuse "oversized-symbol-table" "table exceeds" (envelope (TList (replicate 65537 TNull)) globalTable rows)
   refuse "oversized-global-table" "table exceeds" (envelope symbols (TList (replicate 65537 TNull)) rows)
   let largeIdentity = identity {symbolOccurrence=T.replicate 2048 "x"}
@@ -1324,7 +1334,7 @@ candidateCompactInventory = withScratch $ \work -> do
     (envelope largeSymbols (TList []) (oneLarge ++ [fixtureCandidate "Other" [expandedGroup]]))
   refuse "unsupported6" "unsupported" (TList [TString "TPMCAN",TString "6",TList legacyRows])
   refuse "unsupported7" "unsupported" (TList [TString "TPMCAN",TString "7",TList legacyRows,emptyParcel])
-  putStrLn "candidate compact inventory: exact legacy values/order/ordinals, complete interning, unavailable indices, table/expanded bounds and unsupported6/7 passed"
+  putStrLn "candidate compact inventory: exact legacy values/order/ordinals, complete interning, unavailable/out-of-range indices, dangling globals, duplicate owners, table/expanded bounds and unsupported6/7 passed"
   where
     fixtureCandidate name groups = TList
       ([TString "main",TString name,TString "/fixture/source.hs",sha,TString "/fixture/interface.hi",sha,sha,sha,sha]
