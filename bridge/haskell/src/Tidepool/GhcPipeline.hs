@@ -393,7 +393,7 @@ activationPreviewInputType environment = do
     ([Scaled _ _], _) -> Left "activation preview input differs from its checked binder type"
     _ -> Left "activation preview has no single monomorphic input argument"
   where
-    unique name = case [idType identifier | identifier <- collectDataIds (tcg_binds environment)
+    unique name = case [idType identifier | identifier <- typeEnvIds (tcg_type_env environment)
       , occNameString (nameOccName (idName identifier)) == name] of
       [ty] -> Right ty
       _ -> Left ("activation preview has no unique checked binder: " ++ name)
