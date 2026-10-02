@@ -58,6 +58,8 @@ mod resident_interactive;
 mod resident_tools;
 mod resident_workbench;
 mod role;
+pub(crate) mod tool_contract;
+pub use tool_contract::ToolContractError;
 mod runtime_observation;
 mod start;
 pub(crate) mod status_tool;
