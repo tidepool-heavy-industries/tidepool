@@ -13,6 +13,11 @@ use tokio::sync::Notify;
 const PENDING_CALL: &str = "captured-unfold-and-await";
 const REUSE_CALL: &str = "reuse-failed-cell-capture";
 
+// Semantic acceptance includes cold whole-cell compilation, validation and
+// native attachment in a debug build. Performance gates keep their own budgets.
+const COLD_DEBUG_CELL_SETTLEMENT_BUDGET: Duration = Duration::from_secs(300);
+const TYPED_CHILD_REPLY_SETTLEMENT_BUDGET: Duration = Duration::from_secs(90);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CapturedScenario {
     Success,
@@ -288,6 +293,7 @@ fn assert_committed_haskell_value(response: &Value, expected: &str) {
 async fn embedded_operation(
     runtime: &embedded_harness::EmbeddedHarnessRuntime,
     operation: &OperationId,
+    settlement_budget: Duration,
 ) -> Result<Value, String> {
     let call_id = &operation.call.0;
     let call = &operation.call;
@@ -316,11 +322,13 @@ async fn embedded_operation(
     );
     eprintln!("[captured-engine] wait exact operation {operation:?}");
     match tokio::time::timeout(
-        Duration::from_secs(90),
+        settlement_budget,
         runtime.scheduler().wait(&claim.operation),
     )
     .await
-    .unwrap_or_else(|_| panic!("embedded Haskell operation {call_id} did not settle"))
+    .unwrap_or_else(|_| {
+        panic!("embedded Haskell operation {call_id} did not settle within {settlement_budget:?}")
+    })
     .unwrap()
     {
         JobOutput::Completed(result) => result.map_err(|error| error.to_string()),
@@ -476,17 +484,41 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
     let setup = embedded_operation(
         &runtime,
         &transport.operation(&root_origin, "captured-scope-setup"),
+        COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
     )
     .await
     .unwrap();
     assert_committed_haskell_value(&setup, "True");
+    let scheduler = runtime.scheduler();
+    // Subscribe before issuing the parent call: settlement may precede observation,
+    // and Scheduler::wait refuses operations that are not admitted yet.
+    let mut parent_settlements = scheduler.operation_settlements();
     transport.setup_ready.notify_one();
     let mut sessions = std::collections::HashSet::new();
     for _ in 0..2 {
-        let request = tokio::time::timeout(Duration::from_secs(120), requests_rx.recv())
-            .await
-            .expect("captured children did not start while the parent call was pending")
-            .unwrap();
+        let request = tokio::time::timeout(Duration::from_secs(120), async {
+            tokio::select! {
+                biased;
+                settled = async {
+                    loop {
+                        let operation = parent_settlements.recv().await
+                            .expect("exact parent settlement observation must remain available");
+                        if operation.origin == root_origin && operation.call.0 == PENDING_CALL {
+                            return operation;
+                        }
+                    }
+                } => {
+                    assert_eq!(settled, transport.operation(&root_origin, PENDING_CALL));
+                    let result = scheduler.wait(&settled).await
+                        .expect("settlement event follows admitted retained terminal output");
+                    panic!("parent settled before both captured children started: {result:?}");
+                }
+                request = requests_rx.recv() => request,
+            }
+        })
+        .await
+        .expect("captured children did not start while the parent call was pending")
+        .unwrap();
         let parent = transport.operation(&root_origin, PENDING_CALL);
         assert!(
             runtime
@@ -512,13 +544,21 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         "[captured-engine] two child provider branches ready while exact parent claim is pending"
     );
     transport.reply_children.send_replace(true);
-    let result =
-        embedded_operation(&runtime, &transport.operation(&root_origin, PENDING_CALL)).await;
+    let result = embedded_operation(
+        &runtime,
+        &transport.operation(&root_origin, PENDING_CALL),
+        COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+    )
+    .await;
     for origin in &sessions {
         let call = format!("captured-child-{}", origin.actor().0);
-        let reply = embedded_operation(&runtime, &transport.operation(origin, &call))
-            .await
-            .unwrap();
+        let reply = embedded_operation(
+            &runtime,
+            &transport.operation(origin, &call),
+            TYPED_CHILD_REPLY_SETTLEMENT_BUDGET,
+        )
+        .await
+        .unwrap();
         assert_eq!(reply["status"], "replied", "{reply}");
     }
     match scenario {
@@ -532,7 +572,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 "{failure}"
             );
             assert!(campaign.actor.terminal().get().is_none(),
-                "the fixture fails the parent cell while ParentOwned children retain a live supervisor");
+                "the fixture fails a cell while its parent actor remains live");
             eprintln!(
                 "[captured-engine] actual parent execution failed after both typed child replies"
             );
@@ -546,9 +586,13 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                             "admitted children did not read their scope after parent cell failure",
                         )
                         .unwrap();
-                let value = embedded_operation(&runtime, &transport.operation(&origin, &call))
-                    .await
-                    .unwrap();
+                let value = embedded_operation(
+                    &runtime,
+                    &transport.operation(&origin, &call),
+                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                )
+                .await
+                .unwrap();
                 assert_committed_haskell_value(&value, "(41, 42)");
                 retained.insert(origin);
             }
@@ -558,10 +602,13 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 .await
                 .expect("the failed cell's retained capture did not admit another child")
                 .unwrap();
-            let reused =
-                embedded_operation(&runtime, &transport.operation(&root_origin, REUSE_CALL))
-                    .await
-                    .unwrap();
+            let reused = embedded_operation(
+                &runtime,
+                &transport.operation(&root_origin, REUSE_CALL),
+                COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+            )
+            .await
+            .unwrap();
             assert_committed_haskell_value(&reused, "True");
             eprintln!(
                 "[captured-engine] retained children and independently reused capture succeeded"

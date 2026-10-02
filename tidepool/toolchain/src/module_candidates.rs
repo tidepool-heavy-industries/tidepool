@@ -4,11 +4,15 @@
 use ciborium::value::Value;
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+mod codec_measurement;
 pub(crate) mod deployment;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tidepool_repr::execution_schema::{
     CachedHomeOwner, DecodeLimits, ModuleVersion, ProjectedGroup, RawModuleProduct, ResultContract,
     RuntimeRep, Signature, SymbolIdentity,
@@ -16,10 +20,15 @@ use tidepool_repr::execution_schema::{
 
 use crate::cache::{DependencyEvidence, ProductAvailability};
 
-const RECORD_LIMIT: usize = 32 << 20;
+pub(crate) const RECORD_LIMIT: usize = 32 << 20;
 const MANIFEST_LIMIT: usize = 4 << 20;
 const CANDIDATE_LIMIT: usize = 128;
-const RECORD_DIR: &str = "module-candidates-v6";
+const RECORD_DIR: &str = "module-candidates-v10";
+const RECORD_MAGIC: &[u8; 8] = b"TPCREC9\n";
+const RECORD_VERSION: u32 = 8;
+const HEADER_LIMIT: usize = 64 << 10;
+const DISCOVERY_LIMIT: usize = 512;
+const PAYLOAD_LIMIT: usize = 128 << 20;
 const PACKAGE_BUNDLE_LIMIT: usize = 16 << 20;
 // A measured 33,955,557-byte ordinary resident display graph exceeds 32 MiB.
 // This is the aggregate worker sidecar limit; each durable module record
@@ -36,10 +45,8 @@ pub(crate) fn product_decode_limits() -> DecodeLimits {
 /// Preserve each original TPMOD row in its own bounded sidecar. A module's
 /// product identity must not change when an unrelated module is compiled in
 /// the same worker request.
-pub(crate) fn split_module_product_bytes(
-    bytes: &[u8],
-    products: &[RawModuleProduct],
-) -> Option<Vec<Vec<u8>>> {
+#[cfg(test)]
+fn split_module_product_bytes(bytes: &[u8], products: &[RawModuleProduct]) -> Option<Vec<Vec<u8>>> {
     if bytes.len() > PRODUCT_MAX_BYTES {
         return None;
     }
@@ -211,6 +218,8 @@ pub(crate) struct CandidateBundle {
     pub evidence: DependencyEvidence,
     pub target_source: String,
     pub origin: CandidateOrigin,
+    pub original_execution: Option<OriginalCandidateExecution>,
+    pub(crate) execution_admitted: bool,
 }
 
 #[derive(Debug)]
@@ -253,22 +262,159 @@ pub(crate) fn record_deployment_acceptance(
         "deployment module products accepted");
 }
 
+/// The original version recipe is retained, never inferred from a later offer.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum CandidateVersionOrigin {
+    Ordinary,
+    Exact { semantic_sha256: [u8; 32] },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OriginalOwner {
+    unit: String,
+    module: String,
+    module_version: [u8; 32],
+    skinny_iface_sha256: [u8; 32],
+    product_sha256: [u8; 32],
+}
+impl OriginalOwner {
+    fn from_owner(owner: &CachedHomeOwner) -> Self {
+        Self {
+            unit: owner.unit.clone(),
+            module: owner.module.clone(),
+            module_version: owner.module_version.0,
+            skinny_iface_sha256: owner.skinny_iface_sha256,
+            product_sha256: owner.product_sha256,
+        }
+    }
+    fn owner(&self) -> CachedHomeOwner {
+        CachedHomeOwner {
+            unit: self.unit.clone(),
+            module: self.module.clone(),
+            module_version: ModuleVersion(self.module_version),
+            skinny_iface_sha256: self.skinny_iface_sha256,
+            product_sha256: self.product_sha256,
+        }
+    }
+}
+
+/// Constructed only after the original owner, Home seal and graph are verified.
+#[derive(Clone, Debug)]
+pub(crate) struct OriginalCandidateExecution {
+    pub(crate) graph: Arc<crate::execution_source::CertifiedExecutionSourceGraph>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(test, derive(Clone))]
 struct Record {
     tag: String,
     version: u32,
+    #[serde(with = "opaque_bytes::endpoint")]
     endpoint: Vec<u8>,
     include: Vec<PathBuf>,
     evidence: DependencyEvidence,
+    #[serde(with = "opaque_bytes")]
     products: Vec<u8>,
     unit: String,
     module: String,
     source: PathBuf,
     source_sha256: String,
+    #[serde(with = "opaque_bytes")]
     interface: Vec<u8>,
+    #[serde(with = "opaque_bytes::packages")]
     package_imports: Vec<u8>,
     target_source: String,
+    version_origin: CandidateVersionOrigin,
+    original_owner: OriginalOwner,
+    #[serde(with = "opaque_bytes::packages")]
+    original_certification: Vec<u8>,
+    execution_source_sha256: Option<[u8; 32]>,
+    #[serde(skip)]
+    execution_source: Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+}
+
+/// Opaque compiler buffers are byte strings, never element-wise integer arrays.
+/// Record readers bound the entire encoded payload before invoking serde;
+/// ciborium grows buffers from consumed chunks, not an untrusted length hint.
+mod opaque_bytes {
+    use serde::{de, Deserializer, Serializer};
+
+    struct Bytes<const LIMIT: usize>;
+
+    impl<'de, const LIMIT: usize> de::Visitor<'de> for Bytes<LIMIT> {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "a byte string of at most {LIMIT} bytes")
+        }
+
+        fn visit_bytes<E: de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+            if value.len() > LIMIT {
+                return Err(E::custom("candidate byte string exceeds field limit"));
+            }
+            Ok(value.to_vec())
+        }
+
+        fn visit_byte_buf<E: de::Error>(self, value: Vec<u8>) -> Result<Self::Value, E> {
+            if value.len() > LIMIT {
+                return Err(E::custom("candidate byte string exceeds field limit"));
+            }
+            Ok(value)
+        }
+    }
+
+    fn serialize_bounded<S: Serializer, const LIMIT: usize>(
+        value: &[u8],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        if value.len() > LIMIT {
+            return Err(serde::ser::Error::custom(
+                "candidate byte string exceeds field limit",
+            ));
+        }
+        serializer.serialize_bytes(value)
+    }
+
+    pub(super) fn serialize<S: Serializer>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_bounded::<S, { super::RECORD_LIMIT }>(value, serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u8>, D::Error> {
+        deserializer.deserialize_byte_buf(Bytes::<{ super::RECORD_LIMIT }>)
+    }
+
+    pub(super) mod endpoint {
+        use super::*;
+        pub(in super::super) fn serialize<S: Serializer>(
+            value: &[u8],
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            serialize_bounded::<S, 4096>(value, serializer)
+        }
+        pub(in super::super) fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Vec<u8>, D::Error> {
+            deserializer.deserialize_byte_buf(Bytes::<4096>)
+        }
+    }
+
+    pub(super) mod packages {
+        use super::*;
+        pub(in super::super) fn serialize<S: Serializer>(
+            value: &[u8],
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            serialize_bounded::<S, { 4 << 20 }>(value, serializer)
+        }
+        pub(in super::super) fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Vec<u8>, D::Error> {
+            deserializer.deserialize_byte_buf(Bytes::<{ 4 << 20 }>)
+        }
+    }
 }
 
 fn sha(bytes: &[u8]) -> String {
@@ -290,62 +436,400 @@ pub(crate) fn context_paths(include: &[PathBuf]) -> Option<Vec<PathBuf>> {
     include.iter().map(|p| absolute(p)).collect()
 }
 
-fn record_dir(endpoint_identity: &[u8], include: &[PathBuf]) -> PathBuf {
-    let mut material = Vec::new();
-    material.extend_from_slice(endpoint_identity);
-    for path in include {
-        material.push(0);
-        material.extend_from_slice(path.as_os_str().as_encoded_bytes());
-    }
+fn record_dir(endpoint_identity: &[u8]) -> PathBuf {
     crate::paths::compile_cache_dir()
         .join(RECORD_DIR)
-        .join(sha(&material))
+        .join(sha(endpoint_identity))
 }
 
-fn eligible_records(
+/// This bounded projection is discovery advice, never compilation authority.
+/// The selected payload must authenticate it before ordinary record validation.
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RecordHeader {
+    endpoint: Vec<u8>,
+    include: Vec<PathBuf>,
+    unit: String,
+    module: String,
+    source: PathBuf,
+    payload_len: u64,
+    payload_sha256: String,
+}
+
+impl RecordHeader {
+    fn for_record(record: &Record, payload: &[u8]) -> Self {
+        Self {
+            endpoint: record.endpoint.clone(),
+            include: record.include.clone(),
+            unit: record.unit.clone(),
+            module: record.module.clone(),
+            source: record.source.clone(),
+            payload_len: payload.len() as u64,
+            payload_sha256: sha(payload),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PublicationDisposition {
+    IncludeUnavailable,
+    InvocationProofRejected,
+    ProductSplitRejected,
+    PackageBundleRejected,
+    GenerationDependent,
+    PackageWitnessMissing,
+    PackageWitnessRejected,
+    ProductOwnerRejected,
+    ModuleEvidenceRejected,
+    GeneratedRequestTarget,
+    SourceUnavailable,
+    SourceEvidenceRejected,
+    Eligible,
+    SourceRootUnavailable,
+    DirectoryUnavailable,
+    PayloadEncodingRejected,
+    PayloadLimit,
+    HeaderEncodingRejected,
+    HeaderLimit,
+    WriteRejected,
+    Published,
+    ExactContext,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RecordEncodingRejection {
+    disposition: PublicationDisposition,
+    payload_bytes: Option<usize>,
+}
+
+struct PublicationDiagnostics {
+    remaining: usize,
+}
+
+impl PublicationDiagnostics {
+    fn new() -> Self {
+        Self {
+            remaining: if std::env::var(crate::timing::TIMING_ENV).as_deref() == Ok("1") {
+                CANDIDATE_LIMIT
+            } else {
+                0
+            },
+        }
+    }
+
+    fn report(
+        &mut self,
+        product: &RawModuleProduct,
+        original_bytes: Option<usize>,
+        encoded_payload_bytes: Option<usize>,
+        disposition: PublicationDisposition,
+    ) {
+        self.report_owner(
+            &product.unit,
+            &product.module,
+            product.groups.len(),
+            original_bytes,
+            encoded_payload_bytes,
+            disposition,
+        );
+    }
+
+    fn report_owner(
+        &mut self,
+        unit: &str,
+        module: &str,
+        group_rows: usize,
+        original_bytes: Option<usize>,
+        encoded_payload_bytes: Option<usize>,
+        disposition: PublicationDisposition,
+    ) {
+        if self.remaining == 0 {
+            return;
+        }
+        self.remaining -= 1;
+        tracing::debug!(target: "tidepool_toolchain::module_candidates",
+            phase = "candidate_publication_owner", disposition = ?disposition,
+            unit, module, group_rows,
+            original_bytes_known = original_bytes.is_some(),
+            original_bytes = original_bytes.unwrap_or_default(),
+            encoded_payload_bytes_known = encoded_payload_bytes.is_some(),
+            encoded_payload_bytes = encoded_payload_bytes.unwrap_or_default(),
+            "ordinary module candidate publication disposition");
+    }
+}
+
+pub(crate) fn record_exact_context_publication_skip(products: &[RawModuleProduct]) {
+    let mut diagnostics = PublicationDiagnostics::new();
+    for product in products {
+        diagnostics.report(product, None, None, PublicationDisposition::ExactContext);
+    }
+}
+
+fn encode_record_checked(record: &Record) -> Result<Vec<u8>, RecordEncodingRejection> {
+    let mut payload = Vec::new();
+    ciborium::ser::into_writer(record, &mut payload).map_err(|_| RecordEncodingRejection {
+        disposition: PublicationDisposition::PayloadEncodingRejected,
+        payload_bytes: None,
+    })?;
+    if payload.len() > RECORD_LIMIT {
+        return Err(RecordEncodingRejection {
+            disposition: PublicationDisposition::PayloadLimit,
+            payload_bytes: Some(payload.len()),
+        });
+    }
+    let header = serde_json::to_vec(&RecordHeader::for_record(record, &payload)).map_err(|_| {
+        RecordEncodingRejection {
+            disposition: PublicationDisposition::HeaderEncodingRejected,
+            payload_bytes: Some(payload.len()),
+        }
+    })?;
+    if header.len() > HEADER_LIMIT {
+        return Err(RecordEncodingRejection {
+            disposition: PublicationDisposition::HeaderLimit,
+            payload_bytes: Some(payload.len()),
+        });
+    }
+    let mut framed = Vec::with_capacity(12 + header.len() + payload.len());
+    framed.extend_from_slice(RECORD_MAGIC);
+    framed.extend_from_slice(&(header.len() as u32).to_be_bytes());
+    framed.extend(header);
+    framed.extend(payload);
+    Ok(framed)
+}
+
+#[cfg(test)]
+fn encode_record(record: &Record) -> Option<Vec<u8>> {
+    encode_record_checked(record).ok()
+}
+
+fn read_header(file: &mut fs::File) -> Option<RecordHeader> {
+    let mut prefix = [0; 12];
+    file.read_exact(&mut prefix).ok()?;
+    if &prefix[..8] != RECORD_MAGIC {
+        return None;
+    }
+    let len = u32::from_be_bytes(prefix[8..].try_into().ok()?) as usize;
+    if len > HEADER_LIMIT {
+        return None;
+    }
+    let mut bytes = vec![0; len];
+    file.read_exact(&mut bytes).ok()?;
+    let header: RecordHeader = serde_json::from_slice(&bytes).ok()?;
+    if header.endpoint.len() > 4096
+        || header.payload_len > RECORD_LIMIT as u64
+        || file.metadata().ok()?.len() != 12 + len as u64 + header.payload_len
+        || !header.source.is_absolute()
+    {
+        return None;
+    }
+    Some(header)
+}
+
+fn read_record(file: &mut fs::File, header: &RecordHeader) -> Option<Record> {
+    let mut payload = vec![0; usize::try_from(header.payload_len).ok()?];
+    file.read_exact(&mut payload).ok()?;
+    if sha(&payload) != header.payload_sha256 {
+        return None;
+    }
+    let record: Record = ciborium::de::from_reader(payload.as_slice()).ok()?;
+    (RecordHeader::for_record(&record, &payload) == *header).then_some(record)
+}
+
+#[cfg(test)]
+fn read_record_path(path: &Path) -> Option<Record> {
+    let mut file = fs::File::open(path).ok()?;
+    let header = read_header(&mut file)?;
+    read_record(&mut file, &header)
+}
+
+/// Conservative discovery filter for ordinary .hs/.lhs source owners. GHC
+/// remains responsible for definitive current import selection.
+fn current_home_path(module: &str, include: &[PathBuf]) -> Result<Option<PathBuf>, ()> {
+    if module.split('.').any(|part| {
+        part.is_empty()
+            || !part
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'\'')
+    }) {
+        return Err(());
+    }
+    let relative = module.replace('.', "/");
+    for root in include {
+        for extension in ["hs", "lhs"] {
+            let candidate = root.join(format!("{relative}.{extension}"));
+            match fs::metadata(&candidate) {
+                Ok(metadata) if metadata.is_file() => {
+                    return absolute(&candidate).map(Some).ok_or(());
+                }
+                Ok(_) => return Err(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(()),
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn current_source_matches(module: &str, source: &Path, include: &[PathBuf]) -> bool {
+    include.is_empty()
+        || matches!(current_home_path(module, include), Ok(Some(path)) if path == source)
+}
+
+/// Partition advice by the root that actually selected this ordinary source,
+/// not by the entire invocation's include vector. Unsupported or ambiguous
+/// conventions remain a miss; the original record and version stay intact.
+fn selected_record_root(record: &Record) -> Option<PathBuf> {
+    let relative = record.module.replace('.', "/");
+    for root in &record.include {
+        let mut selected = Vec::new();
+        for extension in ["hs", "lhs"] {
+            let candidate = root.join(format!("{relative}.{extension}"));
+            match fs::metadata(&candidate) {
+                Ok(metadata) if metadata.is_file() => selected.push(absolute(&candidate)?),
+                Ok(_) => return None,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return None,
+            }
+        }
+        match selected.as_slice() {
+            [] => {}
+            [source] if source == &record.source => return absolute(root),
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn root_shard(producer_dir: &Path, root: &Path) -> PathBuf {
+    producer_dir.join(sha(root.as_os_str().as_encoded_bytes()))
+}
+
+/// Request-local candidate records. Construction consumes the exact decoded
+/// inventory; durable writes remain deferred until the front door admits targets.
+pub(crate) struct PreparedPublication<'a> {
+    endpoint_identity: &'a [u8],
+    include: &'a [PathBuf],
+    evidence: &'a DependencyEvidence,
+    records: Vec<Record>,
+    group_counts: BTreeMap<(String, String), usize>,
+    graphs: BTreeMap<[u8; 32], Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+}
+
+pub(crate) fn prepare_publication<'a>(
+    endpoint_identity: &'a [u8],
+    include: &'a [PathBuf],
+    evidence: &'a DependencyEvidence,
+    products: crate::certified_products::ParsedModuleProducts<'_>,
+    target_source: &str,
+    version_origin: CandidateVersionOrigin,
+    certified: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+) -> (Vec<RawModuleProduct>, PreparedPublication<'a>) {
+    let start = std::time::Instant::now();
+    let bytes = products.aggregate_bytes_len();
+    let owners = products.products().len();
+    let mut diagnostics = PublicationDiagnostics::new();
+    let (products, records) = eligible_records_with_report(
+        endpoint_identity,
+        include,
+        evidence,
+        products,
+        target_source,
+        &version_origin,
+        certified,
+        &mut |product, bytes, disposition| diagnostics.report(product, bytes, None, disposition),
+    );
+    let graphs = records
+        .iter()
+        .filter_map(|record| record.execution_source.as_ref())
+        .map(|graph| (graph.digest(), Arc::clone(graph)))
+        .collect();
+    let group_counts = products
+        .iter()
+        .map(|product| {
+            (
+                (product.unit.clone(), product.module.clone()),
+                product.groups.len(),
+            )
+        })
+        .collect();
+    crate::timing::record_stage_with_owners(
+        crate::timing::NO_NODE,
+        crate::timing::NO_ROUND,
+        "products.publication_prepare",
+        start.elapsed(),
+        bytes as u64,
+        owners,
+    );
+    (
+        products,
+        PreparedPublication {
+            endpoint_identity,
+            include,
+            evidence,
+            records,
+            group_counts,
+            graphs,
+        },
+    )
+}
+
+fn eligible_records_with_report(
     endpoint_identity: &[u8],
     include: &[PathBuf],
     evidence: &DependencyEvidence,
-    products: &[RawModuleProduct],
-    product_bytes: &[u8],
-    package_bundle_bytes: &[u8],
+    parsed: crate::certified_products::ParsedModuleProducts<'_>,
     target_source: &str,
-) -> Vec<Record> {
+    version_origin: &CandidateVersionOrigin,
+    certified: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    report: &mut impl FnMut(&RawModuleProduct, Option<usize>, PublicationDisposition),
+) -> (Vec<RawModuleProduct>, Vec<Record>) {
+    let (products, per_module_bytes, package_imports) = parsed.into_publication_parts();
+    macro_rules! reject_all {
+        ($disposition:expr) => {{
+            for product in products.iter().take(CANDIDATE_LIMIT) {
+                report(product, None, $disposition);
+            }
+            return (products, Vec::new());
+        }};
+    }
     let Some(include) = context_paths(include) else {
-        return Vec::new();
+        reject_all!(PublicationDisposition::IncludeUnavailable);
     };
     if endpoint_identity.is_empty()
         || endpoint_identity.len() > 4096
-        || product_bytes.len() > PRODUCT_MAX_BYTES
         || !evidence.valid(target_source)
         || !evidence.selection_complete
     {
-        return Vec::new();
+        reject_all!(PublicationDisposition::InvocationProofRejected);
     }
-    let Ok(requirements) = crate::prepared_artifact::production_requirements() else {
-        return Vec::new();
-    };
-    let Ok(parsed) = tidepool_repr::execution_schema::parse_module_products(
-        product_bytes,
-        &requirements,
-        product_decode_limits(),
-    ) else {
-        return Vec::new();
-    };
-    if parsed != products {
-        return Vec::new();
+    if per_module_bytes
+        .iter()
+        .any(|bytes| bytes.len() > RECORD_LIMIT)
+    {
+        reject_all!(PublicationDisposition::ProductSplitRejected);
     }
-    let Some(per_module_bytes) = split_module_product_bytes(product_bytes, products) else {
-        return Vec::new();
-    };
-    let Some(mut package_imports) = split_package_imports(package_bundle_bytes, products) else {
-        return Vec::new();
+    let Some(mut package_imports) = package_imports else {
+        reject_all!(PublicationDisposition::PackageBundleRejected);
     };
     let mut records = Vec::new();
     for (product, module_bytes) in products.iter().zip(per_module_bytes) {
+        let original_bytes = Some(module_bytes.len());
+        if generation_dependent(product) {
+            report(
+                product,
+                original_bytes,
+                PublicationDisposition::GenerationDependent,
+            );
+            continue;
+        }
         let Some(package_imports_bytes) =
             package_imports.remove(&(product.unit.clone(), product.module.clone()))
         else {
+            report(
+                product,
+                original_bytes,
+                PublicationDisposition::PackageWitnessMissing,
+            );
             continue;
         };
         let iface_sha: [u8; 32] = Sha256::digest(&product.interface).into();
@@ -358,17 +842,19 @@ fn eligible_records(
         )
         .is_err()
         {
+            report(
+                product,
+                original_bytes,
+                PublicationDisposition::PackageWitnessRejected,
+            );
             continue;
         }
-        if product.unit.is_empty()
-            || product.module.is_empty()
-            || product.interface.is_empty()
-            || !parsed.iter().any(|p| {
-                p.unit == product.unit
-                    && p.module == product.module
-                    && p.interface == product.interface
-            })
-        {
+        if product.unit.is_empty() || product.module.is_empty() || product.interface.is_empty() {
+            report(
+                product,
+                original_bytes,
+                PublicationDisposition::ProductOwnerRejected,
+            );
             continue;
         }
         let matching: Vec<_> = evidence
@@ -382,16 +868,38 @@ fn eligible_records(
             })
             .collect();
         if matching.len() != 1 {
+            report(
+                product,
+                original_bytes,
+                PublicationDisposition::ModuleEvidenceRejected,
+            );
             continue;
         }
         let source = &matching[0].source;
         let (source, source_sha256) = if source == Path::new("@generated-source") {
+            report(
+                product,
+                original_bytes,
+                PublicationDisposition::GeneratedRequestTarget,
+            );
             continue;
         } else {
             let Some(path) = absolute(source) else {
+                report(
+                    product,
+                    original_bytes,
+                    PublicationDisposition::SourceUnavailable,
+                );
                 continue;
             };
-            let Ok(bytes) = fs::read(&path) else { continue };
+            let Ok(bytes) = fs::read(&path) else {
+                report(
+                    product,
+                    original_bytes,
+                    PublicationDisposition::SourceUnavailable,
+                );
+                continue;
+            };
             (path, sha(&bytes))
         };
         if !evidence
@@ -399,11 +907,16 @@ fn eligible_records(
             .iter()
             .any(|s| absolute(&s.path).as_ref() == Some(&source) && s.sha256 == source_sha256)
         {
+            report(
+                product,
+                original_bytes,
+                PublicationDisposition::SourceEvidenceRejected,
+            );
             continue;
         }
         let record = Record {
             tag: "TPMCAN".into(),
-            version: 6,
+            version: RECORD_VERSION,
             endpoint: endpoint_identity.to_vec(),
             include: include.clone(),
             evidence: evidence.clone(),
@@ -415,42 +928,101 @@ fn eligible_records(
             interface: product.interface.clone(),
             package_imports: package_imports_bytes,
             target_source: target_source.to_owned(),
+            version_origin: version_origin.clone(),
+            original_owner: OriginalOwner {
+                unit: product.unit.clone(),
+                module: product.module.clone(),
+                module_version: [0; 32],
+                skinny_iface_sha256: [0; 32],
+                product_sha256: [0; 32],
+            },
+            original_certification: Vec::new(),
+            execution_source_sha256: None,
+            execution_source: None,
         };
+        let mut record = record;
+        let owner = computed_owner(&record);
+        record.original_owner = OriginalOwner::from_owner(&owner);
+        if let Some(original) = certified.iter().find(|original| {
+            original.owner().unit == record.unit && original.owner().module == record.module
+        }) {
+            if original.owner() != &owner
+                || original.interface_bytes() != record.interface
+                || original.product_bytes() != record.products
+                || original.package_imports_bytes() != record.package_imports
+            {
+                report(
+                    product,
+                    original_bytes,
+                    PublicationDisposition::ProductOwnerRejected,
+                );
+                continue;
+            }
+            record.original_certification = original.certification_bytes().to_vec();
+            record.execution_source = original.execution_source().cloned();
+            record.execution_source_sha256 =
+                record.execution_source.as_ref().map(|graph| graph.digest());
+        }
+        report(product, original_bytes, PublicationDisposition::Eligible);
         records.push(record);
     }
-    records
+    (products, records)
 }
 
 /// Persist each eligible ordinary source module in its own bounded record.
-pub(crate) fn publish(
-    endpoint_identity: &[u8],
-    include: &[PathBuf],
-    evidence: &DependencyEvidence,
-    products: &[RawModuleProduct],
-    product_bytes: &[u8],
-    package_bundle_bytes: &[u8],
-    target_source: &str,
-) {
-    let Some(paths) = context_paths(include) else {
-        return;
-    };
-    let dir = record_dir(endpoint_identity, &paths);
-    if fs::create_dir_all(&dir).is_err() {
-        return;
+pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) {
+    let start = std::time::Instant::now();
+    let owners = prepared.records.len();
+    let mut encoded_bytes = 0u64;
+    let mut diagnostics = PublicationDiagnostics::new();
+    let producer_dir = record_dir(prepared.endpoint_identity);
+    if !prepared.graphs.is_empty() {
+        if fs::create_dir_all(&producer_dir).is_err() {
+            return;
+        }
+        for (digest, graph) in &prepared.graphs {
+            if tidepool_atomic_write::write_best_effort(
+                &graph_path(&producer_dir, digest),
+                graph.bytes(),
+            )
+            .is_err()
+            {
+                return;
+            }
+        }
     }
-    for record in eligible_records(
-        endpoint_identity,
-        include,
-        evidence,
-        products,
-        product_bytes,
-        package_bundle_bytes,
-        target_source,
-    ) {
-        let mut bytes = Vec::new();
-        if ciborium::ser::into_writer(&record, &mut bytes).is_err() || bytes.len() > RECORD_LIMIT {
+    for record in prepared.records {
+        let group_rows = prepared.group_counts[&(record.unit.clone(), record.module.clone())];
+        let mut report = |encoded_payload_bytes, disposition| {
+            diagnostics.report_owner(
+                &record.unit,
+                &record.module,
+                group_rows,
+                Some(record.products.len()),
+                encoded_payload_bytes,
+                disposition,
+            );
+        };
+        let producer_dir = record_dir(&record.endpoint);
+        let Some(root) = selected_record_root(&record) else {
+            report(None, PublicationDisposition::SourceRootUnavailable);
+            continue;
+        };
+        let dir = root_shard(&producer_dir, &root);
+        if fs::create_dir_all(&dir).is_err() {
+            report(None, PublicationDisposition::DirectoryUnavailable);
             continue;
         }
+        let bytes = match encode_record_checked(&record) {
+            Ok(bytes) => bytes,
+            Err(rejection) => {
+                report(rejection.payload_bytes, rejection.disposition);
+                continue;
+            }
+        };
+        encoded_bytes += bytes.len() as u64;
+        let header_bytes = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let payload_bytes = bytes.len() - 12 - header_bytes;
         let mut key_material = Vec::new();
         key_material.extend_from_slice(&record.endpoint);
         key_material.extend_from_slice(record.unit.as_bytes());
@@ -458,25 +1030,148 @@ pub(crate) fn publish(
         key_material.extend_from_slice(record.module.as_bytes());
         key_material.push(0);
         key_material.extend_from_slice(record.source.as_os_str().as_encoded_bytes());
-        for root in &record.include {
-            key_material.push(0);
-            key_material.extend_from_slice(root.as_os_str().as_encoded_bytes());
-        }
         let key = sha(&key_material);
-        let _ = tidepool_atomic_write::write_best_effort(&dir.join(format!("{key}.cbor")), &bytes);
+        let disposition =
+            if tidepool_atomic_write::write_best_effort(&dir.join(format!("{key}.cbor")), &bytes)
+                .is_ok()
+            {
+                PublicationDisposition::Published
+            } else {
+                PublicationDisposition::WriteRejected
+            };
+        report(Some(payload_bytes), disposition);
     }
+    crate::timing::record_stage_with_owners(
+        crate::timing::NO_NODE,
+        crate::timing::NO_ROUND,
+        "products.publication_encode_write",
+        start.elapsed(),
+        encoded_bytes,
+        owners,
+    );
 }
 
 fn version_hash(record: &Record) -> [u8; 32] {
-    module_version_for_product(
-        &record.endpoint,
-        &record.include,
-        &record.source_sha256,
-        &record.interface,
-        &record.products,
-        &record.package_imports,
-    )
-    .0
+    match &record.version_origin {
+        CandidateVersionOrigin::Ordinary => {
+            module_version_for_product(
+                &record.endpoint,
+                &record.include,
+                &record.source_sha256,
+                &record.interface,
+                &record.products,
+                &record.package_imports,
+            )
+            .0
+        }
+        CandidateVersionOrigin::Exact { semantic_sha256 } => {
+            exact_module_version_for_product(
+                &record.endpoint,
+                semantic_sha256,
+                &record.unit,
+                &record.module,
+                &parse_sha(&record.source_sha256).unwrap_or([0; 32]),
+                &record.interface,
+                &record.products,
+                &record.package_imports,
+            )
+            .0
+        }
+    }
+}
+
+pub(crate) fn exact_module_version_for_product(
+    producer: &[u8],
+    semantic: &[u8; 32],
+    unit: &str,
+    module: &str,
+    source_sha256: &[u8; 32],
+    interface: &[u8],
+    products: &[u8],
+    packages: &[u8],
+) -> ModuleVersion {
+    let producer =
+        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
+            .sha256();
+    let mut digest = Sha256::new();
+    for field in [
+        b"tidepool-exact-source-home-v2".as_slice(),
+        producer.as_slice(),
+        semantic.as_slice(),
+        unit.as_bytes(),
+        module.as_bytes(),
+        source_sha256.as_slice(),
+        interface,
+        products,
+        packages,
+    ] {
+        digest.update((field.len() as u64).to_be_bytes());
+        digest.update(field);
+    }
+    ModuleVersion(digest.finalize().into())
+}
+
+fn computed_owner(record: &Record) -> CachedHomeOwner {
+    CachedHomeOwner {
+        unit: record.unit.clone(),
+        module: record.module.clone(),
+        module_version: ModuleVersion(version_hash(record)),
+        skinny_iface_sha256: Sha256::digest(&record.interface).into(),
+        product_sha256: Sha256::digest(&record.products).into(),
+    }
+}
+
+fn parse_sha(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut result = [0; 32];
+    for (slot, pair) in result.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+        *slot = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(result)
+}
+
+#[cfg(test)]
+pub(crate) fn test_candidate_graph_path(producer: &[u8], digest: [u8; 32]) -> PathBuf {
+    graph_path(&record_dir(producer), &digest)
+}
+
+fn graph_path(root: &Path, digest: &[u8; 32]) -> PathBuf {
+    root.join(format!("execution-{}.cbor", hex(digest)))
+}
+
+fn validate_original_execution(
+    record: &Record,
+    graph: Arc<crate::execution_source::CertifiedExecutionSourceGraph>,
+    validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+) -> Option<OriginalCandidateExecution> {
+    let owner = computed_owner(record);
+    let semantic = match record.version_origin {
+        CandidateVersionOrigin::Ordinary => None,
+        CandidateVersionOrigin::Exact { semantic_sha256 } => Some(semantic_sha256),
+    };
+    if record.original_owner.owner() != owner
+        || record.execution_source_sha256 != Some(graph.digest())
+        || graph.producer_sha256()
+            != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                &record.endpoint,
+            )
+            .sha256()
+        || graph.semantic_sha256() != semantic
+        || !graph.eligible_execution_root(&owner)
+        || crate::certified_products::candidate_execution_source_digest_with_validation(
+            &record.original_certification,
+            &owner,
+            &record.package_imports,
+            validation,
+        )
+        .ok()?
+            != Some(graph.digest())
+    {
+        return None;
+    }
+    Some(OriginalCandidateExecution { graph })
 }
 
 /// The include paths must already be canonicalized by `context_paths`.
@@ -502,30 +1197,86 @@ pub(crate) fn module_version_for_product(
     ModuleVersion(h.finalize().into())
 }
 
-fn ordinary_records(endpoint_identity: &[u8], include: &[PathBuf]) -> Option<Vec<Record>> {
+fn ordinary_records(
+    endpoint_identity: &[u8],
+    include: &[PathBuf],
+    exact_disjoint: bool,
+) -> Option<Vec<Record>> {
     let include = context_paths(include)?;
-    let dir = record_dir(endpoint_identity, &include);
-    let mut paths: Vec<_> = match fs::read_dir(dir) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "cbor"))
-            .collect(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(_) => return None,
-    };
-    paths.sort();
-    paths.truncate(CANDIDATE_LIMIT);
-    let records = paths
-        .into_iter()
-        .filter_map(|path| {
-            let bytes = fs::read(path).ok()?;
-            if bytes.len() > RECORD_LIMIT {
-                return None;
+    let producer_dir = record_dir(endpoint_identity);
+    let started = std::time::Instant::now();
+    let mut paths = Vec::new();
+    let roots = include.iter().cloned().collect::<BTreeSet<_>>();
+    for root in &roots {
+        match fs::read_dir(root_shard(&producer_dir, root)) {
+            Ok(entries) => {
+                for entry in entries {
+                    let path = entry.ok()?.path();
+                    if path.extension().is_some_and(|x| x == "cbor") {
+                        paths.push(path);
+                        if paths.len() > DISCOVERY_LIMIT {
+                            tracing::info!(target: "tidepool_toolchain::module_candidates", phase = "candidate_discovery_bound", limit = DISCOVERY_LIMIT, active_roots = roots.len());
+                            return None;
+                        }
+                    }
+                }
             }
-            ciborium::de::from_reader::<Record, _>(bytes.as_slice()).ok()
-        })
-        .collect();
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+    }
+    paths.sort();
+    let mut headers_read = 0_u64;
+    let mut header_bytes = 0_u64;
+    let mut selected: BTreeMap<(String, String), (RecordHeader, fs::File)> = BTreeMap::new();
+    let mut ambiguous = BTreeSet::new();
+    for path in paths {
+        let Ok(mut file) = fs::File::open(path) else {
+            continue;
+        };
+        let Some(header) = read_header(&mut file) else {
+            continue;
+        };
+        headers_read += 1;
+        header_bytes += file.stream_position().ok()?;
+        if header.endpoint != endpoint_identity
+            || (!exact_disjoint && header.include != include)
+            || (exact_disjoint && !current_source_matches(&header.module, &header.source, &include))
+        {
+            continue;
+        }
+        let key = (header.unit.clone(), header.module.clone());
+        if let Some((previous, _)) = selected.get(&key) {
+            if previous.source != header.source {
+                ambiguous.insert(key);
+                continue;
+            }
+            if previous.include == include || header.include != include {
+                continue;
+            }
+        }
+        selected.insert(key, (header, file));
+    }
+    for key in ambiguous {
+        selected.remove(&key);
+    }
+    if selected.len() > CANDIDATE_LIMIT {
+        return None;
+    }
+    let mut record_bytes = 0_u64;
+    let mut records = Vec::new();
+    for (_, (header, mut file)) in selected {
+        record_bytes += header.payload_len;
+        if record_bytes > PAYLOAD_LIMIT as u64 {
+            return None;
+        }
+        if let Some(record) = read_record(&mut file, &header) {
+            records.push(record);
+        }
+    }
+    tracing::info!(target: "tidepool_toolchain::module_candidates",
+        phase = "candidate_record_read_decode", elapsed_ms = started.elapsed().as_millis() as u64,
+        active_roots = roots.len(), headers_read, header_bytes, record_bytes, decoded_records = records.len());
     Some(records)
 }
 
@@ -549,11 +1300,44 @@ pub(crate) fn select(
         endpoint_identity,
         include,
         scratch,
-        ordinary_records(endpoint_identity, include)?
+        ordinary_records(endpoint_identity, include, false)?
             .into_iter()
             .map(|r| (r, CandidateOrigin::Ordinary))
             .collect(),
     )
+}
+
+/// Exact owners and planned generated modules are issued by the owning compile
+/// request after its context and checked values have been admitted.
+#[derive(Debug)]
+pub(crate) struct ExactCandidateExclusions {
+    protected: BTreeSet<(String, String)>,
+    reserved: BTreeSet<String>,
+    originals: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
+}
+
+impl ExactCandidateExclusions {
+    pub(crate) fn new(protected: BTreeSet<(String, String)>, reserved: BTreeSet<String>) -> Self {
+        Self {
+            protected,
+            reserved,
+            originals: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_originals(
+        mut self,
+        originals: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
+    ) -> Self {
+        self.originals = originals;
+        self
+    }
+
+    fn excludes(&self, unit: &str, module: &str) -> bool {
+        self.protected
+            .contains(&(unit.to_owned(), module.to_owned()))
+            || self.reserved.contains(module)
+    }
 }
 
 /// Configuration enters here from the owning compile front door, never from
@@ -563,6 +1347,25 @@ pub(crate) fn select_configured(
     include: &[PathBuf],
     scratch: &Path,
 ) -> Result<Option<CandidateSet>, deployment::ModulePackageError> {
+    select_configured_inner(endpoint_identity, include, scratch, None)
+}
+
+pub(crate) fn select_configured_disjoint(
+    endpoint_identity: &[u8],
+    include: &[PathBuf],
+    scratch: &Path,
+    exclusions: &ExactCandidateExclusions,
+) -> Result<Option<CandidateSet>, deployment::ModulePackageError> {
+    select_configured_inner(endpoint_identity, include, scratch, Some(exclusions))
+}
+
+fn select_configured_inner(
+    endpoint_identity: &[u8],
+    include: &[PathBuf],
+    scratch: &Path,
+    exclusions: Option<&ExactCandidateExclusions>,
+) -> Result<Option<CandidateSet>, deployment::ModulePackageError> {
+    let started = std::time::Instant::now();
     let package = crate::toolchain::configured_module_package()?;
     let has_package = package.is_some();
     let mut records = match package {
@@ -574,13 +1377,17 @@ pub(crate) fn select_configured(
         .map(|(r, _)| (r.unit.clone(), r.module.clone()))
         .collect();
     records.extend(
-        ordinary_records(endpoint_identity, include)
+        ordinary_records(endpoint_identity, include, exclusions.is_some())
             .unwrap_or_default()
             .into_iter()
             .filter(|r| !deployed.contains(&(r.unit.clone(), r.module.clone())))
             .map(|r| (r, CandidateOrigin::Ordinary)),
     );
-    let selected = select_records(endpoint_identity, include, scratch, records);
+    let selected = select_records_inner(endpoint_identity, include, scratch, records, exclusions);
+    tracing::info!(target: "tidepool_toolchain::module_candidates",
+        phase = "candidate_selection", elapsed_ms = started.elapsed().as_millis() as u64,
+        exact_disjoint = exclusions.is_some(),
+        offered = selected.as_ref().map_or(0, |set| set.by_owner.len()));
     if has_package && selected.is_none() {
         return Err(deployment::ModulePackageError::Format(
             "candidate selection",
@@ -589,43 +1396,70 @@ pub(crate) fn select_configured(
     Ok(selected)
 }
 
+#[cfg(test)]
 fn select_records(
     endpoint_identity: &[u8],
     include: &[PathBuf],
     scratch: &Path,
     records: Vec<(Record, CandidateOrigin)>,
 ) -> Option<CandidateSet> {
+    select_records_inner(endpoint_identity, include, scratch, records, None)
+}
+
+fn select_records_inner(
+    endpoint_identity: &[u8],
+    include: &[PathBuf],
+    scratch: &Path,
+    records: Vec<(Record, CandidateOrigin)>,
+    exclusions: Option<&ExactCandidateExclusions>,
+) -> Option<CandidateSet> {
     let include = context_paths(include)?;
     let requirements = crate::prepared_artifact::production_requirements().ok()?;
-    let mut by_owner = BTreeMap::new();
-    let mut manifest = Vec::new();
+    let mut validated = BTreeMap::new();
+    let mut package_validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+    let mut validation_elapsed = std::time::Duration::ZERO;
+    let mut decode_elapsed = std::time::Duration::ZERO;
+    let mut decoded_bytes = 0_u64;
     fs::create_dir_all(scratch).ok()?;
     let scratch = absolute(scratch)?;
-    for (record, origin) in records {
+    let mut recovered_graphs =
+        BTreeMap::<[u8; 32], Arc<crate::execution_source::CertifiedExecutionSourceGraph>>::new();
+    let mut graph_bytes = 0usize;
+    for (mut record, origin) in records {
         if record.tag != "TPMCAN"
-            || record.version != 6
+            || record.version != RECORD_VERSION
             || record.endpoint != endpoint_identity
-            || (matches!(origin, CandidateOrigin::Ordinary) && record.include != include)
+            || (matches!(origin, CandidateOrigin::Ordinary)
+                && exclusions.is_none()
+                && record.include != include)
             || record.source.is_relative()
+            || exclusions.is_some_and(|e| e.excludes(&record.unit, &record.module))
         {
             continue;
         }
+        let validation_started = std::time::Instant::now();
         let Ok(source_bytes) = fs::read(&record.source) else {
             continue;
         };
-        if sha(&source_bytes) != record.source_sha256
-            || !record.evidence.selection_complete
-            || !record.evidence.valid(&record.target_source)
-        {
+        let valid = sha(&source_bytes) == record.source_sha256
+            && record.evidence.selection_complete
+            && record.evidence.valid(&record.target_source);
+        validation_elapsed += validation_started.elapsed();
+        if !valid {
             continue;
         }
-        let Ok(parsed) = tidepool_repr::execution_schema::parse_module_products(
+        let decode_started = std::time::Instant::now();
+        decoded_bytes += record.products.len() as u64;
+        let parsed = tidepool_repr::execution_schema::parse_module_products(
             &record.products,
             &requirements,
             product_decode_limits(),
-        ) else {
+        );
+        decode_elapsed += decode_started.elapsed();
+        let Ok(parsed) = parsed else { continue };
+        if parsed.len() != 1 {
             continue;
-        };
+        }
         let matching: Vec<_> = parsed
             .into_iter()
             .filter(|p| {
@@ -659,17 +1493,77 @@ fn select_records(
         }
         let iface_sha = Sha256::digest(&record.interface);
         let iface_sha_array: [u8; 32] = iface_sha.into();
-        if crate::recovery_artifacts::validate_package_imports(
-            &record.package_imports,
-            &record.unit,
-            &record.module,
-            &iface_sha_array,
-            Path::new("module-package-imports.cbor"),
-        )
-        .is_err()
-        {
+        let Ok(package_roots) =
+            crate::recovery_artifacts::validate_package_import_evidence_with_validation(
+                &record.package_imports,
+                &record.unit,
+                &record.module,
+                &iface_sha_array,
+                Path::new("module-package-imports.cbor"),
+                &mut package_validation,
+            )
+        else {
+            continue;
+        };
+        if record.original_owner.owner() != computed_owner(&record) {
             continue;
         }
+        if let Some(digest) = record.execution_source_sha256 {
+            let graph = if let Some(graph) = record.execution_source.take() {
+                graph
+            } else if let Some(graph) = recovered_graphs.get(&digest) {
+                Arc::clone(graph)
+            } else {
+                let path = graph_path(&record_dir(endpoint_identity), &digest);
+                let mut file = fs::File::open(path).ok()?;
+                if file.metadata().ok()?.len() > crate::execution_source::GRAPH_BYTES_LIMIT as u64 {
+                    return None;
+                }
+                let mut bytes = Vec::new();
+                (&mut file)
+                    .take(crate::execution_source::GRAPH_BYTES_LIMIT as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .ok()?;
+                graph_bytes = graph_bytes.checked_add(bytes.len())?;
+                if graph_bytes > crate::execution_source::GRAPH_BYTES_LIMIT
+                    || bytes.len() > crate::execution_source::GRAPH_BYTES_LIMIT
+                    || <[u8; 32]>::from(Sha256::digest(&bytes)) != digest
+                {
+                    return None;
+                }
+                crate::execution_source::CertifiedExecutionSourceGraph::recover_verified(
+                    bytes, digest,
+                )
+                .ok()?
+            };
+            validate_original_execution(&record, Arc::clone(&graph), &mut package_validation)?;
+            recovered_graphs.insert(digest, Arc::clone(&graph));
+            record.execution_source = Some(graph);
+        } else if record.execution_source.is_some() {
+            return None;
+        }
+        let product = matching.into_iter().next()?;
+        if generation_dependent(&product) {
+            continue;
+        }
+        let key = (record.unit.clone(), record.module.clone());
+        if validated
+            .insert(key, (record, origin, product, package_roots))
+            .is_some()
+        {
+            return None;
+        }
+    }
+    tracing::info!(target: "tidepool_toolchain::module_candidates",
+        phase = "candidate_record_validation", validation_ms = validation_elapsed.as_millis() as u64,
+        product_decode_ms = decode_elapsed.as_millis() as u64, decoded_product_bytes = decoded_bytes,
+        validated = validated.len());
+    if let Some(exclusions) = exclusions {
+        retain_closed_disjoint(&mut validated, exclusions, &include);
+    }
+    let mut by_owner = BTreeMap::new();
+    let mut manifest = Vec::new();
+    for (_, (record, origin, product, _)) in validated {
         let product_sha: [u8; 32] = Sha256::digest(&record.products).into();
         let Ok(evidence_bytes) = serde_json::to_vec(&record.evidence) else {
             continue;
@@ -700,13 +1594,7 @@ fn select_records(
                 ])
             })
             .collect();
-        let owner = CachedHomeOwner {
-            unit: record.unit.clone(),
-            module: record.module.clone(),
-            module_version: ModuleVersion(version_hash(&record)),
-            skinny_iface_sha256: iface_sha.into(),
-            product_sha256: product_sha,
-        };
+        let owner = record.original_owner.owner();
         let (iface_path, package_imports_path) = match &origin {
             CandidateOrigin::Deployment {
                 interface,
@@ -717,22 +1605,16 @@ fn select_records(
                     "candidate-{}.hi",
                     sha(format!("{}:{}", record.unit, record.module).as_bytes())
                 ));
-                if tidepool_atomic_write::write_best_effort(&iface_path, &record.interface).is_err()
-                {
-                    continue;
-                }
+                tidepool_atomic_write::write_best_effort(&iface_path, &record.interface).ok()?;
                 let package_path = PathBuf::from(format!("{}.packages", iface_path.display()));
-                if tidepool_atomic_write::write_best_effort(&package_path, &record.package_imports)
-                    .is_err()
-                {
-                    continue;
-                }
+                tidepool_atomic_write::write_best_effort(&package_path, &record.package_imports)
+                    .ok()?;
                 (iface_path, package_path)
             }
         };
         let bundle = CandidateBundle {
             owner: owner.clone(),
-            product: matching.into_iter().next()?,
+            product,
             source: record.source.clone(),
             source_sha256: record.source_sha256.clone(),
             iface_path: iface_path.clone(),
@@ -744,6 +1626,12 @@ fn select_records(
             evidence: record.evidence.clone(),
             target_source: record.target_source.clone(),
             origin,
+            original_execution: record.execution_source.as_ref().map(|graph| {
+                OriginalCandidateExecution {
+                    graph: Arc::clone(graph),
+                }
+            }),
+            execution_admitted: false,
         };
         if by_owner
             .insert((owner.unit.clone(), owner.module.clone()), bundle)
@@ -752,6 +1640,9 @@ fn select_records(
             return None;
         }
         let selected_product = &by_owner[&(record.unit.clone(), record.module.clone())].product;
+        let product_path =
+            scratch.join(format!("candidate-{}.tpmod", hex(&owner.module_version.0)));
+        tidepool_atomic_write::write_best_effort(&product_path, &record.products).ok()?;
         manifest.push(Value::Array(vec![
             Value::Text(owner.unit),
             Value::Text(owner.module),
@@ -772,16 +1663,75 @@ fn select_records(
             ),
             Value::Text(package_imports_path.to_string_lossy().into_owned()),
             Value::Text(sha(&record.package_imports)),
+            Value::Text(product_path.to_string_lossy().into_owned()),
         ]));
+    }
+    retain_closed_execution_capabilities(
+        &mut by_owner,
+        exclusions.map_or(&[], |exclusions| exclusions.originals.as_slice()),
+    );
+    let graph_bytes = by_owner
+        .values()
+        .filter(|bundle| bundle.execution_admitted)
+        .filter_map(|bundle| bundle.original_execution.as_ref())
+        .map(|proof| (proof.graph.digest(), proof.graph.bytes().len()))
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
+        .try_fold(0usize, |total, bytes| total.checked_add(bytes))?;
+    if graph_bytes > MANIFEST_LIMIT {
+        tracing::info!(target: "tidepool_toolchain::module_candidates", reason = ?CandidateExecutionUnavailable::ManifestBound,
+            graph_bytes, limit = MANIFEST_LIMIT, "candidate offer omitted because its execution provenance exceeds the manifest bound");
+        return None;
     }
     let value = Value::Array(vec![
         Value::Text("TPMCAN".into()),
-        Value::Text("5".into()),
+        Value::Text("7".into()),
         Value::Array(manifest),
+        Value::Array(vec![
+            Value::Array(
+                by_owner
+                    .values()
+                    .filter(|bundle| bundle.execution_admitted)
+                    .filter_map(|bundle| bundle.original_execution.as_ref())
+                    .map(|proof| (proof.graph.digest(), &proof.graph))
+                    .collect::<BTreeMap<_, _>>()
+                    .into_iter()
+                    .map(|(digest, graph)| {
+                        Value::Array(vec![
+                            Value::Text(hex(&digest)),
+                            Value::Bytes(graph.bytes().to_vec()),
+                        ])
+                    })
+                    .collect(),
+            ),
+            Value::Array(
+                by_owner
+                    .values()
+                    .filter_map(|bundle| {
+                        if !bundle.execution_admitted {
+                            return None;
+                        }
+                        let proof = bundle.original_execution.as_ref()?;
+                        let owner = &bundle.owner;
+                        Some(Value::Array(vec![
+                            Value::Text(owner.unit.clone()),
+                            Value::Text(owner.module.clone()),
+                            Value::Text(hex(&owner.module_version.0)),
+                            Value::Text(hex(&owner.skinny_iface_sha256)),
+                            Value::Text(hex(&owner.product_sha256)),
+                            Value::Text(hex(&proof.graph.digest())),
+                        ]))
+                    })
+                    .collect(),
+            ),
+        ]),
     ]);
     let mut encoded = Vec::new();
     ciborium::ser::into_writer(&value, &mut encoded).ok()?;
     if encoded.len() > MANIFEST_LIMIT {
+        tracing::info!(target: "tidepool_toolchain::module_candidates", reason = ?CandidateExecutionUnavailable::ManifestBound,
+            manifest_bytes = encoded.len(), limit = MANIFEST_LIMIT,
+            "candidate offer omitted because its execution provenance exceeds the manifest bound");
         return None;
     }
     let manifest_path = scratch.join("module-candidates.cbor");
@@ -790,6 +1740,230 @@ fn select_records(
         manifest_path,
         by_owner,
     })
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CandidateExecutionUnavailable {
+    OriginalClosureUnavailable,
+    ManifestBound,
+}
+
+fn retain_closed_execution_capabilities(
+    bundles: &mut BTreeMap<(String, String), CandidateBundle>,
+    originals: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+) {
+    let mut owners: BTreeMap<_, _> = bundles
+        .values()
+        .map(|bundle| {
+            (
+                (bundle.owner.unit.clone(), bundle.owner.module.clone()),
+                bundle.owner.clone(),
+            )
+        })
+        .collect();
+    let mut graphs: BTreeMap<_, _> = bundles
+        .values()
+        .filter_map(|bundle| {
+            bundle.original_execution.as_ref().map(|proof| {
+                (
+                    (bundle.owner.unit.clone(), bundle.owner.module.clone()),
+                    (bundle.owner.clone(), Arc::clone(&proof.graph)),
+                )
+            })
+        })
+        .collect();
+    for original in originals {
+        let key = (
+            original.owner().unit.clone(),
+            original.owner().module.clone(),
+        );
+        if owners
+            .get(&key)
+            .is_some_and(|owner| owner != original.owner())
+        {
+            continue;
+        }
+        owners.insert(key.clone(), original.owner().clone());
+        if let Some(graph) = original.execution_source() {
+            graphs.insert(key, (original.owner().clone(), Arc::clone(graph)));
+        }
+    }
+    for bundle in bundles.values_mut() {
+        let Some(proof) = bundle.original_execution.as_ref() else {
+            continue;
+        };
+        let mut pending = vec![(bundle.owner.clone(), Arc::clone(&proof.graph))];
+        let mut seen = BTreeSet::new();
+        let mut closed = true;
+        while let Some((owner, graph)) = pending.pop() {
+            if !seen.insert((
+                owner.unit.clone(),
+                owner.module.clone(),
+                owner.module_version.0,
+                owner.skinny_iface_sha256,
+                owner.product_sha256,
+                graph.digest(),
+            )) {
+                continue;
+            }
+            if !graph.eligible_execution_root(&owner)
+                || graph.required_source_owners(&owner).iter().any(|required| {
+                    owners.get(&(required.unit.clone(), required.module.clone())) != Some(required)
+                })
+            {
+                closed = false;
+                break;
+            }
+            for (required, digest) in graph.required_original_graphs(&owner) {
+                let Some((selected, required_graph)) =
+                    graphs.get(&(required.unit.clone(), required.module.clone()))
+                else {
+                    closed = false;
+                    break;
+                };
+                if selected != &required || required_graph.digest() != digest {
+                    closed = false;
+                    break;
+                }
+                pending.push((required, Arc::clone(required_graph)));
+            }
+            if !closed {
+                break;
+            }
+        }
+        bundle.execution_admitted = closed;
+        if !closed {
+            tracing::debug!(target: "tidepool_toolchain::module_candidates", unit = bundle.owner.unit.as_str(),
+                module = bundle.owner.module.as_str(), reason = ?CandidateExecutionUnavailable::OriginalClosureUnavailable,
+                "candidate retains native products without execution capability");
+        }
+    }
+}
+
+fn generation_dependent(product: &RawModuleProduct) -> bool {
+    product.groups.iter().any(|group| {
+        group
+            .globals()
+            .iter()
+            .any(|global| global.required_generation.is_some())
+    })
+}
+
+type ValidatedCandidate = (
+    Record,
+    CandidateOrigin,
+    RawModuleProduct,
+    crate::recovery_artifacts::ValidatedPackageImports,
+);
+
+/// Authenticated direct package selections and closed compiler-provided
+/// categories alone classify pathless imports. Missing home/Val evidence
+/// cannot acquire package authority from its spelling.
+pub(crate) fn package_edge_matches(
+    edge: &crate::cache::ModuleImportEvidence,
+    evidence: &crate::recovery_artifacts::ValidatedPackageImports,
+) -> bool {
+    use crate::cache::ImportQualifier;
+    use crate::recovery_artifacts::CompilerProvidedImport;
+    if edge.boot || edge.selected.is_some() {
+        return false;
+    }
+    let primitive = edge.module == "GHC.Prim"
+        && evidence
+            .compiler_provided()
+            .contains(&CompilerProvidedImport::Primitive);
+    match &edge.qualifier {
+        ImportQualifier::OtherUnit(unit) => {
+            evidence
+                .roots()
+                .contains_key(&(unit.clone(), edge.module.clone()))
+                || (unit == "ghc-prim" && primitive)
+        }
+        ImportQualifier::Unqualified => {
+            evidence
+                .roots()
+                .keys()
+                .filter(|(_, module)| module == &edge.module)
+                .count()
+                + usize::from(primitive)
+                == 1
+        }
+        ImportQualifier::ThisUnit(_) => false,
+    }
+}
+
+/// Remove vertices until every remaining home edge names another offered body
+/// at the exact source path selected in its original evidence.
+
+fn retain_closed_disjoint(
+    candidates: &mut BTreeMap<(String, String), ValidatedCandidate>,
+    exclusions: &ExactCandidateExclusions,
+    include: &[PathBuf],
+) {
+    loop {
+        let rejected: Vec<_> = candidates
+            .iter()
+            .filter_map(|(key, (record, _, _, package_roots))| {
+                let owner = record.evidence.modules.iter().find(|m| {
+                    m.unit == record.unit
+                        && m.module == record.module
+                        && !m.boot
+                        && absolute(&m.source).as_ref() == Some(&record.source)
+                });
+                let closed = owner.is_some_and(|owner| {
+                    owner.imports.iter().all(|edge| {
+                        use crate::cache::ImportQualifier;
+                        if edge.selected.is_none() {
+                            return !edge.boot
+                                && package_edge_matches(edge, package_roots)
+                                && (!matches!(edge.qualifier, ImportQualifier::Unqualified)
+                                    || matches!(
+                                        current_home_path(&edge.module, include),
+                                        Ok(None)
+                                    ));
+                        }
+                        // Boot interfaces do not yet carry an authenticated body pair
+                        // in this offer. Keep ordinary SOURCE reuse separate.
+                        if edge.boot {
+                            return false;
+                        }
+                        let Some(selected) = edge.selected.as_ref().and_then(|p| absolute(p))
+                        else {
+                            return false;
+                        };
+                        let mut matches = record.evidence.modules.iter().filter(|m| {
+                            m.module == edge.module
+                                && m.boot == edge.boot
+                                && absolute(&m.source).as_ref() == Some(&selected)
+                                && match &edge.qualifier {
+                                    ImportQualifier::ThisUnit(unit) => &m.unit == unit,
+                                    ImportQualifier::Unqualified => true,
+                                    ImportQualifier::OtherUnit(_) => false,
+                                }
+                        });
+                        let Some(dependency) = matches.next() else {
+                            return false;
+                        };
+                        if matches.next().is_some()
+                            || exclusions.excludes(&dependency.unit, &dependency.module)
+                        {
+                            return false;
+                        }
+                        candidates
+                            .get(&(dependency.unit.clone(), dependency.module.clone()))
+                            .is_some_and(|(body, _, _, _)| body.source == selected)
+                    })
+                });
+                (!closed).then(|| key.clone())
+            })
+            .collect();
+        if rejected.is_empty() {
+            break;
+        }
+        for key in rejected {
+            candidates.remove(&key);
+        }
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -804,6 +1978,70 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
+
+    #[test]
+    #[ignore = "requires retained Core record input and fresh output directory"]
+    fn retained_core_candidate_production_emitter() {
+        let input = PathBuf::from(
+            std::env::var_os("TIDEPOOL_CANDIDATE_RECORD_INPUT").expect("retained Core record"),
+        );
+        let output = PathBuf::from(
+            std::env::var_os("TIDEPOOL_CANDIDATE_RECORD_OUTPUT").expect("fresh output directory"),
+        );
+        assert!(!output.exists(), "diagnostic output must be fresh");
+        let input_bytes = fs::read(&input).unwrap();
+        assert!(input_bytes.len() <= RECORD_LIMIT + HEADER_LIMIT + 12);
+        let record = read_record_path(&input).expect("authenticated production record");
+        assert_eq!(record.unit, "main");
+        assert_eq!(record.module, "Tidepool.Effects.Core");
+        let endpoint = record.endpoint.clone();
+        let include = record.include.clone();
+        let original_products = record.products.clone();
+        let original_interface = record.interface.clone();
+        let original_packages = record.package_imports.clone();
+        let original_version = version_hash(&record);
+        // Ordinary selection exercises the production emitter without asserting
+        // that this single vertex closes an exact-context candidate graph.
+        let selected = select_records(
+            &endpoint,
+            &include,
+            &output,
+            vec![(record, CandidateOrigin::Ordinary)],
+        )
+        .expect("production candidate selection");
+        assert_eq!(selected.by_owner.len(), 1);
+        let bundle = &selected.by_owner[&("main".into(), "Tidepool.Effects.Core".into())];
+        assert_eq!(bundle.product.groups.len(), 6037);
+        assert!(!generation_dependent(&bundle.product));
+        assert_eq!(bundle.owner.module_version.0, original_version);
+        assert_eq!(bundle.product_bytes, original_products);
+        assert_eq!(fs::read(&bundle.iface_path).unwrap(), original_interface);
+        assert_eq!(
+            fs::read(&bundle.package_imports_path).unwrap(),
+            original_packages
+        );
+        let original_product_path =
+            output.join(format!("candidate-{}.tpmod", hex(&original_version)));
+        assert_eq!(fs::read(&original_product_path).unwrap(), original_products);
+        assert_eq!(fs::read(&input).unwrap(), input_bytes);
+        fs::write(
+            output.join("emitter-result.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "scope": "production ordinary emitter; not exact closure or worker admission",
+                "record": input,
+                "record_sha256": sha(&input_bytes),
+                "manifest": selected.manifest_path,
+                "module": bundle.owner.module,
+                "group_rows": bundle.product.groups.len(),
+                "module_version": hex(&original_version),
+                "products": {"path": original_product_path, "bytes": original_products.len(), "sha256": sha(&original_products)},
+                "interface": {"path": bundle.iface_path, "bytes": original_interface.len(), "sha256": sha(&original_interface)},
+                "packages": {"path": bundle.package_imports_path, "bytes": original_packages.len(), "sha256": sha(&original_packages)}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
 
     #[test]
     #[ignore = "requires matched Haskell worker and Rust frontend"]
@@ -925,12 +2163,13 @@ mod tests {
     pub(super) fn package_imports(unit: &str, module: &str, iface: &[u8]) -> Vec<u8> {
         let value = Value::Array(vec![
             Value::Text("TPPKGROOTS".into()),
-            Value::Text("1".into()),
+            Value::Text("2".into()),
             Value::Array(vec![
                 Value::Text(unit.into()),
                 Value::Text(module.into()),
                 Value::Text(sha(iface)),
             ]),
+            Value::Array(vec![]),
             Value::Array(vec![]),
         ]);
         let mut bytes = Vec::new();
@@ -1013,6 +2252,186 @@ mod tests {
     }
 
     #[test]
+    fn execution_capability_requires_current_full_local_source_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let (graph, owners) =
+            crate::execution_source::test_graph_with_local_source_dependency(root.path());
+        let record = candidate_fixture(root.path(), "Unrelated");
+        let make_bundle = |owner: CachedHomeOwner, proof: bool| CandidateBundle {
+            owner,
+            product: tidepool_repr::execution_schema::parse_module_products(
+                &record.products,
+                &crate::prepared_artifact::production_requirements().unwrap(),
+                product_decode_limits(),
+            )
+            .unwrap()
+            .remove(0),
+            source: record.source.clone(),
+            source_sha256: record.source_sha256.clone(),
+            iface_path: root.path().join("fixture.hi"),
+            iface_sha256: sha(&record.interface),
+            package_imports_path: root.path().join("fixture.packages"),
+            package_imports_sha256: sha(&record.package_imports),
+            package_imports_bytes: record.package_imports.clone(),
+            product_bytes: record.products.clone(),
+            evidence: record.evidence.clone(),
+            target_source: record.target_source.clone(),
+            origin: CandidateOrigin::Ordinary,
+            original_execution: proof.then(|| OriginalCandidateExecution {
+                graph: Arc::clone(&graph),
+            }),
+            execution_admitted: false,
+        };
+        let key = |owner: &CachedHomeOwner| (owner.unit.clone(), owner.module.clone());
+        let mut bundles = BTreeMap::from([
+            (key(&owners[0]), make_bundle(owners[0].clone(), true)),
+            (key(&owners[1]), make_bundle(owners[1].clone(), false)),
+        ]);
+        retain_closed_execution_capabilities(&mut bundles, &[]);
+        assert!(
+            bundles[&key(&owners[0])].execution_admitted,
+            "local dependency requires exact owner, not its own graph"
+        );
+        bundles
+            .get_mut(&key(&owners[1]))
+            .unwrap()
+            .owner
+            .module_version = ModuleVersion([99; 32]);
+        retain_closed_execution_capabilities(&mut bundles, &[]);
+        assert!(!bundles[&key(&owners[0])].execution_admitted);
+        assert!(
+            bundles[&key(&owners[0])].original_execution.is_some(),
+            "original custody is retained"
+        );
+        assert_eq!(
+            bundles.len(),
+            2,
+            "native candidates survive execution-only refusal"
+        );
+        bundles.get_mut(&key(&owners[1])).unwrap().owner = owners[1].clone();
+        bundles.insert(key(&owners[2]), make_bundle(owners[2].clone(), true));
+        retain_closed_execution_capabilities(&mut bundles, &[]);
+        assert!(
+            bundles[&key(&owners[0])].execution_admitted,
+            "the same original proof resumes with its original dependency"
+        );
+        assert!(
+            !bundles[&key(&owners[2])].execution_admitted,
+            "unrelated unsupported root is refused independently"
+        );
+        assert!(Arc::ptr_eq(
+            &bundles[&key(&owners[0])]
+                .original_execution
+                .as_ref()
+                .unwrap()
+                .graph,
+            &graph
+        ));
+        let retained = crate::execution_source::test_graph_requiring_original(
+            &graph,
+            &owners[1],
+            graph.digest(),
+        );
+        bundles
+            .get_mut(&key(&owners[0]))
+            .unwrap()
+            .original_execution = Some(OriginalCandidateExecution { graph: retained });
+        retain_closed_execution_capabilities(&mut bundles, &[]);
+        assert!(
+            !bundles[&key(&owners[0])].execution_admitted,
+            "explicit retained edge requires its graph ref"
+        );
+        bundles
+            .get_mut(&key(&owners[1]))
+            .unwrap()
+            .original_execution = Some(OriginalCandidateExecution {
+            graph: Arc::clone(&graph),
+        });
+        retain_closed_execution_capabilities(&mut bundles, &[]);
+        assert!(bundles[&key(&owners[0])].execution_admitted);
+    }
+
+    #[test]
+    fn original_execution_proof_requires_original_owner_producer_semantic_and_seal() {
+        use crate::execution_source::{
+            CertifiedExecutionSourceGraph, ExecutionSourceAdmission, ExecutionSourceGraphInput,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let mut record = candidate_fixture(root.path(), "Library");
+        let owner = computed_owner(&record);
+        let input = root.path().join("Input.hs");
+        fs::write(&input, &record.target_source).unwrap();
+        let make_graph = |producer: &[u8], semantic_sha256| {
+            let ExecutionSourceAdmission::Available(graph) =
+                CertifiedExecutionSourceGraph::admit(ExecutionSourceGraphInput {
+                    producer:
+                        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                            producer,
+                        ),
+                    semantic_sha256,
+                    include: &record.include,
+                    source_path: &input,
+                    source: &record.target_source,
+                    evidence: &record.evidence,
+                    exact_imports: &BTreeMap::new(),
+                    owners: std::slice::from_ref(&owner),
+                    fresh_owners: &BTreeSet::from([crate::declaration_join::ExactModuleIdentity {
+                        unit: owner.unit.clone(),
+                        module: owner.module.clone(),
+                    }]),
+                    retained_sources: &BTreeMap::new(),
+                    packages: &BTreeMap::new(),
+                })
+                .unwrap()
+            else {
+                panic!("graph");
+            };
+            graph
+        };
+        let graph = make_graph(&record.endpoint, None);
+        let wrong_producer = make_graph(b"another producer", None);
+        let wrong_semantic = make_graph(&record.endpoint, Some([8; 32]));
+        let seal = |graph: &crate::execution_source::CertifiedExecutionSourceGraph| {
+            let legacy =
+                crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
+                    .unwrap();
+            crate::certified_products::bind_home_execution_source(
+                &legacy,
+                &owner,
+                graph.digest(),
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
+            .unwrap()
+        };
+        record.original_certification = seal(&graph);
+        record.execution_source_sha256 = Some(graph.digest());
+        let validate =
+            |record: &Record,
+             graph: Arc<crate::execution_source::CertifiedExecutionSourceGraph>| {
+                validate_original_execution(
+                    record,
+                    graph,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
+            };
+        assert!(validate(&record, Arc::clone(&graph)).is_some());
+        let mut changed = record.clone();
+        changed.original_owner.module_version = [99; 32];
+        assert!(validate(&changed, Arc::clone(&graph)).is_none());
+        changed = record.clone();
+        changed.original_certification = b"corrupt seal".to_vec();
+        assert!(validate(&changed, Arc::clone(&graph)).is_none());
+        changed = record.clone();
+        changed.execution_source_sha256 = Some(wrong_producer.digest());
+        changed.original_certification = seal(&wrong_producer);
+        assert!(validate(&changed, wrong_producer).is_none());
+        changed = record;
+        changed.execution_source_sha256 = Some(wrong_semantic.digest());
+        changed.original_certification = seal(&wrong_semantic);
+        assert!(validate(&changed, wrong_semantic).is_none());
+    }
+
+    #[test]
     fn aggregate_product_bound_admits_measured_display_graph_but_rejects_over_limit() {
         assert!(product_decode_limits().max_bytes >= 33_955_557);
         assert!(split_module_product_bytes(&vec![0; PRODUCT_MAX_BYTES + 1], &[]).is_none());
@@ -1050,6 +2469,13 @@ mod tests {
         assert!(split_package_imports(&trailing, &parsed).is_none());
     }
 
+    fn fixture_record_dir(root: &Path) -> PathBuf {
+        root_shard(
+            &root.join(RECORD_DIR).join(sha(b"endpoint")),
+            &absolute(root).unwrap(),
+        )
+    }
+
     fn write_record(root: &Path, source: &Path, unit: &str, module: &str, products: Vec<u8>) {
         let source = fs::canonicalize(source).unwrap();
         let source_bytes = fs::read(&source).unwrap();
@@ -1081,9 +2507,9 @@ mod tests {
         };
         let record = Record {
             tag: "TPMCAN".into(),
-            version: 6,
+            version: RECORD_VERSION,
             endpoint: b"endpoint".to_vec(),
-            include: vec![],
+            include: vec![absolute(root).unwrap()],
             evidence,
             products,
             unit: unit.into(),
@@ -1093,10 +2519,22 @@ mod tests {
             interface: vec![0x42],
             package_imports: package_imports(unit, module, &[0x42]),
             target_source,
+            version_origin: CandidateVersionOrigin::Ordinary,
+            original_owner: OriginalOwner {
+                unit: unit.into(),
+                module: module.into(),
+                module_version: [0; 32],
+                skinny_iface_sha256: [0; 32],
+                product_sha256: [0; 32],
+            },
+            original_certification: Vec::new(),
+            execution_source_sha256: None,
+            execution_source: None,
         };
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(&record, &mut bytes).unwrap();
-        let dir = root.join(RECORD_DIR).join(sha(b"endpoint"));
+        let mut record = record;
+        record.original_owner = OriginalOwner::from_owner(&computed_owner(&record));
+        let bytes = encode_record(&record).unwrap();
+        let dir = fixture_record_dir(root);
         fs::create_dir_all(&dir).unwrap();
         let name = format!(
             "{}.cbor",
@@ -1105,12 +2543,740 @@ mod tests {
         fs::write(dir.join(name), bytes).unwrap();
     }
 
+    fn candidate_fixture(root: &Path, module: &str) -> Record {
+        let source = root.join(format!("{module}.hs"));
+        fs::write(&source, format!("module {module} where\n")).unwrap();
+        write_record(
+            root,
+            &source,
+            "u",
+            module,
+            product_bytes("u", module, &[0x42]),
+        );
+        fs::read_dir(fixture_record_dir(root))
+            .unwrap()
+            .map(|entry| read_record_path(&entry.unwrap().path()).unwrap())
+            .find(|r| r.module == module)
+            .unwrap()
+    }
+
+    fn publication_fixture_report(record: &Record) -> (Vec<Record>, Vec<PublicationDisposition>) {
+        let parsed = crate::certified_products::ParsedModuleProducts::decode(
+            &record.products,
+            &package_bundle(&record.unit, &record.module, &record.interface),
+        )
+        .unwrap();
+        let mut dispositions = Vec::new();
+        let (_, records) = eligible_records_with_report(
+            &record.endpoint,
+            &record.include,
+            &record.evidence,
+            parsed,
+            &record.target_source,
+            &CandidateVersionOrigin::Ordinary,
+            &[],
+            &mut |_, _, disposition| dispositions.push(disposition),
+        );
+        (records, dispositions)
+    }
+
+    #[test]
+    fn publication_preparation_defers_writes_and_preserves_original_frames() {
+        let root = tempfile::tempdir().unwrap();
+        let record = candidate_fixture(root.path(), "Library");
+        fs::rename(
+            fixture_record_dir(root.path()),
+            root.path().join("original-fixture-records"),
+        )
+        .unwrap();
+        let package = package_bundle(&record.unit, &record.module, &record.interface);
+        let parsed =
+            crate::certified_products::ParsedModuleProducts::decode(&record.products, &package)
+                .unwrap();
+        let (products, prepared) = prepare_publication(
+            &record.endpoint,
+            &record.include,
+            &record.evidence,
+            parsed,
+            &record.target_source,
+            CandidateVersionOrigin::Ordinary,
+            &[],
+        );
+        assert_eq!(products.len(), 1);
+        assert_eq!(prepared.records.len(), 1);
+        assert_eq!(prepared.records[0].products, record.products);
+        assert_eq!(prepared.records[0].package_imports, record.package_imports);
+        assert_eq!(version_hash(&prepared.records[0]), version_hash(&record));
+        assert!(!fixture_record_dir(root.path()).exists());
+        drop(prepared); // Discarding a prepared request has no durable side effects.
+        assert!(!fixture_record_dir(root.path()).exists());
+        let parsed = crate::certified_products::ParsedModuleProducts::decode(
+            &record.products,
+            b"invalid package bundle",
+        )
+        .unwrap();
+        let (_, rejected) = prepare_publication(
+            &record.endpoint,
+            &record.include,
+            &record.evidence,
+            parsed,
+            &record.target_source,
+            CandidateVersionOrigin::Ordinary,
+            &[],
+        );
+        assert!(rejected.records.is_empty());
+        assert!(!fixture_record_dir(root.path()).exists());
+    }
+
+    #[test]
+    fn publication_materialized_generated_dependency_is_eligible_but_request_target_is_not() {
+        let root = tempfile::tempdir().unwrap();
+        let mut record = candidate_fixture(root.path(), "Tidepool.Effects.Core");
+        let source = root.path().join("Tidepool/Effects/Core.hs");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::rename(&record.source, &source).unwrap();
+        record.source = fs::canonicalize(source).unwrap();
+        record.evidence.sources[1].path = record.source.clone();
+        record.evidence.modules[0].source = record.source.clone();
+        let (eligible, dispositions) = publication_fixture_report(&record);
+        assert_eq!(dispositions, [PublicationDisposition::Eligible]);
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(selected_record_root(&eligible[0]), Some(root.path().into()));
+
+        record.target_source = fs::read_to_string(&record.source).unwrap();
+        record.evidence.sources.remove(1);
+        record.evidence.sources[0].sha256 = sha(record.target_source.as_bytes());
+        record.evidence.modules[0].source = "@generated-source".into();
+        let (eligible, dispositions) = publication_fixture_report(&record);
+        assert!(eligible.is_empty());
+        assert_eq!(
+            dispositions,
+            [PublicationDisposition::GeneratedRequestTarget]
+        );
+    }
+
+    #[test]
+    fn publication_disposition_retains_source_and_package_proof_refusals() {
+        let root = tempfile::tempdir().unwrap();
+        let mut record = candidate_fixture(root.path(), "Library");
+        record.evidence.sources[1].sha256 = sha(b"unconsumed source");
+        let (eligible, dispositions) = publication_fixture_report(&record);
+        assert!(eligible.is_empty());
+        assert_eq!(
+            dispositions,
+            [PublicationDisposition::InvocationProofRejected]
+        );
+        record.evidence.sources[1].sha256 = sha(&fs::read(&record.source).unwrap());
+        let parsed = crate::certified_products::ParsedModuleProducts::decode(
+            &record.products,
+            &package_bundle(&record.unit, &record.module, &[0x43]),
+        )
+        .unwrap();
+        let mut dispositions = Vec::new();
+        let (_, eligible) = eligible_records_with_report(
+            &record.endpoint,
+            &record.include,
+            &record.evidence,
+            parsed,
+            &record.target_source,
+            &CandidateVersionOrigin::Ordinary,
+            &[],
+            &mut |_, _, disposition| dispositions.push(disposition),
+        );
+        assert!(eligible.is_empty());
+        assert_eq!(
+            dispositions,
+            [PublicationDisposition::PackageWitnessRejected]
+        );
+    }
+
+    #[test]
+    fn publication_payload_limit_reports_actual_encoded_size_with_byte_strings() {
+        let root = tempfile::tempdir().unwrap();
+        let mut record = candidate_fixture(root.path(), "Library");
+        record.products = vec![0xff; RECORD_LIMIT - 1];
+        let rejection = encode_record_checked(&record).unwrap_err();
+        assert_eq!(rejection.disposition, PublicationDisposition::PayloadLimit);
+        assert!(record.products.len() < RECORD_LIMIT);
+        assert!(rejection.payload_bytes.unwrap() > RECORD_LIMIT);
+    }
+
+    #[test]
+    fn publication_diagnostics_preserve_record_encoding_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let record = candidate_fixture(root.path(), "Library");
+        let bytes = encode_record_checked(&record).unwrap();
+        let mut payload = Vec::new();
+        ciborium::ser::into_writer(&record, &mut payload).unwrap();
+        let header = serde_json::to_vec(&RecordHeader::for_record(&record, &payload)).unwrap();
+        assert_eq!(&bytes[..8], RECORD_MAGIC);
+        assert_eq!(&bytes[8..12], &(header.len() as u32).to_be_bytes());
+        assert_eq!(&bytes[12..12 + header.len()], header);
+        assert_eq!(&bytes[12 + header.len()..], payload);
+    }
+
+    #[test]
+    fn candidate_byte_strings_preserve_opaque_buffers_and_module_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let record = candidate_fixture(root.path(), "Library");
+        let identity = version_hash(&record);
+        let framed = encode_record_checked(&record).unwrap();
+        let header_len = u32::from_be_bytes(framed[8..12].try_into().unwrap()) as usize;
+        let payload = &framed[12 + header_len..];
+        let Value::Map(fields) = ciborium::de::from_reader::<Value, _>(payload).unwrap() else {
+            panic!("record must be a map")
+        };
+        for (name, bytes) in [
+            ("endpoint", &record.endpoint),
+            ("products", &record.products),
+            ("interface", &record.interface),
+            ("package_imports", &record.package_imports),
+        ] {
+            assert_eq!(
+                fields
+                    .iter()
+                    .find(|(key, _)| key.as_text() == Some(name))
+                    .unwrap()
+                    .1,
+                Value::Bytes(bytes.clone())
+            );
+        }
+        let decoded: Record = ciborium::de::from_reader(payload).unwrap();
+        assert_eq!(decoded.endpoint, record.endpoint);
+        assert_eq!(decoded.products, record.products);
+        assert_eq!(decoded.interface, record.interface);
+        assert_eq!(decoded.package_imports, record.package_imports);
+        assert_eq!(version_hash(&decoded), identity);
+        assert_eq!(encode_record_checked(&decoded).unwrap(), framed);
+    }
+
+    #[test]
+    fn candidate_byte_strings_refuse_legacy_arrays_and_oversized_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let record = candidate_fixture(root.path(), "Library");
+        let mut payload = Vec::new();
+        ciborium::ser::into_writer(&record, &mut payload).unwrap();
+        let Value::Map(fields) = ciborium::de::from_reader::<Value, _>(payload.as_slice()).unwrap()
+        else {
+            unreachable!()
+        };
+        for name in ["endpoint", "products", "interface", "package_imports"] {
+            let mut legacy = fields.clone();
+            let field = &mut legacy
+                .iter_mut()
+                .find(|(key, _)| key.as_text() == Some(name))
+                .unwrap()
+                .1;
+            let Value::Bytes(bytes) = field else {
+                unreachable!()
+            };
+            *field = Value::Array(bytes.iter().map(|b| Value::Integer((*b).into())).collect());
+            let mut encoded = Vec::new();
+            ciborium::ser::into_writer(&Value::Map(legacy), &mut encoded).unwrap();
+            assert!(ciborium::de::from_reader::<Record, _>(encoded.as_slice()).is_err());
+        }
+        for (name, limit) in [("endpoint", 4096), ("package_imports", 4 << 20)] {
+            let mut oversized = fields.clone();
+            oversized
+                .iter_mut()
+                .find(|(key, _)| key.as_text() == Some(name))
+                .unwrap()
+                .1 = Value::Bytes(vec![0; limit + 1]);
+            let mut encoded = Vec::new();
+            ciborium::ser::into_writer(&Value::Map(oversized), &mut encoded).unwrap();
+            assert!(ciborium::de::from_reader::<Record, _>(encoded.as_slice()).is_err());
+        }
+    }
+
+    #[test]
+    fn candidate_byte_string_migration_refuses_previous_framing_and_record_version() {
+        let root = tempfile::tempdir().unwrap();
+        let mut record = candidate_fixture(root.path(), "Library");
+        let mut framed = encode_record_checked(&record).unwrap();
+        framed[..8].copy_from_slice(b"TPCREC7\n");
+        let path = root.path().join("old-framing.cbor");
+        fs::write(&path, framed).unwrap();
+        assert!(read_record_path(&path).is_none());
+        record.version = 6;
+        let scratch = tempfile::tempdir().unwrap();
+        let include = record.include.clone();
+        assert!(select_records(
+            b"endpoint",
+            &include,
+            scratch.path(),
+            vec![(record, CandidateOrigin::Ordinary)]
+        )
+        .unwrap()
+        .by_owner
+        .is_empty());
+    }
+
+    fn import_candidate(record: &mut Record, dependency: &Record) {
+        use crate::cache::{ImportQualifier, ModuleImportEvidence, ResolutionEvidence};
+        let selected = dependency.source.clone();
+        record.evidence.modules[0]
+            .imports
+            .push(ModuleImportEvidence {
+                qualifier: ImportQualifier::ThisUnit(dependency.unit.clone()),
+                module: dependency.module.clone(),
+                boot: false,
+                selected: Some(selected.clone()),
+            });
+        record.evidence.resolutions.push(ResolutionEvidence {
+            qualifier: ImportQualifier::ThisUnit(dependency.unit.clone()),
+            module: dependency.module.clone(),
+            boot: false,
+            selected: Some(selected.clone()),
+            candidates: vec![selected],
+        });
+        record.evidence.sources.extend(
+            dependency
+                .evidence
+                .sources
+                .iter()
+                .filter(|s| s.path != Path::new("@generated-source"))
+                .cloned(),
+        );
+        record
+            .evidence
+            .modules
+            .extend(dependency.evidence.modules.iter().cloned());
+        record
+            .evidence
+            .resolutions
+            .extend(dependency.evidence.resolutions.iter().cloned());
+        assert!(record.evidence.valid(&record.target_source));
+    }
+
+    fn select_disjoint_records(
+        scratch: &Path,
+        records: Vec<Record>,
+        exclusions: &ExactCandidateExclusions,
+    ) -> CandidateSet {
+        select_records_inner(
+            b"endpoint",
+            &[],
+            scratch,
+            records
+                .into_iter()
+                .map(|r| (r, CandidateOrigin::Ordinary))
+                .collect(),
+            Some(exclusions),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn exact_candidates_keep_greatest_closed_subset_and_original_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let mut a = candidate_fixture(root.path(), "A");
+        let mut b = candidate_fixture(root.path(), "B");
+        let c = candidate_fixture(root.path(), "C");
+        let d = candidate_fixture(root.path(), "D");
+        import_candidate(&mut b, &c);
+        import_candidate(&mut a, &b);
+        let exclusions = ExactCandidateExclusions::new(
+            BTreeSet::from([("u".into(), "C".into())]),
+            BTreeSet::new(),
+        );
+        let selected = select_disjoint_records(scratch.path(), vec![a, b, c, d], &exclusions);
+        assert_eq!(
+            selected.by_owner.keys().cloned().collect::<Vec<_>>(),
+            vec![("u".into(), "D".into())]
+        );
+        let manifest: Value =
+            ciborium::de::from_reader(fs::File::open(&selected.manifest_path).unwrap()).unwrap();
+        let fields = manifest.as_array().unwrap();
+        assert_eq!(fields[1].as_text(), Some("7"));
+        let row = fields[2].as_array().unwrap()[0].as_array().unwrap();
+        assert_eq!(row.len(), 14);
+        let original = fs::read(row[13].as_text().unwrap()).unwrap();
+        let bundle = &selected.by_owner[&("u".into(), "D".into())];
+        assert_eq!(original, bundle.product_bytes);
+        assert_eq!(row[7].as_text(), Some(sha(&original).as_str()));
+        assert_eq!(
+            row[6].as_text(),
+            Some(hex(&bundle.owner.module_version.0).as_str())
+        );
+    }
+
+    #[test]
+    fn exact_candidates_use_selected_paths_and_ignore_unreached_transaction_owners() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let mut a = candidate_fixture(root.path(), "A");
+        let mut b = candidate_fixture(root.path(), "B");
+        let hidden = candidate_fixture(root.path(), "Hidden");
+        // A selected the original B. A different same-named fresh body is not
+        // proof of that edge, even when both files contain the same bytes.
+        import_candidate(&mut a, &b);
+        let relocated = root.path().join("FreshB.hs");
+        fs::copy(&b.source, &relocated).unwrap();
+        b.source = fs::canonicalize(relocated).unwrap();
+        b.evidence.sources[1].path = b.source.clone();
+        b.evidence.modules[0].source = b.source.clone();
+        // Hidden was consumed in another target in the same compilation, but
+        // there is no selected import edge from B to Hidden.
+        b.evidence.sources.extend(
+            hidden
+                .evidence
+                .sources
+                .iter()
+                .filter(|s| s.path != Path::new("@generated-source"))
+                .cloned(),
+        );
+        b.evidence.modules.extend(hidden.evidence.modules.clone());
+        let exclusions = ExactCandidateExclusions::new(
+            BTreeSet::from([("u".into(), "Hidden".into())]),
+            BTreeSet::new(),
+        );
+        let selected = select_disjoint_records(scratch.path(), vec![a, b, hidden], &exclusions);
+        assert_eq!(
+            selected.by_owner.keys().cloned().collect::<Vec<_>>(),
+            vec![("u".into(), "B".into())]
+        );
+    }
+
+    #[test]
+    fn exact_candidates_refuse_missing_ambiguous_and_reserved_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let mut a = candidate_fixture(root.path(), "A");
+        let b = candidate_fixture(root.path(), "B");
+        import_candidate(&mut a, &b);
+        let empty = ExactCandidateExclusions::new(BTreeSet::new(), BTreeSet::new());
+        assert!(
+            select_disjoint_records(scratch.path(), vec![a.clone()], &empty)
+                .by_owner
+                .is_empty()
+        );
+        let reserved = ExactCandidateExclusions::new(BTreeSet::new(), BTreeSet::from(["B".into()]));
+        assert!(
+            select_disjoint_records(scratch.path(), vec![a.clone(), b.clone()], &reserved)
+                .by_owner
+                .is_empty()
+        );
+        a.evidence.modules[0].imports[0].qualifier = crate::cache::ImportQualifier::Unqualified;
+        a.evidence.resolutions[0].qualifier = crate::cache::ImportQualifier::Unqualified;
+        let mut ambiguous = a.evidence.modules[1].clone();
+        ambiguous.unit = "another-unit".into();
+        a.evidence.modules.push(ambiguous);
+        assert!(a.evidence.valid(&a.target_source));
+        let selected = select_disjoint_records(scratch.path(), vec![a, b], &empty);
+        assert_eq!(selected.by_owner.len(), 1);
+        assert!(selected.by_owner.contains_key(&("u".into(), "B".into())));
+    }
+
+    fn store_fixture(root: &Path, record: &Record, name: &str) {
+        let producer = root.join(RECORD_DIR).join(sha(b"endpoint"));
+        let dir = root_shard(&producer, &selected_record_root(record).unwrap());
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!("{name}.cbor")),
+            encode_record(record).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn exact_discovery_crosses_include_recipes_but_refuses_current_shadow() {
+        let cache = tempfile::tempdir().unwrap();
+        let sources = tempfile::tempdir().unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let mut record = candidate_fixture(cache.path(), "Library");
+        let source = sources.path().join("Library.hs");
+        fs::copy(&record.source, &source).unwrap();
+        record.source = absolute(&source).unwrap();
+        record.evidence.sources[1].path = record.source.clone();
+        record.evidence.modules[0].source = record.source.clone();
+        record.include = vec![absolute(sources.path()).unwrap()];
+        record.original_owner = OriginalOwner::from_owner(&computed_owner(&record));
+        let original_version = version_hash(&record);
+        store_fixture(cache.path(), &record, "original");
+        unsafe {
+            std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
+        }
+        let include = vec![extra.path().into(), sources.path().into()];
+        assert!(ordinary_records(b"endpoint", &include, false)
+            .unwrap()
+            .is_empty());
+        let records = ordinary_records(b"endpoint", &include, true).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(version_hash(&records[0]), original_version);
+        let exclusions = ExactCandidateExclusions::new(BTreeSet::new(), BTreeSet::new());
+        let selected = select_records_inner(
+            b"endpoint",
+            &include,
+            scratch.path(),
+            records
+                .into_iter()
+                .map(|r| (r, CandidateOrigin::Ordinary))
+                .collect(),
+            Some(&exclusions),
+        )
+        .unwrap();
+        assert_eq!(selected.by_owner.len(), 1);
+        assert_eq!(
+            selected.by_owner[&("u".into(), "Library".into())]
+                .owner
+                .module_version
+                .0,
+            original_version
+        );
+        // Equal bytes at a newly higher-priority path are a different selection.
+        fs::copy(&source, extra.path().join("Library.hs")).unwrap();
+        assert!(ordinary_records(b"endpoint", &include, true)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn discovery_requires_matching_header_payload_and_ignores_old_format() {
+        let root = tempfile::tempdir().unwrap();
+        let record = candidate_fixture(root.path(), "Library");
+        unsafe {
+            std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", root.path());
+        }
+        let dir = fixture_record_dir(root.path());
+        for entry in fs::read_dir(&dir).unwrap() {
+            fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        let mut framed = encode_record(&record).unwrap();
+        *framed.last_mut().unwrap() ^= 1;
+        fs::write(dir.join("tampered.cbor"), framed).unwrap();
+        assert!(ordinary_records(b"endpoint", &[root.path().into()], true)
+            .unwrap()
+            .is_empty());
+        fs::remove_file(dir.join("tampered.cbor")).unwrap();
+        let mut legacy = Vec::new();
+        ciborium::ser::into_writer(&record, &mut legacy).unwrap();
+        fs::write(dir.join("legacy.cbor"), legacy).unwrap();
+        assert!(ordinary_records(b"endpoint", &[root.path().into()], true)
+            .unwrap()
+            .is_empty());
+        let mut payload = Vec::new();
+        ciborium::ser::into_writer(&record, &mut payload).unwrap();
+        let mut header = RecordHeader::for_record(&record, &payload);
+        header.module = "Other".into();
+        let header = serde_json::to_vec(&header).unwrap();
+        let mut mismatch = RECORD_MAGIC.to_vec();
+        mismatch.extend_from_slice(&(header.len() as u32).to_be_bytes());
+        mismatch.extend(header);
+        mismatch.extend(payload);
+        fs::write(dir.join("mismatch.cbor"), mismatch).unwrap();
+        assert!(ordinary_records(b"endpoint", &[root.path().into()], true)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn discovery_ignores_historical_roots_and_flat_layout_but_bounds_active_shards() {
+        let cache = tempfile::tempdir().unwrap();
+        let sources = tempfile::tempdir().unwrap();
+        let mut record = candidate_fixture(sources.path(), "Library");
+        record.include = vec![absolute(sources.path()).unwrap()];
+        store_fixture(cache.path(), &record, "current");
+        unsafe {
+            std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
+        }
+        let producer = record_dir(b"endpoint");
+        for n in 0..=DISCOVERY_LIMIT {
+            let shard = root_shard(&producer, &cache.path().join(format!("historical-{n}")));
+            fs::create_dir_all(&shard).unwrap();
+            fs::write(shard.join("historical.cbor"), b"not decoded").unwrap();
+            // Flat V7 and flat V8 records must not participate in discovery.
+            fs::write(producer.join(format!("flat-{n}.cbor")), b"not decoded").unwrap();
+        }
+        let legacy = cache
+            .path()
+            .join("module-candidates-v7")
+            .join(sha(b"endpoint"));
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("legacy.cbor"), encode_record(&record).unwrap()).unwrap();
+        let include = vec![sources.path().into(), sources.path().join(".")];
+        assert_eq!(
+            ordinary_records(b"endpoint", &include, true).unwrap().len(),
+            1
+        );
+        let active = root_shard(&producer, &absolute(sources.path()).unwrap());
+        for n in 0..DISCOVERY_LIMIT {
+            fs::write(active.join(format!("overflow-{n}.cbor")), b"not decoded").unwrap();
+        }
+        assert!(ordinary_records(b"endpoint", &include, true).is_none());
+    }
+
+    #[test]
+    fn selected_root_requires_original_first_selection_and_unambiguous_source_convention() {
+        let root = tempfile::tempdir().unwrap();
+        let earlier = tempfile::tempdir().unwrap();
+        let mut record = candidate_fixture(root.path(), "Library");
+        record.include.insert(0, absolute(earlier.path()).unwrap());
+        assert_eq!(selected_record_root(&record), absolute(root.path()));
+        fs::copy(&record.source, earlier.path().join("Library.hs")).unwrap();
+        assert!(selected_record_root(&record).is_none());
+        fs::remove_file(earlier.path().join("Library.hs")).unwrap();
+        fs::write(root.path().join("Library.lhs"), b"literate shadow").unwrap();
+        assert!(selected_record_root(&record).is_none());
+    }
+
+    #[test]
+    fn exact_package_edges_require_authenticated_unique_direct_roots() {
+        use crate::cache::{ImportQualifier, ModuleImportEvidence, ResolutionEvidence};
+        let root = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let mut record = candidate_fixture(root.path(), "Library");
+        let package = root.path().join("List.hi");
+        fs::write(&package, b"package-interface").unwrap();
+        let mut sidecar: Value =
+            ciborium::de::from_reader(record.package_imports.as_slice()).unwrap();
+        sidecar.as_array_mut().unwrap()[3] = Value::Array(vec![Value::Array(vec![
+            Value::Text("base".into()),
+            Value::Text("Data.List".into()),
+            Value::Text(package.to_str().unwrap().into()),
+            Value::Text(sha(b"package-interface")),
+        ])]);
+        record.package_imports.clear();
+        ciborium::ser::into_writer(&sidecar, &mut record.package_imports).unwrap();
+        record.evidence.modules[0]
+            .imports
+            .push(ModuleImportEvidence {
+                qualifier: ImportQualifier::Unqualified,
+                module: "Data.List".into(),
+                boot: false,
+                selected: None,
+            });
+        record.evidence.resolutions.push(ResolutionEvidence {
+            qualifier: ImportQualifier::Unqualified,
+            module: "Data.List".into(),
+            boot: false,
+            selected: None,
+            candidates: vec![root.path().join("Data/List.hs")],
+        });
+        record.original_owner = OriginalOwner::from_owner(&computed_owner(&record));
+        let empty = ExactCandidateExclusions::new(BTreeSet::new(), BTreeSet::new());
+        assert_eq!(
+            select_disjoint_records(scratch.path(), vec![record.clone()], &empty)
+                .by_owner
+                .len(),
+            1
+        );
+        record.package_imports = package_imports("u", "Library", &[0x42]);
+        assert!(
+            select_disjoint_records(scratch.path(), vec![record], &empty)
+                .by_owner
+                .is_empty()
+        );
+        let rows = sidecar.as_array_mut().unwrap()[3].as_array_mut().unwrap();
+        let mut other = rows[0].clone();
+        other.as_array_mut().unwrap()[0] = Value::Text("other".into());
+        rows.push(other);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&sidecar, &mut bytes).unwrap();
+        let roots = crate::recovery_artifacts::validate_package_import_evidence_with_validation(
+            &bytes,
+            "u",
+            "Library",
+            &Sha256::digest([0x42]).into(),
+            Path::new("packages"),
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        let mut edge = ModuleImportEvidence {
+            qualifier: ImportQualifier::Unqualified,
+            module: "Data.List".into(),
+            boot: false,
+            selected: None,
+        };
+        assert!(!package_edge_matches(&edge, &roots));
+        edge.qualifier = ImportQualifier::OtherUnit("base".into());
+        assert!(package_edge_matches(&edge, &roots));
+        edge.qualifier = ImportQualifier::ThisUnit("base".into());
+        assert!(!package_edge_matches(&edge, &roots));
+        sidecar.as_array_mut().unwrap()[4] = Value::Array(vec![Value::Array(vec![
+            Value::Text("primitive".into()),
+            Value::Text("ghc-prim".into()),
+            Value::Text("GHC.Prim".into()),
+        ])]);
+        bytes.clear();
+        ciborium::ser::into_writer(&sidecar, &mut bytes).unwrap();
+        let roots = crate::recovery_artifacts::validate_package_import_evidence_with_validation(
+            &bytes,
+            "u",
+            "Library",
+            &Sha256::digest([0x42]).into(),
+            Path::new("packages"),
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        edge.module = "GHC.Prim".into();
+        edge.qualifier = ImportQualifier::OtherUnit("ghc-prim".into());
+        assert!(package_edge_matches(&edge, &roots));
+        edge.qualifier = ImportQualifier::OtherUnit("other".into());
+        assert!(!package_edge_matches(&edge, &roots));
+    }
+
+    #[test]
+    fn generation_bound_products_are_not_ordinary_source_products() {
+        use tidepool_repr::execution_schema::{testing, GlobalDecl};
+        let mut wire = testing::wire_program();
+        wire.globals.push(GlobalDecl {
+            identity: testing::identity("Val", "retained"),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: Some(7),
+        });
+        let group = testing::projected_group(wire, 0).unwrap();
+        let product = RawModuleProduct {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            interface: vec![0x42],
+            groups: vec![group],
+        };
+        assert!(generation_dependent(&product));
+    }
+
+    #[test]
+    fn durable_old_record_and_unrelated_product_rows_are_not_offered() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let mut record = candidate_fixture(root.path(), "A");
+        record.version = 5;
+        let empty = ExactCandidateExclusions::new(BTreeSet::new(), BTreeSet::new());
+        assert!(
+            select_disjoint_records(scratch.path(), vec![record.clone()], &empty)
+                .by_owner
+                .is_empty()
+        );
+        record.version = 6;
+        let mut value: Value = ciborium::de::from_reader(record.products.as_slice()).unwrap();
+        let extra: Value =
+            ciborium::de::from_reader(product_bytes("u", "Hidden", &[0x42]).as_slice()).unwrap();
+        if let Value::Array(fields) = &mut value {
+            if let Value::Array(rows) = &mut fields[2] {
+                rows.push(extra.as_array().unwrap()[2].as_array().unwrap()[0].clone());
+            }
+        }
+        record.products.clear();
+        ciborium::ser::into_writer(&value, &mut record.products).unwrap();
+        assert!(
+            select_disjoint_records(scratch.path(), vec![record], &empty)
+                .by_owner
+                .is_empty()
+        );
+    }
+
     fn select_in(root: &Path, scratch: &Path) -> Option<CandidateSet> {
         // The cache path is process-global; serialize this module's tests.
         unsafe {
             std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", root);
         }
-        select(b"endpoint", &[], scratch)
+        select(b"endpoint", &[root.into()], scratch)
     }
 
     #[test]
@@ -1127,7 +3293,7 @@ mod tests {
             panic!("candidate manifest envelope")
         };
         assert_eq!(fields[0].as_text(), Some("TPMCAN"));
-        assert_eq!(fields[1].as_text(), Some("5"));
+        assert_eq!(fields[1].as_text(), Some("7"));
         assert_eq!(fields[2], Value::Array(vec![]));
     }
 
@@ -1153,14 +3319,13 @@ mod tests {
             "CacheOdd",
             product_bytes("u", "CacheOdd", &[0x42]),
         );
-        let record_path = fs::read_dir(root.path().join(RECORD_DIR).join(sha(b"endpoint")))
+        let record_path = fs::read_dir(fixture_record_dir(root.path()))
             .unwrap()
             .next()
             .unwrap()
             .unwrap()
             .path();
-        let mut record: Record =
-            ciborium::de::from_reader(fs::read(&record_path).unwrap().as_slice()).unwrap();
+        let mut record = read_record_path(&record_path).unwrap();
         let boot = fs::canonicalize(boot).unwrap();
         record.evidence.sources.push(SourceEvidence {
             path: boot.clone(),
@@ -1190,9 +3355,14 @@ mod tests {
             candidates: vec![boot.clone()],
         });
         assert!(record.evidence.valid(&record.target_source));
-        let mut encoded = Vec::new();
-        ciborium::ser::into_writer(&record, &mut encoded).unwrap();
-        fs::write(&record_path, encoded).unwrap();
+        fs::write(&record_path, encode_record(&record).unwrap()).unwrap();
+        let exact_record = read_record_path(&record_path).unwrap();
+        let empty = ExactCandidateExclusions::new(BTreeSet::new(), BTreeSet::new());
+        assert!(
+            select_disjoint_records(scratch.path(), vec![exact_record], &empty)
+                .by_owner
+                .is_empty()
+        );
         let selected = select_in(root.path(), scratch.path()).unwrap();
         assert_eq!(selected.by_owner.len(), 1);
         let manifest: Value =
@@ -1247,7 +3417,7 @@ mod tests {
             .is_empty());
 
         fs::write(&source, "module Library where").unwrap();
-        let dir = root.path().join(RECORD_DIR).join(sha(b"endpoint"));
+        let dir = fixture_record_dir(root.path());
         for entry in fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
             fs::remove_file(path).unwrap();
@@ -1282,13 +3452,11 @@ mod tests {
         unsafe {
             std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", root.path());
         }
-        let dir = root.path().join(RECORD_DIR).join(sha(b"endpoint"));
+        let dir = fixture_record_dir(root.path());
         let path = fs::read_dir(dir).unwrap().next().unwrap().unwrap().path();
-        let mut record: Record = ciborium::de::from_reader(fs::File::open(&path).unwrap()).unwrap();
+        let mut record: Record = read_record_path(&path).unwrap();
         record.package_imports = package_imports("u", "Other", &[0x42]);
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(&record, &mut bytes).unwrap();
-        fs::write(path, bytes).unwrap();
+        fs::write(path, encode_record(&record).unwrap()).unwrap();
         assert!(select_in(root.path(), scratch.path())
             .unwrap()
             .by_owner
@@ -1310,32 +3478,32 @@ mod tests {
             "Library",
             product_bytes("u", "Library", &[0x42]),
         );
-        let dir = root.path().join(RECORD_DIR).join(sha(b"endpoint"));
+        let dir = fixture_record_dir(root.path());
         let path = fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
-        let mut record: Record = ciborium::de::from_reader(fs::File::open(&path).unwrap()).unwrap();
+        let mut record: Record = read_record_path(&path).unwrap();
         fs::remove_file(path).unwrap();
         let equivalent = root.path().join("nested/../Library.hs");
         record.evidence.sources[1].path = equivalent.clone();
         record.evidence.modules[0].source = equivalent;
-        let requirements = crate::prepared_artifact::production_requirements().unwrap();
-        let products = tidepool_repr::execution_schema::parse_module_products(
+        let parsed = crate::certified_products::ParsedModuleProducts::decode(
             &record.products,
-            &requirements,
-            product_decode_limits(),
+            &package_bundle("u", "Library", &[0x42]),
         )
         .unwrap();
         unsafe {
             std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", root.path());
         }
-        publish(
+        let include = [root.path().into()];
+        let (_, publication) = prepare_publication(
             b"endpoint",
-            &[],
+            &include,
             &record.evidence,
-            &products,
-            &record.products,
-            &package_bundle("u", "Library", &[0x42]),
+            parsed,
             &record.target_source,
+            CandidateVersionOrigin::Ordinary,
+            &[],
         );
+        publish_prepared(publication);
         let selected = select_in(root.path(), scratch.path()).unwrap();
         assert!(selected
             .by_owner
@@ -1344,7 +3512,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn selection_rejects_duplicate_module_owners() {
+    fn discovery_selects_one_intact_duplicate_record_per_owner() {
         let root = tempfile::tempdir().unwrap();
         let scratch = tempfile::tempdir().unwrap();
         let source = root.path().join("Library.hs");
@@ -1356,10 +3524,16 @@ mod tests {
             "Library",
             product_bytes("u", "Library", &[0x42]),
         );
-        let dir = root.path().join(RECORD_DIR).join(sha(b"endpoint"));
+        let dir = fixture_record_dir(root.path());
         let original = fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
         fs::copy(original, dir.join("duplicate.cbor")).unwrap();
-        assert!(select_in(root.path(), scratch.path()).is_none());
+        assert_eq!(
+            select_in(root.path(), scratch.path())
+                .unwrap()
+                .by_owner
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1369,16 +3543,20 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let source = root.path().join("Library.hs");
         fs::write(&source, "module Library where").unwrap();
-        for n in 0..12 {
-            let module = format!("{}{}", n, "M".repeat(390_000));
-            write_record(
-                root.path(),
-                &source,
-                "u",
-                &module,
-                product_bytes("u", &module, &[0x42]),
-            );
-        }
-        assert!(select_in(root.path(), scratch.path()).is_none());
+        let record = candidate_fixture(root.path(), "Library");
+        let records = (0..12)
+            .map(|n| {
+                let mut record = record.clone();
+                record.module = format!("{}{}", n, "M".repeat(390_000));
+                record.evidence.modules[0].module = record.module.clone();
+                record.products = product_bytes("u", &record.module, &[0x42]);
+                record.package_imports = package_imports("u", &record.module, &[0x42]);
+                record.original_owner = OriginalOwner::from_owner(&computed_owner(&record));
+                (record, CandidateOrigin::Ordinary)
+            })
+            .collect();
+        assert!(
+            select_records(b"endpoint", &[root.path().into()], scratch.path(), records).is_none()
+        );
     }
 }

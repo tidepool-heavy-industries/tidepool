@@ -149,7 +149,7 @@ invokeModel turn input = case compileTools (specTools (turnSpec turn)) of
         pure (ModelResult (decodeOutcome (turnFormat turn) outcome) (Just receipt))
       Success (Callback token callId name args) -> do
         answer <- dispatch compiled name args
-        next <- send (ModelResumeWith token callId answer)
+        next <- send (ModelResumeWith token callId (toolDispatchReply answer))
         drive compiled (Just token) next
       Success (Hook token operation name args handle ordinal output) -> do
         annotation <- case afterTool (turnSpec turn) of

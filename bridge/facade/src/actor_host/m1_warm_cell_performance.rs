@@ -12,52 +12,238 @@ const WARM_UP: usize = 10;
 const MEASURED: usize = 50;
 
 #[derive(Clone, serde::Deserialize)]
-struct Workload {
-    workload: String,
-    source: String,
-    expected: String,
-    source_digest: String,
+pub(super) struct Workload {
+    pub(super) workload: String,
+    pub(super) source: String,
+    pub(super) expected: String,
+    pub(super) source_digest: String,
+}
+
+#[derive(
+    Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub(super) struct CompilerInvocation {
+    daemon_epoch: String,
+    admission_id: u64,
+    request_ordinal: u64,
+    compile_request: String,
+}
+
+impl CompilerInvocation {
+    fn key(&self) -> (String, u64, u64) {
+        (
+            self.daemon_epoch.clone(),
+            self.admission_id,
+            self.request_ordinal,
+        )
+    }
+
+    pub(super) fn from_trace(row: &Value) -> Self {
+        let request: Self =
+            serde_json::from_value(row.clone()).expect("complete exact compiler invocation");
+        request.validate();
+        request
+    }
+
+    fn validate(&self) {
+        assert!(
+            self.admission_id > 0 && self.request_ordinal > 0,
+            "one-based daemon invocation counters"
+        );
+        for (value, length) in [(&self.daemon_epoch, 64), (&self.compile_request, 16)] {
+            assert!(
+                value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "complete compiler invocation digests"
+            );
+        }
+    }
+}
+
+#[derive(Default)]
+struct CompilerAttribution {
+    issued: HashMap<(String, String), OperationId>,
+    executions: HashMap<String, OperationId>,
+    requests: HashMap<OperationId, Vec<CompilerInvocation>>,
+    owners: HashMap<(String, u64, u64), OperationId>,
 }
 
 #[derive(Clone, Default)]
-struct ClientRequests(Arc<Mutex<Vec<String>>>);
+pub(super) struct ClientRequests(Arc<Mutex<CompilerAttribution>>);
 
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ClientRequests {
-    fn on_new_span(
+impl ClientRequests {
+    pub(super) fn issue(&self, operation: &OperationId) {
+        let mut state = self.0.lock();
+        assert!(
+            state.issued.len() < 10_000,
+            "bounded operation observations"
+        );
+        assert!(
+            state
+                .issued
+                .insert(
+                    (operation.request.0.clone(), operation.call.0.clone()),
+                    operation.clone()
+                )
+                .is_none(),
+            "exact operation issued once"
+        );
+    }
+
+    pub(super) fn requests(&self, operation: &OperationId) -> Vec<CompilerInvocation> {
+        self.0
+            .lock()
+            .requests
+            .get(operation)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Default)]
+struct TraceFields(HashMap<String, String>);
+impl tracing::field::Visit for TraceFields {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.insert(field.name().into(), value.into());
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.insert(field.name().into(), format!("{value:?}"));
+    }
+}
+
+#[derive(Clone)]
+struct CellExecution(String);
+
+impl<S> tracing_subscriber::Layer<S> for ClientRequests
+where
+    S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
+{
+    fn on_event(
         &self,
-        attributes: &tracing::span::Attributes<'_>,
-        _id: &tracing::Id,
-        _context: tracing_subscriber::layer::Context<'_, S>,
+        event: &tracing::Event<'_>,
+        context: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        if attributes.metadata().name() != "compile_request"
-            || attributes.metadata().target() != "tidepool_extract_cmd::endpoint"
+        let mut fields = TraceFields::default();
+        event.record(&mut fields);
+        let message = fields.0.get("message").map(String::as_str);
+        if message == Some("workbench cell dispatched to its actor") {
+            let Some(request) = fields.0.get("turn_id") else {
+                return;
+            };
+            let Some(call) = fields.0.get("context_call_id") else {
+                return;
+            };
+            let mut state = self.0.lock();
+            // Startup and non-model cells are outside the authored measurement set.
+            let Some(operation) = state.issued.get(&(request.clone(), call.clone())).cloned()
+            else {
+                return;
+            };
+            let execution = fields
+                .0
+                .get("execution")
+                .expect("actual dispatch execution identity");
+            assert!(!execution.is_empty());
+            assert!(
+                !state.executions.contains_key(execution),
+                "one dispatch per exact execution"
+            );
+            state.executions.insert(execution.clone(), operation);
+            return;
+        }
+        if message != Some("compiler request identified")
+            || event.metadata().target() != "tidepool_extract_cmd::endpoint"
+            || fields.0.get("transport").map(String::as_str) != Some("daemon")
         {
             return;
         }
-        struct Correlation(Option<String>);
-        impl tracing::field::Visit for Correlation {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                if field.name() == "compile_request" {
-                    self.0 = Some(format!("{value:?}"));
-                }
-            }
-        }
-        let mut correlation = Correlation(None);
-        attributes.record(&mut correlation);
-        let mut requests = self.0.lock();
+        let execution = context.event_scope(event).and_then(|mut scope| {
+            scope.find_map(|ancestor| ancestor.extensions().get::<CellExecution>().cloned())
+        });
+        let Some(execution) = execution else { return };
+        let mut state = self.0.lock();
+        let Some(operation) = state.executions.get(&execution.0).cloned() else {
+            return;
+        };
+        let request = CompilerInvocation {
+            daemon_epoch: fields
+                .0
+                .get("daemon_epoch")
+                .expect("actual daemon epoch")
+                .clone(),
+            admission_id: fields
+                .0
+                .get("admission_id")
+                .expect("accepted daemon admission")
+                .parse()
+                .expect("numeric daemon admission"),
+            request_ordinal: fields
+                .0
+                .get("request_ordinal")
+                .expect("actual request ordinal")
+                .parse()
+                .expect("numeric request ordinal"),
+            compile_request: fields
+                .0
+                .get("compile_request")
+                .expect("compiler input digest")
+                .clone(),
+        };
+        request.validate();
         assert!(
-            requests.len() < 10_000,
-            "bounded compiler observation budget"
+            !state.owners.contains_key(&request.key()),
+            "exact compiler invocation already belongs to an operation"
         );
-        requests.push(correlation.0.expect("existing client request digest"));
+        assert!(
+            state.requests.get(&operation).map_or(0, Vec::len) < 100,
+            "bounded per-operation compiler observations"
+        );
+        state.owners.insert(request.key(), operation.clone());
+        state.requests.entry(operation).or_default().push(request);
     }
+
+    fn on_new_span(
+        &self,
+        attributes: &tracing::span::Attributes<'_>,
+        id: &tracing::Id,
+        context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if attributes.metadata().name() != "cell" {
+            return;
+        }
+        let mut fields = TraceFields::default();
+        attributes.record(&mut fields);
+        if let Some(execution) = fields.0.get("execution").filter(|value| !value.is_empty()) {
+            context
+                .span(id)
+                .unwrap()
+                .extensions_mut()
+                .insert(CellExecution(execution.clone()));
+        }
+    }
+}
+
+pub(super) fn require_owned_daemon(startup: &Value) {
+    assert_eq!(
+        startup["daemon_pid"].as_u64().unwrap().to_string(),
+        std::env::var("TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID")
+            .expect("owned measurement daemon PID")
+    );
+    assert_eq!(
+        startup["producer"].as_str().unwrap(),
+        std::env::var("TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER")
+            .expect("owned measurement daemon producer")
+    );
+    assert_eq!(
+        startup["daemon_epoch"].as_str().unwrap(),
+        std::env::var("TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH")
+            .expect("actual owned ready epoch")
+    );
 }
 
 struct PendingCell {
     sequence: usize,
     operation: OperationId,
     started: Instant,
-    client_cursor: usize,
 }
 
 struct DisplayedCell {
@@ -139,10 +325,10 @@ impl WarmTransport {
                     request: request_id.clone(),
                     call: CallId(call_id.clone()),
                 };
+                self.clients.issue(&operation);
                 *self.pending.lock() = Some(PendingCell {
                     sequence,
                     operation,
-                    client_cursor: self.clients.0.lock().len(),
                     started: Instant::now(),
                 });
                 harness::item::Item(
@@ -233,7 +419,7 @@ impl DaemonTrace {
 
     async fn completion(
         &mut self,
-        expected: &BTreeSet<String>,
+        expected: &BTreeSet<CompilerInvocation>,
         epoch: &str,
         daemon_pid: &Value,
         warm: bool,
@@ -248,7 +434,7 @@ impl DaemonTrace {
                 for row in self.read() {
                     let message = row["message"].as_str().unwrap_or_default();
                     if matches!(message, "compiler request started" | "compiler request finished") {
-                        let correlation = row["compile_request"].as_str().unwrap().to_owned();
+                        let correlation = CompilerInvocation::from_trace(&row);
                         assert!(expected.contains(&correlation), "foreign/concurrent compiler request invalidates exclusive attribution: {row}");
                         assert_eq!(row["daemon_epoch"], epoch, "daemon rotated during production campaign");
                         assert_eq!(&row["daemon_pid"], daemon_pid);
@@ -298,6 +484,7 @@ async fn production_engine_store_warm_display_cells_50() {
     );
     let startup = &startups[0];
     assert_eq!(startup["producer"], endpoint.producer_hex());
+    require_owned_daemon(startup);
     let epoch = startup["daemon_epoch"].as_str().unwrap().to_owned();
     let daemon_pid = startup["daemon_pid"].clone();
     assert!(daemon_pid.as_u64().is_some_and(|pid| pid > 0));
@@ -415,7 +602,7 @@ async fn production_engine_store_warm_display_cells_50() {
         assert_eq!(observed.pending.sequence, sequence);
         let operation = &observed.pending.operation;
         let store = fixture.runtime.store();
-        let claims = store.claims(&operation.call).unwrap();
+        let claims = store.claims_for_operation(operation).unwrap();
         assert_eq!(
             claims.len(),
             1,
@@ -443,12 +630,12 @@ async fn production_engine_store_warm_display_cells_50() {
             .iter()
             .any(|item| item.0["call_id"] == operation.call.0
                 && item.0["type"] == "custom_tool_call_output"));
-        let correlations = clients.0.lock()[observed.pending.client_cursor..].to_vec();
+        let correlations = clients.requests(operation);
         let expected = correlations.iter().cloned().collect::<BTreeSet<_>>();
         assert_eq!(
             expected.len(),
             correlations.len(),
-            "one client span per compiler request"
+            "one exact invocation per compiler request"
         );
         let measured = sequence >= WARM_UP;
         let requests = trace
@@ -465,7 +652,7 @@ async fn production_engine_store_warm_display_cells_50() {
             eprintln!(
                 "resident-performance {}",
                 json!({
-                    "schema":1, "composition":"engine-store", "kind":"warm_cell", "index":index,
+                    "schema":1, "runner_id":"warm_cell", "composition":"engine-store", "kind":"warm_cell", "index":index,
                     "elapsed_ns":observed.elapsed_ns, "completed":true, "displayed":true,
                     "workload":workload.workload, "source":workload.source, "source_digest":workload.source_digest,
                     "daemon_epoch":epoch, "compiler_requests":correlations, "operation_id":operation,
@@ -500,3 +687,6 @@ async fn production_engine_store_warm_display_cells_50() {
         );
     }
 }
+
+#[path = "m1_compiler_attribution_tests.rs"]
+mod attribution_tests;

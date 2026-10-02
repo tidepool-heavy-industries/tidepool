@@ -7,7 +7,7 @@ use harness::{
     engine::EngineConfig,
     model::{AgentPath, Effort},
     server::{QueuedCommand, ServerConfig, ServerControl, SessionSecret},
-    transport::{ResponsesClient, auth::CodexFileAuth},
+    transport::{auth::CodexFileAuth, ResponsesClient},
 };
 use tokio::{
     net::TcpListener,
@@ -357,6 +357,53 @@ impl Drop for EmbeddedService {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum EmbeddedDriverError {
+    #[error(transparent)]
+    Engine(#[from] harness::engine::EngineError),
+    #[error("{0}")]
+    Host(String),
+}
+
+impl From<String> for EmbeddedDriverError {
+    fn from(detail: String) -> Self {
+        Self::Host(detail)
+    }
+}
+
+impl From<&str> for EmbeddedDriverError {
+    fn from(detail: &str) -> Self {
+        Self::Host(detail.into())
+    }
+}
+
+impl EmbeddedDriverError {
+    pub(super) fn cleanup_failed(&self) -> bool {
+        matches!(
+            self,
+            Self::Engine(harness::engine::EngineError::Cleanup { .. })
+        )
+    }
+}
+
+fn cancelled_round(
+    error: harness::engine::EngineError,
+    previous_head: Option<harness::model::RequestId>,
+) -> Result<
+    (
+        Option<harness::model::RequestId>,
+        Option<EmbeddedDriverError>,
+    ),
+    EmbeddedDriverError,
+> {
+    let Some(head) = cancelled_head(&error) else {
+        return Err(error.into());
+    };
+    let cleanup = matches!(&error, harness::engine::EngineError::Cleanup { .. })
+        .then(|| EmbeddedDriverError::Engine(error));
+    Ok((head.or(previous_head), cleanup))
+}
+
 pub(super) async fn drive_conversation(
     embedded: EmbeddedConversation,
     runtime: Arc<EmbeddedHarnessRuntime>,
@@ -367,7 +414,7 @@ pub(super) async fn drive_conversation(
     cancellation: watch::Receiver<bool>,
     lifecycle: impl LifecyclePublisher,
     actor_ref: exomonad_actor::ActorRef,
-) -> Result<(), String> {
+) -> Result<(), EmbeddedDriverError> {
     drive_conversation_with_transport::<CodexFileAuth, _>(
         embedded,
         runtime,
@@ -394,7 +441,7 @@ pub(super) async fn drive_conversation_with_transport<A, C>(
     lifecycle: impl LifecyclePublisher,
     actor_ref: exomonad_actor::ActorRef,
     transport: C,
-) -> Result<(), String>
+) -> Result<(), EmbeddedDriverError>
 where
     A: harness::transport::Auth,
     C: harness::engine::ResponsesTransport,
@@ -448,7 +495,7 @@ where
                     if changed.is_err() || *cancellation.borrow() { return Ok(()); }
                     continue;
                 }
-                wake = incoming.recv() => match wake { Some(wake) => wake, None => return Ok(()) },
+                wake = incoming.recv() => match wake { Some(_) => continue, None => return Ok(()) },
             },
         };
         let head = store
@@ -503,38 +550,39 @@ where
                 }
             }
         };
-        let interrupted = matches!(&result, Err(error) if cancelled_head(error).is_some());
-        let cleanup_failure = match &result {
-            Err(error @ harness::engine::EngineError::Cleanup { primary, .. })
-                if cancelled_head(primary).is_some() =>
-            {
-                Some(error.to_string())
+        let (durable_head, interrupted, rejected, cleanup_failure) = match result {
+            Ok(completion) => (Some(completion.head_request), false, false, None),
+            Err(harness::engine::EngineError::RequestRejected { head_request, .. }) => {
+                (Some(head_request), false, true, None)
             }
-            _ => None,
+            Err(error) => {
+                let (head, cleanup) = cancelled_round(error, head.clone())?;
+                (head, true, false, cleanup)
+            }
         };
-        let durable_head = match result {
-            Ok(completion) => Some(completion.head_request),
-            Err(error) => match cancelled_head(&error) {
-                Some(request_head) => request_head.or_else(|| head.clone()),
-                None => return Err(error.to_string()),
-            },
+        // A clean rejection already committed its exact failed head in Engine.
+        let advanced = if rejected {
+            Ok(true)
+        } else {
+            store.advance_agent_head(&actor, head.as_ref(), durable_head.as_ref())
         };
-        if !store
-            .advance_agent_head(&actor, head.as_ref(), durable_head.as_ref())
-            .map_err(|error| error.to_string())?
-        {
-            return Err(format!(
-                "embedded conversation {} lost its durable head",
-                actor.0
-            ));
+        if let Some(error) = cleanup_failure {
+            if !matches!(&advanced, Ok(true)) {
+                tracing::warn!(
+                    ?actor,
+                    ?advanced,
+                    "embedded head advance failed alongside Engine cleanup"
+                );
+            }
+            return Err(error);
+        }
+        if !advanced.map_err(|error| error.to_string())? {
+            return Err(format!("embedded conversation {} lost its durable head", actor.0).into());
         }
         if lifetime_stopped || *cancellation.borrow() {
-            return Err("engine cancelled".into());
+            return Ok(());
         }
         if interrupted {
-            if let Some(error) = cleanup_failure {
-                return Err(error);
-            }
             // The interrupted request and its settled claims are durable.
             // Reconcile exact claims before the next model request.
             recovering = true;
@@ -542,7 +590,9 @@ where
             continue;
         }
         lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
-        recovering = false;
+        // Cleanup may retain a settled tool output on an ancestor claim.
+        // Reconcile the branch lineage before the next explicit-input request.
+        recovering = rejected;
     }
 }
 
@@ -581,5 +631,55 @@ pub(super) async fn submit_browser_command(
         ClientCommand::Host { .. } => {
             Err("targeted host commands must be routed through the embedded actor owner".into())
         }
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use harness::{engine::EngineError, model::RequestId};
+
+    #[test]
+    fn cancellation_retains_durable_head_and_distinguishes_cleanup_failure() {
+        let previous = RequestId("previous".into());
+        let (head, cleanup) = cancelled_round(
+            EngineError::Cancelled { head_request: None },
+            Some(previous.clone()),
+        )
+        .unwrap();
+        assert_eq!(head, Some(previous.clone()));
+        assert!(
+            cleanup.is_none(),
+            "confirmed cancellation is a successful stop"
+        );
+
+        let exact = RequestId("cancelled-request".into());
+        let (head, cleanup) = cancelled_round(
+            EngineError::Cleanup {
+                primary: Box::new(EngineError::Cancelled {
+                    head_request: Some(exact.clone()),
+                }),
+                cleanup: "outstanding call claim could not be settled".into(),
+            },
+            Some(previous),
+        )
+        .unwrap();
+        assert_eq!(head, Some(exact));
+        let error = cleanup.expect("cancellation must retain cleanup failure");
+        assert!(error.cleanup_failed());
+        assert!(
+            matches!(error, EmbeddedDriverError::Engine(EngineError::Cleanup { cleanup, .. })
+            if cleanup == "outstanding call claim could not be settled")
+        );
+    }
+
+    #[test]
+    fn generic_engine_error_remains_failure_during_cancellation() {
+        let error = cancelled_round(EngineError::InvalidFunctionCall, None).unwrap_err();
+        assert!(matches!(
+            error,
+            EmbeddedDriverError::Engine(EngineError::InvalidFunctionCall)
+        ));
+        assert!(!error.cleanup_failed());
     }
 }

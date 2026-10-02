@@ -28,9 +28,14 @@ mod warm_cell_performance;
 
 #[path = "m1_cancel_performance.rs"]
 mod cancel_performance;
+#[path = "m1_eight_actor_performance.rs"]
+mod eight_actor_performance;
 
 #[path = "m1_real_host_late_output_tests.rs"]
 mod real_host_late_output_tests;
+
+#[path = "m1_request_reload_tests.rs"]
+mod request_reload_tests;
 
 #[tokio::test]
 #[ignore = "requires declared matched web, Node, Playwright and resident compiler inputs"]
@@ -570,7 +575,6 @@ async fn host_cancellation_stops_a_real_running_haskell_cell() {
         .unwrap();
     match result {
         Ok(()) => {}
-        Err(error) if error == "engine cancelled" => {}
         Err(error) => {
             panic!("embedded Engine failed while cancelling its real Haskell call: {error}")
         }
@@ -582,15 +586,85 @@ async fn host_cancellation_stops_a_real_running_haskell_cell() {
     campaign.hosted.await.unwrap();
 }
 
+struct RejectFirstRequest {
+    authentication: bool,
+    tool_before_rejection: bool,
+    requests: Mutex<Vec<ResponsesRequest>>,
+    successor_stalled: tokio::sync::Notify,
+    reject_successor: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl ResponsesTransport for RejectFirstRequest {
+    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        let round = {
+            let mut requests = self.requests.lock();
+            requests.push(request);
+            requests.len()
+        };
+        if self.tool_before_rejection && round == 1 {
+            return Ok(ResponsesTurn {
+                response_id: "before-rejection-tool".into(),
+                items: vec![harness::item::Item(json!({
+                    "type":"custom_tool_call", "call_id":"before-rejection-cell",
+                    "name":"haskell", "input":"40 + 2 :: Int"
+                }))],
+                usage: Usage::default(),
+            });
+        }
+        if round == if self.tool_before_rejection { 2 } else { 1 } {
+            if self.tool_before_rejection {
+                self.successor_stalled.notify_one();
+                self.reject_successor.notified().await;
+            }
+            return Err(if self.authentication {
+                TransportError::Authentication
+            } else {
+                TransportError::Http {
+                    status: 400,
+                    diagnostic: Some(harness::transport::HttpDiagnostic {
+                        code: Some("invalid_function_parameters".into()),
+                        error_type: Some("invalid_request_error".into()),
+                        param: Some("tools[0].parameters".into()),
+                        message: Some("required must contain view".into()),
+                    }),
+                }
+            });
+        }
+        Ok(ResponsesTurn {
+            response_id: "explicit-successor".into(),
+            items: vec![harness::item::Item(json!({
+                "type":"message", "role":"assistant", "phase":"final_answer",
+                "content":[{"type":"output_text","text":"explicit input recovered"}]
+            }))],
+            usage: Usage::default(),
+        })
+    }
+}
+
 #[tokio::test]
-async fn production_host_marks_embedded_root_ready_and_retires_invalid_auth_failure() {
+async fn production_host_preserves_rejected_request_and_waits_for_explicit_input() {
+    for authentication in [false, true] {
+        rejected_request_host_case(authentication, false).await;
+    }
+}
+
+#[tokio::test]
+async fn production_host_recovers_ancestor_tool_output_after_request_rejection() {
+    for authentication in [false, true] {
+        rejected_request_host_case(authentication, true).await;
+    }
+}
+
+async fn rejected_request_host_case(authentication: bool, tool_before_rejection: bool) {
     let files = tempfile::tempdir().unwrap();
     let assets = files.path().join("assets");
     std::fs::create_dir_all(&assets).unwrap();
     std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let secret = "offline-host-rejection-secret-is-long-enough";
     let secret_file = files.path().join("browser-secret");
-    std::fs::write(&secret_file, "offline-host-test-secret-32-bytes-long").unwrap();
-    let auth_file = files.path().join("codex-auth.json");
+    std::fs::write(&secret_file, secret).unwrap();
+    let auth_file = files.path().join("unused-auth.json");
     std::fs::write(&auth_file, "{}").unwrap();
     let settings = EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
@@ -601,117 +675,26 @@ async fn production_host_marks_embedded_root_ready_and_retires_invalid_auth_fail
         context_capacity_tokens: 200_000,
         concurrent_jobs: 1,
     };
-    let mut campaign = test_campaign::TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
-        |admission| admission,
-        |config| {
-            config.backend = crate::exomonad::HostBackendOptions::Embedded;
-            config.embedded = Some(settings.clone());
-        },
-    )
-    .await;
-    std::fs::create_dir_all(&campaign.config.run_root).unwrap();
-    let mut root_installation = campaign.root_installation.clone();
-    root_installation.initial_user_message = Some("begin offline authentication check".into());
-    let (lifecycle_tx, lifecycle_rx) = mpsc::channel(32);
-    lifecycle_tx
-        .send(LocalResidentDeployment::PolicyInstalled(Box::new(
-            root_installation,
-        )))
+    let transport = Arc::new(RejectFirstRequest {
+        authentication,
+        tool_before_rejection,
+        requests: Mutex::new(Vec::new()),
+        successor_stalled: tokio::sync::Notify::new(),
+        reject_successor: tokio::sync::Notify::new(),
+    });
+    let host_transport: Arc<dyn ResponsesTransport> = transport.clone();
+    let fixture = RunningBrowserHost::start(&settings, &host_transport)
         .await
         .unwrap();
-    let deployments = campaign.take_deployments();
-    let forward = tokio::spawn(async move {
-        let mut deployments = deployments;
-        while let Some(deployment) = deployments.recv().await {
-            if lifecycle_tx.send(deployment).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    let embedded_service =
-        embedded_service::EmbeddedService::prepare(&campaign.config.run_root, &settings)
-            .await
-            .unwrap();
-    let (readiness_tx, mut readiness_rx) = mpsc::unbounded_channel();
-    let (shutdown_tx, shutdown_rx) = watch::channel(None);
-    let (_config_tx, config_rx) = watch::channel(campaign.config.clone());
-    let actor = campaign.actor.clone();
-    let host_graph_forest = Arc::clone(&campaign.forest);
-    let fleet = InteractiveFleet {
-        provider_forest: Arc::clone(&campaign.forest),
-        root: actor,
-        config: campaign.config.clone(),
-        run_root: campaign.config.run_root.clone(),
-        #[cfg(feature = "codex-compat")]
-        tmux: TmuxSession::new(&campaign.config.tmux_session).unwrap(),
-        #[cfg(feature = "codex-compat")]
-        backend: HostRuntimeMode::Embedded,
-        worktrees: campaign.worktrees.clone(),
-        #[cfg(feature = "codex-compat")]
-        bindings: campaign.bindings.clone(),
-        readiness: readiness_tx,
-        worktree_authority: campaign.authority.clone(),
-        #[cfg(feature = "codex-compat")]
-        watch_retention: Arc::new(|_, _| false),
-        #[cfg(feature = "codex-compat")]
-        watch_observation: Arc::new(|_, _, _| false),
-        #[cfg(feature = "codex-compat")]
-        open_request: Arc::new(|_| None),
-        #[cfg(feature = "codex-compat")]
-        source_layers: None,
-        #[cfg(feature = "codex-compat")]
-        actor_recovery: exomonad_actor::ActorRecoveryJournal::open(
-            campaign.config.run_root.join("actor-lifecycle.v2.jsonl"),
-        )
-        .unwrap(),
-        #[cfg(feature = "codex-compat")]
-        recovered_threads: Arc::new(BTreeMap::new()),
-        #[cfg(feature = "codex-compat")]
-        recovered_root_predecessor: None,
-        host_graph: Arc::new(move || host_graph_forest.inspect_host_graph()),
-    };
-    let host = tokio::spawn(run_interactive_applications(
-        lifecycle_rx,
-        Arc::new(Mutex::new(HashMap::new())),
-        fleet,
-        shutdown_rx,
-        config_rx,
-        Some(embedded_service),
-    ));
-
-    let readiness = tokio::time::timeout(Duration::from_secs(30), readiness_rx.recv())
-        .await
-        .expect("production host did not publish embedded readiness")
-        .expect("host dropped readiness before publishing it");
-    let address = match readiness {
-        ActorHostReadiness::EmbeddedReady { root, address } => {
-            assert_eq!(root, campaign.actor.identity());
-            address
-        }
-        other => panic!("production host reported unexpected readiness: {other:?}"),
-    };
-    let terminal = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if let Some(terminal) = campaign.actor.terminal().get() {
-                break terminal;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("invalid credentials did not fail and retire the hosted root");
-    assert_eq!(terminal.kind, ActorExitKind::Failed, "{terminal:?}");
-
-    let api = format!("http://{address}/api");
-    let origin = format!("https://{address}");
+    let target = browser_target(&fixture.campaign);
+    let actor = fixture.campaign.actor.identity();
+    let api = format!("http://{}/api", fixture.address);
+    let origin = format!("https://{}", fixture.address);
     let client = reqwest::Client::new();
-    let secret = std::fs::read_to_string(settings.session_secret_file).unwrap();
     let login = client
         .post(format!("{api}/session"))
         .header("Origin", &origin)
-        .json(&serde_json::json!({ "secret": secret }))
+        .json(&json!({"secret":secret}))
         .send()
         .await
         .unwrap();
@@ -723,57 +706,190 @@ async fn production_host_marks_embedded_root_ready_and_retires_invalid_auth_fail
         .next()
         .unwrap()
         .to_owned();
-    let mut request = format!("ws://{address}/api/ws")
-        .into_client_request()
-        .unwrap();
-    request
-        .headers_mut()
-        .insert("Origin", origin.parse().unwrap());
-    request
-        .headers_mut()
-        .insert("Cookie", cookie.parse().unwrap());
-    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-    let snapshot: serde_json::Value =
-        serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
-    assert_eq!(snapshot["snapshot"]["actors"][0]["lifecycle"], "lost");
-    assert_eq!(
-        snapshot["snapshot"]["conversations"][0]["state"],
-        "cancelled"
-    );
-    let response = client
+    let first = browser_input(&target, "retain rejected user input");
+    let accepted = client
         .post(format!("{api}/commands"))
         .header("Origin", &origin)
         .header(reqwest::header::COOKIE, &cookie)
-        .json(&browser_input(
-            &browser_target(&campaign),
-            "must not wake a retired root",
-        ))
+        .json(&first)
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
-    let rejection = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let frame = socket.next().await.unwrap().unwrap();
-            let event: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-            if event["event"]["event"]["kind"] == "command.receipt" {
-                break event;
+    assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
+    let store = fixture.runtime.store();
+    if tool_before_rejection {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            transport.successor_stalled.notified(),
+        )
+        .await
+        .expect("successor request did not start while tool was pending");
+        assert!(!transport.requests.lock()[1].input.iter().any(|item| {
+            item.0["type"] == "custom_tool_call_output"
+                && item.0["call_id"] == "before-rejection-cell"
+        }));
+        // Match the existing real-cell fixture budget for its three compiler stages.
+        tokio::time::timeout(Duration::from_secs(300), async {
+            loop {
+                let claims = store
+                    .claims(&harness::model::CallId("before-rejection-cell".into()))
+                    .unwrap();
+                if claims.first().is_some_and(|claim| {
+                    store
+                        .replay_output_operation(&claim.operation)
+                        .unwrap()
+                        .is_some_and(|item| {
+                            cell_output_matches(&item, "before-rejection-cell", "42")
+                        })
+                }) {
+                    assert_eq!(claims.len(), 1);
+                    assert!(!store
+                        .items(&claims[0].request)
+                        .unwrap()
+                        .iter()
+                        .any(|item| { item.0["type"] == "custom_tool_call_output" }));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
+        })
+        .await
+        .expect("tool did not settle before provider rejection");
+        transport.reject_successor.notify_one();
+    }
+    let failed_head = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let head = store.agent(&target.actor).unwrap().unwrap().head_request;
+            if let Some(head) = head {
+                if store
+                    .events(Some(&head))
+                    .unwrap()
+                    .iter()
+                    .any(|event| event.kind == "request_failed")
+                {
+                    break head;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("host did not reject browser input after root retirement");
-    assert_eq!(rejection["event"]["event"]["value"]["outcome"], "refused");
-    socket.close(None).await.unwrap();
-
-    shutdown_tx.send_replace(Some(NativeRetirement::Terminate));
-    let host_result = tokio::time::timeout(Duration::from_secs(30), host)
+    .expect("provider failure never advanced the exact durable head");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        transport.requests.lock().len(),
+        if tool_before_rejection { 2 } else { 1 },
+        "provider rejection retried without input"
+    );
+    assert!(fixture.campaign.actor.terminal().get().is_none());
+    assert_eq!(fixture.campaign.actor.identity(), actor);
+    let (mut socket, snapshot) = browser_snapshot_until(fixture.address, &cookie, "waiting").await;
+    assert_eq!(snapshot["snapshot"]["conversations"][0]["state"], "idle");
+    let failed = snapshot["snapshot"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|request| request["id"] == failed_head.0)
+        .expect("failed request absent after reconnect");
+    assert_eq!(failed["state"], "failed");
+    assert_eq!(
+        failed["failure"]["kind"],
+        if authentication {
+            "authentication"
+        } else {
+            "http"
+        }
+    );
+    if !authentication {
+        assert_eq!(
+            failed["failure"]["diagnostic"]["code"],
+            "invalid_function_parameters"
+        );
+        assert_eq!(
+            failed["failure"]["diagnostic"]["message"],
+            "required must contain view"
+        );
+    }
+    // Replaying the same browser operation does not create another envelope or request.
+    let duplicate = client
+        .post(format!("{api}/commands"))
+        .header("Origin", &origin)
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&first)
+        .send()
         .await
-        .expect("production host did not shut down")
-        .expect("production host task panicked");
-    assert!(host_result.is_ok(), "host cleanup failed: {host_result:?}");
-    campaign.forest.shutdown().await;
-    let _ = campaign.hosted.await;
-    forward.abort();
-    assert!(forward.await.unwrap_err().is_cancelled());
+        .unwrap();
+    assert_eq!(duplicate.status(), reqwest::StatusCode::ACCEPTED);
+    let followup = browser_input(&target, "explicit corrected followup");
+    let accepted = client
+        .post(format!("{api}/commands"))
+        .header("Origin", &origin)
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&followup)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
+    let successor = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let head = store.agent(&target.actor).unwrap().unwrap().head_request;
+            if let Some(head) = head.filter(|head| head != &failed_head) {
+                break head;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("explicit followup did not complete");
+    assert_eq!(
+        store.request(&successor).unwrap().unwrap().parent,
+        Some(failed_head)
+    );
+    let requests = transport.requests.lock();
+    let expected_requests = if tool_before_rejection { 3 } else { 2 };
+    assert_eq!(requests.len(), expected_requests);
+    let followup_request = &requests[expected_requests - 1];
+    if tool_before_rejection {
+        assert_eq!(
+            followup_request
+                .input
+                .iter()
+                .filter(|item| { cell_output_matches(item, "before-rejection-cell", "42") })
+                .count(),
+            1,
+            "settled ancestor output was not recovered exactly once"
+        );
+        assert_eq!(
+            followup_request
+                .input
+                .iter()
+                .filter(|item| {
+                    item.0["type"] == "custom_tool_call"
+                        && item.0["call_id"] == "before-rejection-cell"
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            store
+                .claims(&harness::model::CallId("before-rejection-cell".into()))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    for text in ["retain rejected user input", "explicit corrected followup"] {
+        assert_eq!(
+            followup_request
+                .input
+                .iter()
+                .filter(|item| item.0["content"] == text)
+                .count(),
+            1
+        );
+    }
+    drop(requests);
+    assert!(fixture.campaign.actor.terminal().get().is_none());
+    socket.close(None).await.unwrap();
+    fixture.stop().await.unwrap();
 }

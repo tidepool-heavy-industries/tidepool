@@ -6,14 +6,33 @@ The named Cargo unit-test target owns these module and embedded fixture bytes.
 """
 
 TEST_ONLY_SOURCES = {
+    'tidepool-extract-cmd': frozenset({
+        'tidepool/extract-cmd/src/diagnostics_tests.rs',
+    }),
     'tidepool-codegen': frozenset({
         'tidepool/codegen/src/prepared_program/machine/literal_manifest_tests.rs',
     }),
     'tidepool': frozenset({
+        'bridge/facade/src/exomonad/source/publication_fault_tests.rs',
+        'bridge/facade/src/exomonad/source/publication_fault_driver.hs',
+        'bridge/facade/src/actor_host/fixtures/browser_agent_spec.hs',
+        'bridge/facade/src/actor_host/fixtures/request_reload_agent_spec.hs',
+        'bridge/facade/src/actor_host/m1_request_reload_tests.rs',
+        'bridge/facade/src/actor_host/m1_eight_actor_launch.hs',
+        'bridge/facade/src/actor_host/m1_eight_actor_performance.rs',
         'bridge/facade/src/actor_host/m1_cancel_cell.hs',
         'bridge/facade/src/actor_host/m1_cancel_performance.rs',
         'bridge/facade/src/actor_host/m1_warm_cell_performance.rs',
+        'bridge/facade/src/actor_host/m1_compiler_attribution_tests.rs',
         'bridge/facade/src/actor_host/m1_warm_cell_workloads.json',
+    }),
+    'exomonad-actor': frozenset({
+        'exomonad/actor/src/resident_actor/capture_workspace_child.hs',
+        'exomonad/actor/src/resident_actor/captured_readers_parent.hs',
+        'exomonad/actor/src/resident_actor/captured_reader_reuse.hs',
+        'exomonad/actor/src/resident_actor/capture_workspace_tests.rs',
+        'exomonad/actor/src/resident_actor/capture_partial_startup_failure.hs',
+        'exomonad/actor/src/resident_actor/owned_workbench/model_tests.rs',
     }),
     'tidepool-runtime': frozenset({
         'tidepool/runtime/src/session/exact_recovery_acceptance_tests.rs',
@@ -46,9 +65,11 @@ TEST_ONLY_SOURCES = {
         'tidepool/runtime/src/session/fixtures/recovery-dependent.hs',
         'tidepool/runtime/src/session/fixtures/recovery-native-packet.json',
         'tidepool/runtime/src/session/fixtures/recovery-original.hs',
+        'tidepool/runtime/src/session/paired_publication/linearization_tests.rs',
         'tidepool/runtime/src/session/turn_scaling_tests.rs',
     }),
     'tidepool-toolchain': frozenset({
+        'tidepool/toolchain/src/module_candidates/codec_measurement.rs',
         'tidepool/toolchain/tests/fixtures/deployment-module-package/Consumer.hs',
         'tidepool/toolchain/tests/fixtures/materialization-fault.c',
         'tidepool/toolchain/tests/fixtures/owned-declaration/ExactConsumer.hs',

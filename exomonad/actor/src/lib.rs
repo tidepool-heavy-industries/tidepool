@@ -23,6 +23,8 @@
 pub(crate) mod after_tool;
 pub mod agent_spec;
 mod call_timing;
+mod cell_model;
+pub use cell_model::{CellModelBinding, CellModelFactory, ModelBoundaryError, ModelReq};
 mod conversation;
 mod descriptor;
 mod external_application;
@@ -59,7 +61,8 @@ mod start;
 pub(crate) mod status_tool;
 mod termination;
 pub use hosted_lifecycle::{
-    CleanupComponentOutcome, HostedWorkSeal, ResidentCleanupOutcome, ResidentShutdown,
+    CleanupComponentOutcome, ForestRootShutdown, HostedWorkSeal, ResidentCleanupOutcome,
+    ResidentShutdown,
 };
 mod typed_request;
 mod usage_pointer;
@@ -147,7 +150,7 @@ pub use resident_tools::{
 pub use resident_workbench::{
     ActorMachineRegistry, ActorWorkbenchSource, ChildSessionFactory, InstalledToolLease,
     ResidentActorRunner, ResidentActorWorkbench, ResidentActorWorkbenchError,
-    ResidentMachineMeasurement,
+    ResidentMachineMeasurement, ToolDispatchError, ToolDispatchReply,
 };
 pub use role::{
     render_child_budget, ActorEffectKey, ActorRole, DescendantBudget, EffectiveRole,

@@ -286,6 +286,27 @@ pub trait ActorSourceLayers: Send + Sync {
         let _ = (actor, also_check);
         SourceLayerReload::Unavailable("this host installs no session helpers".into())
     }
+    /// Check a reload candidate, then arbitrate its actual publication against
+    /// invocation cancellation through the existing native decision owner.
+    fn reload_with_publication(
+        &self,
+        _actor: PrincipalId,
+        _also_check: &[String],
+        _publication: &std::sync::Arc<tidepool_runtime::session::PublicationDecision>,
+    ) -> SourceLayerReload {
+        SourceLayerReload::Unavailable("source owner does not support cancellable reload".into())
+    }
+
+    fn reload_helpers_with_publication(
+        &self,
+        _actor: PrincipalId,
+        _also_check: &[String],
+        _publication: &std::sync::Arc<tidepool_runtime::session::PublicationDecision>,
+    ) -> SourceLayerReload {
+        SourceLayerReload::Unavailable(
+            "source owner does not support cancellable helper reload".into(),
+        )
+    }
 }
 
 /// What publishing one actor's own layer did, as the actor engine needs to
@@ -307,6 +328,14 @@ pub enum SourceLayerReload {
     Rejected {
         active: String,
         rejected: String,
+        diagnostics: String,
+    },
+    /// Cancellation won before the checked candidate became visible.
+    Cancelled,
+    /// The new revision is visible but durable confirmation failed. Retain the
+    /// native commit claim as unconfirmed rather than retrying publication.
+    PublicationUnconfirmed {
+        revision: String,
         diagnostics: String,
     },
     /// This actor has no layer of its own to publish into.

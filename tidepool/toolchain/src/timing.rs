@@ -252,6 +252,29 @@ pub fn render_round(round: u64) -> String {
 /// render through [`render_node`]/[`render_round`] — [`NO_NODE`]/[`NO_ROUND`]
 /// never reach a consumer as a raw `u64::MAX`.
 pub fn record_stage(node: u64, round: u64, stage: &str, elapsed: Duration, bytes: u64) {
+    record_stage_counts(node, round, stage, elapsed, bytes, None);
+}
+
+/// Emit a disjoint product-processing stage with its actual owner count.
+pub(crate) fn record_stage_with_owners(
+    node: u64,
+    round: u64,
+    stage: &str,
+    elapsed: Duration,
+    bytes: u64,
+    owners: usize,
+) {
+    record_stage_counts(node, round, stage, elapsed, bytes, Some(owners));
+}
+
+fn record_stage_counts(
+    node: u64,
+    round: u64,
+    stage: &str,
+    elapsed: Duration,
+    bytes: u64,
+    owners: Option<usize>,
+) {
     let node_label = render_node(node);
     let round_label = render_round(round);
     tracing::debug!(
@@ -261,6 +284,8 @@ pub fn record_stage(node: u64, round: u64, stage: &str, elapsed: Duration, bytes
         stage,
         ms = elapsed.as_millis() as u64,
         bytes,
+        owners_known = owners.is_some(),
+        owners = owners.unwrap_or_default(),
         "turn stage"
     );
 }

@@ -168,6 +168,8 @@ struct ModuleFiles {
     interface: FileRef,
     packages: FileRef,
     evidence: FileRef,
+    #[serde(default)]
+    certification: Option<FileRef>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -180,6 +182,8 @@ struct Catalog {
     producer_identity: [u8; 32],
     consumed_worker_identity: [u8; 32],
     modules: Vec<ModuleFiles>,
+    #[serde(default)]
+    execution_graphs: Vec<FileRef>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -192,6 +196,12 @@ struct Owner {
     include: Vec<PathBuf>,
     target_source: String,
     module_version: [u8; 32],
+    #[serde(default)]
+    original_owner: Option<super::OriginalOwner>,
+    #[serde(default)]
+    version_origin: Option<super::CandidateVersionOrigin>,
+    #[serde(default)]
+    execution_source_sha256: Option<[u8; 32]>,
 }
 
 /// Validated source provenance and file references, never native authority.
@@ -232,7 +242,7 @@ impl DeploymentModulePackage {
         let bytes = read(path, CATALOG_LIMIT)?;
         let catalog: Catalog = serde_json::from_slice(&bytes)
             .map_err(|_| ModulePackageError::Format("catalog JSON"))?;
-        if catalog.schema != 1 {
+        if !matches!(catalog.schema, 1 | 2) {
             return Err(ModulePackageError::Format("catalog schema"));
         }
         require_immutable_roots(policy, &catalog.source_root, &catalog.output_root)?;
@@ -341,6 +351,23 @@ impl DeploymentModulePackage {
         let mut remaining = TOTAL_LIMIT;
         let mut records = Vec::new();
         let mut owners = BTreeSet::new();
+        let mut graphs = std::collections::BTreeMap::new();
+        if self.catalog.execution_graphs.len() > CANDIDATE_LIMIT {
+            return Err(ModulePackageError::Bounds);
+        }
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        for reference in &self.catalog.execution_graphs {
+            let bytes = self.read_ref(reference, &mut remaining)?;
+            let digest = super::parse_sha(&reference.sha256)
+                .ok_or(ModulePackageError::Format("execution graph digest"))?;
+            let graph = crate::execution_source::CertifiedExecutionSourceGraph::recover_verified(
+                bytes, digest,
+            )
+            .map_err(|_| ModulePackageError::Format("execution graph"))?;
+            if graphs.insert(digest, graph).is_some() {
+                return Err(ModulePackageError::Format("duplicate execution graph"));
+            }
+        }
         for files in &self.catalog.modules {
             let owner: Owner =
                 serde_json::from_slice(&self.read_ref(&files.owner, &mut remaining)?)
@@ -348,9 +375,9 @@ impl DeploymentModulePackage {
             if !owners.insert((owner.unit.clone(), owner.module.clone())) {
                 return Err(ModulePackageError::Format("duplicate module owner"));
             }
-            let record = Record {
+            let mut record = Record {
                 tag: "TPMCAN".into(),
-                version: 6,
+                version: super::RECORD_VERSION,
                 endpoint: producer.to_vec(),
                 include: owner.include,
                 unit: owner.unit,
@@ -363,7 +390,44 @@ impl DeploymentModulePackage {
                 package_imports: self.read_ref(&files.packages, &mut remaining)?,
                 evidence: serde_json::from_slice(&self.read_ref(&files.evidence, &mut remaining)?)
                     .map_err(|_| ModulePackageError::Format("dependency evidence JSON"))?,
+                version_origin: owner
+                    .version_origin
+                    .unwrap_or(super::CandidateVersionOrigin::Ordinary),
+                original_owner: owner.original_owner.unwrap_or(super::OriginalOwner {
+                    unit: String::new(),
+                    module: String::new(),
+                    module_version: [0; 32],
+                    skinny_iface_sha256: [0; 32],
+                    product_sha256: [0; 32],
+                }),
+                original_certification: files
+                    .certification
+                    .as_ref()
+                    .map(|reference| self.read_ref(reference, &mut remaining))
+                    .transpose()?
+                    .unwrap_or_default(),
+                execution_source_sha256: owner.execution_source_sha256,
+                execution_source: None,
             };
+            if self.catalog.schema == 1 {
+                if record.execution_source_sha256.is_some() {
+                    return Err(ModulePackageError::Format("legacy execution proof"));
+                }
+                record.original_owner =
+                    super::OriginalOwner::from_owner(&super::computed_owner(&record));
+            }
+            if record.original_owner.owner() != super::computed_owner(&record) {
+                return Err(ModulePackageError::Format("original full owner"));
+            }
+            if let Some(digest) = record.execution_source_sha256 {
+                let graph = graphs
+                    .get(&digest)
+                    .ok_or(ModulePackageError::Format("missing execution graph"))?
+                    .clone();
+                super::validate_original_execution(&record, graph.clone(), &mut validation)
+                    .ok_or(ModulePackageError::Format("execution source owner"))?;
+                record.execution_source = Some(graph);
+            }
             if owner.module_version != version_hash(&record)
                 || record.include != [self.catalog.source_root.clone()]
                 || !record.source.starts_with(&self.catalog.source_root)
@@ -506,6 +570,10 @@ mod tests {
         }
 
         fn with_modules(names: &[&str]) -> Self {
+            Self::with_modules_and_execution(names, false)
+        }
+
+        fn with_modules_and_execution(names: &[&str], with_execution: bool) -> Self {
             let root = tempfile::tempdir().unwrap();
             let source = root.path().join("sources");
             let output = root.path().join("products");
@@ -560,26 +628,72 @@ mod tests {
             let bytes = combine_rows(names.iter().map(|name| product_bytes("u", name, &[0x42])));
             let packages =
                 combine_rows(names.iter().map(|name| package_bundle("u", name, &[0x42])));
-            let products = tidepool_repr::execution_schema::parse_module_products(
-                &bytes,
-                &crate::prepared_artifact::production_requirements().unwrap(),
-                super::super::product_decode_limits(),
-            )
-            .unwrap();
+            let parsed =
+                crate::certified_products::ParsedModuleProducts::decode(&bytes, &packages).unwrap();
+            let include = [source.clone()];
+            let (_, mut prepared) = super::super::prepare_publication(
+                &producer_identity,
+                &include,
+                &evidence,
+                parsed,
+                "target",
+                super::super::CandidateVersionOrigin::Ordinary,
+                &[],
+            );
+            if with_execution {
+                use crate::execution_source::{
+                    CertifiedExecutionSourceGraph, ExecutionSourceAdmission,
+                    ExecutionSourceGraphInput,
+                };
+                let input = root.path().join("Input.hs");
+                fs::write(&input, b"target").unwrap();
+                let owners = prepared
+                    .records
+                    .iter()
+                    .map(super::super::computed_owner)
+                    .collect::<Vec<_>>();
+                let fresh = owners
+                    .iter()
+                    .map(|owner| crate::declaration_join::ExactModuleIdentity {
+                        unit: owner.unit.clone(),
+                        module: owner.module.clone(),
+                    })
+                    .collect();
+                let ExecutionSourceAdmission::Available(graph) = CertifiedExecutionSourceGraph::admit(ExecutionSourceGraphInput {
+                    producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer_identity),
+                    semantic_sha256: None, include: &include, source_path: &input, source: "target", evidence: &evidence,
+                    exact_imports: &std::collections::BTreeMap::new(), owners: &owners, fresh_owners: &fresh,
+                    retained_sources: &std::collections::BTreeMap::new(), packages: &std::collections::BTreeMap::new(),
+                }).unwrap() else { panic!("graph"); };
+                for record in &mut prepared.records {
+                    let owner = record.original_owner.owner();
+                    let seal = crate::certified_products::encode_home_certification(
+                        &owner,
+                        &[],
+                        &std::collections::BTreeMap::new(),
+                    )
+                    .unwrap();
+                    record.original_certification =
+                        crate::certified_products::bind_home_execution_source(
+                            &seal,
+                            &owner,
+                            graph.digest(),
+                            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                        )
+                        .unwrap();
+                    record.execution_source_sha256 = Some(graph.digest());
+                    record.execution_source = Some(graph.clone());
+                }
+                prepared.graphs.insert(graph.digest(), graph);
+            }
             export_under(
                 &output,
                 &source,
-                &producer_identity,
                 &crate::toolchain::AdmittedCompilerDeployment {
                     producer_identity,
                     consumed_worker_identity: [4; 32],
                 },
-                &[source.clone()],
-                &evidence,
-                &products,
-                &bytes,
-                &packages,
-                "target",
+                &prepared,
                 RootPolicy::Fixture,
             )
             .unwrap();
@@ -675,6 +789,46 @@ mod tests {
             &files.evidence.path,
         ];
         assert_eq!(paths.into_iter().collect::<BTreeSet<_>>().len(), 5);
+    }
+
+    #[test]
+    fn deployment_execution_proof_is_shared_and_advertised_corruption_refuses() {
+        let fixture = Fixture::with_modules_and_execution(&["A", "B"], true);
+        let catalog = fixture.catalog();
+        assert_eq!(catalog.schema, 2);
+        assert_eq!(catalog.execution_graphs.len(), 1);
+        assert!(catalog
+            .modules
+            .iter()
+            .all(|files| files.certification.is_some()));
+        let package = fixture.load().unwrap();
+        let records = package.records(&[3; 32]).unwrap();
+        let a = records[0].execution_source.as_ref().unwrap();
+        let b = records[1].execution_source.as_ref().unwrap();
+        assert!(std::sync::Arc::ptr_eq(a, b));
+        let path = fixture.output.join(&catalog.execution_graphs[0].path);
+        let bytes = fs::read(&path).unwrap();
+        fs::write(&path, b"corrupt").unwrap();
+        assert!(matches!(
+            fixture.load(),
+            Err(ModulePackageError::ArtifactChanged(_))
+        ));
+        fs::remove_file(&path).unwrap();
+        assert!(matches!(fixture.load(), Err(ModulePackageError::RootMoved)));
+        fs::write(&path, bytes).unwrap();
+        let seal = fixture.output.join(
+            catalog.modules[0]
+                .certification
+                .as_ref()
+                .unwrap()
+                .path
+                .clone(),
+        );
+        fs::write(seal, b"corrupt seal").unwrap();
+        assert!(matches!(
+            fixture.load(),
+            Err(ModulePackageError::ArtifactChanged(_))
+        ));
     }
 
     #[test]
@@ -953,26 +1107,14 @@ fn write_ref(root: &Path, relative: PathBuf, bytes: &[u8]) -> Result<FileRef, Mo
 pub(crate) fn export(
     output_root: &Path,
     source_root: &Path,
-    producer: &[u8],
     authority: &crate::toolchain::AdmittedCompilerDeployment,
-    include: &[PathBuf],
-    evidence: &crate::cache::DependencyEvidence,
-    products: &[tidepool_repr::execution_schema::RawModuleProduct],
-    product_bytes: &[u8],
-    package_bytes: &[u8],
-    target_source: &str,
+    prepared: &super::PreparedPublication<'_>,
 ) -> Result<(), ModulePackageError> {
     export_under(
         output_root,
         source_root,
-        producer,
         authority,
-        include,
-        evidence,
-        products,
-        product_bytes,
-        package_bytes,
-        target_source,
+        prepared,
         RootPolicy::NixStore,
     )
 }
@@ -980,16 +1122,13 @@ pub(crate) fn export(
 fn export_under(
     output_root: &Path,
     source_root: &Path,
-    producer: &[u8],
     authority: &crate::toolchain::AdmittedCompilerDeployment,
-    include: &[PathBuf],
-    evidence: &crate::cache::DependencyEvidence,
-    products: &[tidepool_repr::execution_schema::RawModuleProduct],
-    product_bytes: &[u8],
-    package_bytes: &[u8],
-    target_source: &str,
+    prepared: &super::PreparedPublication<'_>,
     policy: RootPolicy,
 ) -> Result<(), ModulePackageError> {
+    let producer = prepared.endpoint_identity;
+    let include = prepared.include;
+    let evidence = prepared.evidence;
     require_immutable_roots(policy, source_root, output_root)?;
     if producer != authority.producer_identity {
         return Err(ModulePackageError::CompilerMismatch);
@@ -1008,15 +1147,7 @@ fn export_under(
     if output_root.join("catalog.json").exists() {
         return Err(ModulePackageError::Format("catalog already exists"));
     }
-    let records = super::eligible_records(
-        producer,
-        include,
-        evidence,
-        products,
-        product_bytes,
-        package_bytes,
-        target_source,
-    );
+    let records = &prepared.records;
     require_complete_cohort(&records, evidence)?;
     if records.is_empty() || records.len() > CANDIDATE_LIMIT {
         return Err(ModulePackageError::Bounds);
@@ -1035,6 +1166,9 @@ fn export_under(
             include: record.include.clone(),
             target_source: record.target_source.clone(),
             module_version: version_hash(&record),
+            original_owner: Some(record.original_owner.clone()),
+            version_origin: Some(record.version_origin.clone()),
+            execution_source_sha256: record.execution_source_sha256,
         };
         modules.push(ModuleFiles {
             owner: write_ref(
@@ -1060,10 +1194,30 @@ fn export_under(
                 &serde_json::to_vec(&record.evidence)
                     .map_err(|_| ModulePackageError::Format("evidence encoding"))?,
             )?,
+            certification: (!record.original_certification.is_empty())
+                .then(|| {
+                    write_ref(
+                        output_root,
+                        directory.join("home-certification.cbor"),
+                        &record.original_certification,
+                    )
+                })
+                .transpose()?,
         });
     }
+    let execution_graphs = prepared
+        .graphs
+        .iter()
+        .map(|(digest, graph)| {
+            write_ref(
+                output_root,
+                PathBuf::from(format!("execution-{}.cbor", super::hex(digest))),
+                graph.bytes(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let catalog = Catalog {
-        schema: 1,
+        schema: 2,
         output_root: output_root.to_owned(),
         source_root: source_root.clone(),
         source_files: crate::cache::source_root_manifest(&source_root)
@@ -1071,6 +1225,7 @@ fn export_under(
         producer_identity: authority.producer_identity,
         consumed_worker_identity: authority.consumed_worker_identity,
         modules,
+        execution_graphs,
     };
     let bytes = serde_json::to_vec_pretty(&catalog)
         .map_err(|_| ModulePackageError::Format("catalog encoding"))?;

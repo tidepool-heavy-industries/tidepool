@@ -9,7 +9,7 @@ import Codec.CBOR.Encoding
   , encodeWord64, encodePreEncoded )
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (IOException, try)
-import Control.Monad (forM)
+import Control.Monad (forM, when)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import Data.Foldable (fold)
@@ -53,6 +53,7 @@ import Tidepool.PackageWitness
   ( PackageImportRoot(..), packageImportRoot, validatePackageImportRoot )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.Timing (readTimingEnabled, emitCount)
 
 data Product = Product
   { productOrigin :: T.Text
@@ -79,6 +80,8 @@ encodeCertifiedProducts
   -> IO (Either String BS.ByteString)
 encodeCertifiedProducts env cached exact fresh targets evidence productBytes evidenceBytes = do
   packageRef <- newIORef []
+  timing <- readTimingEnabled
+  (resolvePackage, resolutionCounts) <- newPackageGlobalResolver timing env
   let freshEvidenceSha = digest evidenceBytes
       freshProductSha = digest productBytes
       freshProducts = catMaybes
@@ -132,7 +135,7 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
     else do
       modules <- forM allGlobals $ \(product, group) -> do
         globals <- forM (candidateGroupGlobals group) $ \global ->
-          encodeGlobalWitness env packageRef ownerMap homeModules
+          encodeGlobalWitness env resolvePackage packageRef ownerMap homeModules
             (candidateGlobalIdentity global)
             (candidateGlobalRep global)
             (candidateGlobalSignature global)
@@ -141,20 +144,32 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
         pure (product, group, sequence globals)
       targetRows <- forM targets $ \(target, program) -> do
         globals <- forM (programGlobals program) $ \global ->
-          encodeGlobalWitness env packageRef ownerMap homeModules
+          encodeGlobalWitness env resolvePackage packageRef ownerMap homeModules
             (globalIdentity global) (globalRep global)
             (globalEntrySignature global >>= \(SignatureId index) ->
               at (programSignatures program) (fromIntegral index))
             (globalRequiredEvaluated global) (globalRequiredGeneration global)
         pure (target, sequence globals)
-      certifyLocalPackageExports env packageRef (map snd targets)
+      certifyLocalPackageExports env resolvePackage packageRef (map snd targets)
       packageWitnesses <- readIORef packageRef
       let packages = Map.fromListWith Set.union
             [ ((unit, name), Set.singleton (path, sha))
             | (unit, name, path, sha) <- packageWitnesses ]
-      packagesValid <- and <$> forM packageWitnesses (\(_, _, path, sha) -> do
+      (requests, loads) <- resolutionCounts
+      let references = Map.fromListWith (+)
+            [((path, sha), 1) | (_, _, path, sha) <- packageWitnesses]
+      validated <- forM (Map.toAscList references) $ \((path, sha), count) -> do
         readBack <- try (BS.readFile path) :: IO (Either IOException BS.ByteString)
-        pure (either (const False) ((== sha) . digest) readBack))
+        pure $ case readBack of
+          Left _ -> (False, 0, 0)
+          Right bytes -> let size = fromIntegral (BS.length bytes)
+            in (digest bytes == sha, size, size * count)
+      let packagesValid = and [valid | (valid, _, _) <- validated]
+      emitCount timing "certified_package_global_requests" requests
+      emitCount timing "certified_package_owner_loads" loads
+      emitCount timing "certified_package_owner_revalidations" (fromIntegral (Map.size references))
+      emitCount timing "certified_package_revalidation_bytes" (sum [size | (_, size, _) <- validated])
+      emitCount timing "certified_package_reference_bytes" (sum [size | (_, _, size) <- validated])
       let failures = [errorText | (_, _, Left errorText) <- modules]
             ++ [errorText | (_, Left errorText) <- targetRows]
             ++ ["package interface changed during certification" | not packagesValid]
@@ -197,8 +212,9 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
 -- turns. One canonical binder proves each module's selected interface; later
 -- retained-package demands independently prove their own canonical binder.
 -- Noncanonical compiler helpers remain internal and do not supply evidence.
-certifyLocalPackageExports :: HscEnv -> IORef [PackageWitness] -> [WireProgram] -> IO ()
-certifyLocalPackageExports env packageRef programs = do
+certifyLocalPackageExports :: HscEnv -> PackageGlobalResolver
+  -> IORef [PackageWitness] -> [WireProgram] -> IO ()
+certifyLocalPackageExports env resolvePackage packageRef programs = do
   observed <- readIORef packageRef
   let witnessed = Set.fromList [(unit, name) | (unit, name, _, _) <- observed]
       candidates = Map.fromListWith (++)
@@ -219,7 +235,7 @@ certifyLocalPackageExports env packageRef programs = do
         (at (programConstructors program) (fromIntegral index))
     eligible _ _ = True
     select [] = pure ()
-    select (identity : rest) = resolvePackageGlobal env identity >>= \case
+    select (identity : rest) = resolvePackage identity >>= \case
       Left _ -> select rest
       Right (_, witness) -> modifyIORef' packageRef
         ((symbolUnit identity, symbolModule identity, packagePath witness,
@@ -262,17 +278,17 @@ sourceHash evidence unit name = do
   pure (T.pack (dependencySourceSha256 source))
 
 encodeGlobalWitness
-  :: HscEnv -> IORef [PackageWitness] -> Map.Map SymbolIdentity BinderOwner
+  :: HscEnv -> PackageGlobalResolver -> IORef [PackageWitness] -> Map.Map SymbolIdentity BinderOwner
   -> Set.Set (T.Text, T.Text)
   -> SymbolIdentity -> RuntimeRep -> Maybe Signature -> Bool -> Maybe Word64
   -> IO (Either String Encoding)
-encodeGlobalWitness env packageRef binders homeModules identity rep signature evaluated generation = do
+encodeGlobalWitness env resolvePackage packageRef binders homeModules identity rep signature evaluated generation = do
   selected <- case generation of
     Just wanted
       | isHomeUnit (hsc_home_unit env) (moduleUnit (symbolOwner identity)) ->
           pure (Right (array
             [encodeString "retained", encodeIdentity identity, encodeWord64 wanted]))
-      | otherwise -> packageOwner env packageRef identity (Just wanted)
+      | otherwise -> packageOwner resolvePackage packageRef identity (Just wanted)
     Nothing -> case Map.lookup identity binders of
       Just (unit, name, version, ordinal) -> pure (Right (array
         [encodeString "source", encodeString unit, encodeString name
@@ -281,7 +297,7 @@ encodeGlobalWitness env packageRef binders homeModules identity rep signature ev
       Nothing
         | (symbolUnit identity, symbolModule identity) `Set.member` homeModules ->
             pure (Left "external home global has no certified source group")
-        | otherwise -> packageOwner env packageRef identity Nothing
+        | otherwise -> packageOwner resolvePackage packageRef identity Nothing
   pure $ do
     owner <- selected
     Right (array
@@ -293,10 +309,10 @@ symbolOwner :: SymbolIdentity -> Module
 symbolOwner identity = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
   (mkModuleName (T.unpack (symbolModule identity)))
 
-packageOwner :: HscEnv -> IORef [PackageWitness] -> SymbolIdentity -> Maybe Word64
+packageOwner :: PackageGlobalResolver -> IORef [PackageWitness] -> SymbolIdentity -> Maybe Word64
   -> IO (Either String Encoding)
-packageOwner env packageRef identity generation = do
-  selected <- resolvePackageGlobal env identity
+packageOwner resolvePackage packageRef identity generation = do
+  selected <- resolvePackage identity
   case selected of
     Left reason -> pure (Left reason)
     Right (_, witness) -> do
@@ -309,37 +325,87 @@ packageOwner env packageRef identity generation = do
         Nothing -> encodeString "package" : fields
         Just wanted -> encodeString "retained-package" : fields ++ [encodeWord64 wanted])))
 
+type PackageGlobalResolver = SymbolIdentity -> IO (Either String (Id, PackageImportRoot))
+
+-- This cache belongs to one certification. A module's defining interface is
+-- checked around its read; each demanded symbol is still resolved separately.
+-- Successful witnesses are checked again before publication, and nothing is
+-- retained across requests or changes to the compiler environment.
+newPackageGlobalResolver :: Bool -> HscEnv -> IO (PackageGlobalResolver, IO (Integer, Integer))
+newPackageGlobalResolver timing env = do
+  state <- newIORef (0, Map.empty)
+  let load owner = do
+        (_, interfaces) <- readIORef state
+        case Map.lookup owner interfaces of
+          Just value -> pure value
+          Nothing -> do
+            loaded <- loadPackageInterface env owner
+            value <- case loaded of
+              Left reason -> pure (Left reason)
+              Right (iface, witness) -> do
+                unchanged <- validatePackageImportRoot env witness
+                pure ((iface, witness) <$ unchanged)
+            modifyIORef' state (\(requests, selected) ->
+              (requests, Map.insert owner value selected))
+            pure value
+      resolve identity = do
+        when timing $ modifyIORef' state (\(requests, interfaces) ->
+          let next = requests + 1 in next `seq` (next, interfaces))
+        resolvePackageGlobalUsing env load identity
+      counts = do
+        (requests, interfaces) <- readIORef state
+        pure (requests, fromIntegral (Map.size interfaces))
+  pure (resolve, counts)
+
 -- Recovery and certification share one canonical package owner. The Id comes
 -- from the exact interface's structural declaration, including implicit tops.
-resolvePackageGlobal :: HscEnv -> SymbolIdentity
-  -> IO (Either String (Id, PackageImportRoot))
-resolvePackageGlobal env identity
+resolvePackageGlobal :: HscEnv -> PackageGlobalResolver
+resolvePackageGlobal env identity = do
+  selected <- resolvePackageGlobalUsing env (loadPackageInterface env) identity
+  case selected of
+    Left reason -> pure (Left reason)
+    Right (identifier, witness) -> do
+      unchanged <- validatePackageImportRoot env witness
+      pure $ case unchanged of
+        Left reason -> Left (packageRefusal identity reason)
+        Right () -> Right (identifier, witness)
+
+loadPackageInterface :: HscEnv -> Module
+  -> IO (Either String (ModIface, PackageImportRoot))
+loadPackageInterface env owner = do
+  found <- packageImportRoot env owner
+  case found of
+    Left reason -> pure (Left reason)
+    Right witness -> do
+      exact <- readExactInterface env owner
+      case exact of
+        Right (iface, location) | ml_hi_file location == packagePath witness ->
+          pure (Right (iface, witness))
+        _ -> pure (Left "selected package interface is unavailable or changed")
+
+resolvePackageGlobalUsing :: HscEnv
+  -> (Module -> IO (Either String (ModIface, PackageImportRoot)))
+  -> PackageGlobalResolver
+resolvePackageGlobalUsing env load identity
   | symbolNamespace identity /= "value" =
       pure (Left (refusal "unsupported external global namespace"))
   | otherwise = do
-      let owner = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
-            (mkModuleName (T.unpack (symbolModule identity)))
-      found <- packageImportRoot env owner
+      let owner = symbolOwner identity
+      found <- load owner
       case found of
         Left reason -> pure (Left (refusal reason))
-        Right witness -> do
-          exact <- readExactInterface env owner
-          selected <- case exact of
-            Left _ -> pure (Failed ())
-            Right (iface, location)
-              | ml_hi_file location /= packagePath witness -> pure (Failed ())
-              | otherwise -> canonicalPackageGlobal env owner iface
-                  (mkVarOcc (T.unpack (symbolOccurrence identity)))
-          case selected of
-            Succeeded (AnId identifier) -> do
-              unchanged <- validatePackageImportRoot env witness
-              pure $ case unchanged of
-                Left reason -> Left (refusal reason)
-                Right () -> Right (identifier, witness)
-            _ -> pure (Left (refusal "selected package global is absent from loaded interface"))
+        Right (iface, witness) -> do
+          selected <- canonicalPackageGlobal env owner iface
+            (mkVarOcc (T.unpack (symbolOccurrence identity)))
+          pure $ case selected of
+            Succeeded (AnId identifier) -> Right (identifier, witness)
+            _ -> Left (refusal "selected package global is absent from loaded interface")
   where
-    refusal reason = reason ++ ": " ++ T.unpack (symbolUnit identity) ++ ":"
-      ++ T.unpack (symbolModule identity) ++ "." ++ T.unpack (symbolOccurrence identity)
+    refusal = packageRefusal identity
+
+packageRefusal :: SymbolIdentity -> String -> String
+packageRefusal identity reason = reason ++ ": " ++ T.unpack (symbolUnit identity) ++ ":"
+  ++ T.unpack (symbolModule identity) ++ "." ++ T.unpack (symbolOccurrence identity)
 
 -- The interface supplies canonical Names, including known-key bindings.
 -- An implicit Id is authenticated by its defining parent declaration; wired

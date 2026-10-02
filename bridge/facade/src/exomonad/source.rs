@@ -435,31 +435,91 @@ impl SourceLayer {
     /// Point `active` at a checked candidate. One `rename(2)`: the previous
     /// revision stays complete until the instant the new one is complete.
     pub(crate) fn publish(&self, pending: PendingRevision) -> Result<SourceRevision> {
-        let previous = self.read_active()?;
-        let generation = previous.map_or(1, |previous| previous.generation + 1);
-        let roots = revision_root_count(&pending.directory)?;
+        self.publish_checked(pending, None, None)
+            .map_err(|failure| failure.to_string().into())
+    }
+
+    fn publish_checked(
+        &self,
+        pending: PendingRevision,
+        expected: Option<&SourceRevision>,
+        decision: Option<&Arc<tidepool_runtime::session::PublicationDecision>>,
+    ) -> std::result::Result<SourceRevision, SourcePublishFailure> {
+        let before = |error: Box<dyn std::error::Error>| {
+            SourcePublishFailure::BeforeVisibility(error.to_string())
+        };
+        let previous = self.read_active().map_err(before)?;
+        let generation = previous
+            .as_ref()
+            .map_or(1, |previous| previous.generation + 1);
+        let roots = revision_root_count(&pending.directory).map_err(before)?;
         let staged = self
             .directory
             .join(format!(".active-{}", uuid::Uuid::new_v4()));
-        sync_revision_tree(&pending.directory)?;
+        sync_revision_tree(&pending.directory).map_err(before)?;
         std::os::unix::fs::symlink(
             Path::new("revisions").join(&pending.revision.identity),
             &staged,
-        )?;
-        std::fs::rename(&staged, self.active_link())?;
-        tidepool_atomic_write::sync_parent_directory(&self.active_link())?;
-        tidepool_atomic_write::write_durable(
-            &self.active_record(),
-            &serde_json::to_vec_pretty(&ActiveRecord {
-                identity: pending.revision.identity.clone(),
-                generation,
-                roots,
-            })?,
-        )?;
-        Ok(SourceRevision {
+        )
+        .map_err(|error| SourcePublishFailure::BeforeVisibility(error.to_string()))?;
+        let current = match self.read_active() {
+            Ok(current) => current,
+            Err(error) => {
+                std::fs::remove_file(&staged).ok();
+                return Err(before(error));
+            }
+        };
+        if expected.is_some_and(|expected| current.as_ref() != Some(expected)) {
+            std::fs::remove_file(&staged).ok();
+            return Err(SourcePublishFailure::BeforeVisibility(
+                "active source revision changed after candidate checking".into(),
+            ));
+        }
+        let claim = match decision {
+            Some(decision) => match decision.claim_commit() {
+                Some(claim) => Some(claim),
+                None => {
+                    std::fs::remove_file(&staged).ok();
+                    return Err(SourcePublishFailure::Cancelled);
+                }
+            },
+            None => None,
+        };
+        if let Err(error) = std::fs::rename(&staged, self.active_link()) {
+            std::fs::remove_file(&staged).ok();
+            if let Some(claim) = claim {
+                claim.before_rename_failure();
+            }
+            return Err(SourcePublishFailure::BeforeVisibility(error.to_string()));
+        }
+        let published = SourceRevision {
             generation,
             ..pending.revision
-        })
+        };
+        let confirm = || -> Result<()> {
+            tidepool_atomic_write::sync_parent_directory(&self.active_link())?;
+            tidepool_atomic_write::write_durable(
+                &self.active_record(),
+                &serde_json::to_vec_pretty(&ActiveRecord {
+                    identity: published.identity.clone(),
+                    generation,
+                    roots,
+                })?,
+            )?;
+            Ok(())
+        };
+        if let Err(error) = confirm() {
+            // A visible revision may have survived a crash. Keeping the native
+            // claim unconfirmed prevents cancellation from authorizing replay.
+            return Err(SourcePublishFailure::VisibleUnconfirmed {
+                revision: published.identity,
+                diagnostics: error.to_string(),
+            });
+        }
+        if let Some(claim) = claim {
+            claim.published();
+        }
+        Ok(published)
     }
 
     /// What a reload of `candidate` would change relative to what is active.
@@ -470,6 +530,33 @@ impl SourceLayer {
     ) -> Vec<String> {
         candidate.changed_since(active)
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ReloadRunFailure {
+    #[error("{0:?}")]
+    Source(tidepool_handlers::SourceError),
+    #[error("{0}")]
+    Publication(#[from] SourcePublishFailure),
+}
+
+impl From<tidepool_handlers::SourceError> for ReloadRunFailure {
+    fn from(error: tidepool_handlers::SourceError) -> Self {
+        Self::Source(error)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum SourcePublishFailure {
+    #[error("source publication cancelled")]
+    Cancelled,
+    #[error("{0}")]
+    BeforeVisibility(String),
+    #[error("source revision {revision} is visible but durability is unconfirmed: {diagnostics}")]
+    VisibleUnconfirmed {
+        revision: String,
+        diagnostics: String,
+    },
 }
 
 fn copy_revision_tree(source: &Path, destination: &Path) -> Result<()> {
@@ -792,8 +879,8 @@ impl ExomonadSourceReload {
         &self,
         also_check: &[String],
         intent: Option<&str>,
-    ) -> std::result::Result<tidepool_bridge_effects::SrReloadOutcome, tidepool_handlers::SourceError>
-    {
+        publication: Option<&Arc<tidepool_runtime::session::PublicationDecision>>,
+    ) -> std::result::Result<tidepool_bridge_effects::SrReloadOutcome, ReloadRunFailure> {
         let active = self.layer.ensure_active(&self.frozen).map_err(unreadable)?;
         let pending = self
             .layer
@@ -811,13 +898,35 @@ impl ExomonadSourceReload {
             true,
             also_check,
             intent,
+            publication,
         )
+    }
+
+    fn reload_helpers_owned(
+        &self,
+        actor: PrincipalId,
+        also_check: &[String],
+        publication: Option<&Arc<tidepool_runtime::session::PublicationDecision>>,
+    ) -> exomonad_actor::SourceLayerReload {
+        if matches!(self.scope(actor), ActorSourceScope::Checkpoint(_)) {
+            return exomonad_actor::SourceLayerReload::Unavailable(
+                "checkpoint source is frozen; session helpers cannot be republished".into(),
+            );
+        }
+        let _one_at_a_time = self.gate.lock();
+        let Some(branch) = self.helper_scopes.read().get(&actor).cloned() else {
+            return exomonad_actor::SourceLayerReload::Unavailable(
+                "this actor has no session helper branch".into(),
+            );
+        };
+        self.reload_helper_branch(&branch, also_check, publication)
     }
 
     fn reload_helper_branch(
         &self,
         branch: &str,
         also_check: &[String],
+        publication: Option<&Arc<tidepool_runtime::session::PublicationDecision>>,
     ) -> exomonad_actor::SourceLayerReload {
         use exomonad_actor::SourceLayerReload;
 
@@ -918,11 +1027,19 @@ impl ExomonadSourceReload {
             };
         }
         let changed = changed_modules(&active, pending.revision());
-        match layer.publish(pending) {
+        match layer.publish_checked(pending, Some(&active), publication) {
             Ok(published) => SourceLayerReload::Published {
                 previous: active.identity,
                 revision: published.identity,
                 changed,
+            },
+            Err(SourcePublishFailure::Cancelled) => SourceLayerReload::Cancelled,
+            Err(SourcePublishFailure::VisibleUnconfirmed {
+                revision,
+                diagnostics,
+            }) => SourceLayerReload::PublicationUnconfirmed {
+                revision,
+                diagnostics,
             },
             Err(error) => SourceLayerReload::Unavailable(format!(
                 "session helper revision could not be published: {error}"
@@ -948,8 +1065,8 @@ impl ExomonadSourceReload {
         replaces_run_layer: bool,
         also_check: &[String],
         intent: Option<&str>,
-    ) -> std::result::Result<tidepool_bridge_effects::SrReloadOutcome, tidepool_handlers::SourceError>
-    {
+        publication: Option<&Arc<tidepool_runtime::session::PublicationDecision>>,
+    ) -> std::result::Result<tidepool_bridge_effects::SrReloadOutcome, ReloadRunFailure> {
         use tidepool_bridge_effects::SrReloadOutcome;
         if pending.revision().identity == active.identity {
             return Ok(SrReloadOutcome::ReloadUnchanged(Self::wire(&active)));
@@ -1021,7 +1138,7 @@ impl ExomonadSourceReload {
         let changed = layer.changed_modules(&active, pending.revision());
         let capture_directory = pending.directory.clone();
         let source_roots = pending.source_roots.clone();
-        let published = layer.publish(pending).map_err(unreadable)?;
+        let published = layer.publish_checked(pending, Some(&active), publication)?;
         let workspace = commit_captured_workspace(
             workspace,
             &source_roots,
@@ -1055,7 +1172,7 @@ impl ExomonadSourceReload {
             ActorSourceScope::Checkpoint(_) => {
                 return Err(tidepool_handlers::SourceError::SourceUnavailable(
                     "checkpoint source is frozen; drift is unavailable".into(),
-                ))
+                ));
             }
             ActorSourceScope::Run | ActorSourceScope::RunReadOnly => {
                 let config = self.frozen.config().map_err(unreadable)?;
@@ -1519,7 +1636,7 @@ impl tidepool_handlers::SourceReloadService for ExomonadSourceReload {
                     "checkpoint source is frozen; this actor cannot republish it".into(),
                 ))
             }
-            ActorSourceScope::Run => self.reload_run(also_check, intent),
+            ActorSourceScope::Run => self.reload_run(also_check, intent, None).map_err(|failure| tidepool_handlers::SourceError::SourceUnreadable(failure.to_string())),
             ActorSourceScope::RunReadOnly => {
                 Err(tidepool_handlers::SourceError::SourceUnavailable(
                     "this actor uses the run's current tooling; only the run owner can reload it. \
@@ -1605,7 +1722,8 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         if !candidate.same_revision(checkpoint) {
             return Err(format!(
                 "checkpoint source revisions differ from authored entry source: captured {:?}, entry {:?}",
-                checkpoint.identities(), candidate.identities(),
+                checkpoint.identities(),
+                candidate.identities(),
             ));
         }
         Ok(checkpoint.include_paths().to_vec())
@@ -1730,18 +1848,62 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         actor: PrincipalId,
         also_check: &[String],
     ) -> exomonad_actor::SourceLayerReload {
-        if matches!(self.scope(actor), ActorSourceScope::Checkpoint(_)) {
-            return exomonad_actor::SourceLayerReload::Unavailable(
-                "checkpoint source is frozen; session helpers cannot be republished".into(),
+        self.reload_helpers_owned(actor, also_check, None)
+    }
+
+    fn reload_helpers_with_publication(
+        &self,
+        actor: PrincipalId,
+        also_check: &[String],
+        publication: &Arc<tidepool_runtime::session::PublicationDecision>,
+    ) -> exomonad_actor::SourceLayerReload {
+        self.reload_helpers_owned(actor, also_check, Some(publication))
+    }
+
+    fn reload_with_publication(
+        &self,
+        actor: PrincipalId,
+        also_check: &[String],
+        publication: &Arc<tidepool_runtime::session::PublicationDecision>,
+    ) -> exomonad_actor::SourceLayerReload {
+        use exomonad_actor::SourceLayerReload;
+        use tidepool_bridge_effects::SrReloadOutcome;
+        let _one_at_a_time = self.gate.lock();
+        if !matches!(self.scope(actor), ActorSourceScope::Run) {
+            return SourceLayerReload::Unavailable(
+                "this actor cannot republish the run source layer".into(),
             );
         }
-        let _one_at_a_time = self.gate.lock();
-        let Some(branch) = self.helper_scopes.read().get(&actor).cloned() else {
-            return exomonad_actor::SourceLayerReload::Unavailable(
-                "this actor has no session helper branch".into(),
-            );
-        };
-        self.reload_helper_branch(&branch, also_check)
+        match self.reload_run(also_check, None, Some(publication)) {
+            Ok(SrReloadOutcome::ReloadUnchanged(revision)) => SourceLayerReload::Unchanged {
+                revision: revision.identity,
+            },
+            Ok(SrReloadOutcome::ReloadPublished(previous, revision, changed, _)) => {
+                SourceLayerReload::Published {
+                    previous: previous.identity,
+                    revision: revision.identity,
+                    changed,
+                }
+            }
+            Ok(SrReloadOutcome::ReloadRejected(active, rejected, diagnostics)) => {
+                SourceLayerReload::Rejected {
+                    active: active.identity,
+                    rejected: rejected.identity,
+                    diagnostics,
+                }
+            }
+            Err(ReloadRunFailure::Publication(SourcePublishFailure::Cancelled)) => {
+                SourceLayerReload::Cancelled
+            }
+            Err(ReloadRunFailure::Publication(SourcePublishFailure::VisibleUnconfirmed {
+                revision,
+                diagnostics,
+            })) => SourceLayerReload::PublicationUnconfirmed {
+                revision,
+                diagnostics,
+            },
+            Err(error) => SourceLayerReload::Unavailable(error.to_string()),
+        }
     }
 }
 
@@ -1856,6 +2018,10 @@ fn revision_module(identity: &str) -> String {
     )
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "source/publication_fault_tests.rs"]
+mod publication_fault_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1876,10 +2042,12 @@ mod tests {
         assert!(captured.identities()[0].starts_with("helpers:"));
         assert!(captured.identities()[1].starts_with("run:"));
         assert!(!captured.include_paths().is_empty());
-        assert!(captured
-            .include_paths()
-            .iter()
-            .all(|path| !path.to_string_lossy().contains("/active/")));
+        assert!(
+            captured
+                .include_paths()
+                .iter()
+                .all(|path| !path.to_string_lossy().contains("/active/"))
+        );
         assert_eq!(
             reload
                 .admit_checkpoint_layer(&captured, PrincipalId::SYSTEM, "run", &[])
@@ -1954,15 +2122,21 @@ mod tests {
         assert_ne!(foreign.semantic_digest(), digest);
         assert!(!foreign.same_revision(&captured));
         assert!(reload.validate_source_authority(&foreign).is_err());
-        assert!(reload
-            .admit_checkpoint_layer(&foreign, PrincipalId::SYSTEM, "run", &[])
-            .is_err());
-        assert!(reload
-            .bind_checkpoint_for(PrincipalId::new(1, 1), "run", &foreign)
-            .is_err());
-        assert!(reload
-            .validate_source_authority(&exomonad_actor::CheckpointSourceLayer::default())
-            .is_err());
+        assert!(
+            reload
+                .admit_checkpoint_layer(&foreign, PrincipalId::SYSTEM, "run", &[])
+                .is_err()
+        );
+        assert!(
+            reload
+                .bind_checkpoint_for(PrincipalId::new(1, 1), "run", &foreign)
+                .is_err()
+        );
+        assert!(
+            reload
+                .validate_source_authority(&exomonad_actor::CheckpointSourceLayer::default())
+                .is_err()
+        );
         reload.validate_source_authority(&captured).unwrap();
     }
 
@@ -1986,10 +2160,12 @@ mod tests {
         drop(reload);
         drop(run);
         drop(captured);
-        assert!(surviving_child
-            .include_paths()
-            .iter()
-            .all(|path| path.exists()));
+        assert!(
+            surviving_child
+                .include_paths()
+                .iter()
+                .all(|path| path.exists())
+        );
         assert!(run_path.exists());
         drop(surviving_child);
         assert!(
@@ -2067,13 +2243,15 @@ mod tests {
             std::fs::read_to_string(reload.helper_draft("run").join("SessionHelpers.hs")).unwrap(),
             source
         );
-        assert!(reload
-            .helper_layer("run")
-            .read_active()
-            .unwrap()
-            .unwrap()
-            .modules
-            .is_empty());
+        assert!(
+            reload
+                .helper_layer("run")
+                .read_active()
+                .unwrap()
+                .unwrap()
+                .modules
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2133,7 +2311,7 @@ mod tests {
             crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
         );
 
-        let outcome = reload.reload_helper_branch("run", &[]);
+        let outcome = reload.reload_helper_branch("run", &[], None);
         assert!(matches!(
             outcome,
             exomonad_actor::SourceLayerReload::Rejected { .. }
@@ -2142,13 +2320,15 @@ mod tests {
             std::fs::read_to_string(reload.helper_draft("run").join("SessionHelpers.hs")).unwrap(),
             invalid
         );
-        assert!(reload
-            .helper_layer("run")
-            .read_active()
-            .unwrap()
-            .unwrap()
-            .modules
-            .is_empty());
+        assert!(
+            reload
+                .helper_layer("run")
+                .read_active()
+                .unwrap()
+                .unwrap()
+                .modules
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2172,11 +2352,13 @@ mod tests {
             true,
         );
         assert!(result.unwrap_err().contains("disagree"));
-        assert!(reload
-            .helper_layer("prepared")
-            .read_active()
-            .unwrap()
-            .is_none());
+        assert!(
+            reload
+                .helper_layer("prepared")
+                .read_active()
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -2185,12 +2367,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("A.hs"), "module A where").unwrap();
         let layer = SourceLayer::new(run.path());
-        assert!(layer
-            .capture_from_roots(
-                "test",
-                &[root.path().to_path_buf(), root.path().join("missing"),]
-            )
-            .is_err());
+        assert!(
+            layer
+                .capture_from_roots(
+                    "test",
+                    &[root.path().to_path_buf(), root.path().join("missing"),]
+                )
+                .is_err()
+        );
         assert_eq!(std::fs::read_dir(layer.revisions()).unwrap().count(), 0);
         assert_eq!(
             std::fs::read_to_string(root.path().join("A.hs")).unwrap(),
@@ -2273,17 +2457,102 @@ mod tests {
     }
 
     #[test]
+    fn checked_source_publication_cancellation_keeps_active_revision() {
+        use tidepool_runtime::session::{PublicationDecision, PublicationPhase};
+        let run = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.hs"), "module A where\na = 1").unwrap();
+        let layer = SourceLayer::new(run.path());
+        let roots = [root.path().to_path_buf()];
+        let active = layer
+            .publish(layer.capture_from_roots("test", &roots).unwrap())
+            .unwrap();
+        std::fs::write(root.path().join("A.hs"), "module A where\na = 2").unwrap();
+        let pending = layer.capture_from_roots("test", &roots).unwrap();
+        let decision = PublicationDecision::new();
+        decision.request_cancellation();
+        assert!(matches!(
+            layer.publish_checked(pending, Some(&active), Some(&decision)),
+            Err(SourcePublishFailure::Cancelled)
+        ));
+        assert_eq!(decision.phase(), PublicationPhase::CancellationRequested);
+        assert_eq!(layer.read_active().unwrap(), Some(active));
+        assert!(!run.path().read_dir().unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".active-")
+        }));
+    }
+
+    #[test]
+    fn checked_source_publication_revalidates_exact_active_generation() {
+        use tidepool_runtime::session::{PublicationDecision, PublicationPhase};
+        let run = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.hs"), "module A where\na = 1").unwrap();
+        let layer = SourceLayer::new(run.path());
+        let roots = [root.path().to_path_buf()];
+        let active = layer
+            .publish(layer.capture_from_roots("test", &roots).unwrap())
+            .unwrap();
+        std::fs::write(root.path().join("A.hs"), "module A where\na = 2").unwrap();
+        let stale = layer.capture_from_roots("test", &roots).unwrap();
+        std::fs::write(root.path().join("A.hs"), "module A where\na = 3").unwrap();
+        let latest = layer
+            .publish(layer.capture_from_roots("test", &roots).unwrap())
+            .unwrap();
+        let decision = PublicationDecision::new();
+        assert!(matches!(
+            layer.publish_checked(stale, Some(&active), Some(&decision)),
+            Err(SourcePublishFailure::BeforeVisibility(_))
+        ));
+        assert_eq!(decision.phase(), PublicationPhase::Running);
+        assert_eq!(layer.read_active().unwrap(), Some(latest));
+    }
+
+    #[test]
+    fn checked_source_publication_settles_the_native_commit_claim() {
+        use tidepool_runtime::session::{
+            PublicationCancellation, PublicationDecision, PublicationPhase,
+        };
+        let run = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("A.hs"), "module A where\na = 1").unwrap();
+        let layer = SourceLayer::new(run.path());
+        let roots = [root.path().to_path_buf()];
+        let active = layer
+            .publish(layer.capture_from_roots("test", &roots).unwrap())
+            .unwrap();
+        std::fs::write(root.path().join("A.hs"), "module A where\na = 2").unwrap();
+        let pending = layer.capture_from_roots("test", &roots).unwrap();
+        let decision = PublicationDecision::new();
+        let published = layer
+            .publish_checked(pending, Some(&active), Some(&decision))
+            .unwrap();
+        assert_eq!(decision.phase(), PublicationPhase::Published);
+        assert_eq!(
+            decision.request_cancellation(),
+            PublicationCancellation::AlreadyPublished
+        );
+        assert_eq!(layer.read_active().unwrap(), Some(published));
+    }
+
+    #[test]
     fn source_observation_rejects_partial_and_symlinked_inputs_without_writes() {
         let run = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("A.hs"), "module A where").unwrap();
         let layer = SourceLayer::new(run.path());
-        assert!(layer
-            .observe_from_roots(
-                "test",
-                &[root.path().to_path_buf(), root.path().join("missing")]
-            )
-            .is_err());
+        assert!(
+            layer
+                .observe_from_roots(
+                    "test",
+                    &[root.path().to_path_buf(), root.path().join("missing")]
+                )
+                .is_err()
+        );
         assert!(!layer.revisions().exists());
         std::os::unix::fs::symlink(root.path().join("A.hs"), root.path().join("Alias.hs")).unwrap();
         let error = layer
@@ -2348,9 +2617,11 @@ mod tests {
 
         // The include vector is unchanged; only what it resolves to moved.
         assert_eq!(include, layer.include_paths(1));
-        assert!(std::fs::read_to_string(include[0].join("Project/Work.hs"))
-            .unwrap()
-            .contains("work = 2"));
+        assert!(
+            std::fs::read_to_string(include[0].join("Project/Work.hs"))
+                .unwrap()
+                .contains("work = 2")
+        );
 
         // Compile-time provenance travels with the revision: the generated
         // module on the search path names the snapshot that built whatever
@@ -2448,10 +2719,12 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-        assert!(added
-            .modules
-            .iter()
-            .any(|(module, _)| module == "SessionHelpers.Extra"));
+        assert!(
+            added
+                .modules
+                .iter()
+                .any(|(module, _)| module == "SessionHelpers.Extra")
+        );
         assert_eq!(
             changed_modules(&first, &added),
             vec!["SessionHelpers.Extra".to_owned()]
@@ -2461,13 +2734,17 @@ mod tests {
         let deleted = layer
             .capture_from_roots("helpers-test", std::slice::from_ref(&draft))
             .unwrap();
-        assert!(changed_modules(&added, deleted.revision())
-            .contains(&"SessionHelpers.Extra".to_owned()));
+        assert!(
+            changed_modules(&added, deleted.revision())
+                .contains(&"SessionHelpers.Extra".to_owned())
+        );
         let published = layer.publish(deleted).unwrap();
-        assert!(!published
-            .modules
-            .iter()
-            .any(|(module, _)| module == "SessionHelpers.Extra"));
+        assert!(
+            !published
+                .modules
+                .iter()
+                .any(|(module, _)| module == "SessionHelpers.Extra")
+        );
     }
 
     #[test]
@@ -2495,13 +2772,15 @@ mod tests {
         let helper_actor = PrincipalId::new(1, 1);
         exomonad_actor::ActorSourceLayers::bind(&reload, helper_actor, &[]);
         exomonad_actor::ActorSourceLayers::layer_include(&reload, &[]).unwrap();
-        assert!(reload
-            .helper_layer("run")
-            .read_active()
-            .unwrap()
-            .unwrap()
-            .modules
-            .is_empty());
+        assert!(
+            reload
+                .helper_layer("run")
+                .read_active()
+                .unwrap()
+                .unwrap()
+                .modules
+                .is_empty()
+        );
         // A helper checks against the published run layer, including source
         // introduced after the frozen workspace was captured.
         std::fs::write(
@@ -2726,11 +3005,13 @@ mod tests {
         let revision = layer.revisions().join(published.identity);
         std::fs::rename(revision.join("0"), revision.join("1")).unwrap();
 
-        assert!(layer
-            .read_active()
-            .unwrap_err()
-            .to_string()
-            .contains("contiguous"));
+        assert!(
+            layer
+                .read_active()
+                .unwrap_err()
+                .to_string()
+                .contains("contiguous")
+        );
     }
 
     #[test]
@@ -3243,11 +3524,11 @@ mod tests {
 
         // The edited source is untouched, and the previous graph still
         // compiles, which is what "still active" means.
-        assert!(std::fs::read_to_string(
-            project.path().join(".exomonad/workspace/Project/Types.hs")
-        )
-        .unwrap()
-        .contains("evidenceAmount"));
+        assert!(
+            std::fs::read_to_string(project.path().join(".exomonad/workspace/Project/Types.hs"))
+                .unwrap()
+                .contains("evidenceAmount")
+        );
         assert_eq!(
             git.try_run(&workspace, &["rev-parse", "HEAD"])
                 .unwrap()

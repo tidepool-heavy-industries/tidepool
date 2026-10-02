@@ -49,6 +49,24 @@ impl ResidentCleanupOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForestRootShutdown {
+    Settled(ResidentShutdown),
+    Failed {
+        actor: ActorRef,
+        cause: crate::KernelInvocationFailure,
+    },
+    TimedOut {
+        actor: ActorRef,
+    },
+}
+
+impl ForestRootShutdown {
+    pub fn is_confirmed(&self) -> bool {
+        matches!(self, Self::Settled(shutdown) if shutdown.cleanup.is_confirmed())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResidentShutdown {
     pub terminal: ActorTerminal,
     pub cleanup: ResidentCleanupOutcome,

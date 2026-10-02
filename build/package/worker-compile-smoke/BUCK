@@ -22,8 +22,8 @@ sh_test(
     ],
     env = {
         "PATH": read_root_config("nix", "ghc_bin") + ":" + read_root_config("nix", "action_path"),
-        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:matched_runtime_bundle)/share/exomonad/compiler-deployment.json",
-        "TIDEPOOL_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
+        "TIDEPOOL_COMPILER_DEPLOYMENT": read_root_config("nix", "runtime_stdlib_extract", "") + "/share/exomonad/compiler-deployment.json",
+        "TIDEPOOL_GHC_LIBDIR": read_root_config("nix", "runtime_stdlib_ghc_libdir", ""),
     },
     visibility = ["PUBLIC"],
 )

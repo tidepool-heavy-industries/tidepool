@@ -1,4 +1,4 @@
-//! Canonical sequential Ractor wrapper for Tidepool actor behavior.
+//! Canonical Ractor wrapper for Tidepool actor behavior.
 
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
@@ -681,6 +681,15 @@ pub trait KernelBehavior: Send + 'static {
         false
     }
 
+    /// Serialize administrative source/tool publication without occupying an
+    /// independent notebook execution's continuation.
+    fn serializes_workbench_publication(
+        &self,
+        _request: &tidepool_runtime::session::WorkbenchRequest,
+    ) -> bool {
+        false
+    }
+
     fn start<'a>(
         &'a mut self,
         context: &'a KernelContext,
@@ -1041,6 +1050,7 @@ struct PendingWorkbench {
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
     execution: Option<tidepool_runtime::session::WorkbenchExecutionId>,
     serial: bool,
+    publication: bool,
     hosted_cell: crate::kernel::HostedCellSlot,
 }
 
@@ -1094,15 +1104,29 @@ impl PendingActorTask {
         actor: ActorRef,
         boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
     ) -> bool {
-        let Some(key) = self
-            .control()
-            .and_then(|control| control.invocation.as_ref())
-        else {
-            return false;
-        };
-        key.matches_boundary(boundary)
-            && self.step().request_execution()
-                == Some(&crate::resident_tools::execution_id(actor, key))
+        match boundary {
+            tidepool_runtime::session::WorkbenchForkBoundary::Hosted(_) => {
+                let Some(key) = self
+                    .control()
+                    .and_then(|control| control.invocation.as_ref())
+                else {
+                    return false;
+                };
+                key.matches_boundary(boundary)
+                    && self.step().request_execution()
+                        == Some(&crate::resident_tools::execution_id(actor, key))
+            }
+            tidepool_runtime::session::WorkbenchForkBoundary::Execution {
+                actor_id,
+                incarnation,
+                execution_id,
+            } => {
+                *actor_id == actor.id.0
+                    && *incarnation == actor.incarnation.0
+                    && self.step().request_execution() == Some(execution_id)
+            }
+            tidepool_runtime::session::WorkbenchForkBoundary::Route { .. } => false,
+        }
     }
 }
 
@@ -1275,7 +1299,6 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         if !state.pending_tasks.is_empty() {
-            let allow_workbench = can_admit_independent_workbench(state);
             match message {
                 KernelMessage::ActorStepCompleted { step, outcome } => {
                     complete_actor_task(&myself, state, step, outcome).await;
@@ -1283,6 +1306,33 @@ where
                 }
                 KernelMessage::DrainMailbox => {
                     state.mailbox_drain_scheduled = false;
+                    let ready = state.deferred_mailbox.iter().position(|message| {
+                        can_apply_independent_settlement(state, message)
+                            || matches!(message, KernelMessage::Workbench { invocation, .. }
+                                if can_admit_deferred_workbench(state, &invocation.request))
+                    });
+                    if let Some(index) = ready {
+                        let message = state
+                            .deferred_mailbox
+                            .remove(index)
+                            .expect("selected deferred work");
+                        match message {
+                            KernelMessage::Workbench {
+                                invocation,
+                                control,
+                                reply,
+                            } => {
+                                start_workbench(&myself, state, invocation, control, reply);
+                            }
+                            settlement => apply_hosted_settlement(state, settlement).await,
+                        }
+                        schedule_deferred_mailbox(&myself, state)?;
+                    }
+                    return Ok(());
+                }
+                settlement if can_apply_independent_settlement(state, &settlement) => {
+                    apply_hosted_settlement(state, settlement).await;
+                    schedule_deferred_mailbox(&myself, state)?;
                     return Ok(());
                 }
                 KernelMessage::SealHostedWork { reply } => {
@@ -1326,27 +1376,7 @@ where
                     invocation,
                     reply,
                 } => {
-                    let call = invocation
-                        .as_ref()
-                        .cloned()
-                        .map(crate::resident_tools::WorkbenchCallKey::from);
-                    if state.pending_tasks.values().any(|pending| match pending {
-                        PendingActorTask::Workbench(pending) => {
-                            pending.execution.as_ref() == Some(&execution)
-                                && pending
-                                    .control
-                                    .as_ref()
-                                    .and_then(|control| control.invocation.as_ref())
-                                    == call.as_ref()
-                        }
-                        PendingActorTask::Tool(pending) => {
-                            pending.step.request_execution() == Some(&execution)
-                                && call.as_ref().is_some_and(|call| {
-                                    pending.control.invocation.as_ref() == Some(call)
-                                })
-                        }
-                        PendingActorTask::Kernel(_) => false,
-                    }) {
+                    if pending_cancellation(state, &execution, invocation.as_ref()) {
                         reply
                             .send(crate::WorkbenchCancellationOutcome::Unconfirmed {
                                 execution: execution.clone(),
@@ -1381,7 +1411,7 @@ where
                     invocation,
                     control,
                     reply,
-                } if allow_workbench => {
+                } if can_admit_workbench_request(state, &invocation.request) => {
                     if !matches!(state.hosted_admission, HostedAdmission::Open) {
                         let rejection = Err(KernelInvocationFailure::Rejected {
                             actor: state.context.identity,
@@ -1420,6 +1450,15 @@ where
                 if state.replacement.is_some()
                     || !state.deferred_mailbox.is_empty()
                     || !state.behavior.accepts_mailbox() =>
+            {
+                state.deferred_mailbox.push_back(message);
+                schedule_deferred_mailbox(&myself, state)?;
+                return Ok(());
+            }
+            message @ KernelMessage::Workbench { .. }
+                if !state.deferred_mailbox.is_empty()
+                    && matches!(&message, KernelMessage::Workbench { invocation, .. }
+                        if state.behavior.serializes_workbench_publication(&invocation.request)) =>
             {
                 state.deferred_mailbox.push_back(message);
                 schedule_deferred_mailbox(&myself, state)?;
@@ -1742,34 +1781,9 @@ where
                 start_tool(&myself, state, invocation, Some(capture), reply);
                 return Ok(());
             }
-            KernelMessage::ReconcileWorkbenchBoundary { boundary, reply } => {
-                let outcome = state
-                    .behavior
-                    .reconcile_workbench_boundary(&state.context, boundary)
-                    .await
-                    .unwrap_or(crate::WorkbenchBoundaryReconciliation::Pending);
-                reply.send(outcome).ok();
-            }
-            KernelMessage::ToolCompleted { boundary, reply } => {
-                if matches!(state.hosted_admission, HostedAdmission::Closing) {
-                    reply
-                        .send(Err(KernelInvocationFailure::Rejected {
-                            actor: state.context.identity,
-                            detail: "hosted completion boundary is closed".into(),
-                        }))
-                        .ok();
-                    return Ok(());
-                }
-                let result = state
-                    .behavior
-                    .tool_completed(&state.context, boundary)
-                    .await
-                    .map(|()| serde_json::Value::Null)
-                    .map_err(|error| KernelInvocationFailure::Rejected {
-                        actor: state.context.identity,
-                        detail: error.to_string(),
-                    });
-                reply.send(result).ok();
+            settlement @ (KernelMessage::ReconcileWorkbenchBoundary { .. }
+            | KernelMessage::ToolCompleted { .. }) => {
+                apply_hosted_settlement(state, settlement).await;
             }
             KernelMessage::ReleaseFork { release } => {
                 if matches!(state.hosted_admission, HostedAdmission::Closing) {
@@ -1812,15 +1826,8 @@ where
             KernelMessage::ActorStepCompleted { step, .. } => {
                 tracing::warn!(actor = %state.context.identity, ?step, "stale actor completion ignored");
             }
-            KernelMessage::ReconcileWorkbenchCancellation {
-                execution,
-                invocation,
-                reply,
-            } => {
-                let outcome = state
-                    .behavior
-                    .reconcile_workbench_cancellation(execution, invocation);
-                reply.send(outcome).ok();
+            settlement @ KernelMessage::ReconcileWorkbenchCancellation { .. } => {
+                apply_hosted_settlement(state, settlement).await;
             }
             KernelMessage::DrainMailbox => {
                 unreachable!("mailbox drain messages are normalized before dispatch")
@@ -1936,7 +1943,7 @@ fn start_workbench<B: KernelBehavior>(
     reply: ractor::RpcReplyPort<crate::KernelWorkbenchReply>,
 ) {
     assert!(
-        state.pending_tasks.is_empty() || can_admit_independent_workbench(state),
+        state.pending_tasks.is_empty() || can_admit_deferred_workbench(state, &invocation.request),
         "workbench admission requires an independent owned-task lane"
     );
     let Some(generation) = state.next_task_generation.checked_add(1) else {
@@ -1961,6 +1968,9 @@ fn start_workbench<B: KernelBehavior>(
         control: control.clone(),
         execution,
         serial: false,
+        publication: state
+            .behavior
+            .serializes_workbench_publication(&invocation.request),
         hosted_cell: Arc::clone(state.mailbox_admission.hosted_cell()),
     });
     let dispatch = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2035,17 +2045,152 @@ fn start_workbench<B: KernelBehavior>(
     spawn_actor_task(myself, state, generation, task);
 }
 
-fn can_admit_independent_workbench<B: KernelBehavior>(state: &LocalActorState<B>) -> bool {
+fn has_independent_workbench_tasks<B: KernelBehavior>(state: &LocalActorState<B>) -> bool {
     !state.pending_tasks.is_empty()
         && state.behavior.0.is_some()
         && state.behavior.allows_independent_workbench_admission()
         && state.replacement.is_none()
         && !state.behavior.replacement_staged()
-        && state.deferred_mailbox.is_empty()
-        && matches!(state.hosted_admission, HostedAdmission::Open)
         && state.pending_tasks.values().all(|pending| {
             matches!(pending, PendingActorTask::Workbench(workbench) if !workbench.serial)
         })
+}
+
+fn can_admit_independent_workbench<B: KernelBehavior>(state: &LocalActorState<B>) -> bool {
+    has_independent_workbench_tasks(state)
+        && state.deferred_mailbox.iter().all(|message| {
+            matches!(
+                deferred_control(message),
+                Some(DeferredControl::HostedSettlement)
+            ) || matches!(message, KernelMessage::Workbench { invocation, .. }
+                    if state.behavior.serializes_workbench_publication(&invocation.request))
+        })
+        && matches!(state.hosted_admission, HostedAdmission::Open)
+}
+
+fn pending_cancellation<B: KernelBehavior>(
+    state: &LocalActorState<B>,
+    execution: &tidepool_runtime::session::WorkbenchExecutionId,
+    invocation: Option<&exomonad_tool::ToolInvocationContext>,
+) -> bool {
+    let call = invocation
+        .cloned()
+        .map(crate::resident_tools::WorkbenchCallKey::from);
+    state.pending_tasks.values().any(|pending| match pending {
+        PendingActorTask::Workbench(pending) => {
+            pending.execution.as_ref() == Some(execution)
+                && pending
+                    .control
+                    .as_ref()
+                    .and_then(|control| control.invocation.as_ref())
+                    == call.as_ref()
+        }
+        PendingActorTask::Tool(pending) => {
+            pending.step.request_execution() == Some(execution)
+                && call
+                    .as_ref()
+                    .is_some_and(|call| pending.control.invocation.as_ref() == Some(call))
+        }
+        PendingActorTask::Kernel(_) => false,
+    })
+}
+
+fn can_apply_independent_settlement<B: KernelBehavior>(
+    state: &LocalActorState<B>,
+    message: &KernelMessage,
+) -> bool {
+    if !has_independent_workbench_tasks(state) {
+        return false;
+    }
+    match message {
+        KernelMessage::ToolCompleted { boundary, .. }
+        | KernelMessage::ReconcileWorkbenchBoundary { boundary, .. } => {
+            !matches!(
+                boundary,
+                tidepool_runtime::session::WorkbenchForkBoundary::Route { .. }
+            ) && !state
+                .pending_tasks
+                .values()
+                .any(|pending| pending.matches_workbench_boundary(state.context.identity, boundary))
+        }
+        KernelMessage::ReconcileWorkbenchCancellation {
+            execution,
+            invocation,
+            ..
+        } => !pending_cancellation(state, execution, invocation.as_ref()),
+        _ => false,
+    }
+}
+
+/// Apply one exact hosted boundary on its serialized actor turn. Admission
+/// beside parked cells proves that this boundary owns no pending execution;
+/// stateful tools, kernel continuations and mailbox protocols stay exclusive.
+async fn apply_hosted_settlement<B: KernelBehavior>(
+    state: &mut LocalActorState<B>,
+    message: KernelMessage,
+) {
+    match message {
+        KernelMessage::ReconcileWorkbenchBoundary { boundary, reply } => {
+            let outcome = state
+                .behavior
+                .reconcile_workbench_boundary(&state.context, boundary)
+                .await
+                .unwrap_or(crate::WorkbenchBoundaryReconciliation::Pending);
+            reply.send(outcome).ok();
+        }
+        KernelMessage::ReconcileWorkbenchCancellation {
+            execution,
+            invocation,
+            reply,
+        } => {
+            let outcome = state
+                .behavior
+                .reconcile_workbench_cancellation(execution, invocation);
+            reply.send(outcome).ok();
+        }
+        KernelMessage::ToolCompleted { boundary, reply } => {
+            if matches!(state.hosted_admission, HostedAdmission::Closing) {
+                reply
+                    .send(Err(KernelInvocationFailure::Rejected {
+                        actor: state.context.identity,
+                        detail: "hosted completion boundary is closed".into(),
+                    }))
+                    .ok();
+                return;
+            }
+            let result = state
+                .behavior
+                .tool_completed(&state.context, boundary)
+                .await
+                .map(|()| serde_json::Value::Null)
+                .map_err(|error| KernelInvocationFailure::Rejected {
+                    actor: state.context.identity,
+                    detail: error.to_string(),
+                });
+            reply.send(result).ok();
+        }
+        _ => unreachable!("exact hosted settlement"),
+    }
+}
+
+fn can_admit_deferred_workbench<B: KernelBehavior>(
+    state: &LocalActorState<B>,
+    request: &tidepool_runtime::session::WorkbenchRequest,
+) -> bool {
+    can_admit_independent_workbench(state)
+        && (!state.behavior.serializes_workbench_publication(request)
+            || !state.pending_tasks.values().any(|pending| {
+                matches!(pending, PendingActorTask::Workbench(workbench) if workbench.publication)
+            }))
+}
+
+fn can_admit_workbench_request<B: KernelBehavior>(
+    state: &LocalActorState<B>,
+    request: &tidepool_runtime::session::WorkbenchRequest,
+) -> bool {
+    can_admit_deferred_workbench(state, request)
+        && (!state.behavior.serializes_workbench_publication(request)
+            || state.deferred_mailbox.is_empty())
 }
 
 fn start_tool<B: KernelBehavior>(
@@ -2408,7 +2553,7 @@ async fn complete_actor_task<B: KernelBehavior>(
     if state.pending_tasks.is_empty() {
         maybe_drain(myself, state).await;
     }
-    if state.pending_tasks.is_empty() && state.terminal.get().is_none() {
+    if state.terminal.get().is_none() {
         if let Err(error) = schedule_deferred_mailbox(myself, state) {
             fail_actor(
                 myself,
@@ -2534,15 +2679,26 @@ fn retain_unconfirmed_exit(terminal: &RetainedActorExit, actor: ActorRef, detail
     }
 }
 
-/// Settlement of an admitted execution does not require a resident receiver.
-/// These controls remain sequential with the workbench and retain queue order.
+/// Admitted workbench requests and settlement do not require a resident
+/// receiver. Their queued forms retain the same admission boundary.
 enum DeferredControl {
+    Workbench,
     HostedSettlement,
+    RouteSettlement,
     Shutdown,
 }
 
 fn deferred_control(message: &KernelMessage) -> Option<DeferredControl> {
     match message {
+        KernelMessage::Workbench { .. } => Some(DeferredControl::Workbench),
+        KernelMessage::ToolCompleted {
+            boundary: tidepool_runtime::session::WorkbenchForkBoundary::Route { .. },
+            ..
+        }
+        | KernelMessage::ReconcileWorkbenchBoundary {
+            boundary: tidepool_runtime::session::WorkbenchForkBoundary::Route { .. },
+            ..
+        } => Some(DeferredControl::RouteSettlement),
         KernelMessage::ToolCompleted { .. }
         | KernelMessage::ReconcileWorkbenchBoundary { .. }
         | KernelMessage::ReconcileWorkbenchCancellation { .. } => {
@@ -2565,9 +2721,18 @@ where
             .deferred_mailbox
             .iter()
             .any(|message| deferred_control(message).is_some());
+    let runnable = if state.pending_tasks.is_empty() {
+        state.behavior.accepts_mailbox() || runnable_control
+    } else {
+        state.deferred_mailbox.iter().any(|message| {
+            can_apply_independent_settlement(state, message)
+                || matches!(message, KernelMessage::Workbench { invocation, .. }
+                    if can_admit_deferred_workbench(state, &invocation.request))
+        })
+    };
     if state.replacement.is_none()
         && state.terminal.get().is_none()
-        && (state.behavior.accepts_mailbox() || runnable_control)
+        && runnable
         && !state.deferred_mailbox.is_empty()
         && !state.mailbox_drain_scheduled
     {
@@ -3049,6 +3214,7 @@ mod tests {
         workbench_panics: bool,
         owned_workbench: bool,
         independent_workbench_admission: bool,
+        administrative_workbench_gate: Option<(Arc<Notify>, Arc<Notify>)>,
         owned_cleanup: Option<Arc<Notify>>,
         owned_finish_fails: bool,
         owned_successor_gate: Option<(Arc<Notify>, Arc<Notify>)>,
@@ -3079,6 +3245,10 @@ mod tests {
     impl KernelBehavior for ProbeBehavior {
         fn allows_independent_workbench_admission(&self) -> bool {
             self.independent_workbench_admission
+        }
+
+        fn serializes_workbench_publication(&self, request: &WorkbenchRequest) -> bool {
+            request.cell_source() == Some("reload")
         }
 
         fn replacement_staged(&self) -> bool {
@@ -3361,7 +3531,11 @@ mod tests {
                 };
             }
             let calls = Arc::clone(&self.calls);
-            let gate = self.workbench_gate.clone();
+            let gate = if self.serializes_workbench_publication(&invocation.request) {
+                self.administrative_workbench_gate.clone()
+            } else {
+                self.workbench_gate.clone()
+            };
             let panics = self.workbench_panics;
             let cleanup = self.owned_cleanup.clone();
             let finish_fails = self.owned_finish_fails;
@@ -3627,6 +3801,7 @@ mod tests {
                 workbench_panics: false,
                 owned_workbench: false,
                 independent_workbench_admission: false,
+                administrative_workbench_gate: None,
                 owned_cleanup: None,
                 owned_finish_fails: false,
                 owned_successor_gate: None,
@@ -4141,6 +4316,288 @@ mod tests {
 
         resume.notify_one();
         assert!(first.await.expect("resumed first reply").is_ok());
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .await
+            .expect("shutdown");
+        task.await.expect("actor task");
+    }
+
+    #[tokio::test]
+    async fn administrative_workbench_serializes_reload_without_blocking_cells() {
+        let mut fixture = behavior(false);
+        fixture.behavior.owned_workbench = true;
+        fixture.behavior.independent_workbench_admission = true;
+        let parked = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        fixture.behavior.owned_successor_gate = Some((parked.clone(), resume.clone()));
+        fixture.behavior.owned_successor_source = Some("A".into());
+        let reload_started = Arc::new(Notify::new());
+        let reload_release = Arc::new(Notify::new());
+        fixture.behavior.administrative_workbench_gate =
+            Some((reload_started.clone(), reload_release.clone()));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let first = send_workbench_request(&actor, WorkbenchRequest::from_cell_input("A"), None);
+        parked.notified().await;
+        let reload =
+            send_workbench_request(&actor, WorkbenchRequest::from_cell_input("reload"), None);
+        reload_started.notified().await;
+        let next_reload =
+            send_workbench_request(&actor, WorkbenchRequest::from_cell_input("reload"), None);
+        let third = send_workbench_request(&actor, WorkbenchRequest::from_cell_input("C"), None);
+        assert!(tokio::time::timeout(Duration::from_secs(2), third)
+            .await
+            .expect("third cell progresses around reloads")
+            .expect("third reply")
+            .is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), reload_started.notified())
+                .await
+                .is_err(),
+            "the second reload must not start before the first settles"
+        );
+        reload_release.notify_one();
+        assert!(reload.await.expect("first reload reply").is_ok());
+        tokio::time::timeout(Duration::from_secs(2), reload_started.notified())
+            .await
+            .expect("queued reload starts while A remains parked");
+        let fourth = send_workbench_request(&actor, WorkbenchRequest::from_cell_input("D"), None);
+        assert!(tokio::time::timeout(Duration::from_secs(2), fourth)
+            .await
+            .expect("fourth cell progresses")
+            .expect("fourth reply")
+            .is_ok());
+        reload_release.notify_one();
+        assert!(next_reload.await.expect("second reload reply").is_ok());
+        resume.notify_one();
+        assert!(first.await.expect("resumed first reply").is_ok());
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .await
+            .expect("shutdown");
+        task.await.expect("actor task");
+    }
+
+    #[tokio::test]
+    async fn queued_administrative_workbench_runs_without_a_mailbox_receiver() {
+        let mut fixture = behavior(false);
+        fixture.behavior.mailbox_ready = false;
+        fixture.behavior.owned_workbench = true;
+        fixture.behavior.independent_workbench_admission = true;
+        let reload_started = Arc::new(Notify::new());
+        let reload_release = Arc::new(Notify::new());
+        fixture.behavior.administrative_workbench_gate =
+            Some((reload_started.clone(), reload_release.clone()));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let first =
+            send_workbench_request(&actor, WorkbenchRequest::from_cell_input("reload"), None);
+        reload_started.notified().await;
+        let second =
+            send_workbench_request(&actor, WorkbenchRequest::from_cell_input("reload"), None);
+        let control = send_workbench_request(&actor, WorkbenchRequest::from_cell_input("C"), None);
+        assert!(tokio::time::timeout(Duration::from_secs(2), control)
+            .await
+            .expect("cell progresses beside the sole reload")
+            .expect("cell reply")
+            .is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), reload_started.notified())
+                .await
+                .is_err(),
+            "queued reload preserves the administrative publication boundary"
+        );
+        reload_release.notify_one();
+        assert!(first.await.expect("first reload settles").is_ok());
+        tokio::time::timeout(Duration::from_secs(2), reload_started.notified())
+            .await
+            .expect("queued reload starts after the last task settles without a mailbox receiver");
+        reload_release.notify_one();
+        assert!(second.await.expect("second reload settles").is_ok());
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .await
+            .expect("shutdown");
+        task.await.expect("actor task");
+    }
+
+    #[tokio::test]
+    async fn settled_workbench_acknowledges_while_another_execution_stays_parked() {
+        let mut fixture = behavior(false);
+        fixture.behavior.owned_workbench = true;
+        fixture.behavior.independent_workbench_admission = true;
+        let parked = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        fixture.behavior.owned_successor_gate = Some((parked.clone(), resume.clone()));
+        fixture.behavior.owned_successor_source = Some("A".into());
+        let calls = fixture.calls.clone();
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let invocation = ToolInvocationContext::external(
+            "ack-thread".into(),
+            "A".into(),
+            "A".into(),
+            Some("A".into()),
+            None,
+        );
+        let control = crate::WorkbenchExecutionControl::from_invocation(Some(invocation));
+        let execution = control.execution_id(actor.identity());
+        let first = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("A").with_execution_id(execution.clone()),
+            Some(control),
+        );
+        parked.notified().await;
+        let (own_tx, mut own_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::ToolCompleted {
+                boundary: tidepool_runtime::session::WorkbenchForkBoundary::external(
+                    "ack-thread".into(),
+                    "A".into(),
+                    "A".into(),
+                ),
+                reply: own_tx.into(),
+            })
+            .expect("queue A's own completion");
+        let (execution_ack_tx, mut execution_ack_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::ToolCompleted {
+                boundary: tidepool_runtime::session::WorkbenchForkBoundary::Execution {
+                    actor_id: actor.identity().id.0,
+                    incarnation: actor.identity().incarnation.0,
+                    execution_id: execution,
+                },
+                reply: execution_ack_tx.into(),
+            })
+            .expect("queue A's exact execution completion");
+        let second = send_workbench_request(&actor, WorkbenchRequest::from_cell_input("B"), None);
+        assert!(tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .expect("B progresses past A's pending acknowledgement")
+            .expect("B reply")
+            .is_ok());
+        let (ack_tx, ack_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::ToolCompleted {
+                boundary: tidepool_runtime::session::WorkbenchForkBoundary::external(
+                    "ack-thread".into(),
+                    "B".into(),
+                    "B".into(),
+                ),
+                reply: ack_tx.into(),
+            })
+            .expect("acknowledge settled B");
+        assert!(tokio::time::timeout(Duration::from_secs(2), ack_rx)
+            .await
+            .expect("B acknowledgement ignores unrelated A")
+            .expect("ack reply")
+            .is_ok());
+        let third = send_workbench_request(&actor, WorkbenchRequest::from_cell_input("C"), None);
+        assert!(tokio::time::timeout(Duration::from_secs(2), third)
+            .await
+            .expect("C progresses")
+            .expect("C reply")
+            .is_ok());
+        assert!(
+            matches!(own_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "A's own completion stays fenced"
+        );
+        assert!(
+            matches!(
+                execution_ack_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "A's exact execution completion stays fenced"
+        );
+        assert_eq!(
+            calls
+                .lock()
+                .iter()
+                .filter(|call| **call == "tool-completed")
+                .count(),
+            1
+        );
+        let (route_tx, mut route_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::ReconcileWorkbenchBoundary {
+                boundary: tidepool_runtime::session::WorkbenchForkBoundary::Route {
+                    actor_id: actor.identity().id.0,
+                    incarnation: actor.identity().incarnation.0,
+                    watch_id: 7,
+                },
+                reply: route_tx.into(),
+            })
+            .expect("queue exclusive route reconciliation");
+        let mut fourth =
+            send_workbench_request(&actor, WorkbenchRequest::from_cell_input("D"), None);
+        let (blocked_tx, blocked_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::ToolCompleted {
+                boundary: tidepool_runtime::session::WorkbenchForkBoundary::external(
+                    "ack-thread".into(),
+                    "B".into(),
+                    "B".into(),
+                ),
+                reply: blocked_tx.into(),
+            })
+            .expect("observe actor turn after route and D");
+        assert!(tokio::time::timeout(Duration::from_secs(2), blocked_rx)
+            .await
+            .expect("settled B still acknowledges")
+            .expect("observer ack reply")
+            .is_ok());
+        assert!(
+            matches!(
+                route_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "route reconciliation stays exclusive while A is parked"
+        );
+        assert!(
+            matches!(fourth.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "queued route reconciliation remains an admission barrier"
+        );
+        resume.notify_one();
+        assert!(first.await.expect("A resumes").is_ok());
+        assert!(tokio::time::timeout(Duration::from_secs(2), own_rx)
+            .await
+            .expect("A's deferred acknowledgement drains")
+            .expect("A ack reply")
+            .is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), execution_ack_rx)
+                .await
+                .expect("A's exact execution acknowledgement drains")
+                .expect("execution ack reply")
+                .is_ok()
+        );
+        tokio::time::timeout(Duration::from_secs(2), route_rx)
+            .await
+            .expect("route reconciliation drains after A settles")
+            .expect("route reply");
+        assert!(tokio::time::timeout(Duration::from_secs(2), fourth)
+            .await
+            .expect("D resumes after exclusive route reconciliation")
+            .expect("D reply")
+            .is_ok());
         actor
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
@@ -6193,6 +6650,59 @@ mod tests {
             events.last().unwrap(),
             ActorLifecycle::Exited(terminal) if terminal.kind == ActorExitKind::Cancelled
         ));
+    }
+
+    #[tokio::test]
+    async fn forest_shutdown_preserves_confirmed_and_unconfirmed_component_evidence() {
+        use crate::{CleanupComponentOutcome as Component, ForestRootShutdown};
+        for realm in [
+            Component::Confirmed,
+            Component::Unconfirmed("busy resident machine".into()),
+            Component::Unsupported,
+        ] {
+            let mut fixture = behavior(false);
+            fixture.behavior.shutdown_override =
+                Some(ShutdownOverride::Fixed(Component::Confirmed, realm.clone()));
+            let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+            let outcome =
+                crate::resident_actor::shutdown_forest_root(&actor, Duration::from_secs(1)).await;
+            task.await.unwrap();
+            assert_eq!(
+                outcome.is_confirmed(),
+                matches!(realm, Component::Confirmed)
+            );
+            let ForestRootShutdown::Settled(shutdown) = outcome else {
+                panic!("actor did not settle");
+            };
+            assert_eq!(shutdown.cleanup.actor(), actor.identity());
+            assert_eq!(shutdown.cleanup.realm(), &realm);
+            assert_eq!(shutdown.terminal.kind, ActorExitKind::Cancelled);
+            let repeated =
+                crate::resident_actor::shutdown_forest_root(&actor, Duration::from_secs(1)).await;
+            assert_eq!(repeated, ForestRootShutdown::Settled(shutdown));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn forest_shutdown_timeout_remains_unconfirmed_after_forced_actor_exit() {
+        let mut fixture = behavior(false);
+        fixture.behavior.shutdown_override =
+            Some(ShutdownOverride::HangRealmForever(Arc::new(Notify::new())));
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        let outcome =
+            crate::resident_actor::shutdown_forest_root(&actor, Duration::from_secs(1)).await;
+        assert_eq!(
+            outcome,
+            crate::ForestRootShutdown::TimedOut {
+                actor: actor.identity()
+            }
+        );
+        assert!(!outcome.is_confirmed());
+        task.await.unwrap();
+        assert!(
+            !outcome.is_confirmed(),
+            "scheduler exit must not confirm resource cleanup"
+        );
     }
 
     /// Q2-B: unconfirmed hook/resource-scope cleanup no longer rewrites the exit kind

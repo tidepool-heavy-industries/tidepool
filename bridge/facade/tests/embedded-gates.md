@@ -34,6 +34,15 @@ failed original operation has durably settled. Releasing that checkpoint twice
 must succeed. Issuer actor retirement and final native reader reclamation have
 separate native-owner gates; these tests do not substitute for those proofs.
 
+M2 uses a named 300-second cold-debug settlement budget for its real setup,
+parent cells, post-failure reader cells and checkpoint reuse. This semantic
+budget includes whole-cell compilation, validation and native attachment;
+it makes no speed claim. Typed child reply settlement keeps its 90-second
+budget, provider branch/read observations keep 120 seconds, host readiness
+and termination keep 30 seconds, and each isolated test keeps its 600-second
+outer bound. Optimized performance acceptance remains separate, including
+its one-second p95 and ten-second cold limits.
+
 The preflight gate installs a real `AgentSpec`, then dispatches an authored cell
 through its admitted root policy. The first bind would send an observable
 notification and return `41`; its final statement is the real type error

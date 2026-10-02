@@ -1,6 +1,7 @@
 -- | Exact package selections shared by authored compiler evidence and joins.
 module Tidepool.PackageWitness
-  ( PackageImportRoot(..), packageImportRoot, validatePackageImportRoot
+  ( PackageImportRoot(..), PackageImportEvidence(..), CompilerProvidedImport(..)
+  , emptyPackageImports, encodeCompilerProvidedImport, packageImportRoot, validatePackageImportRoot
   , sealPackageImports, readPackageImports, encodePackageImports
   , packageInputClosure ) where
 
@@ -42,6 +43,23 @@ data PackageImportRoot = PackageImportRoot
   , packagePath :: FilePath, packageSha256 :: String
   } deriving (Eq, Ord, Show)
 
+-- Compiler-provided imports have no installed .hi and grant no native lease.
+data CompilerProvidedImport = CompilerPrimitive deriving (Eq, Ord, Show)
+
+data PackageImportEvidence = PackageImportEvidence
+  { packageInterfaces :: [PackageImportRoot]
+  , compilerProvided :: [CompilerProvidedImport]
+  } deriving (Eq, Ord, Show)
+
+emptyPackageImports :: PackageImportEvidence
+emptyPackageImports = PackageImportEvidence [] []
+
+encodeCompilerProvidedImport :: CompilerProvidedImport -> Encoding
+encodeCompilerProvidedImport CompilerPrimitive = encodeListLen 3
+  <> encodeString (T.pack "primitive")
+  <> encodeString (T.pack (unitString (moduleUnit gHC_PRIM)))
+  <> encodeString (T.pack (moduleNameString (moduleName gHC_PRIM)))
+
 packageImportRoot :: HscEnv -> Module -> IO (Either String PackageImportRoot)
 packageImportRoot env owner
   | isHomeUnit (hsc_home_unit env) (moduleUnit owner) = pure (Left "package root refers to the home unit")
@@ -71,7 +89,7 @@ validatePackageImportRoot env expected = do
 -- | Authored compilation supplies actual direct resolved imports; interface
 -- dependency fields cannot recover unused or instance-only source imports.
 -- Empty selections are sealed explicitly, so missing evidence is never empty.
-sealPackageImports :: FilePath -> ExactIfaceArtifact -> [PackageImportRoot] -> IO ()
+sealPackageImports :: FilePath -> ExactIfaceArtifact -> PackageImportEvidence -> IO ()
 sealPackageImports path iface roots = bracket
   (do (temporary, handle) <- openBinaryTempFile (takeDirectory path) "package-imports.tmp"
       hClose handle
@@ -81,7 +99,7 @@ sealPackageImports path iface roots = bracket
     createLink temporary path
 
 readPackageImports
-  :: FilePath -> String -> ExactIfaceArtifact -> IO (Either String [PackageImportRoot])
+  :: FilePath -> String -> ExactIfaceArtifact -> IO (Either String PackageImportEvidence)
 readPackageImports path expectedDigest iface = do
   captured <- try $ do
     size <- getFileSize path
@@ -99,29 +117,30 @@ readPackageImports path expectedDigest iface = do
             | not (BL.null remaining) || owner /= (exactUnit iface, exactModule iface, exactSha256 iface)
                 || encodeRoots iface roots /= bytes -> pure (Left "package import evidence has a different owner or encoding")
             | otherwise -> do
-                packageBytes <- try (mapM (BS.readFile . packagePath) roots) :: IO (Either IOException [BS.ByteString])
+                packageBytes <- try (mapM (BS.readFile . packagePath) (packageInterfaces roots)) :: IO (Either IOException [BS.ByteString])
                 pure $ case packageBytes of
-                  Right values | map digest values == map packageSha256 roots -> Right roots
+                  Right values | map digest values == map packageSha256 (packageInterfaces roots) -> Right roots
                   _ -> Left "selected package interface bytes changed"
 
-encodePackageImports :: ExactIfaceArtifact -> [PackageImportRoot] -> BS.ByteString
+encodePackageImports :: ExactIfaceArtifact -> PackageImportEvidence -> BS.ByteString
 encodePackageImports = encodeRoots
 
-encodeRoots :: ExactIfaceArtifact -> [PackageImportRoot] -> BS.ByteString
-encodeRoots iface roots = toStrictByteString $ encodeListLen 4 <> string "TPPKGROOTS" <> string "1"
+encodeRoots :: ExactIfaceArtifact -> PackageImportEvidence -> BS.ByteString
+encodeRoots iface evidence = toStrictByteString $ encodeListLen 5 <> string "TPPKGROOTS" <> string "2"
   <> encodeListLen 3 <> foldMap string [exactUnit iface, exactModule iface, exactSha256 iface]
-  <> encodeListLen (fromIntegral (length roots)) <> foldMap root roots
+  <> encodeListLen (fromIntegral (length (packageInterfaces evidence))) <> foldMap root (packageInterfaces evidence)
+  <> encodeListLen (fromIntegral (length (compilerProvided evidence))) <> foldMap encodeCompilerProvidedImport (compilerProvided evidence)
   where
     string = encodeString . T.pack
     root value = encodeListLen 4 <> foldMap string
       [packageUnit value, packageModule value, packagePath value, packageSha256 value]
 
-decodeRoots :: Decoder s ((String, String, String), [PackageImportRoot])
+decodeRoots :: Decoder s ((String, String, String), PackageImportEvidence)
 decodeRoots = do
-  array 4
+  array 5
   magic <- string
   version <- string
-  unless (magic == "TPPKGROOTS" && version == "1") (fail "unsupported package import evidence")
+  unless (magic == "TPPKGROOTS" && version == "2") (fail "unsupported package import evidence")
   array 3
   owner <- (,,) <$> nonempty <*> nonempty <*> hash
   count <- decodeListLen
@@ -129,7 +148,21 @@ decodeRoots = do
   roots <- replicateM count $ do
     array 4
     PackageImportRoot <$> nonempty <*> nonempty <*> path <*> hash
-  pure (owner, roots)
+  providedCount <- decodeListLen
+  when (providedCount > 1) (fail "too many compiler-provided imports")
+  provided <- replicateM providedCount $ do
+    array 3
+    category <- string
+    unit <- nonempty
+    name <- nonempty
+    unless (category == "primitive" && unit == unitString (moduleUnit gHC_PRIM)
+      && name == moduleNameString (moduleName gHC_PRIM)) $
+      fail "unknown compiler-provided import"
+    pure CompilerPrimitive
+  unless (length roots == Set.size (Set.fromList roots)) (fail "duplicate package import root")
+  unless (length roots == Set.size (Set.fromList [(packageUnit root, packageModule root) | root <- roots])) $
+    fail "ambiguous package import owner"
+  pure (owner, PackageImportEvidence roots provided)
   where
     array size = decodeListLen >>= \actual -> unless (size == actual) (fail "invalid package evidence field count")
     string = T.unpack <$> decodeString

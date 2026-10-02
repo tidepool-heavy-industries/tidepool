@@ -3,6 +3,7 @@
 module Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..)
   , CandidateGroup(..), CandidateGlobal(..)
+  , CandidateExecutionSource, candidateExecutionSources, candidateOriginalIdentity
   , readModuleCandidates ) where
 
 import Codec.CBOR.Decoding
@@ -10,17 +11,21 @@ import Codec.CBOR.Decoding
   , decodeString, decodeWord, peekTokenType )
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Control.Exception (IOException, try)
-import Control.Monad (replicateM, unless, when)
+import Control.Monad (forM_, replicateM, unless, when)
 import Data.Char (isHexDigit)
 import Data.List (stripPrefix)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Set as Set
+import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import System.Directory (getFileSize)
 import System.FilePath (isAbsolute)
 import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), RuntimeRep(..), Signature(..), ResultContract(..) )
+import Tidepool.ExecutionSource
+  ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..)
+  , decodeExecutionSources, executionIdentityKey, executionSourceOriginalClosure )
 
 data ModuleCandidate = ModuleCandidate
   { candidateUnit :: String
@@ -36,7 +41,24 @@ data ModuleCandidate = ModuleCandidate
   , candidateGroups :: [CandidateGroup]
   , candidatePackageImports :: FilePath
   , candidatePackageImportsSha256 :: String
+  , candidateProductPath :: FilePath
+  , candidateExecutionSource :: Maybe CandidateExecutionSource
   } deriving (Eq, Show)
+
+-- The offer supplies provenance only. Current GHC admission must succeed
+-- before these original recipes may accompany promoted native products.
+data CandidateExecutionSource = CandidateExecutionSource
+  [ExecutionSourceGraph] ExecutionSourceRef deriving (Eq, Show)
+
+candidateExecutionSources :: ModuleCandidate -> Maybe ([ExecutionSourceGraph], ExecutionSourceRef)
+candidateExecutionSources candidate = case candidateExecutionSource candidate of
+  Nothing -> Nothing
+  Just (CandidateExecutionSource graphs reference) -> Just (graphs, reference)
+
+candidateOriginalIdentity :: ModuleCandidate -> ExecutionSourceIdentity
+candidateOriginalIdentity candidate = ExecutionSourceIdentity
+  (candidateUnit candidate) (candidateModule candidate) (candidateModuleVersion candidate)
+  (candidateInterfaceSha256 candidate) (candidateProductSha256 candidate)
 
 data CandidateGroup = CandidateGroup
   { candidateGroupOrdinal :: Word
@@ -76,7 +98,7 @@ readModuleCandidates path = do
   result <- try (do
     size <- getFileSize path
     if size > maxManifestBytes
-      then pure (Left "candidate manifest exceeds one MiB")
+      then pure (Left "candidate manifest exceeds four MiB")
       else do
         bytes <- BS.readFile path
         pure $ case deserialiseFromBytes decodeManifest (BL.fromStrict bytes) of
@@ -92,26 +114,43 @@ readModuleCandidates path = do
 decodeManifest :: Decoder s [ModuleCandidate]
 decodeManifest = do
   count <- decodeListLen
-  unless (count == 3) (fail "candidate manifest header must have three fields")
   magic <- decodeString
   unless (magic == "TPMCAN") (fail "candidate manifest has wrong magic")
   version <- decodeString
-  unless (version == "5") (fail "unsupported candidate manifest version")
+  unless ((version == "6" && count == 3) || (version == "7" && count == 4))
+    (fail "unsupported candidate manifest version or framing")
   total <- decodeListLen
   when (total > maxCandidates) (fail "too many module candidates")
   candidates <- replicateM total decodeCandidate
   let owners = Set.fromList [(candidateUnit c, candidateModule c) | c <- candidates]
   unless (Set.size owners == length candidates) (fail "duplicate module candidate")
-  pure candidates
+  if version == "6" then pure candidates else do
+    (graphs,references) <- decodeExecutionSources
+    let offered = Map.fromList [(candidateOriginalIdentity candidate,candidate) | candidate <- candidates]
+        available = Map.fromList [(executionGraphSha256 graph,graph) | graph <- graphs]
+        byOwner = Map.fromList [(executionIdentityKey (executionRefIdentity reference),reference)
+          | reference <- references]
+    forM_ references $ \reference -> do
+      unless (Map.member (executionRefIdentity reference) offered)
+        (fail "candidate execution reference differs from offered original")
+      case Map.lookup (executionRefGraph reference) available of
+        Just graph | any ((== executionRefIdentity reference) . executionOwnerIdentity)
+            (executionGraphOwners graph) -> pure ()
+        _ -> fail "candidate execution reference lacks its original graph owner"
+      either (fail . show) (const (pure ()))
+        (executionSourceOriginalClosure graphs [reference])
+    pure [candidate {candidateExecutionSource = CandidateExecutionSource graphs <$>
+        Map.lookup (candidateUnit candidate,candidateModule candidate) byOwner}
+      | candidate <- candidates]
 
 decodeCandidate :: Decoder s ModuleCandidate
 decodeCandidate = do
   count <- decodeListLen
-  unless (count == 13) (fail "module candidate must have thirteen fields")
+  unless (count == 14) (fail "module candidate must have fourteen fields")
   let text = T.unpack <$> decodeString
   candidate <- ModuleCandidate <$> text <*> text <*> text
     <*> text <*> text <*> text <*> text <*> text <*> text
-    <*> decodeImports <*> decodeGroups <*> text <*> text
+    <*> decodeImports <*> decodeGroups <*> text <*> text <*> text <*> pure Nothing
   unless (not (null (candidateUnit candidate))
       && not (null (candidateModule candidate))
       && isAbsolute (candidateSource candidate)
@@ -122,14 +161,15 @@ decodeCandidate = do
       && isDigest (candidateProductSha256 candidate)
       && isDigest (candidateEvidenceSha256 candidate)
       && isAbsolute (candidatePackageImports candidate)
-      && isDigest (candidatePackageImportsSha256 candidate))
+      && isDigest (candidatePackageImportsSha256 candidate)
+      && isAbsolute (candidateProductPath candidate))
     (fail "invalid module candidate identity or digest")
   pure candidate
 
 decodeGroups :: Decoder s [CandidateGroup]
 decodeGroups = do
   total <- decodeListLen
-  when (total > 4096) (fail "too many original groups")
+  when (total > 65536) (fail "too many original groups")
   replicateM total $ do
     count <- decodeListLen
     unless (count == 3) (fail "original group must have three fields")

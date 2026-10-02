@@ -63,8 +63,9 @@ use tracing::Instrument;
 use crate::mailbox::{InstalledReceiver, ResidentOutbound};
 use crate::request::{RequestRegistry, RequestReservationOwner};
 use crate::resident_workbench::{
-    ForkGroupBoundary, PreparedCell, ResidentActorBoundary, ResidentActorStartupStep,
-    ResidentKernelBoundary, ResidentWorkbenchFragment, ResidentWorkbenchStep,
+    AgentStopProjection, ForkGroupBoundary, PreparedCell, ResidentActorBoundary,
+    ResidentActorStartupStep, ResidentKernelBoundary, ResidentWorkbenchFragment,
+    ResidentWorkbenchStep,
 };
 use crate::{
     ActorDescriptor, ActorExitKind, ActorMachineRegistry, ActorRef, ActorSessionContext,
@@ -211,6 +212,20 @@ pub struct ReleaseAwait {
 }
 
 impl ReleaseAwait {
+    /// Create an exact-actor release observation and its acknowledgement.
+    pub fn channel(
+        actor: ActorRef,
+    ) -> (Arc<Self>, tokio::sync::oneshot::Receiver<ResourceRelease>) {
+        let (reply, release) = tokio::sync::oneshot::channel();
+        (
+            Arc::new(Self {
+                actor,
+                reply: Mutex::new(Some(reply)),
+            }),
+            release,
+        )
+    }
+
     /// Deliver the host's answer. Returns false when the waiter is gone.
     pub fn answer(&self, release: ResourceRelease) -> bool {
         self.reply
@@ -275,6 +290,7 @@ struct ResidentEnvironment<H, O> {
     /// one every actor compiles against exactly the deployment-wide roots.
     source_layers: Option<crate::ActorSourceLayerResolver>,
     jev: crate::JevBackendHandle,
+    cell_model_factory: Option<Arc<dyn crate::CellModelFactory>>,
     /// Set by an actor host that answers `ReleaseAwait`; without one a stop
     /// has no interactive resources to wait for.
     release_tracked: Arc<std::sync::atomic::AtomicBool>,
@@ -721,6 +737,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             launch_resolver: self.launch_resolver.clone(),
             source_layers: self.source_layers.clone(),
             jev: Arc::clone(&self.jev),
+            cell_model_factory: self.cell_model_factory.clone(),
             release_tracked: Arc::clone(&self.release_tracked),
             conversation_reader: self.conversation_reader.clone(),
             usage_pointers: self.usage_pointers.clone(),
@@ -1432,6 +1449,7 @@ struct WorkbenchEffectState {
     context: ActorSessionContext,
     public_visibility: Option<tidepool_runtime::session::PublicVisibilitySnapshot>,
     control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
+    model: Option<Arc<dyn crate::CellModelBinding>>,
     installed_tools: Option<crate::InstalledToolLease>,
     admitted_source: crate::CheckpointSourceLayer,
     reservation_owner: RequestReservationOwner,
@@ -1655,6 +1673,13 @@ enum CurrentEffectOwner<'a> {
 }
 
 impl CurrentEffectOwner<'_> {
+    fn model(&self) -> Option<Arc<dyn crate::CellModelBinding>> {
+        match self {
+            Self::Workbench(execution) => execution.model.clone(),
+            Self::Actor { .. } => None,
+        }
+    }
+
     fn invocation_work(&self) -> Option<Arc<InvocationWork>> {
         match self {
             Self::Workbench(execution) => {
@@ -1699,6 +1724,31 @@ impl CurrentEffectOwner<'_> {
 
     fn after_tool_active(&self) -> bool {
         matches!(self, Self::Workbench(execution) if execution.after_tool_active)
+    }
+}
+
+fn prepare_model_effect(
+    context: &ActorSessionContext,
+    owner: &CurrentEffectOwner<'_>,
+    boundary: ResidentActorBoundary,
+) -> ResidentActorBoundary {
+    match boundary {
+        ResidentActorBoundary::Model {
+            continuation,
+            request,
+            table,
+        } => {
+            let work = match owner.model() {
+                Some(model) => model.prepare(
+                    request,
+                    tidepool_repr::PrincipalId::from(context.actor),
+                    table,
+                ),
+                None => crate::cell_model::unavailable_model_work(request),
+            };
+            ResidentActorBoundary::External { continuation, work }
+        }
+        boundary => boundary,
     }
 }
 
@@ -2061,16 +2111,20 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 Ok(None) => {}
             }
         }
-        let admitted_source = installed_tools
-            .as_ref()
-            .map_or_else(
-                || self.freeze_installed_source(context.actor),
-                |lease| Ok(lease.source().clone()),
-            )
-            .map_err(|error| KernelInvocationFailure::Rejected {
+        let admitted_source = if current_builtin {
+            // Builtins inspect current state or prepare a fresh reload source;
+            // they acquire no compilation authority from this admission.
+            installed_tools
+                .as_ref()
+                .map_or_else(crate::CheckpointSourceLayer::default, |lease| {
+                    lease.source().clone()
+                })
+        } else {
+            installed_tools.as_ref().ok_or_else(|| KernelInvocationFailure::Rejected {
                 actor: context.actor,
-                detail: format!("cannot admit exact source layer: {error}"),
-            })?;
+                detail: "cannot admit exact source layer: the source installation is unavailable; repair it with reload_helpers".into(),
+            })?.source().clone()
+        };
         let compilation_authority = if current_builtin {
             None
         } else {
@@ -2247,26 +2301,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         {
             return AgentStopProjection::StoppedNow;
         }
-        let (reply, release) = tokio::sync::oneshot::channel();
-        let request = Arc::new(ReleaseAwait {
-            actor,
-            reply: Mutex::new(Some(reply)),
-        });
-        if self
-            .environment
-            .deployments
-            .try_send(LocalResidentDeployment::ReleaseAwait(request))
-            .is_err()
-        {
-            return AgentStopProjection::StoppedNow;
-        }
-        match tokio::time::timeout(RELEASE_WAIT, release).await {
-            Ok(Ok(ResourceRelease::Released)) | Ok(Err(_)) => AgentStopProjection::StoppedNow,
-            Ok(Ok(ResourceRelease::Retained(detail))) => {
-                AgentStopProjection::StoppedRetaining(detail)
-            }
-            Err(_) => AgentStopProjection::StoppedReleasing,
-        }
+        tracked_stopped_projection(actor, &self.environment.deployments, RELEASE_WAIT).await
     }
 
     /// Unlike the other `deployments` producers in this file, a `WatchChanged`
@@ -4242,6 +4277,7 @@ where
         ancestry: &crate::CallAncestry,
         boundary: ResidentActorBoundary,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let boundary = prepare_model_effect(context, &effect_owner, boundary);
         let boundary =
             match self.prepare_independent_effect(kernel, context, &effect_owner, boundary) {
                 Ok(operation) => return operation.await,
@@ -4262,6 +4298,7 @@ where
                     effect_owner.control(),
                     continuation,
                     work,
+                    effect_owner.model(),
                 )
                 .await
             }),
@@ -5868,68 +5905,6 @@ where
         Ok(InteractivePark::Parked)
     }
 
-    async fn reload_helpers(&self, context: &ActorSessionContext, also_check: &[String]) -> String {
-        let started = std::time::Instant::now();
-        let Some(layers) = self.environment.source_layers.as_ref() else {
-            return reload_receipt(
-                "unavailable",
-                started,
-                vec!["helpers: this host installs no source layers.".into()],
-            );
-        };
-        let (outcome, detail, source_available) = match layers
-            .reload_helpers(tidepool_repr::PrincipalId::from(context.actor), also_check)
-        {
-            crate::SourceLayerReload::Unavailable(detail) => ("unavailable", detail, false),
-            crate::SourceLayerReload::Rejected {
-                active,
-                rejected,
-                diagnostics,
-            } => (
-                "rejected",
-                format!(
-                    "helpers: rejected {rejected}; {active} remains active. Edited files remain on disk.\n{diagnostics}"
-                ),
-                false,
-            ),
-            crate::SourceLayerReload::Unchanged { revision } => (
-                "unchanged",
-                format!("helpers: unchanged at {revision}."),
-                true,
-            ),
-            crate::SourceLayerReload::Published {
-                previous,
-                revision,
-                changed,
-            } => (
-                "published",
-                format!(
-                    "helpers: published {revision} over {previous}; changed {}.",
-                    if changed.is_empty() {
-                        "nothing".to_string()
-                    } else {
-                        changed.join(", ")
-                    }
-                ),
-                true,
-            ),
-        };
-        if source_available {
-            match self.freeze_installed_source(context.actor) {
-                Ok(source) => self.installed_tools.publish_source(source),
-                Err(error) => {
-                    self.installed_tools.clear();
-                    return reload_receipt(
-                        "source unavailable",
-                        started,
-                        vec![detail, error.to_string()],
-                    );
-                }
-            }
-        }
-        reload_receipt(outcome, started, vec![detail])
-    }
-
     fn freeze_installed_source(
         &self,
         actor: ActorRef,
@@ -5942,157 +5917,6 @@ where
                     .map_err(ResidentActorWorkbenchError::ActorProtocol)
             },
         )
-    }
-
-    /// Rebuild this actor's spec and swap the retained record between calls.
-    ///
-    /// Four steps, and the receipt says which one it ended at, because they
-    /// really can end in different places. Publishing the layer while the spec
-    /// itself fails to compile is a real outcome, not an error: the revision is
-    /// live for this actor's later cells, so a model repairing its spec can
-    /// import and exercise the new modules from a cell while the spec does not
-    /// yet compile, and this actor keeps serving the record it already has.
-    ///
-    /// Step three refuses rather than asks. The tool bridge registers a tool
-    /// list once and serves it read-only for the life of that registration, so
-    /// no confirmation could make a changed surface work; a changed surface
-    /// takes effect at the actor's next incarnation.
-    async fn reload_agent_spec(
-        &mut self,
-        context: &ActorSessionContext,
-        also_check: &[String],
-    ) -> String {
-        let Some(active) = self.installed_tools.current_tools() else {
-            return "this actor installed no agent spec, so there is nothing to reload."
-                .to_string();
-        };
-        let resolved = active.resolved.clone();
-        let started = std::time::Instant::now();
-        let mut receipt = vec![format!("spec: {}", resolved.describe())];
-
-        // The spec module was found by convention and is in no configured
-        // module list, so the reload adds it: a spec that fails to compile
-        // must fail its own reload rather than surface later at an unrelated
-        // call.
-        let mut checked: Vec<String> = also_check.to_vec();
-        if let Some(module) = resolved.checked_module() {
-            if !checked.contains(&module) {
-                checked.push(module);
-            }
-        }
-
-        let Some(layers) = self.environment.source_layers.clone() else {
-            receipt.push(
-                "layer: this host installs no source layers, so nothing was republished.".into(),
-            );
-            return reload_receipt("unavailable", started, receipt);
-        };
-        // The layer is the one the host bound to THIS principal when the actor
-        // was admitted. A reload is scoped to the actor that asked and never
-        // upgrades a child.
-        match layers.reload(tidepool_repr::PrincipalId::from(context.actor), &checked) {
-            crate::SourceLayerReload::Unavailable(detail) => {
-                receipt.push(format!("layer: {detail}"));
-                return reload_receipt("unavailable", started, receipt);
-            }
-            crate::SourceLayerReload::Rejected {
-                active,
-                rejected,
-                diagnostics,
-            } => {
-                receipt.push(format!(
-                    "layer: rejected. {active} is still active; {rejected} did not typecheck. \
-                     Your edited files are on disk exactly as you wrote them, and the previous \
-                     spec is still serving calls.\n{diagnostics}"
-                ));
-                return reload_receipt("rejected", started, receipt);
-            }
-            crate::SourceLayerReload::Unchanged { revision } => {
-                receipt.push(format!("layer: unchanged at {revision}."));
-            }
-            crate::SourceLayerReload::Published {
-                previous,
-                revision,
-                changed,
-            } => {
-                receipt.push(format!(
-                    "layer: published {revision} over {previous}; changed {}.",
-                    if changed.is_empty() {
-                        "nothing".to_string()
-                    } else {
-                        changed.join(", ")
-                    }
-                ));
-            }
-        }
-
-        match self.freeze_installed_source(context.actor) {
-            Ok(source) => self.installed_tools.publish_source(source),
-            Err(error) => {
-                self.installed_tools.clear();
-                receipt.push(format!("source: {error}"));
-                return reload_receipt("source unavailable", started, receipt);
-            }
-        }
-
-        let install = self.spec_installs + 1;
-        let prepare_started = std::time::Instant::now();
-        let candidate = self
-            .environment
-            .runner
-            .application_workbench()
-            .prepare_tools(context.clone(), install)
-            .await;
-        tracing::info!(
-            actor = %context.actor,
-            phase = "reload",
-            install,
-            elapsed_ms = prepare_started.elapsed().as_millis(),
-            success = candidate.is_ok(),
-            "agent spec preparation"
-        );
-        let candidate = match candidate {
-            Ok(candidate) => candidate,
-            Err(error) => {
-                receipt.push(format!(
-                    "spec: the install fragment did not compile against the new revision, so the \
-                     previous record is still active. The layer above WAS published, so your \
-                     cells already see the edited modules.\n{error}"
-                ));
-                return reload_receipt("spec did not compile", started, receipt);
-            }
-        };
-
-        let Some(active) = self.installed_tools.current_tools() else {
-            receipt
-                .push("spec: the active record vanished mid-reload; nothing was swapped.".into());
-            return reload_receipt("not swapped", started, receipt);
-        };
-        let changes =
-            exomonad_tool::surface::compare_surfaces(&active.declarations, &candidate.declarations);
-        if !changes.is_empty() {
-            receipt.push(format!(
-                "refused: the rebuilt spec declares a different surface, and the tool list was \
-                 registered once for this session. The previous record is still serving calls; \
-                 a changed surface takes effect at your next incarnation.\n{}",
-                exomonad_tool::surface::describe_changes(&changes)
-            ));
-            return reload_receipt("refused", started, receipt);
-        }
-
-        receipt.push(format!(
-            "swapped: install {install} now serves later calls ({}). A call already accepted \
-             keeps the implementation it started with.",
-            candidate.provenance()
-        ));
-        if !candidate.slots.is_empty() {
-            receipt.push(format!("slots: {}", candidate.slots.join(", ")));
-        }
-        self.spec_installs = install;
-        self.installed_tools
-            .publish_tools(Some(Arc::new(candidate)));
-        self.after_tool.forget_failures();
-        reload_receipt("swapped", started, receipt)
     }
 
     async fn install_interactive_policy(
@@ -6702,6 +6526,8 @@ where
                 unreachable!("replacement bootstrap parks before initialization")
             }
             ResidentBoot::Workbench => {
+                let source = self.freeze_installed_source(context.actor)?;
+                self.installed_tools.publish_source(context.actor, source);
                 self.set_standing(context.actor, ResidentStanding::Workbench);
                 self.policy_installed = true;
                 return Ok(KernelStep::Continue(()));
@@ -7305,6 +7131,11 @@ where
                         ordinal,
                         effect = %effect,
                         "effect boundary captured"
+                    );
+                    let boundary = prepare_model_effect(
+                        context,
+                        &CurrentEffectOwner::Workbench(execution_state),
+                        boundary,
                     );
                     if let ResidentActorBoundary::Console { text, .. } = &boundary {
                         let rendered = crate::workbench_display::bounded_output(
@@ -8098,73 +7929,15 @@ where
                 };
                 cursor.dispatch_initialized = true;
             }
-            if let Some(call) = reload_helpers_call {
-                let arguments =
-                    crate::reload_helpers_tool::parse(call.arguments).map_err(|error| {
-                        workbench_failure(
-                            &[],
-                            0,
-                            1,
-                            ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
-                        )
-                    })?;
-                let output = self.reload_helpers(context, &arguments.also_check).await;
-                return Ok(WorkbenchRunAdvance::Complete(KernelStep::Continue(
-                    workbench_response(
-                        WorkbenchRunStatus::Committed,
-                        vec![WorkbenchItemReceipt {
-                            diagnostics: Vec::new(),
-                            index: 0,
-                            kind: None,
-                            span: None,
-                            source_items: Vec::new(),
-                            status: WorkbenchItemStatus::Committed,
-                            output,
-                            warnings: Vec::new(),
-                            installed_bindings: Vec::new(),
-                            operations: Vec::new(),
-                            terminal_transfer: None,
-                            failure_layer: None,
-                        }],
-                        1,
-                        1,
-                        None,
+            if reload_helpers_call.is_some() || reload_spec_call.is_some() {
+                return Err(workbench_failure(
+                    &[],
+                    0,
+                    1,
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "reload requires its owned preparation task".into(),
                     ),
-                )));
-            }
-            if let Some(call) = reload_spec_call {
-                let arguments =
-                    crate::reload_spec_tool::parse(call.arguments).map_err(|error| {
-                        workbench_failure(
-                            &[],
-                            0,
-                            1,
-                            ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
-                        )
-                    })?;
-                let output = self.reload_agent_spec(context, &arguments.also_check).await;
-                return Ok(WorkbenchRunAdvance::Complete(KernelStep::Continue(
-                    workbench_response(
-                        WorkbenchRunStatus::Committed,
-                        vec![WorkbenchItemReceipt {
-                            diagnostics: Vec::new(),
-                            index: 0,
-                            kind: None,
-                            span: None,
-                            source_items: Vec::new(),
-                            status: WorkbenchItemStatus::Committed,
-                            output,
-                            warnings: Vec::new(),
-                            installed_bindings: Vec::new(),
-                            operations: Vec::new(),
-                            terminal_transfer: None,
-                            failure_layer: None,
-                        }],
-                        1,
-                        1,
-                        None,
-                    ),
-                )));
+                ));
             }
             let default_workbench = if admitted_workbench.is_none() {
                 Some(
@@ -10301,6 +10074,16 @@ where
         true
     }
 
+    fn serializes_workbench_publication(&self, request: &WorkbenchRequest) -> bool {
+        request.tool_call().is_some_and(|call| {
+            matches!(
+                call.name.as_str(),
+                crate::reload_spec_tool::RELOAD_SPEC_TOOL
+                    | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
+            )
+        })
+    }
+
     fn dispatch_workbench(
         &mut self,
         kernel: &KernelContext,
@@ -10380,6 +10163,7 @@ where
                     context: context.clone(),
                     public_visibility,
                     control,
+                    model: None,
                     installed_tools,
                     admitted_source,
                     reservation_owner,
@@ -11164,6 +10948,14 @@ where
         self.environment.jev = backend;
     }
 
+    /// Bind each subsequently admitted workbench execution to one model owner.
+    /// Child admission supplies its actual descriptor to this same factory.
+    #[must_use]
+    pub fn with_cell_model_factory(mut self, factory: Arc<dyn crate::CellModelFactory>) -> Self {
+        self.environment.cell_model_factory = Some(factory);
+        self
+    }
+
     /// Give every actor launched from now on its own source layer, resolved
     /// from the checkout it is launched with. Without this every actor
     /// compiles against the deployment-wide include roots and nothing else.
@@ -11705,6 +11497,17 @@ where
         self.environment.runner.measurement_snapshot(self.session)
     }
 
+    /// Observe the machine actually mounted for this actor incarnation.
+    /// Unknown placements and running or retired machines have no snapshot.
+    #[must_use]
+    pub fn measurement_snapshot_for(
+        &self,
+        actor: ActorRef,
+    ) -> Option<crate::resident_workbench::ResidentMachineMeasurement> {
+        self.actor_session(actor)
+            .and_then(|session| self.environment.runner.measurement_snapshot(session))
+    }
+
     pub fn new(
         source: ActorWorkbenchSource,
         session: tidepool_repr::SessionId,
@@ -11740,6 +11543,7 @@ where
             launch_resolver,
             source_layers: None,
             jev: Arc::new(crate::jev::UnconfiguredJev),
+            cell_model_factory: None,
             release_tracked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             conversation_reader: None,
             usage_pointers: crate::UsagePointerTable::default(),
@@ -12090,7 +11894,9 @@ where
         }
     }
 
-    pub async fn shutdown(&self) {
+    /// Close root admission and retain each root's actor-owned cleanup evidence.
+    /// A forced actor stop remains unconfirmed even after its scheduler task exits.
+    pub async fn shutdown(&self) -> Vec<crate::ForestRootShutdown> {
         *self.environment.root_admission_closed.write().await = true;
         let roots = self
             .environment
@@ -12100,19 +11906,11 @@ where
             .filter(|(_, record)| record.scheduler_root)
             .filter_map(|(actor, _)| self.directory.resolve(*actor))
             .collect::<Vec<_>>();
+        let mut outcomes = Vec::with_capacity(roots.len());
         for root in roots {
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                root.shutdown(ActorTerminal {
-                    kind: ActorExitKind::Cancelled,
-                    summary: "forest host shutdown".into(),
-                }),
-            )
-            .await;
-            if !matches!(result, Ok(Ok(_))) {
-                root.address().kill();
-            }
+            outcomes.push(shutdown_forest_root(&root, std::time::Duration::from_secs(30)).await);
         }
+        outcomes
     }
 
     /// Provision a host-authorized workbench without a provider attachment.
@@ -12426,51 +12224,56 @@ where
         _admission: &tokio::sync::RwLockReadGuard<'_, bool>,
         recovery: PreparedRootAdmission,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
-        let PreparedRootAdmission {
-            replay,
-            identity,
-            launch_worktrees,
-            worktree_custody,
-        } = recovery;
-        if descriptor.placement().session != self.session
-            || (identity.is_none()
-                && (descriptor.supervisor_parent().is_some()
-                    || descriptor.context_parent().is_some()))
-        {
-            return Err(ractor::SpawnErr::StartupFailed(Box::new(
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "forest root must be independent and belong to the forest machine",
-                ),
-            )));
-        }
-        let mut behavior =
-            ResidentKernelBehavior::prepared(descriptor, self.environment.clone(), outcome);
-        behavior.launch_worktrees = launch_worktrees;
-        behavior.worktree_custody = worktree_custody;
-        if let Some(replay) = replay {
-            behavior.workbench_executions = replay;
-        }
-        match identity {
-            Some(identity) => {
-                crate::local_actor::spawn_local_actor_in_directory_with_identity(
-                    None,
-                    behavior,
-                    identity,
-                    self.directory.clone(),
-                )
-                .await
+        // Keep the composed startup future out of each forwarding caller's
+        // inline future. It still runs in this task under the admission guard.
+        Box::pin(async move {
+            let PreparedRootAdmission {
+                replay,
+                identity,
+                launch_worktrees,
+                worktree_custody,
+            } = recovery;
+            if descriptor.placement().session != self.session
+                || (identity.is_none()
+                    && (descriptor.supervisor_parent().is_some()
+                        || descriptor.context_parent().is_some()))
+            {
+                return Err(ractor::SpawnErr::StartupFailed(Box::new(
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "forest root must be independent and belong to the forest machine",
+                    ),
+                )));
             }
-            None => {
-                crate::local_actor::spawn_local_actor_in_directory(
-                    None,
-                    behavior,
-                    self.incarnation,
-                    self.directory.clone(),
-                )
-                .await
+            let mut behavior =
+                ResidentKernelBehavior::prepared(descriptor, self.environment.clone(), outcome);
+            behavior.launch_worktrees = launch_worktrees;
+            behavior.worktree_custody = worktree_custody;
+            if let Some(replay) = replay {
+                behavior.workbench_executions = replay;
             }
-        }
+            match identity {
+                Some(identity) => {
+                    crate::local_actor::spawn_local_actor_in_directory_with_identity(
+                        None,
+                        behavior,
+                        identity,
+                        self.directory.clone(),
+                    )
+                    .await
+                }
+                None => {
+                    crate::local_actor::spawn_local_actor_in_directory(
+                        None,
+                        behavior,
+                        self.incarnation,
+                        self.directory.clone(),
+                    )
+                    .await
+                }
+            }
+        })
+        .await
     }
 }
 
@@ -12840,6 +12643,65 @@ pub(crate) async fn publish_request_notifications(
     }
 }
 
+pub(crate) async fn shutdown_forest_root(
+    root: &LocalActorRef,
+    grace: std::time::Duration,
+) -> crate::ForestRootShutdown {
+    let result = tokio::time::timeout(
+        grace,
+        root.shutdown_with_cleanup(ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "forest host shutdown".into(),
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(shutdown)) => crate::ForestRootShutdown::Settled(shutdown),
+        result => {
+            root.address().kill();
+            match result {
+                Ok(Err(cause)) => crate::ForestRootShutdown::Failed {
+                    actor: root.identity(),
+                    cause,
+                },
+                Err(_) => crate::ForestRootShutdown::TimedOut {
+                    actor: root.identity(),
+                },
+                Ok(Ok(_)) => unreachable!(),
+            }
+        }
+    }
+}
+
+async fn tracked_stopped_projection(
+    actor: ActorRef,
+    deployments: &mpsc::Sender<LocalResidentDeployment>,
+    grace: std::time::Duration,
+) -> AgentStopProjection {
+    let (request, release) = ReleaseAwait::channel(actor);
+    match deployments.try_send(LocalResidentDeployment::ReleaseAwait(request)) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            return AgentStopProjection::StoppedRetaining(
+                "host release observation unavailable: lifecycle channel full".into(),
+            )
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            return AgentStopProjection::StoppedRetaining(
+                "host release observation unavailable: lifecycle channel closed".into(),
+            )
+        }
+    }
+    match tokio::time::timeout(grace, release).await {
+        Ok(Ok(ResourceRelease::Released)) => AgentStopProjection::StoppedNow,
+        Ok(Ok(ResourceRelease::Retained(detail))) => AgentStopProjection::StoppedRetaining(detail),
+        Ok(Err(_)) => AgentStopProjection::StoppedRetaining(
+            "host release acknowledgement lost; cleanup unconfirmed".into(),
+        ),
+        Err(_) => AgentStopProjection::StoppedReleasing,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -12943,6 +12805,86 @@ mod tests {
         }
         .hosted_boundary()
         .is_some());
+    }
+
+    #[tokio::test]
+    async fn tracked_release_observation_full_and_closed_channels_retain_uncertainty() {
+        let actor = ActorRef::first(ActorId(2));
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let (request, _) = super::ReleaseAwait::channel(actor);
+        sender
+            .try_send(super::LocalResidentDeployment::ReleaseAwait(request))
+            .unwrap();
+        assert!(matches!(
+            super::tracked_stopped_projection(actor, &sender, std::time::Duration::from_secs(1))
+                .await,
+            AgentStopProjection::StoppedRetaining(_)
+        ));
+        receiver.close();
+        assert!(matches!(
+            super::tracked_stopped_projection(actor, &sender, std::time::Duration::from_secs(1))
+                .await,
+            AgentStopProjection::StoppedRetaining(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn tracked_release_observation_requires_exact_acknowledgement() {
+        let actor = ActorRef::first(ActorId(2));
+        for release in [
+            Some(super::ResourceRelease::Released),
+            Some(super::ResourceRelease::Retained("cleanup failed".into())),
+            None,
+        ] {
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+            let observation = super::tracked_stopped_projection(
+                actor,
+                &sender,
+                std::time::Duration::from_secs(1),
+            );
+            let host = async {
+                let Some(super::LocalResidentDeployment::ReleaseAwait(request)) =
+                    receiver.recv().await
+                else {
+                    panic!("missing wait");
+                };
+                assert_eq!(request.actor, actor);
+                if let Some(release) = release.clone() {
+                    assert!(request.answer(release));
+                }
+            };
+            let (outcome, ()) = tokio::join!(observation, host);
+            match release {
+                Some(super::ResourceRelease::Released) => {
+                    assert!(matches!(outcome, AgentStopProjection::StoppedNow))
+                }
+                Some(super::ResourceRelease::Retained(detail)) => assert!(
+                    matches!(outcome, AgentStopProjection::StoppedRetaining(actual) if actual == detail)
+                ),
+                None => assert!(matches!(outcome, AgentStopProjection::StoppedRetaining(_))),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tracked_release_observation_timeout_remains_releasing() {
+        let actor = ActorRef::first(ActorId(2));
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let observation =
+            super::tracked_stopped_projection(actor, &sender, std::time::Duration::from_secs(1));
+        let host = async {
+            let Some(super::LocalResidentDeployment::ReleaseAwait(request)) = receiver.recv().await
+            else {
+                panic!("missing wait");
+            };
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            assert!(
+                !request.answer(super::ResourceRelease::Released),
+                "timed-out waiter must not become confirmation"
+            );
+        };
+        let (outcome, ()) = tokio::join!(observation, host);
+        assert!(matches!(outcome, AgentStopProjection::StoppedReleasing));
     }
 
     #[tokio::test]

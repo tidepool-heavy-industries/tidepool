@@ -18,6 +18,236 @@ pub struct SourceBinder {
     pub binder: SymbolIdentity,
 }
 
+/// Runtime selection context minted by the existing lexical scope owner.
+/// This identity is never reconstructed from durable source loss metadata.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SourceInstanceDomain {
+    namespace: crate::binding_table::BindingTipId,
+    slot: u64,
+}
+
+impl SourceInstanceDomain {
+    pub fn single() -> Self {
+        Self::for_scope(crate::scope::ScopeId::ROOT)
+    }
+    pub(crate) fn for_scope(scope: crate::scope::ScopeId) -> Self {
+        Self::in_view(crate::binding_table::BindingTipId(0), scope.0)
+    }
+    pub(crate) fn in_view(namespace: crate::binding_table::BindingTipId, slot: u64) -> Self {
+        Self { namespace, slot }
+    }
+}
+
+/// An exact implementation selected within one captured mutable environment.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ScopedSourceBinder {
+    pub domain: SourceInstanceDomain,
+    pub source: SourceBinder,
+}
+
+/// Selected live instances and authored origins from one owning binding view.
+/// Construction remains inside the existing scope/custody owner.
+#[derive(Clone)]
+pub struct SourceDomainSelection {
+    current: SourceInstanceDomain,
+    authored: HashMap<SourceInstanceDomain, HashMap<CachedHomeOwner, SourceInstanceDomain>>,
+    inherited: BTreeMap<ScopedSourceBinder, SourceInstanceLease>,
+    anchors: HashMap<(SourceInstanceDomain, CachedHomeOwner, u32), SourceInstanceLease>,
+}
+
+impl SourceDomainSelection {
+    pub(crate) fn new(
+        current: SourceInstanceDomain,
+        authored: HashMap<SourceInstanceDomain, HashMap<CachedHomeOwner, SourceInstanceDomain>>,
+        entries: impl IntoIterator<Item = (SourceInstanceDomain, SourceInstanceLease)>,
+    ) -> Result<Self, DemandError> {
+        if !authored.contains_key(&current)
+            || authored
+                .values()
+                .flat_map(|origins| origins.values())
+                .any(|target| !authored.contains_key(target))
+        {
+            return Err(DemandError::MissingDomain(current));
+        }
+        let mut inherited = BTreeMap::new();
+        let mut anchors = HashMap::new();
+
+        for (domain, lease) in entries {
+            if !authored.contains_key(&domain) {
+                return Err(DemandError::MissingDomain(domain));
+            }
+            let group = (domain, lease.owner().clone(), lease.original_ordinal());
+            if anchors
+                .insert(group, lease.clone())
+                .is_some_and(|old: SourceInstanceLease| old.instance() != lease.instance())
+            {
+                return Err(DemandError::ConflictingDomainInstance {
+                    domain,
+                    binder: lease.binder().clone(),
+                });
+            }
+            let key = ScopedSourceBinder {
+                domain,
+                source: lease.binder().clone(),
+            };
+            if inherited.insert(key.clone(), lease.clone()).is_some_and(
+                |old: SourceInstanceLease| {
+                    old.instance() != lease.instance() || old.handle() != lease.handle()
+                },
+            ) {
+                return Err(DemandError::ConflictingDomainInstance {
+                    domain,
+                    binder: key.source,
+                });
+            }
+        }
+        Ok(Self {
+            current,
+            authored,
+            inherited,
+            anchors,
+        })
+    }
+
+    pub fn current(&self) -> SourceInstanceDomain {
+        self.current
+    }
+    pub fn inherited(&self) -> &BTreeMap<ScopedSourceBinder, SourceInstanceLease> {
+        &self.inherited
+    }
+    pub fn domain_for_owner(
+        &self,
+        caller: SourceInstanceDomain,
+        owner: &CachedHomeOwner,
+    ) -> Result<SourceInstanceDomain, DemandError> {
+        let origins = self
+            .authored
+            .get(&caller)
+            .ok_or(DemandError::MissingDomain(caller))?;
+        Ok(origins.get(owner).copied().unwrap_or(caller))
+    }
+}
+
+/// One sealed original group instance demand with its complete source import
+/// selections. The immutable original arena remains separate from these choices.
+#[derive(Clone)]
+pub struct ScopedSourceGroupDemand {
+    index: usize,
+    domain: SourceInstanceDomain,
+    owner: CachedHomeOwner,
+    ordinal: u32,
+    imports: BTreeMap<SourceBinder, ScopedSourceBinder>,
+}
+
+impl ScopedSourceGroupDemand {
+    pub fn index(&self) -> usize {
+        self.index
+    }
+    pub fn domain(&self) -> SourceInstanceDomain {
+        self.domain
+    }
+    pub fn owner(&self) -> &CachedHomeOwner {
+        &self.owner
+    }
+    pub fn original_ordinal(&self) -> u32 {
+        self.ordinal
+    }
+    pub fn source_imports(&self) -> &BTreeMap<SourceBinder, ScopedSourceBinder> {
+        &self.imports
+    }
+}
+
+#[derive(Clone)]
+pub struct ScopedInheritedSourceDemand {
+    domain: SourceInstanceDomain,
+    demand: InheritedSourceDemand,
+}
+
+impl ScopedInheritedSourceDemand {
+    pub fn domain(&self) -> SourceInstanceDomain {
+        self.domain
+    }
+    pub fn demand(&self) -> &InheritedSourceDemand {
+        &self.demand
+    }
+    pub fn into_demand(self) -> InheritedSourceDemand {
+        self.demand
+    }
+}
+
+pub struct PendingScopedSourceDemand {
+    groups: Vec<ScopedSourceGroupDemand>,
+    inherited: Vec<ScopedInheritedSourceDemand>,
+    target: BTreeMap<SourceBinder, ScopedSourceBinder>,
+}
+
+impl PendingScopedSourceDemand {
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<ScopedSourceGroupDemand>,
+        Vec<ScopedInheritedSourceDemand>,
+        BTreeMap<SourceBinder, ScopedSourceBinder>,
+    ) {
+        (self.groups, self.inherited, self.target)
+    }
+}
+
+/// One native root admission. Existing physical roots require a sealed demand
+/// whose exact anchor is revalidated by the owning binding table.
+pub struct SourceInstanceAttachment {
+    domain: SourceInstanceDomain,
+    lease: SourceInstanceLease,
+    inherited: Option<InheritedSourceDemand>,
+}
+
+static_assertions::assert_not_impl_any!(SourceInstanceAttachment: Clone, Copy);
+
+impl SourceInstanceAttachment {
+    pub(in crate::prepared_program) fn installed(
+        domain: SourceInstanceDomain,
+        lease: SourceInstanceLease,
+    ) -> Self {
+        Self {
+            domain,
+            lease,
+            inherited: None,
+        }
+    }
+    pub(crate) fn inherited(
+        demand: &InheritedSourceDemand,
+        lease: SourceInstanceLease,
+    ) -> Result<Self, DemandError> {
+        if lease.instance() != demand.anchor().instance()
+            || lease.owner() != demand.owner()
+            || lease.original_ordinal() != demand.original_ordinal()
+            || lease.binder() != demand.binder()
+            || lease.value() != demand.value()
+        {
+            return Err(DemandError::InvalidInheritedInstance(
+                demand.binder().clone(),
+            ));
+        }
+        Ok(Self {
+            domain: demand.domain(),
+            lease,
+            inherited: Some(demand.clone()),
+        })
+    }
+    pub(crate) fn domain(&self) -> SourceInstanceDomain {
+        self.domain
+    }
+    pub fn lease(&self) -> &SourceInstanceLease {
+        &self.lease
+    }
+    pub(crate) fn demand(&self) -> Option<&InheritedSourceDemand> {
+        self.inherited.as_ref()
+    }
+    pub(crate) fn into_parts(self) -> (SourceInstanceDomain, SourceInstanceLease) {
+        (self.domain, self.lease)
+    }
+}
+
 /// Machine-owned root for one materialized source binder in one original
 /// group installation. Cloning this descriptor does not mint another root:
 /// scope custody shares one handle and releases it exactly once when the last
@@ -112,6 +342,20 @@ pub enum DemandError {
     InvalidInheritedInstance(SourceBinder),
     #[error("source group has invalid original binder inventory for {0:?}")]
     InvalidGroup(SourceBinder),
+    #[error(
+        "source selection domain {domain:?} contains conflicting mutable instances for {binder:?}"
+    )]
+    ConflictingDomainInstance {
+        domain: SourceInstanceDomain,
+        binder: SourceBinder,
+    },
+    #[error("source selection domain {0:?} is absent or not closed")]
+    MissingDomain(SourceInstanceDomain),
+    #[error("domain demand does not match original certified group {owner:?} ordinal {ordinal}")]
+    InvalidScopedGroup {
+        owner: CachedHomeOwner,
+        ordinal: u32,
+    },
     #[error(transparent)]
     Compile(#[from] CompileError),
 }
@@ -250,6 +494,14 @@ impl PendingGroupInventory {
         })
     }
 
+    pub fn seal_in_domains(
+        &self,
+        roots: impl IntoIterator<Item = SourceBinder>,
+        selected: &SourceDomainSelection,
+    ) -> Result<PendingScopedSourceDemand, DemandError> {
+        self.index.seal_in_domains(roots, selected)
+    }
+
     pub fn seal_with_inherited(
         &self,
         roots: impl IntoIterator<Item = SourceBinder>,
@@ -284,9 +536,13 @@ pub struct InheritedSourceDemand {
     binder: SourceBinder,
     value: ValueId,
     anchor: SourceInstanceLease,
+    domain: SourceInstanceDomain,
 }
 
 impl InheritedSourceDemand {
+    pub fn domain(&self) -> SourceInstanceDomain {
+        self.domain
+    }
     pub fn owner(&self) -> &CachedHomeOwner {
         &self.owner
     }
@@ -304,9 +560,84 @@ impl InheritedSourceDemand {
     }
 }
 
+#[derive(Clone)]
+pub struct ScopedCertifiedGroup {
+    original: CertifiedGroup,
+    demand: ScopedSourceGroupDemand,
+}
+
+impl ScopedCertifiedGroup {
+    pub fn admit(
+        original: CertifiedGroup,
+        demand: ScopedSourceGroupDemand,
+    ) -> Result<Self, DemandError> {
+        let sources: BTreeSet<_> = original
+            .imports()
+            .iter()
+            .filter_map(|owner| match owner {
+                ImportOwner::Source { version, binder } => Some(SourceBinder {
+                    version: version.clone(),
+                    binder: binder.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        if original.owner() != &demand.owner
+            || original.original_ordinal() != demand.ordinal
+            || sources != demand.imports.keys().cloned().collect()
+        {
+            return Err(DemandError::InvalidScopedGroup {
+                owner: original.owner().clone(),
+                ordinal: original.original_ordinal(),
+            });
+        }
+        Ok(Self { original, demand })
+    }
+    pub fn original(&self) -> &CertifiedGroup {
+        &self.original
+    }
+    pub fn demand(&self) -> &ScopedSourceGroupDemand {
+        &self.demand
+    }
+}
+
+pub struct ScopedDemandedImage {
+    original: DemandedImage,
+    demand: ScopedSourceGroupDemand,
+}
+
+impl ScopedDemandedImage {
+    pub fn admit(
+        original: DemandedImage,
+        source: ScopedCertifiedGroup,
+    ) -> Result<Self, DemandError> {
+        if original.group() != source.original() {
+            return Err(DemandError::InvalidScopedGroup {
+                owner: source.original.owner().clone(),
+                ordinal: source.original.original_ordinal(),
+            });
+        }
+        Ok(Self {
+            original,
+            demand: source.demand,
+        })
+    }
+    pub fn into_image(mut self) -> DemandedImage {
+        self.original.demand = Some(self.demand);
+        self.original
+    }
+    pub fn original(&self) -> &DemandedImage {
+        &self.original
+    }
+    pub fn demand(&self) -> &ScopedSourceGroupDemand {
+        &self.demand
+    }
+}
+
 pub struct DemandedImage {
     group: CertifiedGroup,
     image: Arc<CompiledProgram>,
+    demand: Option<ScopedSourceGroupDemand>,
 }
 
 impl DemandedImage {
@@ -317,7 +648,11 @@ impl DemandedImage {
         let image = registry.get_or_compile_group(&group, || {
             CompiledProgram::compile_certified_group(&group).map(Arc::new)
         })?;
-        Ok(Self { group, image })
+        Ok(Self {
+            group,
+            image,
+            demand: None,
+        })
     }
 
     /// Specialize only immutable package literals supplied by the runtime's
@@ -343,9 +678,35 @@ impl DemandedImage {
         let image = registry.get_or_compile_literal_group(&group, &literals, || {
             CompiledProgram::compile_certified_group_with_literals(&group, &literals).map(Arc::new)
         })?;
-        Ok(Self { group, image })
+        Ok(Self {
+            group,
+            image,
+            demand: None,
+        })
     }
 
+    pub fn domain(&self) -> SourceInstanceDomain {
+        self.demand
+            .as_ref()
+            .map(|plan| plan.domain)
+            .unwrap_or_else(|| SourceInstanceDomain::for_scope(crate::scope::ScopeId::ROOT))
+    }
+    pub fn qualified_source(
+        &self,
+        source: &SourceBinder,
+    ) -> Result<ScopedSourceBinder, DemandError> {
+        match &self.demand {
+            Some(plan) => plan
+                .imports
+                .get(source)
+                .cloned()
+                .ok_or_else(|| DemandError::MissingSource(source.clone())),
+            None => Ok(ScopedSourceBinder {
+                domain: self.domain(),
+                source: source.clone(),
+            }),
+        }
+    }
     pub fn group(&self) -> &CertifiedGroup {
         &self.group
     }
@@ -374,6 +735,27 @@ impl<'a> GroupInventory<'a> {
         roots: impl IntoIterator<Item = SourceBinder>,
     ) -> Result<SealedDemand<'a>, DemandError> {
         self.seal_with_inherited(roots, &BTreeMap::new(), &HashMap::new())
+    }
+
+    pub fn seal_in_domains(
+        &self,
+        roots: impl IntoIterator<Item = SourceBinder>,
+        selected: &SourceDomainSelection,
+    ) -> Result<
+        (
+            Vec<ScopedCertifiedGroup>,
+            Vec<ScopedInheritedSourceDemand>,
+            BTreeMap<SourceBinder, ScopedSourceBinder>,
+        ),
+        DemandError,
+    > {
+        let demand = self.index.seal_in_domains(roots, selected)?;
+        let groups = demand
+            .groups
+            .into_iter()
+            .map(|plan| ScopedCertifiedGroup::admit(self.groups[plan.index].clone(), plan))
+            .collect::<Result<_, _>>()?;
+        Ok((groups, demand.inherited, demand.target))
     }
 
     /// Stop closure at exact live lexical instances. A later demand for an
@@ -436,60 +818,145 @@ impl DemandIndex {
         Ok(Self { groups, binders })
     }
 
+    fn qualified_source(
+        &self,
+        caller: SourceInstanceDomain,
+        source: SourceBinder,
+        selected: &SourceDomainSelection,
+    ) -> Result<ScopedSourceBinder, DemandError> {
+        let index = *self
+            .binders
+            .get(&source)
+            .ok_or_else(|| DemandError::MissingSource(source.clone()))?;
+        Ok(ScopedSourceBinder {
+            domain: selected.domain_for_owner(caller, &self.groups[index].owner)?,
+            source,
+        })
+    }
+
+    fn seal_in_domains(
+        &self,
+        roots: impl IntoIterator<Item = SourceBinder>,
+        selected: &SourceDomainSelection,
+    ) -> Result<PendingScopedSourceDemand, DemandError> {
+        let target = roots
+            .into_iter()
+            .map(|source| {
+                self.qualified_source(selected.current, source.clone(), selected)
+                    .map(|qualified| (source, qualified))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let mut pending: VecDeque<_> = target.values().cloned().collect();
+        let mut reachable = BTreeMap::new();
+        let mut inherited = BTreeMap::new();
+        while let Some(key) = pending.pop_front() {
+            let index = *self
+                .binders
+                .get(&key.source)
+                .ok_or_else(|| DemandError::MissingSource(key.source.clone()))?;
+            let group = &self.groups[index];
+            if let Some(lease) = selected.inherited.get(&key) {
+                if lease.binder() != &key.source
+                    || lease.owner() != &group.owner
+                    || lease.original_ordinal() != group.original_ordinal
+                {
+                    return Err(DemandError::InvalidInheritedInstance(key.source));
+                }
+                continue;
+            }
+            if let Some(anchor) =
+                selected
+                    .anchors
+                    .get(&(key.domain, group.owner.clone(), group.original_ordinal))
+            {
+                if anchor.owner() != &group.owner
+                    || anchor.original_ordinal() != group.original_ordinal
+                    || anchor.binder().version != group.owner.module_version
+                    || !group.tops.contains_key(&anchor.binder().binder)
+                {
+                    return Err(DemandError::InvalidInheritedInstance(key.source));
+                }
+                inherited
+                    .entry(key.clone())
+                    .or_insert_with(|| ScopedInheritedSourceDemand {
+                        domain: key.domain,
+                        demand: InheritedSourceDemand {
+                            owner: group.owner.clone(),
+                            original_ordinal: group.original_ordinal,
+                            value: group.tops[&key.source.binder],
+                            binder: key.source,
+                            anchor: anchor.clone(),
+                            domain: key.domain,
+                        },
+                    });
+                continue;
+            }
+            if reachable.contains_key(&(key.domain, index)) {
+                continue;
+            }
+            let imports = group
+                .imports
+                .iter()
+                .cloned()
+                .map(|source| {
+                    self.qualified_source(key.domain, source.clone(), selected)
+                        .map(|qualified| (source, qualified))
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            pending.extend(imports.values().cloned());
+            reachable.insert(
+                (key.domain, index),
+                ScopedSourceGroupDemand {
+                    index,
+                    domain: key.domain,
+                    owner: group.owner.clone(),
+                    ordinal: group.original_ordinal,
+                    imports,
+                },
+            );
+        }
+        Ok(PendingScopedSourceDemand {
+            groups: reachable.into_values().collect(),
+            inherited: inherited.into_values().collect(),
+            target,
+        })
+    }
+
     fn seal(
         &self,
         roots: impl IntoIterator<Item = SourceBinder>,
         existing: &BTreeMap<SourceBinder, SourceInstanceLease>,
         anchors: &HashMap<(CachedHomeOwner, u32), SourceInstanceLease>,
     ) -> Result<PendingSealedDemand, DemandError> {
-        let mut pending = VecDeque::new();
-        for root in roots {
-            pending.push_back(root);
-        }
-        let mut reachable = BTreeSet::new();
-        let mut inherited = BTreeMap::new();
-        while let Some(binder) = pending.pop_front() {
-            let &index = self
-                .binders
-                .get(&binder)
-                .ok_or_else(|| DemandError::MissingSource(binder.clone()))?;
-            let group = &self.groups[index];
-            if let Some(lease) = existing.get(&binder) {
-                if lease.binder() != &binder
-                    || lease.owner() != &group.owner
-                    || lease.original_ordinal() != group.original_ordinal
-                {
-                    return Err(DemandError::InvalidInheritedInstance(binder));
-                }
-                continue;
-            }
-            if let Some(anchor) = anchors.get(&(group.owner.clone(), group.original_ordinal)) {
-                if anchor.owner() != &group.owner
-                    || anchor.original_ordinal() != group.original_ordinal
-                    || anchor.binder().version != group.owner.module_version
-                    || !group.tops.contains_key(&anchor.binder().binder)
-                {
-                    return Err(DemandError::InvalidInheritedInstance(binder));
-                }
-                inherited
-                    .entry(binder.clone())
-                    .or_insert_with(|| InheritedSourceDemand {
-                        owner: group.owner.clone(),
-                        original_ordinal: group.original_ordinal,
-                        value: group.tops[&binder.binder],
-                        binder,
-                        anchor: anchor.clone(),
-                    });
-                continue;
-            }
-            if !reachable.insert(index) {
-                continue;
-            }
-            pending.extend(group.imports.iter().cloned());
-        }
+        let domain = SourceInstanceDomain::for_scope(crate::scope::ScopeId::ROOT);
+        let selected = SourceDomainSelection {
+            current: domain,
+            authored: HashMap::from([(domain, HashMap::new())]),
+            inherited: existing
+                .iter()
+                .map(|(source, lease)| {
+                    (
+                        ScopedSourceBinder {
+                            domain,
+                            source: source.clone(),
+                        },
+                        lease.clone(),
+                    )
+                })
+                .collect(),
+            anchors: anchors
+                .iter()
+                .map(|((owner, ordinal), lease)| ((domain, owner.clone(), *ordinal), lease.clone()))
+                .collect(),
+        };
+        let scoped = self.seal_in_domains(roots, &selected)?;
         Ok(PendingSealedDemand {
-            indices: reachable.into_iter().collect(),
-            inherited: inherited.into_values().collect(),
+            indices: scoped.groups.into_iter().map(|group| group.index).collect(),
+            inherited: scoped
+                .inherited
+                .into_iter()
+                .map(|selected| selected.demand)
+                .collect(),
         })
     }
 }

@@ -34,7 +34,7 @@ handleModel :: ModelCall a -> Eff '[State [Text]] a
 handleModel (ModelStartWith _) = pure (Right (object
   ["kind" .= ("callback" :: Text), "invocation" .= ("i" :: Text), "call_id" .= ("c" :: Text), "name" .= ("echo" :: Text), "arguments" .= ("called" :: Text)]))
 handleModel (ModelResumeWith token call answer)
-  | token == "i" && call == "c" && answer == String "called" = pure (Right (object
+  | token == "i" && call == "c" && answer == toolDispatchReply (Right (String "called")) = pure (Right (object
       ["kind" .= ("hook" :: Text), "invocation" .= token, "operation" .= ("op" :: Text), "name" .= ("echo" :: Text), "arguments" .= ("called" :: Text), "handle" .= ("retained:1" :: Text), "ordinal" .= (1 :: Int), "output" .= ("called" :: Text)]))
   | otherwise = error "callback identity/output changed"
 handleModel (ModelAnnotateWith token op annotation)
@@ -48,6 +48,15 @@ handleModel (ModelCloseWith _) = modify (<> (["closed"] :: [Text])) >> pure (Rig
 
 main :: IO ()
 main = do
+  unless (toolDispatchReply (Left (UnknownTool "missing")) == object
+    ["status" .= ("refused" :: Text), "kind" .= ("unknown_tool" :: Text)
+    ,"tool" .= ("missing" :: Text), "error" .= ("no such tool: missing" :: Text)])
+    (error "unknown-tool refusal lost its typed identity")
+  unless (toolDispatchReply (Left (InvalidToolInput "echo" "semantic rejection")) == object
+    ["status" .= ("refused" :: Text), "kind" .= ("invalid_input" :: Text)
+    ,"tool" .= ("echo" :: Text), "detail" .= ("semantic rejection" :: Text)
+    ,"error" .= ("invalid input for tool echo: semantic rejection" :: Text)])
+    (error "input refusal lost its typed detail")
   let (result, events) = run (runState [] (interpret handleModel program))
   unless (events == ["called", "retained:1"]) (error "callbacks did not use caller state")
   case modelOutcome result of

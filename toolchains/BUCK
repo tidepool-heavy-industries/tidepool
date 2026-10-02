@@ -118,3 +118,39 @@ nix_directory(
     store_path = read_root_config("nix", "test_tools_closure"),
     visibility = ["PUBLIC"],
 )
+
+# These outputs are optional until a deployment-catalog gate is selected.
+# The copies declare resources; consumers retain their original store roots.
+nix_directory(
+    name = "runtime_stdlib_sources",
+    cp = read_root_config("nix", "coreutils") + "/cp",
+    store_path = read_root_config("nix", "runtime_stdlib_sources", ""),
+    visibility = ["PUBLIC"],
+)
+
+nix_directory(
+    name = "runtime_stdlib_products",
+    cp = read_root_config("nix", "coreutils") + "/cp",
+    store_path = read_root_config("nix", "runtime_stdlib_products", ""),
+    visibility = ["PUBLIC"],
+)
+
+nix_directory(
+    name = "runtime_stdlib_extract",
+    cp = read_root_config("nix", "coreutils") + "/cp",
+    store_path = read_root_config("nix", "runtime_stdlib_extract", ""),
+    visibility = ["PUBLIC"],
+)
+
+nix_directory(
+    name = "exomonad_runtime_tools",
+    cp = read_root_config("nix", "coreutils") + "/cp",
+    store_path = read_root_config("nix", "exomonad_runtime_tools", ""),
+    visibility = ["PUBLIC"],
+)
+
+nix_tool(
+    name = "bubblewrap",
+    executable = read_root_config("nix", "bubblewrap", ""),
+    visibility = ["PUBLIC"],
+)

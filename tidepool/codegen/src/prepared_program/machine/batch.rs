@@ -32,6 +32,7 @@ pub struct BatchLeaseRequest {
     original_ordinal: u32,
     binder: SourceBinder,
     binding: ValueId,
+    domain: super::super::SourceInstanceDomain,
 }
 
 impl BatchLeaseRequest {
@@ -69,6 +70,7 @@ impl BatchLeaseRequest {
             original_ordinal: source.original_ordinal(),
             binder: binder.clone(),
             binding: value,
+            domain: demanded.domain(),
         })
     }
 }
@@ -76,6 +78,7 @@ impl BatchLeaseRequest {
 pub struct BatchInstallReceipt {
     pub programs: Vec<ProgramId>,
     pub leases: Vec<SourceInstanceLease>,
+    pub source_attachments: Vec<super::super::SourceInstanceAttachment>,
 }
 
 struct Candidate {
@@ -135,6 +138,82 @@ impl PreparedMachine<'_> {
         ))
     }
 
+    /// Issue a sibling attachment only from this machine's fresh rooted lease.
+    pub fn retain_certified_source_attachment(
+        &mut self,
+        requested: &InheritedSourceDemand,
+    ) -> Result<super::super::SourceInstanceAttachment, ExecutionError> {
+        let lease = self.retain_certified_source_top(requested)?;
+        Ok(
+            super::super::SourceInstanceAttachment::inherited(requested, lease)
+                .expect("machine validated exact sibling provenance"),
+        )
+    }
+
+    /// Attach one staged physical sibling to another exact selected domain.
+    pub fn share_certified_source_attachment(
+        &self,
+        requested: &InheritedSourceDemand,
+        staged: &super::super::SourceInstanceAttachment,
+    ) -> Result<super::super::SourceInstanceAttachment, ExecutionError> {
+        let token = staged.lease();
+        self.handle_is_evaluated(token.handle())?;
+        self.handle_is_evaluated(requested.anchor().handle())?;
+        let image = self
+            .programs
+            .get(&requested.anchor().instance().program())
+            .ok_or(ExecutionError::UnknownProgram(
+                requested.anchor().instance().program(),
+            ))?
+            .program
+            .get();
+        if image.certified_source.as_ref()
+            != Some(&(requested.owner().clone(), requested.original_ordinal()))
+            || image
+                .top_exports
+                .get(&requested.value())
+                .map(|top| &top.identity)
+                != Some(&requested.binder().binder)
+        {
+            return Err(ExecutionError::BatchSourceContract(Box::new(
+                requested.binder().binder.clone(),
+            )));
+        }
+        super::super::SourceInstanceAttachment::inherited(requested, token.clone()).map_err(|_| {
+            ExecutionError::BatchSourceContract(Box::new(requested.binder().binder.clone()))
+        })
+    }
+
+    /// Validate a one-shot source attachment against this still-live machine.
+    pub fn validate_source_attachment(
+        &self,
+        attachment: &super::super::SourceInstanceAttachment,
+    ) -> Result<(), ExecutionError> {
+        let lease = attachment.lease();
+        self.handle_is_evaluated(lease.handle())?;
+        let image = self
+            .programs
+            .get(&lease.instance().program())
+            .ok_or(ExecutionError::UnknownProgram(lease.instance().program()))?
+            .program
+            .get();
+        let mismatch =
+            || ExecutionError::BatchSourceContract(Box::new(lease.binder().binder.clone()));
+        if image.certified_source.as_ref()
+            != Some(&(lease.owner().clone(), lease.original_ordinal()))
+            || lease.binder().version != lease.owner().module_version
+        {
+            return Err(mismatch());
+        }
+        let top = image.top_exports.get(&lease.value()).ok_or_else(mismatch)?;
+        if top.identity != lease.binder().binder
+            || top.entry_signature.as_ref() != lease.entry_signature()
+        {
+            return Err(mismatch());
+        }
+        Ok(())
+    }
+
     /// Install a closed batch of independently compiled original groups as
     /// one transaction. Every candidate receives a fresh root block, static
     /// instance and mutable CAFs; source imports may point forward or form a
@@ -158,6 +237,7 @@ impl PreparedMachine<'_> {
                 Ok(BatchInstallReceipt {
                     programs: Vec::new(),
                     leases: Vec::new(),
+                    source_attachments: Vec::new(),
                 })
             } else {
                 Err(ExecutionError::Invariant(
@@ -464,13 +544,14 @@ impl PreparedMachine<'_> {
             );
             ids.push(id);
         }
+        let mut source_attachments = Vec::new();
         let leases = requests
             .into_iter()
             .zip(handles)
             .map(|(request, handle)| {
                 let installed = &self.programs[&ids[request.group]];
                 let export = &installed.program.get().top_exports[&request.binding];
-                SourceInstanceLease::new(
+                let lease = SourceInstanceLease::new(
                     GroupInstanceId::from(ids[request.group]),
                     request.owner,
                     request.original_ordinal,
@@ -478,12 +559,18 @@ impl PreparedMachine<'_> {
                     request.binding,
                     handle,
                     export.entry_signature.clone(),
-                )
+                );
+                source_attachments.push(super::super::SourceInstanceAttachment::installed(
+                    request.domain,
+                    lease.clone(),
+                ));
+                lease
             })
             .collect();
         Ok(BatchInstallReceipt {
             programs: ids,
             leases,
+            source_attachments,
         })
     }
 

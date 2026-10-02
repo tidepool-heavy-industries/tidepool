@@ -537,11 +537,23 @@ impl InstalledToolsState {
         self.current()?.tools_arc()
     }
 
-    pub(crate) fn publish_source(&self, source: crate::CheckpointSourceLayer) {
+    pub(crate) fn publish_source(
+        &self,
+        actor: crate::ActorRef,
+        source: crate::CheckpointSourceLayer,
+    ) {
         let mut current = self.0.lock();
-        if let Some(lease) = current.as_ref() {
-            *current = Some(lease.with_source(source));
-        }
+        *current = Some(match current.as_ref() {
+            Some(lease) => {
+                assert_eq!(
+                    lease.actor(),
+                    actor,
+                    "source publication belongs to the installed actor"
+                );
+                lease.with_source(source)
+            }
+            None => InstalledToolLease::new(actor, source, None),
+        });
     }
 
     pub(crate) fn publish_tools(&self, tools: Option<Arc<ResidentWorkbenchTools>>) {
@@ -1491,11 +1503,11 @@ fn protected_observation(
     }))
 }
 
-/// Private matched-build envelope. The authored output stays inside `Success`;
+/// Matched-build envelope. The authored output stays inside `Success`;
 /// refusals never become values of a tool's advertised output schema.
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub(crate) enum ToolDispatchReply {
+pub enum ToolDispatchReply {
     Success {
         output: serde_json::Value,
     },
@@ -1505,20 +1517,36 @@ pub(crate) enum ToolDispatchReply {
     },
 }
 
-#[derive(Debug, serde::Deserialize, thiserror::Error)]
-#[serde(tag = "kind", content = "error", rename_all = "snake_case")]
+#[derive(Debug, serde::Deserialize, serde::Serialize, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolDispatchError {
-    #[error("{0}")]
-    UnknownTool(String),
-    #[error("{0}")]
-    InvalidInput(String),
+    #[error("{error}")]
+    UnknownTool {
+        #[serde(skip_serializing)]
+        error: String,
+        tool: String,
+    },
+    #[error("{error}")]
+    InvalidInput {
+        #[serde(skip_serializing)]
+        error: String,
+        tool: String,
+        detail: String,
+    },
 }
 
 impl ToolDispatchReply {
-    pub(crate) fn into_output(self) -> Result<serde_json::Value, ToolDispatchError> {
+    pub fn into_output(self) -> Result<serde_json::Value, ToolDispatchError> {
         match self {
             Self::Success { output } => Ok(output),
             Self::Refused { error } => Err(error),
+        }
+    }
+}
+impl ToolDispatchError {
+    pub fn tool(&self) -> &str {
+        match self {
+            Self::UnknownTool { tool, .. } | Self::InvalidInput { tool, .. } => tool,
         }
     }
 }
@@ -1780,6 +1808,11 @@ pub(crate) enum ResidentActorBoundary {
         continuation: ResidentHole,
         request: String,
     },
+    Model {
+        continuation: ResidentHole,
+        request: crate::generated::model_call::ModelReq,
+        table: DataConTable,
+    },
     Command {
         continuation: ResidentHole,
         request: crate::generated::commands::CommandsReq,
@@ -1985,6 +2018,7 @@ impl ResidentActorBoundary {
             Self::External { .. } => "external effect",
             Self::Sleep { .. } => "sleep",
             Self::Jev { .. } => "jev",
+            Self::Model { .. } => "model call",
             Self::Command { .. } => "command job",
             Self::Console { .. } => "print",
             Self::NotificationSend { .. } => "notify",
@@ -2132,6 +2166,7 @@ enum ResidentRequest {
     Commands(crate::generated::commands::CommandsReq),
     Notifications(crate::generated::notifications::NotificationsReq),
     Jev(crate::generated::jev::JevReq),
+    Model(crate::generated::model_call::ModelReq),
     Actor(crate::generated::actor::ActorReq),
     ActorContext(crate::generated::actor_context::ActorContextReq),
     AgentControl(crate::generated::agent_control::AgentControlReq),
@@ -2179,6 +2214,7 @@ impl ResidentRequest {
         );
         try_member!(Self::Sleep, crate::generated::sleep::SleepReq);
         try_member!(Self::Jev, crate::generated::jev::JevReq);
+        try_member!(Self::Model, crate::generated::model_call::ModelReq);
         try_member!(Self::Commands, crate::generated::commands::CommandsReq);
         try_member!(Self::Console, crate::generated::console::ConsoleReq);
         try_member!(Self::Actor, crate::generated::actor::ActorReq);
@@ -2233,6 +2269,7 @@ impl ResidentRequest {
         match self {
             Self::Sleep(crate::generated::sleep::SleepReq::SleepWith(..)) => "sleep",
             Self::Jev(crate::generated::jev::JevReq::JevAskWith(..)) => "jev",
+            Self::Model(_) => "model call",
             Self::Commands(_) => "command job",
             Self::Console(_) => "console output",
             Self::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(
@@ -7844,6 +7881,11 @@ where
                     ResidentRequest::Jev(crate::generated::jev::JevReq::JevAskWith(request)) => {
                         Ok(ResidentActorBoundary::Jev { continuation: hole, request })
                     }
+                    ResidentRequest::Model(request) => Ok(ResidentActorBoundary::Model {
+                        continuation: hole,
+                        request,
+                        table: session.data_con_table().clone(),
+                    }),
                     ResidentRequest::ActorContext(
                         crate::generated::actor_context::ActorContextReq::ActorContextWith,
                     ) => Ok(ResidentActorBoundary::ActorContext(hole)),
@@ -12386,13 +12428,21 @@ mod tool_dispatch_tests {
         .unwrap();
         assert_eq!(reply.into_output().unwrap(), output);
         for (kind, unknown) in [("unknown_tool", true), ("invalid_input", false)] {
-            let reply: ToolDispatchReply = serde_json::from_value(serde_json::json!({
-                "status": "refused", "kind": kind, "error": "correct the call",
-            }))
-            .unwrap();
+            let mut payload = serde_json::json!({
+                "status": "refused", "kind": kind, "error": "correct the call", "tool": "echo",
+            });
+            if !unknown {
+                payload["detail"] = serde_json::json!("invalid argument");
+            }
+            let reply: ToolDispatchReply = serde_json::from_value(payload).unwrap();
             let error = reply.into_output().unwrap_err();
-            assert_eq!(matches!(error, ToolDispatchError::UnknownTool(_)), unknown);
+            assert_eq!(
+                matches!(error, ToolDispatchError::UnknownTool { .. }),
+                unknown
+            );
             assert_eq!(error.to_string(), "correct the call");
+            assert_eq!(error.tool(), "echo");
+            assert_eq!(serde_json::to_value(error).unwrap()["kind"], kind);
         }
     }
 
@@ -12403,6 +12453,9 @@ mod tool_dispatch_tests {
             serde_json::json!({"output": "old naked output"}),
             serde_json::json!({"status": "success"}),
             serde_json::json!({"status": "refused", "kind": "invented", "error": "bad"}),
+            serde_json::json!({"Right": "accidental Either encoding"}),
+            serde_json::json!({"status": "refused", "kind": "unknown_tool", "error": "bad"}),
+            serde_json::json!({"status": "refused", "kind": "invalid_input", "error": "bad", "tool": "echo"}),
         ] {
             assert!(serde_json::from_value::<ToolDispatchReply>(payload).is_err());
         }
@@ -15172,8 +15225,9 @@ mod request_tests {
             "333 :: Int",
         );
         let entry = parent
-            .prepared_binding_handle("parentValue")
-            .expect("independent custody for the startup entry");
+            .retain_binding_custody("parentValue")
+            .expect("retain independent custody for the startup entry")
+            .expect("parent value remains bound before child startup");
         let before = parent
             .render_retained_preview(&retained, 64)
             .expect("parent custody is evaluable before startup");

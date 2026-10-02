@@ -364,7 +364,7 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(engine_result, Err(ref error) if error == "engine cancelled"));
+    engine_result.expect("embedded cancellation must confirm Engine cleanup");
     let binding_alias = binding.clone();
     binding.mark_retired();
     assert!(binding_alias.conversation().is_none());

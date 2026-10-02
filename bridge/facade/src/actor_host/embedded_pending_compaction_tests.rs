@@ -410,12 +410,11 @@ async fn production_engine_carries_raw_and_typed_pending_calls_through_compactio
         "cancel-pending-call"
     );
     stop_driver.send_replace(true);
-    let cancelled = tokio::time::timeout(Duration::from_secs(10), &mut running)
+    tokio::time::timeout(Duration::from_secs(10), &mut running)
         .await
         .expect("pending Engine cancellation did not finish")
         .unwrap()
-        .expect_err("cancelling a pending Engine should stop the host drive");
-    assert!(cancelled.contains("cancel"), "{cancelled}");
+        .expect("cancelling a pending Engine must confirm cleanup");
     cancel_release_tx.send(()).unwrap();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(5), settled_rx.recv())
@@ -593,12 +592,11 @@ async fn production_engine_compaction_failure_continues_once_then_cleans_pending
         .expect("transport dropped post-failure signal");
     assert_eq!(transport.normal_requests.load(Ordering::Relaxed), 2);
     stop_driver.send_replace(true);
-    let cancelled = tokio::time::timeout(Duration::from_secs(10), &mut running)
+    tokio::time::timeout(Duration::from_secs(10), &mut running)
         .await
         .expect("Engine cancellation did not clean the pending call")
         .unwrap()
-        .expect_err("cancelling the pending Engine should stop the host drive");
-    assert!(cancelled.contains("cancel"), "{cancelled}");
+        .expect("cancelling the pending Engine must confirm cleanup");
     release_tx.send(()).unwrap();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(5), settled_rx.recv())

@@ -424,7 +424,7 @@ pub struct BindingLease {
 #[derive(Debug)]
 pub struct PreparedStartupEntry {
     program: Option<ProgramId>,
-    source_keys: Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
+    source_keys: tidepool_codegen::binding_table::SourceScopeAdmission,
     provenance: Arc<ProgramProvenance>,
     admitted: super::PublicVisibilitySnapshot,
     realm: RealmId,
@@ -458,7 +458,7 @@ static_assertions::assert_not_impl_any!(PreparedStartupEntry: Clone, Copy);
 struct AbandonedStartupEntry {
     program: ProgramId,
     scope: ScopeId,
-    source_keys: Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
+    source_keys: tidepool_codegen::binding_table::SourceScopeAdmission,
 }
 
 impl Drop for PreparedStartupEntry {
@@ -1352,8 +1352,9 @@ impl PendingPreparedSource {
                     resolved.package_interfaces.clone(),
                 )
                 .map_err(PreparedRuntimeError::Compile)?;
+                let target = target.with_source_plan(resolved.source_plan.clone());
                 let demanded =
-                    target.compile_demanded(resolved.groups.iter().cloned(), &registry)?;
+                    target.compile_scoped_demanded(resolved.groups.iter().cloned(), &registry)?;
                 Ok(ReadyPreparedSource::Certified {
                     resolved,
                     admitted_public,
@@ -2614,7 +2615,7 @@ where
     ) -> Result<
         (
             ProgramId,
-            Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
+            tidepool_codegen::binding_table::SourceScopeAdmission,
         ),
         PreparedRuntimeError,
     > {
@@ -2635,7 +2636,7 @@ where
     fn retire_failed_turn_source_instances(
         &mut self,
         scope: ScopeId,
-        keys: &[tidepool_codegen::binding_table::SourceLeaseKey],
+        keys: &tidepool_codegen::binding_table::SourceScopeAdmission,
     ) {
         if !keys.is_empty() {
             assert!(
@@ -4072,8 +4073,9 @@ where
                 resolved.package_interfaces.clone(),
             )
             .map_err(PreparedRuntimeError::Compile)?;
+            let target = target.with_source_plan(resolved.source_plan.clone());
             let demanded = target
-                .compile_demanded(resolved.groups, &registry)
+                .compile_scoped_demanded(resolved.groups, &registry)
                 .map_err(PreparedRuntimeError::from)?;
             self.install_certified_turn_in(
                 scope,
@@ -4084,7 +4086,7 @@ where
                 &resolved.inherited_needed,
             )?
         } else {
-            (self.state.install_prepared(prepared)?, Vec::new())
+            (self.state.install_prepared(prepared)?, Default::default())
         };
         let realm = self.run_context.resource_scope;
         let mounted = (|| {
@@ -4656,7 +4658,7 @@ where
     ) -> Result<
         (
             ProgramId,
-            Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
+            tidepool_codegen::binding_table::SourceScopeAdmission,
         ),
         ResidentError,
     > {
@@ -4671,8 +4673,9 @@ where
                 resolved.package_interfaces.clone(),
             )
             .map_err(PreparedRuntimeError::Compile)?;
+            let target = target.with_source_plan(resolved.source_plan.clone());
             let demanded = target
-                .compile_demanded(resolved.groups, &registry)
+                .compile_scoped_demanded(resolved.groups, &registry)
                 .map_err(PreparedRuntimeError::from)?;
             self.install_certified_turn_in(
                 lexical_scope,
@@ -4684,7 +4687,7 @@ where
             )
             .map_err(Into::into)
         } else {
-            Ok((self.state.install_prepared(prepared)?, Vec::new()))
+            Ok((self.state.install_prepared(prepared)?, Default::default()))
         }
     }
 
@@ -4755,7 +4758,8 @@ where
 
     /// Consume the original startup capsule under the admitted actor's current
     /// principal and effect policy. Durable publication may advance its public
-    /// epoch, but cannot substitute native bindings or source instances.
+    /// epoch and declaration tip: execution uses the retained installed program,
+    /// with no compiler lookup. Native bindings and source instances remain exact.
     pub fn run_startup_entry(
         &mut self,
         mut entry: PreparedStartupEntry,
@@ -4772,9 +4776,9 @@ where
         if entry.realm != self.run_context.resource_scope
             || current.scope != entry.admitted.scope
             || current.machine_incarnation != entry.admitted.machine_incarnation
-            || current.declaration_tip != entry.admitted.declaration_tip
             || current.bindings != entry.admitted.bindings
             || current.source_instances != entry.admitted.source_instances
+            || current.source_selection != entry.admitted.source_selection
         {
             return Err(ResidentError::StaleStartupEntry);
         }
@@ -4951,7 +4955,7 @@ where
                     .state
                     .revalidate_and_install_prepared(snapshot, image)?
                 {
-                    Some(program) => (program, Vec::new()),
+                    Some(program) => (program, Default::default()),
                     None => return Ok(None),
                 }
             }
@@ -5390,8 +5394,9 @@ where
                     resolved.package_interfaces.clone(),
                 )
                 .map_err(PreparedRuntimeError::Compile)?;
+                let target = target.with_source_plan(resolved.source_plan.clone());
                 let demanded = target
-                    .compile_demanded(resolved.groups, &registry)
+                    .compile_scoped_demanded(resolved.groups, &registry)
                     .map_err(PreparedRuntimeError::from)?;
                 self.install_certified_turn_in(
                     lexical_scope,
@@ -5402,7 +5407,7 @@ where
                     &resolved.inherited_needed,
                 )?
             } else {
-                (self.state.install_prepared(prepared)?, Vec::new())
+                (self.state.install_prepared(prepared)?, Default::default())
             };
             installed_program = Some(program);
             timing::record_stage(
@@ -5583,7 +5588,7 @@ where
                     else {
                         return Ok(None);
                     };
-                    (program, Vec::new())
+                    (program, Default::default())
                 }
                 ReadyPreparedSource::Certified {
                     resolved,
@@ -5646,7 +5651,7 @@ where
     fn run_installed_display_bundle(
         &mut self,
         program: ProgramId,
-        source_keys: Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
+        source_keys: tidepool_codegen::binding_table::SourceScopeAdmission,
         provenance: Arc<ProgramProvenance>,
         page: &BoundBinder,
         alias: &BoundBinder,
@@ -6350,16 +6355,9 @@ where
                 engine.unpin(entry.program);
             }
             if self.state.scope_tree().is_live(entry.scope) {
-                let mut changed = false;
-                for key in &entry.source_keys {
-                    // A rejected capsule may outlive source retirement or an
-                    // owner transfer. Release only registrations still owned
-                    // by its original scope; never retire a replacement.
-                    changed |= self.state.retire_failed_turn_source_instances(
-                        entry.scope,
-                        std::slice::from_ref(key),
-                    );
-                }
+                let changed = self
+                    .state
+                    .retire_failed_turn_source_instances(entry.scope, &entry.source_keys);
                 if changed {
                     self.advance_public_visibility(entry.scope);
                 }
@@ -7363,6 +7361,208 @@ mod authored_publication_tests {
     }
 
     #[test]
+    fn startup_accepts_authenticated_nonzero_successor_transfer_without_native_remint() {
+        use crate::session::{
+            CertifiedDeclarationPublication, PersistentSession, PublicManifestCommit,
+            PublicationDecision, RecoveryPublicOwner, RecoveryRunAuthority,
+            RecoverySuccessorAuthority,
+        };
+
+        struct RunOwner {
+            root: std::path::PathBuf,
+            _lock: std::fs::File,
+        }
+        impl RecoveryRunAuthority for RunOwner {
+            fn owns_run(&self, root: &std::path::Path) -> std::io::Result<bool> {
+                Ok(root.canonicalize()? == self.root)
+            }
+        }
+        struct Successor {
+            run: Arc<RunOwner>,
+            predecessor: RecoveryPublicOwner,
+            successor: RecoveryPublicOwner,
+            session: SessionId,
+            scope: ScopeId,
+        }
+        impl RecoverySuccessorAuthority for Successor {
+            fn validate_successor(
+                &self,
+                root: &std::path::Path,
+                predecessor: &RecoveryPublicOwner,
+                successor: &RecoveryPublicOwner,
+                session: SessionId,
+                scope: ScopeId,
+            ) -> std::io::Result<bool> {
+                Ok(self.run.owns_run(root)?
+                    && predecessor == &self.predecessor
+                    && successor == &self.successor
+                    && session == self.session
+                    && scope == self.scope)
+            }
+        }
+
+        tidepool_testing::eval_harness::require_extract();
+        let durable = tempfile::tempdir().unwrap();
+        let producer_source = tempfile::tempdir().unwrap();
+        let manifest = durable.path().join("declarations.json");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(durable.path().join("run-owner.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        let run = Arc::new(RunOwner {
+            root: durable.path().canonicalize().unwrap(),
+            _lock: lock,
+        });
+        let owner = |incarnation| {
+            RecoveryPublicOwner::new(
+                &tidepool_repr::ActorPath::parse("root/startup-transfer").unwrap(),
+                incarnation,
+            )
+            .unwrap()
+        };
+        let library = |id, source: &std::path::Path| {
+            let mut lib = SessionLib::open(id, source, ModuleEnv::standalone_default())
+                .unwrap()
+                .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
+            lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
+                .unwrap();
+            lib
+        };
+        let mut producer = PersistentSession::new(
+            Some(library(SessionId(4501), producer_source.path())),
+            1024 * 1024,
+        );
+        let public = producer.mint_isolated_scope();
+        producer
+            .initialize_durable_public_scope(owner(1), public)
+            .unwrap();
+        let admission = producer.begin_private_execution(public).unwrap();
+        producer
+            .define_scoped_in(
+                admission.private_scope(),
+                &[include_str!("fixtures/recovery-original.hs")],
+            )
+            .unwrap();
+        let intent = producer
+            .freeze_execution_intent(&admission, vec![], vec![])
+            .unwrap();
+        let CertifiedDeclarationPublication::Accepted(accepted) = producer
+            .restage_declaration_publication(owner(1), intent)
+            .unwrap()
+            .certify()
+            .unwrap()
+        else {
+            panic!("original declarations must publish");
+        };
+        assert_eq!(
+            producer
+                .publish_staged_public_manifest(
+                    accepted.stage().unwrap(),
+                    &PublicationDecision::new()
+                )
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        let published = producer.public_visibility_snapshot_in(public).unwrap();
+        assert_ne!(published.declaration_tip, Generation(0));
+        let predecessor_bytes = std::fs::read(&manifest).unwrap();
+        drop(producer);
+        drop(producer_source);
+
+        for uncertain in [false, true] {
+            std::fs::write(&manifest, &predecessor_bytes).unwrap();
+            let source = tempfile::tempdir().unwrap();
+            let mut session = TestSession::unbootstrapped(
+                frunk::HNil,
+                EmptyOutput,
+                1024 * 1024,
+                Some(library(SessionId(4502), source.path())),
+            );
+            let scope = session.mint_isolated_scope();
+            session
+                .set_run_context(SessionRunContext {
+                    lexical_scope: scope,
+                    ..SessionRunContext::ROOT
+                })
+                .unwrap();
+            let (producer, _) = crate::session::prepared::tests::install_source_publication_fixture(
+                &mut session.state,
+                scope,
+            );
+            let entry = session
+                .prepare_startup_entry_installed(
+                    startup_code(false),
+                    StartupCompileIdentity::Fixture,
+                )
+                .unwrap();
+            let program = entry.program.unwrap();
+            let original = session.public_visibility_snapshot_in(scope).unwrap();
+            assert_eq!(original.declaration_tip, Generation(0));
+            assert!(!original.source_instances.is_empty());
+            session.seal_recovery_initialization_scope(scope).unwrap();
+            let compiled = session.state.prepared().unwrap().codegen_totals();
+            session.state.lib_mut().fail_recovery_durability_once = uncertain;
+            let commit = session
+                .transfer_recovered_public_owner(
+                    &owner(1),
+                    owner(2),
+                    scope,
+                    Arc::new(Successor {
+                        run: run.clone(),
+                        predecessor: owner(1),
+                        successor: owner(2),
+                        session: SessionId(4502),
+                        scope,
+                    }),
+                )
+                .unwrap();
+            if uncertain {
+                assert!(matches!(
+                    commit,
+                    PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+                ));
+                session
+                    .confirm_durable_public_scope(&owner(2), scope)
+                    .unwrap();
+            } else {
+                assert_eq!(commit, PublicManifestCommit::Durable);
+            }
+            let transferred = session.public_visibility_snapshot_in(scope).unwrap();
+            assert_eq!(transferred.declaration_tip, published.declaration_tip);
+            assert_eq!(transferred.epoch, published.epoch + 1);
+            assert_eq!(transferred.scope, original.scope);
+            assert_eq!(
+                transferred.machine_incarnation,
+                original.machine_incarnation
+            );
+            assert_eq!(transferred.bindings, original.bindings);
+            assert_eq!(transferred.source_instances, original.source_instances);
+            assert_eq!(transferred.source_selection, original.source_selection);
+            assert_eq!(session.state.prepared().unwrap().codegen_totals(), compiled);
+            assert_eq!(entry.program, Some(program));
+            let committed_bytes = std::fs::read(&manifest).unwrap();
+            session
+                .state
+                .require_prepared()
+                .unwrap()
+                .quiesce_and_collect_now()
+                .unwrap();
+            assert!(matches!(
+                session.run_startup_entry(entry),
+                Ok(ResidentOutcome::Completed { .. })
+            ));
+            assert_eq!(session.outstanding_custody(), 0);
+            assert_eq!(std::fs::read(&manifest).unwrap(), committed_bytes);
+            assert!(!session.state.require_prepared().unwrap().unpin(program));
+            session.state.require_prepared().unwrap().unpin(producer);
+        }
+    }
+
+    #[test]
     fn startup_rejects_changed_original_source_inventory() {
         let (_root, mut session) = startup_session();
         let (producer, keys) = crate::session::prepared::tests::install_source_publication_fixture(
@@ -7657,6 +7857,248 @@ mod authored_publication_tests {
                 .get(parcel_library_binding(&identity).unwrap().0)
                 .is_some());
         }
+    }
+
+    #[test]
+    fn certified_authored_capture_freeze_join_preserves_original_domains() {
+        use crate::session::{
+            CertifiedDeclarationPublication, ExecutionPublication, SourceImports,
+        };
+        use tidepool_codegen::prepared_program::{
+            PendingGroupInventory, SourceBinder, SourceGroupOutline,
+        };
+        use tidepool_toolchain::certified_products::{
+            certify_inherited_products, InheritedProductInput, PendingImportOwner,
+        };
+        use tidepool_toolchain::recovery_artifacts::{
+            materialize_certified_products, verify_materialized_ref,
+        };
+
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let mut lib = SessionLib::open(
+            SessionId(4487),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
+        lib.attach_recovery_graph_v2(root.path().join("declarations.json"))
+            .unwrap();
+        let mut session =
+            TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024 * 1024, Some(lib));
+        let public = session.state.mint_scope(ScopeId::ROOT).unwrap();
+        let owner = super::super::RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/certified-domain").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let d = session.begin_private_execution(public).unwrap();
+        let d_generation = session
+            .define_scoped_with_imports_in(
+                d.private_scope(),
+                &["d :: Int -> Int\nd x = x + 41\n{-# NOINLINE d #-}"],
+                &SourceImports::new(),
+            )
+            .unwrap();
+        let original_d = session
+            .state
+            .lib()
+            .log
+            .certified_authored_arc_at(d_generation)
+            .unwrap();
+        let d_owner = original_d.product().owner().clone();
+        let intent = session.freeze_private_execution(&d).unwrap();
+        let ExecutionPublication::Declarations(base) = session
+            .restage_execution_publication(owner.clone(), intent)
+            .unwrap()
+        else {
+            panic!("certified D must produce a declaration publication");
+        };
+        let CertifiedDeclarationPublication::Accepted(joined) = base.certify().unwrap() else {
+            panic!("certified D join rejected");
+        };
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(
+                    joined.stage().unwrap(),
+                    &super::super::PublicationDecision::new()
+                )
+                .unwrap(),
+            super::super::PublicManifestCommit::Durable
+        );
+        let public_before = session
+            .state
+            .bindings()
+            .source_domain_selection_in(session.state.scope_tree(), public)
+            .unwrap();
+        let public_d = public_before
+            .domain_for_owner(public_before.current(), &d_owner)
+            .unwrap();
+        let e = session.begin_private_execution(public).unwrap();
+        let captured = session
+            .state
+            .bindings()
+            .source_domain_selection_in(session.state.scope_tree(), e.private_scope())
+            .unwrap();
+        assert!(
+            captured.inherited().is_empty(),
+            "D has no native instance at capture"
+        );
+        assert!(session.state.prepared().is_none());
+        assert_ne!(
+            captured
+                .domain_for_owner(captured.current(), &d_owner)
+                .unwrap(),
+            public_d
+        );
+        let e_generation = session
+            .define_scoped_with_imports_in(
+                e.private_scope(),
+                &["e :: Int -> Int\ne x = d x + 1\n{-# NOINLINE e #-}"],
+                &SourceImports::new(),
+            )
+            .unwrap();
+        let original_e = session
+            .state
+            .lib()
+            .log
+            .certified_authored_arc_at(e_generation)
+            .unwrap();
+        let e_owner = original_e.product().owner().clone();
+        let captured_d = original_e
+            .recovery_products()
+            .into_iter()
+            .find(|p| p.owner() == &d_owner)
+            .unwrap();
+        assert_eq!(
+            captured_d,
+            *original_d.product(),
+            "capture preserves full immutable original D"
+        );
+        let intent = session.freeze_private_execution(&e).unwrap();
+        let ExecutionPublication::Declarations(base) = session
+            .restage_execution_publication(owner, intent)
+            .unwrap()
+        else {
+            panic!("certified E must produce a declaration publication");
+        };
+        let CertifiedDeclarationPublication::Accepted(joined) = base.certify().unwrap() else {
+            panic!("certified E join rejected");
+        };
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(
+                    joined.stage().unwrap(),
+                    &super::super::PublicationDecision::new()
+                )
+                .unwrap(),
+            super::super::PublicManifestCommit::Durable
+        );
+        session.retire_scope(d.private_scope());
+        session.retire_scope(e.private_scope());
+        let selection = session
+            .state
+            .bindings()
+            .source_domain_selection_in(session.state.scope_tree(), public)
+            .unwrap();
+        assert_eq!(
+            selection
+                .domain_for_owner(selection.current(), &d_owner)
+                .unwrap(),
+            public_d
+        );
+        let public_e = selection
+            .domain_for_owner(selection.current(), &e_owner)
+            .unwrap();
+        let nested_d = selection.domain_for_owner(public_e, &d_owner).unwrap();
+        assert_ne!(
+            nested_d, public_d,
+            "E retains its captured D domain after both origins retire"
+        );
+        assert!(selection.inherited().is_empty());
+
+        // Re-admit the actual durable original products, then demand both
+        // public heads through the same domain planner used by the installer.
+        let view = session.state.compile_view_in(public).unwrap();
+        let context = view.exact_declaration_context().unwrap();
+        let products = context.recovery_products();
+        assert!(products.iter().any(|p| p == original_d.product()));
+        assert!(products.iter().any(|p| p == original_e.product()));
+        let scratch = tempfile::tempdir().unwrap();
+        let references = materialize_certified_products(
+            scratch.path(),
+            context.toolchain_identity_sha256(),
+            &products,
+        )
+        .unwrap();
+        let artifacts = references
+            .iter()
+            .map(|r| verify_materialized_ref(scratch.path(), r).unwrap())
+            .collect::<Vec<_>>();
+        let inputs = artifacts
+            .iter()
+            .map(|artifact| InheritedProductInput { artifact })
+            .collect::<Vec<_>>();
+        let groups = certify_inherited_products(&inputs, &[]).unwrap();
+        let binder = |owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+                      occurrence: &str| {
+            let identity = groups
+                .iter()
+                .filter(|g| g.owner() == owner)
+                .flat_map(|g| g.group().binders())
+                .find(|b| b.occurrence == occurrence)
+                .unwrap()
+                .clone();
+            SourceBinder {
+                version: owner.module_version.clone(),
+                binder: identity,
+            }
+        };
+        let d_root = binder(&d_owner, "d");
+        let e_root = binder(&e_owner, "e");
+        let outlines = groups
+            .iter()
+            .map(|g| {
+                let imports = g
+                    .imports()
+                    .iter()
+                    .filter_map(|i| match i {
+                        PendingImportOwner::Source { owner, binder, .. } => Some(SourceBinder {
+                            version: owner.module_version.clone(),
+                            binder: binder.clone(),
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                SourceGroupOutline::from_projected(g.owner().clone(), g.group(), imports).unwrap()
+            })
+            .collect();
+        let (demanded, inherited, roots) = PendingGroupInventory::new(outlines)
+            .unwrap()
+            .seal_in_domains([d_root.clone(), e_root.clone()], &selection)
+            .unwrap()
+            .into_parts();
+        assert!(inherited.is_empty());
+        assert_eq!(roots[&d_root].domain, public_d);
+        assert_eq!(roots[&e_root].domain, public_e);
+        let d_demands = demanded
+            .iter()
+            .filter(|g| g.owner() == &d_owner)
+            .collect::<Vec<_>>();
+        assert!(d_demands.iter().any(|g| g.domain() == public_d));
+        assert!(
+            d_demands.iter().any(|g| g.domain() == nested_d),
+            "late E demand traverses its captured D, not ambient public D; demanded={:?}; E imports={:?}",
+            demanded.iter().map(|g| (&g.owner().module, g.original_ordinal(), g.domain())).collect::<Vec<_>>(),
+            groups.iter().filter(|g| g.owner() == &e_owner).map(|g| (g.group().binders(), g.imports())).collect::<Vec<_>>()
+        );
+        session.retire_scope(public);
+        assert_eq!(session.persistent_roots_count(), 0);
+        assert!(session.residency().is_none());
     }
 
     #[test]

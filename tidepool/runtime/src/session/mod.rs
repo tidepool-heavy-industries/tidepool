@@ -468,6 +468,7 @@ pub struct PublicVisibilitySnapshot {
     pub machine_incarnation: Option<SessionId>,
     pub bindings: Vec<(String, SessionVarId)>,
     pub source_instances: Vec<SourceLeaseKey>,
+    pub source_selection: tidepool_codegen::binding_table::BindingScopeWitness,
 }
 
 /// Immutable v2 manifest baseline captured under the owning session checkout.
@@ -508,6 +509,16 @@ enum StagedPublicationTarget {
     Ephemeral,
 }
 
+/// Actual completed recovery work for one staged publication ticket.
+/// Hash phases are disjoint; descriptor hashing and compiler work are excluded.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
+pub struct RecoveryPublicationWork {
+    pub checksum_encode_bytes: u64,
+    pub recovery_validation_hash_bytes: u64,
+    pub recovery_materialization_hash_bytes: u64,
+    pub manifest_write_bytes: u64,
+}
+
 /// A fully written, fsynced manifest candidate. Only the owning session may
 /// compare its baseline and rename it while holding the machine checkout.
 pub struct StagedPublicManifest {
@@ -525,6 +536,16 @@ pub struct StagedPublicManifest {
     expected_public: PublicVisibilitySnapshot,
     expected_private: PublicVisibilitySnapshot,
     declaration: Option<paired_publication::PreparedDeclarationPublication>,
+}
+
+impl StagedPublicManifest {
+    /// Per-ticket durable work; ephemeral staging performs no recovery I/O.
+    pub fn recovery_work(&self) -> RecoveryPublicationWork {
+        match &self.target {
+            StagedPublicationTarget::Durable { staged, .. } => staged.work,
+            StagedPublicationTarget::Ephemeral => RecoveryPublicationWork::default(),
+        }
+    }
 }
 
 /// A stale stage preserves the execution's intent; its caller can stage again
@@ -2237,9 +2258,9 @@ impl SessionLib {
     ///
     /// No-op when `name` is not a current decl head. Otherwise appends a
     /// pure-retraction turn and re-renders the current module as a re-export
-    /// shell minus `name`. The shell introduces NO new source (only subtracts an
-    /// export), so it cannot fail to type-check — GHC validation is skipped,
-    /// making retraction cheap (no ~6s compile).
+    /// shell minus `name`. Unattached sessions skip compiler validation because
+    /// the shell only subtracts exports. Durable sessions certify the shell as
+    /// an authored product before committing its generation.
     /// `retract(name) == retract_in(ScopeId::ROOT, name)`.
     pub fn retract(&mut self, name: &str) -> Result<(), SessionError> {
         self.retract_in(ScopeId::ROOT, name)
@@ -2261,27 +2282,21 @@ impl SessionLib {
         scope: ScopeId,
         names: &[String],
     ) -> Result<(), SessionError> {
-        self.retract_heads_in(scope, names, None)
+        if let Some(staged) = self.prepare_retraction_in(scope, names, None)? {
+            self.adopt_staged_batch_with_receipt_and_vals_in(staged, &[])?;
+        }
+        Ok(())
     }
 
-    pub(crate) fn retract_value_heads_in(
-        &mut self,
-        scope: ScopeId,
-        names: &[String],
-    ) -> Result<(), SessionError> {
-        self.retract_heads_in(
-            scope,
-            names,
-            Some(tidepool_toolchain::declaration_join::ExportNamespace::Value),
-        )
-    }
-
-    fn retract_heads_in(
+    /// Durable retractions carry authored certificates and must be adopted by
+    /// the persistent session when it owns the source-instance environment.
+    /// Unattached retractions commit their uncertified shell here.
+    pub(crate) fn prepare_retraction_in(
         &mut self,
         scope: ScopeId,
         names: &[String],
         namespace: Option<tidepool_toolchain::declaration_join::ExportNamespace>,
-    ) -> Result<(), SessionError> {
+    ) -> Result<Option<StagedDeclaration>, SessionError> {
         let tip = self.scope_tip(scope);
         let heads = self.log.current_items_at(tip);
         let mut retracts: Vec<DeclarationRetraction> = names
@@ -2303,10 +2318,9 @@ impl SessionLib {
         retracts.sort();
         retracts.dedup();
         if retracts.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
-        if let Some(state) = &self.durable_graph {
-            let _ = state;
+        if self.durable_graph.is_some() {
             paired_publication::exact_retractions(self, tip, &retracts)?;
             let receipt = DeclarationReceipt {
                 source: DeclarationSource::default(),
@@ -2326,8 +2340,7 @@ impl SessionLib {
             candidate.rendered = render::render_module(&log, candidate.generation, &self.env);
             let scratch = tempfile::tempdir()?;
             let staged = validate_declaration_candidate(candidate, scratch.path())?;
-            self.adopt_staged_batch_with_receipt_and_vals_in(staged, &[])?;
-            return Ok(());
+            return Ok(Some(staged));
         }
         let tip_before = self.tips.get(&scope).copied();
         let gen = self.push_turn_in(
@@ -2349,7 +2362,7 @@ impl SessionLib {
             self.restore_tip(scope, tip_before);
             return Err(e);
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Validate one declaration generation and capture its visible value types

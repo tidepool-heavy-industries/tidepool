@@ -337,7 +337,9 @@ fn admit(
             source_ordinals,
         });
     }
-    let producer_sha256: [u8; 32] = Sha256::digest(producer).into();
+    let producer_sha256 =
+        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
+            .sha256();
     let mut digest = Sha256::new();
     digest.update(b"TidepoolParsedCellPlan1");
     digest.update(producer_sha256);

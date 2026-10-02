@@ -14,6 +14,34 @@ use crate::declaration_join::{ExactInterfaceOwner, ExactModuleIdentity};
 use crate::recovery_artifacts::{CertifiedJoinedInterface, CertifiedRecoveryProduct};
 use crate::CompileError;
 
+/// Exact artifacts persist SHA-256 of the compiler's stable producer bytes.
+/// Endpoint identities and their raw producer bytes are not this identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CanonicalProducerIdentity([u8; 32]);
+
+impl CanonicalProducerIdentity {
+    pub(crate) fn from_producer_bytes(bytes: &[u8]) -> Self {
+        Self(Sha256::digest(bytes).into())
+    }
+
+    pub(crate) fn from_compiler(identity: &tidepool_extract_cmd::CompilerIdentity) -> Self {
+        Self::from_producer_bytes(identity.producer_bytes())
+    }
+
+    pub(crate) fn sha256(self) -> [u8; 32] {
+        self.0
+    }
+
+    pub(crate) fn hex(self) -> String {
+        self.0.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_sha256(digest: [u8; 32]) -> Self {
+        Self(digest)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct ArtifactId(pub [u8; 32]);
 
@@ -200,13 +228,12 @@ impl ArtifactEntry {
         requirements: Vec<ExactModuleIdentity>,
     ) -> Result<Self, CompileError> {
         let owner = product.owner();
-        let native_requirements = crate::certified_products::certified_native_requirements(
-            product.certification_bytes(),
-            owner,
-        )
-        .map_err(|error| {
-            CompileError::ExtractFailed(format!("artifact inventory native requirements: {error}"))
-        })?;
+        let native_requirements = crate::certified_products::original_native_requirements(&product)
+            .map_err(|error| {
+                CompileError::ExtractFailed(format!(
+                    "artifact inventory native requirements: {error}"
+                ))
+            })?;
         let descriptor = descriptor(
             ArtifactKind::OriginalModule,
             ExactModuleIdentity {
@@ -354,6 +381,10 @@ struct InventoryState {
     view_queries: AtomicU64,
     entry_handle_copies: AtomicU64,
     admission_owner_lookups: AtomicU64,
+    reclamation_runs: u64,
+    reclamation_candidate_nodes: u64,
+    reclaimed_nodes: u64,
+    reclamation_elapsed_ns: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -362,7 +393,14 @@ pub struct ArtifactInventoryMetrics {
     pub graph_visits: u64,
     pub view_queries: u64,
     pub entry_handle_copies: u64,
+    /// Structural invariant of this shared owner, not an activity measurement.
+    #[serde(rename = "structural_whole_graph_copies")]
     pub whole_graph_copies: u64,
+    pub reclamation_runs: u64,
+    pub reclamation_candidate_nodes: u64,
+    pub reclaimed_nodes: u64,
+    /// Existing reclamation traversal/removal work; excludes parent destruction.
+    pub reclamation_elapsed_ns: u64,
     pub admission_owner_lookups: u64,
 }
 
@@ -551,6 +589,10 @@ impl ArtifactInventory {
             view_queries: state.view_queries.load(Ordering::Relaxed),
             entry_handle_copies: state.entry_handle_copies.load(Ordering::Relaxed),
             whole_graph_copies: 0,
+            reclamation_runs: state.reclamation_runs,
+            reclamation_candidate_nodes: state.reclamation_candidate_nodes,
+            reclaimed_nodes: state.reclaimed_nodes,
+            reclamation_elapsed_ns: state.reclamation_elapsed_ns,
             admission_owner_lookups: state.admission_owner_lookups.load(Ordering::Relaxed),
         }
     }
@@ -582,7 +624,10 @@ impl Drop for ViewLease {
         // Only the lost roots' reachable closure can become unowned. Nodes
         // outside it remain retained, so their incoming edges seed survivors.
         // This also handles cycles without scanning unrelated graph history.
+        let started = std::time::Instant::now();
+        state.reclamation_runs += 1;
         let candidates = closure(&state, lost_roots.into_iter());
+        state.reclamation_candidate_nodes += candidates.len() as u64;
         let survivors = candidates
             .iter()
             .copied()
@@ -598,10 +643,12 @@ impl Drop for ViewLease {
         for id in candidates.difference(&retained) {
             let index = state.indices.remove(id).expect("indexed artifact");
             state.graph.remove_node(index);
+            state.reclaimed_nodes += 1;
             let entry = state.payloads.remove(id).expect("owned payload");
             state.owners.remove(&entry.descriptor.owner);
             state.modules.remove(&entry.descriptor.owner.module);
         }
+        state.reclamation_elapsed_ns += started.elapsed().as_nanos() as u64;
         // Parent drops after the lock guard, preserving recursive release.
     }
 }
@@ -914,6 +961,16 @@ impl Eq for ArtifactView {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_producer_identity_preserves_exact_artifact_digest() {
+        let raw = [3; 32];
+        let identity = CanonicalProducerIdentity::from_producer_bytes(&raw);
+        let expected: [u8; 32] = Sha256::digest(raw).into();
+        assert_eq!(identity.sha256(), expected);
+        assert_ne!(identity.sha256(), raw);
+        assert_eq!(identity.hex(), format!("{:x}", Sha256::digest(raw)));
+    }
     use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
     fn module(name: &str) -> ExactModuleIdentity {
         ExactModuleIdentity {
@@ -974,6 +1031,47 @@ mod tests {
         // The temporary inspection owner may retain bytes, never graph authority.
         assert_eq!(original.descriptor.owner, module("Original"));
     }
+    #[test]
+    fn reclamation_metrics_follow_last_reader_and_selected_closure() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let original = inventory
+            .admit(&empty, vec![entry("Original", &[])])
+            .unwrap();
+        let retained = original.clone();
+        let dependent = inventory
+            .admit(&original, vec![entry("Consumer", &["Original"])])
+            .unwrap();
+        let before = inventory.metrics();
+        drop(dependent);
+        let after = inventory.metrics();
+        assert_eq!(after.reclamation_runs - before.reclamation_runs, 1);
+        assert_eq!(
+            after.reclamation_candidate_nodes - before.reclamation_candidate_nodes,
+            2
+        );
+        assert_eq!(after.reclaimed_nodes - before.reclaimed_nodes, 1);
+        assert_eq!(after.nodes, 1);
+        drop(original);
+        assert_eq!(
+            inventory.metrics(),
+            after,
+            "an Arc reader drop performs no graph reclamation"
+        );
+        drop(retained);
+        let final_metrics = inventory.metrics();
+        assert_eq!(final_metrics.reclamation_runs - before.reclamation_runs, 2);
+        assert_eq!(
+            final_metrics.reclamation_candidate_nodes - before.reclamation_candidate_nodes,
+            3
+        );
+        assert_eq!(final_metrics.reclaimed_nodes - before.reclaimed_nodes, 2);
+        assert_eq!(final_metrics.nodes, 0);
+        let encoded = serde_json::to_value(final_metrics).unwrap();
+        assert!(encoded.get("whole_graph_copies").is_none());
+        assert_eq!(encoded["structural_whole_graph_copies"], 0);
+    }
+
     #[test]
     fn empty_admission_and_parent_only_release_do_not_scan_history() {
         let inventory = ArtifactInventory::default();

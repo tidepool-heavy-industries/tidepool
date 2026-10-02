@@ -322,7 +322,11 @@ fn certify_authored_declaration_inner(
     let producer_identity = compiled
         .producer_identity
         .ok_or_else(|| contract("authored certification has no bound compiler identity"))?;
-    let toolchain_identity_sha256: [u8; 32] = Sha256::digest(producer_identity).into();
+    let toolchain_identity_sha256 =
+        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+            &producer_identity,
+        )
+        .sha256();
     let evidence = compiled
         .module_inventory
         .ok_or_else(|| contract("authored certification has no final dependency graph"))?;
@@ -555,6 +559,8 @@ pub struct RejectedJoin {
 }
 
 pub struct MaterializedDeclarationJoin {
+    /// SHA-256 input bytes consumed while materializing this receipt's closure.
+    pub materialization_hash_bytes: u64,
     pub join: crate::recovery_artifacts::RecoveryJoinRef,
     pub products: Vec<crate::recovery_artifacts::RecoveryArtifactRef>,
     pub anchors: Vec<crate::recovery_artifacts::RecoveryJoinRef>,
@@ -614,24 +620,26 @@ impl AcceptedJoin {
         &self,
         root: &Path,
     ) -> Result<MaterializedDeclarationJoin, crate::recovery_artifacts::RecoveryArtifactError> {
-        let products = crate::recovery_artifacts::materialize_certified_products(
+        let mut work = crate::recovery_artifacts::RecoveryArtifactWork::default();
+        let products = crate::recovery_artifacts::materialize_certified_products_with_work(
             root,
             self.toolchain_identity_sha256(),
             &self.recovery_products(),
+            &mut work,
         )?;
         let anchors = self
             .context
             .joined_interfaces()
             .iter()
-            .map(|join| join.materialize(root))
+            .map(|join| join.materialize_with_work(root, &mut work))
             .collect::<Result<Vec<_>, _>>()?;
         let value_interfaces = self
             .context
             .value_interfaces()
             .iter()
-            .map(|value| value.materialize(root))
+            .map(|value| value.materialize_with_work(root, &mut work))
             .collect::<Result<Vec<_>, _>>()?;
-        let join = self.interface.materialize(root)?;
+        let join = self.interface.materialize_with_work(root, &mut work)?;
         let descriptor = crate::artifact_inventory::ArtifactDescriptor::from_recovery_join(&join);
         let mut artifact_dependencies = self.context.artifact_view().interface_dependencies();
         artifact_dependencies.extend(self.context.artifact_view().artifact_ids().into_iter().map(
@@ -646,6 +654,7 @@ impl AcceptedJoin {
         artifact_dependencies.sort();
         artifact_dependencies.dedup();
         Ok(MaterializedDeclarationJoin {
+            materialization_hash_bytes: work.hash_bytes,
             join,
             products,
             anchors,
@@ -1263,7 +1272,9 @@ fn execute_declaration_operation(
         .map_err(|error| CompileError::Io(crate::extract_spawn_error(error.source)))?;
     crate::toolchain::admit_bound_endpoint(&endpoint)
         .map_err(|error| contract(error.to_string()))?;
-    let producer: [u8; 32] = Sha256::digest(endpoint.identity().producer_bytes()).into();
+    let producer =
+        crate::artifact_inventory::CanonicalProducerIdentity::from_compiler(endpoint.identity())
+            .sha256();
     if expected_producer.is_some_and(|expected| expected != producer) {
         return Err(contract(
             "declaration operation producer differs from owned artifact producer",

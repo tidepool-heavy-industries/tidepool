@@ -8,14 +8,15 @@
 //! ```text
 //! frame     ::= u32-LE length, then that many raw bytes (UTF-8 text)
 //! preflight ::= "TPDPF001"
-//! identity  ::= "TPDPI002" producer[32] consumed_worker[32] boot_epoch[32]
-//! request   ::= "TPDRQ001" expected_epoch[32]
+//! identity  ::= "TPDPI003" producer[32] consumed_worker[32] boot_epoch[32]
+//! request   ::= "TPDRQ002" expected_epoch[32]
 //!               frame(cwd) u32-LE(argc) frame(argv[0]) .. frame(argv[n-1])
-//! transaction ::= "TPDTR001" expected_epoch[32]
+//! transaction ::= "TPDTR002" expected_epoch[32]
 //!                 (request-tag request)* end-tag
 //! stop      ::= "TPDST001"
 //! stop_ack  ::= 1u8
-//! decision  ::= accepted:u8 | rejected:u8 frame(reason)
+//! decision  ::= accepted:u8 admission_id:u64-LE | rejected:u8 frame(reason) | busy:u8
+//! close_ack ::= accepted:u8
 //! response  ::= i32-LE(exit_code) frame(stdout) frame(stderr)
 //! ```
 //!
@@ -65,15 +66,16 @@ const MAX_REQUEST_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 const MAX_RESPONSE_PAYLOAD_BYTES: u32 = 16 * 1024 * 1024;
 const MAX_REQUEST_ARGS: u32 = 4096;
 const PREFLIGHT: &[u8; 8] = b"TPDPF001";
-const PREFLIGHT_RESPONSE: &[u8; 8] = b"TPDPI002";
-const REQUEST: &[u8; 8] = b"TPDRQ001";
+const PREFLIGHT_RESPONSE: &[u8; 8] = b"TPDPI003";
+const REQUEST: &[u8; 8] = b"TPDRQ002";
 /// A graceful-stop request: no epoch, no body. The daemon acks with a single
 /// byte while accepted requests continue, then retires its socket exactly as
 /// it does on a watched-stamp change. Unaccepted backlog clients receive an
 /// explicit `REJECTED` and may safely rebind.
 const STOP: &[u8; 8] = b"TPDST001";
 const STOP_ACK: u8 = 1;
-pub(crate) const TRANSACTION: &[u8; 8] = b"TPDTR001";
+pub(crate) const TRANSACTION: &[u8; 8] = b"TPDTR002";
+pub(crate) const DIRECT_TRANSACTION: &[u8; 8] = b"TPDTR001";
 pub(crate) const TRANSACTION_END: u8 = 0;
 pub(crate) const TRANSACTION_REQUEST: u8 = 1;
 /// Requests one worker serves before the daemon replaces it. Keep ordinary
@@ -408,9 +410,9 @@ where
         .with_target(false)
         .with_writer(pane_writer)
         .with_filter(pane_filter());
-    // The structured sibling of the daemon's text log. Its `run_id` and
-    // `compile_request` fields are the two keys an Exomonad run's host trace
-    // joins on.
+    // The structured sibling of the daemon's text log. Exact request joins
+    // use daemon_epoch, admission_id and request_ordinal; compile_request
+    // retains the content digest for comparing equivalent inputs.
     let trace = tracing_subscriber::fmt::layer()
         .json()
         .with_current_span(true)
@@ -479,6 +481,63 @@ pub(crate) fn init_tracing(
         FrontendError::Daemon(format!("could not initialize compiler tracing: {error}"))
     })?;
     Ok(guard)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DaemonEpoch([u8; 32]);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdmissionId(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RequestOrdinal(u64);
+
+/// One accepted daemon admission. Ordered requests retain this identity even
+/// when another slot rotates its worker. The daemon owns admission issuance.
+#[derive(Debug)]
+pub(crate) struct DaemonTransaction {
+    pub(crate) stream: UnixStream,
+    epoch: DaemonEpoch,
+    admission_id: AdmissionId,
+    next_request: RequestOrdinal,
+}
+
+#[cfg(test)]
+impl DaemonTransaction {
+    pub(crate) fn for_test(stream: UnixStream) -> Self {
+        Self {
+            stream,
+            epoch: DaemonEpoch([0; 32]),
+            admission_id: AdmissionId(1),
+            next_request: RequestOrdinal(1),
+        }
+    }
+}
+
+fn read_admission_id(stream: &mut UnixStream) -> Result<AdmissionId, DaemonError> {
+    let bytes: [u8; 8] = read_exact_or_crash(stream, 8)
+        .map_err(|error| DaemonError::AfterAcceptance(Box::new(error)))?
+        .try_into()
+        .expect("fixed admission frame width");
+    Ok(AdmissionId(u64::from_le_bytes(bytes)))
+}
+
+fn identify_request(
+    epoch: DaemonEpoch,
+    admission: AdmissionId,
+    ordinal: RequestOrdinal,
+    cwd: &Path,
+    argv: &[OsString],
+) {
+    tracing::info!(
+        target: "tidepool_extract_cmd::endpoint",
+        daemon_epoch = %hex(&epoch.0),
+        admission_id = admission.0,
+        request_ordinal = ordinal.0,
+        compile_request = %compile_request_correlation(cwd, argv),
+        transport = "daemon",
+        "compiler request identified"
+    );
 }
 
 pub(crate) struct DaemonBinding {
@@ -632,6 +691,14 @@ fn execute_once(
     }
     match state {
         ACCEPTED => {
+            let admission_id = read_admission_id(&mut stream)?;
+            identify_request(
+                DaemonEpoch(*epoch),
+                admission_id,
+                RequestOrdinal(1),
+                cwd,
+                argv,
+            );
             stream
                 .set_read_timeout(Some(IO_TIMEOUT))
                 .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
@@ -685,7 +752,7 @@ fn wait_for_busy(
 pub(crate) fn begin_transaction(
     socket_path: &Path,
     epoch: &[u8; 32],
-) -> Result<UnixStream, DaemonError> {
+) -> Result<DaemonTransaction, DaemonError> {
     begin_transaction_with_cancellation(socket_path, epoch, None)
 }
 
@@ -693,7 +760,7 @@ pub(crate) fn begin_transaction_with_cancellation(
     socket_path: &Path,
     epoch: &[u8; 32],
     cancellation: Option<&crate::CompilerTransactionCancellation>,
-) -> Result<UnixStream, DaemonError> {
+) -> Result<DaemonTransaction, DaemonError> {
     let deadline = Instant::now() + IO_TIMEOUT;
     loop {
         if cancellation.is_some_and(crate::CompilerTransactionCancellation::is_cancelled) {
@@ -727,7 +794,7 @@ fn begin_transaction_once(
     epoch: &[u8; 32],
     admission_timeout: Duration,
     cancellation: Option<&crate::CompilerTransactionCancellation>,
-) -> Result<UnixStream, DaemonError> {
+) -> Result<DaemonTransaction, DaemonError> {
     let mut stream = UnixStream::connect(socket_path).map_err(DaemonError::Connect)?;
     if let Some(cancellation) = cancellation {
         cancellation.arm_daemon(&stream).map_err(DaemonError::Io)?;
@@ -760,10 +827,16 @@ fn begin_transaction_once(
     })?[0];
     match state {
         ACCEPTED => {
+            let admission_id = read_admission_id(&mut stream)?;
             stream
                 .set_read_timeout(Some(IO_TIMEOUT))
                 .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
-            Ok(stream)
+            Ok(DaemonTransaction {
+                stream,
+                epoch: DaemonEpoch(*epoch),
+                admission_id,
+                next_request: RequestOrdinal(1),
+            })
         }
         REJECTED => {
             let message = String::from_utf8_lossy(&read_frame(&mut stream)?).into_owned();
@@ -777,10 +850,24 @@ fn begin_transaction_once(
 }
 
 pub(crate) fn execute_transaction_request(
-    stream: &mut UnixStream,
+    transaction: &mut DaemonTransaction,
     cwd: &Path,
     argv: &[OsString],
 ) -> Result<Output, DaemonError> {
+    let ordinal = transaction.next_request;
+    transaction.next_request = RequestOrdinal(ordinal.0.checked_add(1).ok_or_else(|| {
+        DaemonError::AfterAcceptance(Box::new(DaemonError::Protocol(
+            "compiler request ordinal exhausted".into(),
+        )))
+    })?);
+    identify_request(
+        transaction.epoch,
+        transaction.admission_id,
+        ordinal,
+        cwd,
+        argv,
+    );
+    let stream = &mut transaction.stream;
     let started = Instant::now();
     stream
         .write_all(&[TRANSACTION_REQUEST])
@@ -802,7 +889,8 @@ pub(crate) fn execute_transaction_request(
     response
 }
 
-pub(crate) fn end_transaction(stream: &mut UnixStream) -> Result<(), DaemonError> {
+pub(crate) fn end_transaction(transaction: &mut DaemonTransaction) -> Result<(), DaemonError> {
+    let stream = &mut transaction.stream;
     stream
         .write_all(&[TRANSACTION_END])
         .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
@@ -1032,6 +1120,7 @@ fn service_transaction(
     run_id: &str,
     epoch: &[u8; 32],
     queue_wait: Duration,
+    admission_id: AdmissionId,
     request_deadline: Duration,
     rotate_after: u64,
     rss_ceiling_mb: u64,
@@ -1047,6 +1136,7 @@ fn service_transaction(
         daemon_epoch = %hex(epoch),
         worker_pid = worker.child.id(),
         worker_slot,
+        admission_id = admission_id.0,
         transaction,
         queue_ms = u64::try_from(queue_wait.as_millis()).unwrap_or(u64::MAX),
         phase = "compiler_queue",
@@ -1054,6 +1144,7 @@ fn service_transaction(
     );
     let mut transaction_failed = worker.begin_transaction().err();
     let mut orderly_end = false;
+    let mut request_ordinal = RequestOrdinal(0);
     while transaction_failed.is_none() {
         match next_request(&mut connection) {
             RequestStep::End => {
@@ -1062,11 +1153,17 @@ fn service_transaction(
             }
             RequestStep::Malformed => break,
             RequestStep::Request(cwd, argv) => {
+                request_ordinal =
+                    RequestOrdinal(request_ordinal.0.checked_add(1).ok_or_else(|| {
+                        FrontendError::Daemon("compiler request ordinal exhausted".into())
+                    })?);
                 let compile_request = compile_request_correlation(&cwd, &argv);
                 let request_span = tracing::info_span!(
                     "compile_request",
                     run_id,
                     %compile_request,
+                    admission_id = admission_id.0,
+                    request_ordinal = request_ordinal.0,
                     followed_rotation = *followed_rotation,
                     served = *served,
                     transaction,
@@ -1325,6 +1422,7 @@ enum Job {
 }
 
 struct PendingJob {
+    admission_id: AdmissionId,
     queued_at: Instant,
     job: Job,
     accepted: std::sync::mpsc::Receiver<()>,
@@ -1349,6 +1447,7 @@ fn admit_job(
     ordinary_busy: Option<&std::sync::Arc<AtomicBool>>,
     job: Job,
     connection: &mut UnixStream,
+    next_admission_id: &mut AdmissionId,
 ) -> Admission {
     let permit = if let Some(busy) = ordinary_busy {
         if busy
@@ -1362,8 +1461,15 @@ fn admit_job(
     } else {
         None
     };
+    let Some(next) = next_admission_id.0.checked_add(1) else {
+        write_rejected(connection, "compiler admission identity exhausted").ok();
+        return Admission::NoWorkers;
+    };
+    let admission_id = AdmissionId(next);
+    *next_admission_id = admission_id;
     let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel(1);
     match sender.try_send(PendingJob {
+        admission_id,
         queued_at: Instant::now(),
         job,
         accepted: accepted_rx,
@@ -1379,7 +1485,12 @@ fn admit_job(
             return Admission::NoWorkers;
         }
     }
-    if connection.write_all(&[ACCEPTED]).is_ok() && connection.flush().is_ok() {
+    if connection
+        .write_all(&[ACCEPTED])
+        .and_then(|()| connection.write_all(&admission_id.0.to_le_bytes()))
+        .and_then(|()| connection.flush())
+        .is_ok()
+    {
         accepted_tx.send(()).ok();
     }
     Admission::Continue
@@ -1552,6 +1663,7 @@ fn serve_workers(
                         run_id,
                         epoch,
                         pending.queued_at.elapsed(),
+                        pending.admission_id,
                         request_deadline,
                         rotate_after,
                         rss_ceiling_mb,
@@ -1635,6 +1747,7 @@ fn serve_workers(
 
         // Do not advertise the endpoint before at least one worker has started.
         let started = ready_rx.recv().is_ok();
+        let mut next_admission_id = AdmissionId(0);
         let outcome: Result<(), FrontendError> = 'accept: loop {
             if !started {
                 break 'accept Err(FrontendError::Daemon(
@@ -1734,6 +1847,7 @@ fn serve_workers(
                         ordinary_busy.as_ref(),
                         Job::Transaction(worker_connection),
                         &mut connection,
+                        &mut next_admission_id,
                     ),
                     Admission::NoWorkers
                 ) {
@@ -1815,6 +1929,7 @@ fn serve_workers(
                     ordinary_busy.as_ref(),
                     Job::Request(worker_connection, cwd, worker_argv),
                     &mut connection,
+                    &mut next_admission_id,
                 ),
                 Admission::NoWorkers
             ) {
@@ -1885,11 +2000,13 @@ fn log_compile_timing(run_id: &str, compile_request: &str, stderr: &[u8]) {
     }
 }
 
-/// The join key between a client's compile span and the daemon's own
-/// `compile_request` span. Both sides hash the same bytes: the client sends
+/// The content digest shared by the client and daemon compile spans.
+/// Equivalent inputs have the same digest; exact executions are identified
+/// separately by daemon epoch, admission ID and request ordinal.
+/// Both sides hash the same bytes: the client sends
 /// `ExtractRequest::worker_argv`, which is already the two-element typed form
-/// `normalize_worker_argv` returns unchanged, so no id has to travel on the
-/// wire.
+/// `normalize_worker_argv` returns unchanged. The digest is reconstructed
+/// independently of the daemon-issued invocation identity.
 pub(crate) fn compile_request_correlation(cwd: &Path, worker_argv: &[OsString]) -> String {
     let digest = blake3::hash(&encode_request(cwd, worker_argv));
     hex(&digest.as_bytes()[..8])
@@ -2859,8 +2976,7 @@ mod tests {
     fn the_client_and_the_daemon_name_one_compile_request_identically() {
         // The client hashes what it is about to send; the daemon hashes what
         // it normalized after reading. For the typed worker form those are
-        // the same bytes, which is what lets the two traces join without an
-        // id on the wire.
+        // the same bytes, so both traces retain the same content digest.
         let cwd = Path::new("/tmp/work");
         let request = ExtractRequest::from_cli(&["Expr.hs".into(), "--turn".into()]).unwrap();
         let client_argv = request.worker_argv();
@@ -3174,6 +3290,7 @@ tidepool-target phase=desugar module=Execute\n",
             connection.read_exact(&mut header).unwrap();
             read_request(&mut connection).unwrap();
             connection.write_all(&[ACCEPTED]).unwrap();
+            connection.write_all(&1u64.to_le_bytes()).unwrap();
             connection.write_all(&0i32.to_le_bytes()).unwrap();
             connection.write_all(&u32::MAX.to_le_bytes()).unwrap();
         });
@@ -3295,7 +3412,8 @@ tidepool-target phase=desugar module=Execute\n",
             assert_eq!(&header[..8], TRANSACTION);
             assert_eq!(&header[8..], &[3; 32]);
             connection.write_all(&[ACCEPTED]).unwrap();
-            for expected in ["one", "two"] {
+            connection.write_all(&1u64.to_le_bytes()).unwrap();
+            for expected in ["one", "one"] {
                 let mut command = [0u8; 1];
                 connection.read_exact(&mut command).unwrap();
                 assert_eq!(command, [TRANSACTION_REQUEST]);
@@ -3310,18 +3428,304 @@ tidepool-target phase=desugar module=Execute\n",
         });
 
         let mut transaction = begin_transaction(&socket, &[3; 32]).unwrap();
-        for expected in ["one", "two"] {
-            let output = execute_transaction_request(
-                &mut transaction,
-                Path::new("/tmp"),
-                &[OsString::from(expected)],
-            )
-            .unwrap();
-            assert_eq!(output.stdout, expected.as_bytes());
+        let trace = CapturedWriter::default();
+        let subscriber = tracing_subscriber(
+            CapturedWriter::default(),
+            CapturedWriter::default(),
+            trace.clone(),
+            tracing_subscriber::EnvFilter::new("debug"),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            for expected in ["one", "one"] {
+                let output = execute_transaction_request(
+                    &mut transaction,
+                    Path::new("/tmp"),
+                    &[OsString::from(expected)],
+                )
+                .unwrap();
+                assert_eq!(output.stdout, expected.as_bytes());
+            }
+        });
+        let events: Vec<serde_json::Value> = trace
+            .text()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let identified: Vec<_> = events
+            .iter()
+            .filter(|row| row["fields"]["message"] == "compiler request identified")
+            .collect();
+        assert_eq!(identified.len(), 2);
+        for (row, ordinal) in identified.iter().zip([1, 2]) {
+            assert_eq!(row["fields"]["admission_id"], 1);
+            assert_eq!(row["fields"]["request_ordinal"], ordinal);
+            assert_eq!(row["fields"]["daemon_epoch"], hex(&[3; 32]));
         }
+        assert_eq!(
+            identified[0]["fields"]["compile_request"],
+            identified[1]["fields"]["compile_request"]
+        );
         end_transaction(&mut transaction).unwrap();
         server.join().unwrap();
         std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn transaction_queue_and_repeated_requests_have_exact_identities() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv = vec![OsString::from("Expr.hs")];
+        let worker_bin = compile_sleepy_fake_worker(dir.path(), &argv, 0);
+        let prepared = PreparedWorker::for_test(worker_bin).unwrap();
+        let mut worker = Worker::spawn(&prepared).unwrap();
+        let config = DaemonConfig {
+            socket: dir.path().join("unused.sock"),
+            rotate_after: None,
+            rss_ceiling_mb: None,
+            request_deadline_secs: None,
+            watch_stamp: None,
+            persistent: true,
+            run_id: None,
+            log_path: None,
+            workers: Some(1),
+        };
+        let trace = CapturedWriter::default();
+        let subscriber = tracing_subscriber(
+            CapturedWriter::default(),
+            CapturedWriter::default(),
+            trace.clone(),
+            tracing_subscriber::EnvFilter::new("debug"),
+        );
+        let mut served = 0;
+        let mut followed_rotation = false;
+        let mut early_replacements = 0;
+        tracing::subscriber::with_default(subscriber, || {
+            for (admission, request_count) in [(41, 2), (42, 0)] {
+                let (connection, mut client) = UnixStream::pair().unwrap();
+                let mut remaining = request_count;
+                service_transaction(
+                    connection,
+                    &mut worker,
+                    0,
+                    &prepared,
+                    &config,
+                    "run-test",
+                    &[9; 32],
+                    Duration::from_millis(17),
+                    AdmissionId(admission),
+                    Duration::from_secs(10),
+                    100,
+                    u64::MAX,
+                    true,
+                    &mut served,
+                    &mut followed_rotation,
+                    &mut early_replacements,
+                    |_| {
+                        if remaining == 0 {
+                            RequestStep::End
+                        } else {
+                            remaining -= 1;
+                            RequestStep::Request(
+                                dir.path().to_path_buf(),
+                                normalize_worker_argv(argv.clone()).unwrap(),
+                            )
+                        }
+                    },
+                )
+                .unwrap();
+                for _ in 0..request_count {
+                    assert_eq!(decode_output(&mut client).unwrap().status.code(), Some(0));
+                }
+                assert_eq!(read_exact_or_crash(&mut client, 1).unwrap(), [ACCEPTED]);
+            }
+        });
+        worker.shutdown();
+        let events: Vec<serde_json::Value> = trace
+            .text()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let queued: Vec<_> = events
+            .iter()
+            .filter(|row| row["fields"]["message"] == "compiler job dequeued")
+            .collect();
+        assert_eq!(queued.len(), 2);
+        for (row, admission) in queued.iter().zip([41, 42]) {
+            assert_eq!(row["fields"]["admission_id"], admission);
+            assert_eq!(row["fields"]["queue_ms"], 17);
+            assert!(row["fields"].get("request_ordinal").is_none());
+        }
+        let finished: Vec<_> = events
+            .iter()
+            .filter(|row| row["fields"]["message"] == "compiler request finished")
+            .collect();
+        assert_eq!(finished.len(), 2);
+        for (row, ordinal) in finished.iter().zip([1, 2]) {
+            assert_eq!(row["span"]["admission_id"], 41);
+            assert_eq!(row["span"]["request_ordinal"], ordinal);
+            assert_eq!(row["span"]["daemon_epoch"], hex(&[9; 32]));
+        }
+        assert_eq!(
+            finished[0]["fields"]["compile_request"],
+            finished[1]["fields"]["compile_request"]
+        );
+        assert_eq!(served, 2);
+    }
+
+    #[test]
+    fn accepted_partial_identity_is_indeterminate_for_plain_and_transaction_requests() {
+        for transaction in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("daemon.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut header = [0; 40];
+                stream.read_exact(&mut header).unwrap();
+                if !transaction {
+                    read_request(&mut stream).unwrap();
+                }
+                stream.write_all(&[ACCEPTED, 1, 2, 3]).unwrap();
+            });
+            let error = if transaction {
+                begin_transaction(&socket, &[1; 32]).unwrap_err()
+            } else {
+                execute(&socket, &[1; 32], Path::new("/tmp"), &["request".into()]).unwrap_err()
+            };
+            server.join().unwrap();
+            assert!(error.was_accepted(), "{error}");
+            assert!(!error.permits_rebind());
+        }
+    }
+
+    #[test]
+    fn busy_retry_identifies_only_the_accepted_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            for busy in [true, false] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut header = [0; 40];
+                stream.read_exact(&mut header).unwrap();
+                let (_, argv) = read_request(&mut stream).unwrap();
+                assert_eq!(argv, [OsString::from("same-request")]);
+                if busy {
+                    write_busy(&mut stream).unwrap();
+                } else {
+                    stream.write_all(&[ACCEPTED]).unwrap();
+                    stream.write_all(&77u64.to_le_bytes()).unwrap();
+                    write_response(&mut stream, 0, b"", b"").unwrap();
+                }
+            }
+        });
+        let trace = CapturedWriter::default();
+        let subscriber = tracing_subscriber(
+            CapturedWriter::default(),
+            CapturedWriter::default(),
+            trace.clone(),
+            tracing_subscriber::EnvFilter::new("debug"),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(
+                execute(
+                    &socket,
+                    &[9; 32],
+                    Path::new("/tmp"),
+                    &["same-request".into()]
+                )
+                .unwrap()
+                .status
+                .code(),
+                Some(0)
+            );
+        });
+        server.join().unwrap();
+        let events: Vec<serde_json::Value> = trace
+            .text()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let identified: Vec<_> = events
+            .iter()
+            .filter(|row| row["fields"]["message"] == "compiler request identified")
+            .collect();
+        assert_eq!(identified.len(), 1);
+        assert_eq!(identified[0]["fields"]["admission_id"], 77);
+        assert_eq!(identified[0]["fields"]["request_ordinal"], 1);
+        assert_eq!(identified[0]["fields"]["daemon_epoch"], hex(&[9; 32]));
+    }
+
+    #[test]
+    fn cancelling_an_identified_transaction_keeps_its_identity_without_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (written_tx, written_rx) = std::sync::mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut header = [0; 40];
+            stream.read_exact(&mut header).unwrap();
+            assert_eq!(&header[..8], TRANSACTION);
+            stream.write_all(&[ACCEPTED]).unwrap();
+            stream.write_all(&81u64.to_le_bytes()).unwrap();
+            let mut command = [0];
+            stream.read_exact(&mut command).unwrap();
+            assert_eq!(command, [TRANSACTION_REQUEST]);
+            assert_eq!(
+                read_request(&mut stream).unwrap().1,
+                [OsString::from("same-request")]
+            );
+            written_tx.send(()).unwrap();
+            assert_eq!(stream.read(&mut command).unwrap(), 0);
+            listener.set_nonblocking(true).unwrap();
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        });
+        let cancellation = crate::CompilerTransactionCancellation::new();
+        let cancel = std::thread::spawn({
+            let cancellation = cancellation.clone();
+            move || {
+                written_rx.recv().unwrap();
+                cancellation.cancel();
+            }
+        });
+        let trace = CapturedWriter::default();
+        let subscriber = tracing_subscriber(
+            CapturedWriter::default(),
+            CapturedWriter::default(),
+            trace.clone(),
+            tracing_subscriber::EnvFilter::new("debug"),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let mut transaction =
+                begin_transaction_with_cancellation(&socket, &[9; 32], Some(&cancellation))
+                    .unwrap();
+            let error = execute_transaction_request(
+                &mut transaction,
+                Path::new("/work"),
+                &["same-request".into()],
+            )
+            .unwrap_err();
+            assert!(error.was_accepted(), "{error}");
+            assert!(!error.permits_rebind());
+        });
+        cancel.join().unwrap();
+        server.join().unwrap();
+        let events: Vec<serde_json::Value> = trace
+            .text()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let identified: Vec<_> = events
+            .iter()
+            .filter(|row| row["fields"]["message"] == "compiler request identified")
+            .collect();
+        assert_eq!(identified.len(), 1);
+        assert_eq!(identified[0]["fields"]["admission_id"], 81);
+        assert_eq!(identified[0]["fields"]["request_ordinal"], 1);
+        assert_eq!(identified[0]["fields"]["daemon_epoch"], hex(&[9; 32]));
     }
 
     #[test]
@@ -3431,6 +3835,7 @@ tidepool-target phase=desugar module=Execute\n",
             connection.read_exact(&mut header).unwrap();
             read_request(&mut connection).unwrap();
             connection.write_all(&[ACCEPTED]).unwrap();
+            connection.write_all(&1u64.to_le_bytes()).unwrap();
         });
         let error = execute(&socket, &[1; 32], Path::new("/tmp"), &["request".into()]).unwrap_err();
         server.join().unwrap();
@@ -3563,8 +3968,18 @@ fn main() {{
             std::thread::sleep(Duration::from_millis(10));
         };
 
+        let trace = CapturedWriter::default();
+        let dispatch = tracing::Dispatch::new(tracing_subscriber(
+            CapturedWriter::default(),
+            CapturedWriter::default(),
+            trace.clone(),
+            tracing_subscriber::EnvFilter::new("debug"),
+        ));
         let started = Instant::now();
-        let error = execute(&socket, &binding.epoch, &dir, &argv).unwrap_err();
+        let error = tracing::dispatcher::with_default(&dispatch, || {
+            execute(&socket, &binding.epoch, &dir, &argv)
+        })
+        .unwrap_err();
         assert!(
             started.elapsed() < Duration::from_secs(8),
             "the deadline did not bound the hung request: {:?}",
@@ -3579,8 +3994,33 @@ fn main() {{
 
         // The replacement worker (second script invocation) serves the next
         // request normally.
-        let output = execute(&socket, &binding.epoch, &dir, &argv).unwrap();
+        let output = tracing::dispatcher::with_default(&dispatch, || {
+            execute(&socket, &binding.epoch, &dir, &argv)
+        })
+        .unwrap();
         assert_eq!(output.status.code(), Some(0));
+        let events: Vec<serde_json::Value> = trace
+            .text()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let identified: Vec<_> = events
+            .iter()
+            .filter(|row| row["fields"]["message"] == "compiler request identified")
+            .collect();
+        assert_eq!(identified.len(), 2);
+        assert_ne!(
+            identified[0]["fields"]["admission_id"],
+            identified[1]["fields"]["admission_id"]
+        );
+        assert_eq!(
+            identified[0]["fields"]["compile_request"],
+            identified[1]["fields"]["compile_request"]
+        );
+        for row in identified {
+            assert_eq!(row["fields"]["request_ordinal"], 1);
+            assert_eq!(row["fields"]["daemon_epoch"], hex(&binding.epoch));
+        }
 
         std::fs::write(&stamp, b"changed").unwrap();
         assert!(preflight(&socket).is_err());
@@ -3932,7 +4372,9 @@ fn main() {{
         stdout.write_all(&[1]).unwrap();
         stdout.flush().unwrap();
 
-        stdin.read_exact(&mut one).unwrap(); // request prefix
+        loop {{
+        stdin.read_exact(&mut one).unwrap(); // request or end prefix
+        if one[0] == 0 {{ break; }}
         let mut payload = vec![0u8; {payload_len}];
         stdin.read_exact(&mut payload).unwrap();
         std::fs::write(r"{started}", b"").unwrap();
@@ -3942,7 +4384,7 @@ fn main() {{
         stdout.write_all(&[0u8; 12]).unwrap(); // code=0, empty stdout/stderr frames
         stdout.flush().unwrap();
 
-        stdin.read_exact(&mut one).unwrap(); // end_transaction
+        }}
         stdout.write_all(&[1]).unwrap();
         stdout.flush().unwrap();
     }}

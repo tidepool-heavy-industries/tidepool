@@ -26,7 +26,7 @@ pub fn forks_decl() -> crate::EffectDecl {
             "data ForkContext = InheritedContext | SelectedContext deriving (Show, Eq)",
             "data CheckpointRefusal = NoHostedBoundary | WrongSession | UnavailableCheckpoint | ReleasedCheckpoint | CaptureFailed | ProcessRestartUnsupported deriving (Show, Eq)",
             "data ForkEffort = Low | Medium | High deriving (Show, Eq)",
-            "data ActorEffectKey = EffectReplies | EffectWatches | EffectForks | EffectActorContext | EffectAgentLaunch | EffectAgentInspection | EffectAgentControl | EffectBoundWorktree | EffectWorktreeRegistry | EffectWorktreeAllocation | EffectWorktreeIntegration | EffectSleep | EffectCommands | EffectConsole | EffectNotifications | EffectJev | EffectActor | EffectReflect | EffectLookup | EffectRepoEvent | EffectSource | EffectJournal deriving (Show, Eq)",
+            "data ActorEffectKey = EffectReplies | EffectWatches | EffectForks | EffectActorContext | EffectAgentLaunch | EffectAgentInspection | EffectAgentControl | EffectBoundWorktree | EffectWorktreeRegistry | EffectWorktreeAllocation | EffectWorktreeIntegration | EffectSleep | EffectCommands | EffectConsole | EffectNotifications | EffectJev | EffectModelCall | EffectActor | EffectReflect | EffectLookup | EffectRepoEvent | EffectSource | EffectJournal deriving (Show, Eq)",
             "data ForkGroupCleanupOutcome = ForkGroupCleaned | ForkGroupStillActive [(Int, Int)] | ForkGroupCleanupRejected Text deriving (Show, Eq)",
         ],
         extra_imports: &[],

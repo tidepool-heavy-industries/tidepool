@@ -173,16 +173,17 @@ impl crate::KernelBehavior for Owner {
     fn child_exited(&mut self, _: crate::ChildExitNotice) {}
 }
 
-struct Fixture {
-    actor: LocalActorRef,
+pub(in crate::resident_actor) struct Fixture {
+    pub(in crate::resident_actor) actor: LocalActorRef,
     task: ractor::concurrency::JoinHandle<()>,
-    kernel: KernelContext,
-    environment: ResidentEnvironment<frunk::HNil, tidepool_mcp::CapturedOutput>,
+    pub(in crate::resident_actor) kernel: KernelContext,
+    pub(in crate::resident_actor) environment:
+        ResidentEnvironment<frunk::HNil, tidepool_mcp::CapturedOutput>,
     deployments: mpsc::Receiver<LocalResidentDeployment>,
 }
 
 impl Fixture {
-    async fn start() -> Self {
+    pub(in crate::resident_actor) async fn start() -> Self {
         let (send, receive) = tokio::sync::oneshot::channel();
         let (actor, task) = crate::spawn_local_actor(None, Owner::new(send))
             .await
@@ -205,6 +206,7 @@ impl Fixture {
             launch_resolver: None,
             source_layers: None,
             jev: Arc::new(crate::jev::UnconfiguredJev),
+            cell_model_factory: None,
             release_tracked: Default::default(),
             conversation_reader: None,
             usage_pointers: Default::default(),
@@ -260,7 +262,7 @@ impl Fixture {
         (job, backend)
     }
 
-    async fn finish(self) {
+    pub(in crate::resident_actor) async fn finish(self) {
         self.actor
             .retire_by(
                 self.actor.identity(),

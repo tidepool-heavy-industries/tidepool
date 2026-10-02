@@ -156,10 +156,51 @@ Warm cells require at least ten distinct actual source digests and repeated
 measured use of every participating worker PID. Private-session attribution uses a different
 composition and cannot satisfy the product gate.
 
+Before measuring, retain build evidence through the owning build command.
+`build/testing/record-rust-build.py` records the selected release Cargo artifact,
+its frozen output and the admitted Nix compiler. It preserves the repository's
+GC frame-pointer flags and refuses inherited compiler, profile and Rust flag
+overrides. The selected Cargo `compiler-artifact` must have optimized
+`profile.opt_level` (`2`, `3`, `s` or `z`), and `profile.test` must be true for
+the warm/cancellation libtest and false for the packaged cold host. A runner's
+`profile: "release"` label cannot establish this.
+
 After the owning fixture and its compiler have stopped and flushed their logs,
-write `manifest.json` containing `source_oid`, exact `command` (argv array),
-`exit_code`, retained absolute `binary_path`, `binary_sha256`, `frontend_sha256`, `worker_sha256`, and the
-configured/consumed `compiler_producer`. Then run:
+write schema-2 `manifest.json` containing `source_oid`, exact `command` (argv
+array), `exit_code`, `frontend_sha256`, `worker_sha256`, the configured/consumed
+`compiler_producer`, and `runners` entries for `warm_cell`, `cold_start` and
+`cancel_ack`. Each entry retains absolute `binary_path`, `binary_sha256`, exact
+execution `command`, `exit_code`, `expected_test_count`, `executed_test_count`,
+and `rust_build: {"packet_path": "<absolute path>", "packet_sha256": "<SHA256>"}`.
+Warm/cancellation must execute their actual selected test; cold retains its
+package entrypoint/hash and `process_execution_count`, with five successful
+owned processes. Cold sample rows use the writer's
+`actual_retained_host_executable` and its observed executable hash.
+
+The `cargo-build-v1` packet binds `source_oid`, successful `exit_code`, exact
+build `command`, `compiler`, `cargo_messages`, `build_log`, `source_before`,
+`source_after`, `source_archive`, and `output`. File references contain absolute
+`path` and `sha256`; `output` also contains the original `cargo_path` emitted by
+Cargo. The reporter selects exactly one artifact with that executable path and
+hashes the frozen output against the runner binary. The mutable Cargo output
+need not remain present. Source evidence uses the existing snapshot manifest
+and post-build audit: capture changes and audit changes must be empty, the source
+inventories must agree, their HEAD must match `source_oid`, and the retained
+archive hash must match the capture manifest.
+
+`worker_build` uses the same packet reference and a `ghc-build-v1` packet with
+the same source/compiler/output/log anchors plus `compile_commands`, a retained
+JSONL file of the actual contributing GHC actions (`argv` and `exit_code`).
+Every action must use the admitted compiler, produce object code from real
+Haskell source via `-c` or `--make`, and have final optimization flag `-O2`.
+Unexpanded response files, non-object modes, link-only evidence, an overriding
+`-O0`, or evidence omitting `bridge/haskell/app/Main.hs` refuse acceptance.
+The actual worker producer must retain these actions; a handwritten argv or
+an `-O2` belonging to another invocation does not establish this contract.
+The current worker built at another optimization level remains ineligible.
+These checks establish consistency of trusted owner-recorded build evidence;
+they do not independently reproduce a binary or authenticate a dishonest
+producer's statements. Then run:
 
 ```sh
 python3 scripts/resident-performance-report.py \

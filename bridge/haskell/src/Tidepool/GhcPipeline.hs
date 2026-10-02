@@ -6,6 +6,7 @@ module Tidepool.GhcPipeline
   , runPipelineSelected, runPipelineSessionSelected
   , runPipelineSelectedRetaining
   , CompilePurpose(..), PipelineResult(..)
+  , generatedScaffoldRecipe
     -- * Bound-value type analysis
   , stripMonadHead, isClosureType, renderType
   , splitTupleType
@@ -19,17 +20,23 @@ module Tidepool.GhcPipeline
   ) where
 
 import GHC hiding (typeKind)
-import GHC.Driver.Main (hscDesugar, batchMsg, hscTidy)
+import GHC.Driver.Main (hscDesugar, batchMsg, hscTidy, hscCompileCoreExpr')
+import GHC.Driver.Pipeline (compileOne')
+import GHC.Driver.Hooks (hscCompileCoreExprHook)
+import GHC.Data.StringBuffer (stringToStringBuffer)
+import GHC.Driver.Backend (backendGeneratesCode)
 import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit)
-import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags))
+import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags, hsc_FC, hsc_targets, hsc_hooks))
 import GHC.Driver.Monad (reflectGhc, reifyGhc)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, addToHpt, lookupHpt)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Types.Avail (availNames)
 import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
 import GHC.Iface.Make (mkIfaceTc)
-import GHC.Unit.Module.ModIface (set_mi_extra_decls)
-import GHC.Unit.Module.Deps (imp_mods)
+import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
+import GHC.Unit.Finder (initFinderCache)
+import GHC.Unit.Module.ModIface (set_mi_extra_decls, mi_iface_hash)
+import GHC.Unit.Module.Deps (imp_mods, Usage(..))
 import GHC.Unit.Finder (FindResult(Found), findImportedModule)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
 import GHC.Types.SourceFile (HscSource(..))
@@ -41,7 +48,7 @@ import GHC.Utils.Logger (LogAction)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
-import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..))
+import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..), mkNodeKey)
 import GHC.Unit.Home (homeUnitId, isHomeUnit)
 import GHC.Unit.Types (unitString)
 import GHC.Data.Graph.Directed (flattenSCCs)
@@ -60,6 +67,7 @@ import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..))
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Crypto.Hash.SHA256 as SHA256
@@ -102,7 +110,7 @@ import GHC.Types.TypeEnv (typeEnvIds, typeEnvTyCons)
 import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Tc.Types (TcGblEnv, tcg_dependent_files, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_insts, tcg_imports, tcg_keep)
 import GHC.Types.Name.Set (extendNameSetList)
-import GHC.Types.Name.Reader (GlobalRdrEnv)
+import GHC.Types.Name.Reader (GlobalRdrEnv, rdrNameOcc)
 import GHC.Types.Name.Ppr (mkNamePprCtx)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, mkInternalName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (OccName, mkOccName, mkTyVarOcc, occNameSpace, occNameString)
@@ -113,7 +121,7 @@ import Language.Haskell.Syntax.Specificity (Specificity (SpecifiedSpec))
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import Control.Applicative ((<|>))
 import Control.Exception
-  ( finally, try, throwIO, IOException, SomeException, SomeAsyncException
+  ( finally, bracket, try, throwIO, IOException, SomeException, SomeAsyncException
   , fromException, displayException )
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes)
 import Data.List (find, isPrefixOf, isInfixOf, nub, nubBy, sort, sortOn, intercalate)
@@ -121,7 +129,7 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef,
 import Numeric (showHex)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName, takeFileName, normalise, pathSeparator, (</>))
-import System.Directory (canonicalizePath, makeAbsolute)
+import System.Directory (canonicalizePath, makeAbsolute, doesFileExist, getModificationTime)
 import System.IO (hPutStrLn, stderr, readFile')
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, forM_, when, unless)
@@ -136,8 +144,8 @@ import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
   ( PlannedDeclarationInventory, transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted, transformProgramDeclarationImports, hydratePlannedDeclarationInventory )
 import Tidepool.CheckedPrefixImports
-  ( CompletedValueImport(..), CompletedValueImports, hydrateCompletedValueImportsWithDependencies, transformCompletedValueImports )
-import Tidepool.FamilyConsistency (validateCompilationFamilies)
+  ( CompletedValueImport(..), CompletedValueImports, hydrateCompletedValueImportsWithVerifiedDependencies, transformCompletedValueImports, selectedImportNames )
+import Tidepool.FamilyConsistency (validateCompilationFamilies, validateEnvironmentFamilies)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
 import Tidepool.Introspection (normalizeLookupWildcards)
@@ -168,16 +176,22 @@ import Tidepool.DependencyEvidence
   , sourceEvidenceWithFingerprint )
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope
-  , installExactLexicalGraph )
+  , readVerifiedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
+  , checkedValueImportAuthorityFromVerified
+  , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
+  , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
   ( ExactScope(..), ExactCompilation(..), readExactScope, revalidateExactScope, scopeValueInterfaces
-  , writeExactCompilation )
+  , writeExactCompilation, scopeExecutionNativeOwners )
+import Tidepool.ExecutionSource
+  ( ExecutionSourceGraph(..), ExecutionSourceNode(..), ExecutionSourceIdentity(..)
+  , ExecutionSourceFailure(..), executionSourceClosure, executionIdentityKey )
 import Tidepool.PackageWitness
-  ( PackageImportRoot(..), packageImportRoot, readPackageImports
+  ( PackageImportRoot(..), PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports
   , validatePackageImportRoot )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..)
-  , readModuleCandidates )
+  , readModuleCandidates, candidateExecutionSources )
 
 -- | Selects the compiler representation produced at the internal GHC API
 -- boundary. Metadata consumers stop at the checked environment.
@@ -235,7 +249,7 @@ data PreparedPipelineResult = PreparedPipelineResult
   , pprModules :: [PreparedModule]
   , pprDependencies :: DependencyEvidence
   , pprProductInterfaces :: Map.Map ModuleName ModIface
-  , pprPackageRoots :: Map.Map ModuleName [PackageImportRoot]
+  , pprPackageImports :: Map.Map ModuleName PackageImportEvidence
   , pprAcceptedCandidates :: [ModuleCandidate]
   , pprExactCompilation :: Maybe ExactCompilation
   }
@@ -669,6 +683,8 @@ data PipelineVariant = PipelineVariant
     -- ^ Prefix on this variant's own error messages.
   , pvExactScope :: Maybe ExactScope
     -- ^ Admitted immutable declaration owners, independent of live values.
+  , pvGeneratedScaffold :: Maybe GeneratedScaffoldRecipe
+    -- ^ The protected target and its compiler-owned support import.
   , pvDownsweepExcludes :: [ModuleName]
     -- ^ Modules @depanal@ must NOT try to summarise (the session path's
     -- source-less @Val.G\<g\>@ ifaces). Empty on the normal path.
@@ -677,12 +693,41 @@ data PipelineVariant = PipelineVariant
   , pvTransformParsed :: HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
   }
 
+candidateManifestFor :: PipelineSelection result -> Maybe FilePath
+candidateManifestFor (PreparedProducts path) = path
+candidateManifestFor (CheckedEnvironmentProducts path) = Just path
+candidateManifestFor _ = Nothing
+
+exactCompileCycle :: PipelineSelection result -> PipelineVariant -> Bool
+exactCompileCycle selection variant =
+  isJust (candidateManifestFor selection) || isJust (pvExactScope variant)
+
+data ResidentStateOrigin = OrdinarySourceState | LegacySourceFreeState | ExactState
+  deriving (Eq)
+
+residentStateOrigin :: PipelineSelection result -> PipelineVariant -> ResidentStateOrigin
+residentStateOrigin selection variant
+  | exactCompileCycle selection variant = ExactState
+  | not (null (pvDownsweepExcludes variant)) = LegacySourceFreeState
+  | otherwise = OrdinarySourceState
+
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
   | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
   | ProgramItemCompile Bool [(String,CheckedSignature)] [((String,String),String)] [CompletedValueImport]
   | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
   | CellProgramCompile CompilePurpose ExactScope
+  | GeneratedScaffoldCompile GeneratedScaffoldRecipe CompilePurpose
   deriving (Eq, Show)
+
+generatedRecipe :: CompilePurpose -> Maybe GeneratedScaffoldRecipe
+generatedRecipe (GeneratedScaffoldCompile recipe _) = Just recipe
+generatedRecipe (CellProgramCompile inner _) = generatedRecipe inner
+generatedRecipe _ = Nothing
+
+originalPurpose :: CompilePurpose -> CompilePurpose
+originalPurpose (GeneratedScaffoldCompile _ inner) = originalPurpose inner
+originalPurpose (CellProgramCompile inner _) = originalPurpose inner
+originalPurpose purpose = purpose
 
 transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
 transformFor GeneralCompile _ _ _ = pure
@@ -710,11 +755,13 @@ transformFor (PlannedDeclarationCheck inventory _) target env summary
   | ms_mod_name summary == target = transformPlannedDeclarationImports inventory env
   | otherwise = pure
 transformFor (CellProgramCompile purpose _) target env summary = transformFor purpose target env summary
+transformFor (GeneratedScaffoldCompile _ purpose) target env summary = transformFor purpose target env summary
 
 transformWithCompletedValues :: Maybe CompletedValueImports -> CompilePurpose -> ModuleName
   -> HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
 transformWithCompletedValues captured purpose target env summary = case purpose of
   CellProgramCompile inner _ -> transformWithCompletedValues captured inner target env summary
+  GeneratedScaffoldCompile _ inner -> transformWithCompletedValues captured inner target env summary
   CheckedItemCompile annotations original requested
     | ms_mod_name summary == target && not (null requested) -> \parsed -> do
         values <- maybe (fail "completed value interfaces were not installed in this request") pure captured
@@ -737,6 +784,8 @@ transformWithCompletedValues captured purpose target env summary = case purpose 
 data CompilePlan = CompilePlan
   { cpLoadGraph :: ModuleGraph
     -- ^ The graph handed to @load'@ (the skeleton applies @unpoison@ itself).
+  , cpLoadTargets :: Maybe [Target]
+    -- ^ Authenticated execution targets, scoped to the load barrier only.
   , cpAfterLoad :: Ghc ()
     -- ^ Runs immediately after @load'@ and its @ghc_load@ phase emit, before
     -- summaries are taken, after the shared load barrier. The session path
@@ -769,7 +818,7 @@ data ModuleFront = ModuleFront
   { mfSummary    :: ModSummary
   , mfHscEnv     :: HscEnv
   , mfTcGblEnv   :: TcGblEnv
-  , mfPackageRoots :: [PackageImportRoot]
+  , mfPackageImports :: PackageImportEvidence
   , mfDesugared  :: ModGuts
   , mfCapturedType :: Maybe String
   , mfCheckedBinderPins :: [CheckedBinderPin]
@@ -1178,7 +1227,7 @@ definingModuleForOcc hscEnv modName occ = pure $ case lookupHpt (hsc_HPT hscEnv)
 data ModuleFacts = ModuleFacts
   { moduleFactTyCons :: [TyCon]
   , moduleFactReferences :: Set.Set ModuleName
-  , moduleFactPackageRoots :: [PackageImportRoot]
+  , moduleFactPackageImports :: PackageImportEvidence
   , moduleFactHasDependentFiles :: Bool
   , moduleFactQuasiQuoteOrigins :: QuasiQuoteOrigins
     -- ^ Diagnostic and gate input: see 'QuasiQuoteOrigins'. 'lookupValidMemo'
@@ -1234,7 +1283,7 @@ data GutsMemoEntry = GutsMemoEntry
 data ModuleObservation
   = CachedObservation ModSummary GutsMemoEntry
   | FreshObservation ModuleFront
-  | HydratedObservation ModSummary HomeModInfo [PackageImportRoot]
+  | HydratedObservation ModSummary HomeModInfo PackageImportEvidence
 
 observationSummary :: ModuleObservation -> ModSummary
 observationSummary (CachedObservation summary _) = summary
@@ -1247,7 +1296,7 @@ observationFacts (FreshObservation front) = frontFacts front
 observationFacts (HydratedObservation _ hmi roots) = pure ModuleFacts
   { moduleFactTyCons = typeEnvTyCons (md_types (hm_details hmi))
   , moduleFactReferences = Set.empty
-  , moduleFactPackageRoots = roots
+  , moduleFactPackageImports = roots
   , moduleFactHasDependentFiles = False
   , moduleFactQuasiQuoteOrigins = NoQuasiQuotes
   }
@@ -1291,8 +1340,8 @@ observationFront (HydratedObservation _ _ _) = Nothing
 
 -- Resolved direct imports include unused, instance-only and compiler-inserted
 -- package imports; interface dependencies alone do not retain that boundary.
-directPackageImportRoots :: HscEnv -> TcGblEnv -> IO [PackageImportRoot]
-directPackageImportRoots env tcg = do
+directPackageImports :: HscEnv -> TcGblEnv -> IO PackageImportEvidence
+directPackageImports env tcg = do
   let imported = Map.keys (imp_mods (tcg_imports tcg))
       selected = [owner | owner <- imported
         , not (isHomeUnit (hsc_home_unit env) (moduleUnit owner))
@@ -1300,13 +1349,14 @@ directPackageImportRoots env tcg = do
   roots <- forM selected $ \owner -> do
     witness <- packageImportRoot env owner
     either (ioError . userError . ("direct package import unavailable: " ++)) pure witness
-  pure (Set.toAscList (Set.fromList roots))
+  pure (PackageImportEvidence (Set.toAscList (Set.fromList roots))
+    [CompilerPrimitive | gHC_PRIM `elem` imported])
 
 frontFacts :: ModuleFront -> IO ModuleFacts
 frontFacts front = pure ModuleFacts
     { moduleFactTyCons = mg_tcs (mfDesugared front)
     , moduleFactReferences = mfReferencedModules front
-    , moduleFactPackageRoots = mfPackageRoots front
+    , moduleFactPackageImports = mfPackageImports front
     , moduleFactHasDependentFiles = mfHasDependentFiles front
     , moduleFactQuasiQuoteOrigins = mfQuasiQuoteOrigins front
     }
@@ -1338,23 +1388,16 @@ type GutsMemo = Map.Map ModuleName GutsMemoEntry
 runCompileCycle
   :: PipelineSelection result -> Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
   -> RetainedContext -> Maybe String -> Bool -> Word64 -> Double -> PipelineVariant -> FilePath -> Ghc result
-runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing requestIdentity sessionT0 variant path = do
+runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing requestIdentity sessionT0 variant path = withCycleHooks $ do
     memoTrace <- liftIO readMemoTraceEnabled
     let preparation = selectionKind selection
         captureProducts = capturesProductInterfaces selection
-        candidateManifest = case selection of
-          PreparedProducts candidatePath -> candidatePath
-          CheckedEnvironmentProducts candidatePath -> Just candidatePath
-          _ -> Nothing
-        exactCycle = isJust candidateManifest || isJust (pvExactScope variant)
+        candidateManifest = candidateManifestFor selection
+        exactCycle = exactCompileCycle selection variant
         -- An exact hydration transaction cannot borrow mutable interface or
         -- Core memo state from a preceding lexical environment.
         mCache = if exactCycle then Nothing else mCacheInput
         mMemoRef = if exactCycle then Nothing else mMemoRefInput
-    when (isJust candidateManifest && maybe False (\scope ->
-        not (null (scopeInterfaces scope) && null (scopeProducts scope) && null (scopeLexical scope)))
-        (pvExactScope variant)) $
-      liftIO $ ioError $ userError "ordinary source candidates cannot accompany exact declaration owners"
     when exactCycle $ do
       current <- getSession
       fresh <- liftIO (freshExactState current)
@@ -1363,8 +1406,16 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
       env <- getSession
       verified <- liftIO (revalidateExactScope env scope)
       either (liftIO . ioError . userError) pure verified
+    capturedTarget <- forM (pvGeneratedScaffold variant) $ \recipe ->
+      liftIO (captureGeneratedScaffoldTarget recipe path) >>= either (liftIO . fail) pure
     target <- guessTarget path Nothing Nothing
-    setTargets [target]
+    capturedTargetInput <- case capturedTarget of
+      Nothing -> pure target
+      Just bytes -> do
+        now <- liftIO (getModificationTime path)
+        pure target {targetContents=Just
+          (stringToStringBuffer (Text.unpack (TextEncoding.decodeUtf8 bytes)),now)}
+    setTargets [capturedTargetInput]
     -- Install diagnostic capture before load/typecheck. Target warnings become
     -- part of a successful result; all source errors remain available if 'load'' reports
     -- only a 'Failed' flag rather than throwing a 'SourceError'.
@@ -1413,9 +1464,14 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           <$> pvExactScope variant
     when (any (\(_, imports) -> any (\(_, _, boot, _) -> boot) imports) exactImports) $
       liftIO $ ioError $ userError "exact scope does not admit SOURCE boot imports"
+    let sourceFreeOwners = Set.fromList (pvDownsweepExcludes variant
+          ++ [mkModuleName (exactModule iface)
+             | scope <- maybe [] pure (pvExactScope variant)
+             , iface <- scopeValueInterfaces scope])
     acceptedCandidates <- case candidateManifest of
       Nothing -> pure Map.empty
-      Just manifest -> certifyModuleCandidates manifest modGraphRaw path
+      Just manifest -> certifyModuleCandidates (pvExactScope variant)
+        sourceFreeOwners manifest modGraphRaw path
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
     -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
     -- includes its session bootstrap because 'runCompile' captures
@@ -1426,6 +1482,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
     originalPlan <- pvPlan variant timing modGraphRaw
     certifiedEnv <- getSession
     let acceptedNames = Map.keysSet acceptedCandidates
+        loadRequired = any ((== CandidateLoadForExecution) . admittedCandidateLoading)
+          (Map.elems acceptedCandidates)
         sourceSummaries = [summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw]
         importedNames summary =
           [ unLoc name | (_, name) <- ms_textual_imps summary ++ ms_srcimps summary ]
@@ -1435,7 +1493,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 | summary <- sourceSummaries
                 , any (`Set.member` seed) (importedNames summary) ])
           in if grown == seed then seed else importerClosure grown
-        deferred = importerClosure acceptedNames
+        deferred = if loadRequired then Set.empty else importerClosure acceptedNames
         candidateLoadGraph = mkModuleGraph
           [ node | node <- mgModSummaries' (cpLoadGraph originalPlan)
           , case node of
@@ -1447,13 +1505,33 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                  , cpAfterLoad = do
                      cpAfterLoad originalPlan
                      current <- getSession
-                     setSession current { hsc_mod_graph = modGraphRaw }
+                     -- Exact hydration owns the lexical graph; installing
+                     -- ordinary disjoint candidates cannot replace it.
+                     when (isNothing (pvExactScope variant)) $
+                       setSession current { hsc_mod_graph = modGraphRaw }
                      forM_ (Set.toAscList acceptedNames) $ \name ->
                        case lookupHpt (hsc_HPT certifiedEnv) name of
                          Nothing -> liftIO $ ioError $ userError
                            "certified candidate disappeared before HPT installation"
-                         Just hmi -> installPreparedInterface name hmi
+                         Just hmi -> do
+                           forM_ (Map.lookup name acceptedCandidates) $ \candidate ->
+                             case admittedCandidateLoading candidate of
+                               CandidateInterfaceOnly -> pure ()
+                               CandidateLoadForExecution -> do
+                                 loaded <- getSession
+                                 case lookupHpt (hsc_HPT loaded) name of
+                                   Just executable
+                                     | mi_module (hm_iface executable) == mi_module (hm_iface hmi)
+                                     , let linkable = hm_linkable executable
+                                     , isJust (homeMod_bytecode linkable) || isJust (homeMod_object linkable) ->
+                                         pure ()
+                                   _ -> liftIO $ ioError $ userError
+                                     "source-selected native candidate lacks its current GHC executable"
+                           installPreparedInterface name hmi
                  , cpTier = OptimizeEveryModule }
+    liftIO (emitCount timing "candidate_source_load_required"
+      (toInteger (length [() | candidate <- Map.elems acceptedCandidates
+        , admittedCandidateLoading candidate == CandidateLoadForExecution])))
     -- Restore the representation-affecting extraction flags before 'load''
     -- touches a home module. Its TH/QQ downgrade sets
     -- Opt_OmitInterfacePragmas, which disables automatic field unboxing, and
@@ -1487,7 +1565,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
               [] -> (plannedLoadGraph, LoadAllTargets)
           _ -> (plannedLoadGraph, LoadAllTargets)
     loadT0 <- monotonicTime
-    loadFlag <- load' mCache loadHowMuch dependencyDiagnostic (Just batchMsg)
+    loadFlag <- withLoadTargets (cpLoadTargets plan) $ load' mCache loadHowMuch dependencyDiagnostic (Just batchMsg)
                (scopeRetainedModuleGraph (mapMG canonicalizeLoadSummary loadGraph))
     loadT1 <- monotonicTime
     -- 'ghc_load' phase (TIDEPOOL_TIMING): the 'load'' call alone, nothing
@@ -1509,8 +1587,22 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     ++ " bytecode=" ++ show (isJust (homeMod_bytecode linkable))
                     ++ " object=" ++ show (isJust (homeMod_object linkable))
           _ -> pure ()
-    case loadFlag of
-      Succeeded -> cpAfterLoad plan
+    loadedHomeSources <- case loadFlag of
+      Succeeded -> do
+        cpAfterLoad plan
+        loaded <- getSession
+        let sources = case (preparation, pvExactScope variant) of
+              (CheckOnly, Just _) -> Map.fromList
+                [ (ms_mod_name summary, (ms_mod summary, ms_hs_hash summary, hmi))
+                | ModuleNode _ summary <- mgModSummaries' modGraphRaw
+                , ms_hsc_src summary == HsSrcFile
+                , ms_mod_name summary /= targetName
+                , ms_mod_name summary `Map.notMember` acceptedCandidates
+                , Just hmi <- [lookupHpt (hsc_HPT loaded) (ms_mod_name summary)]
+                , mi_module (hm_iface hmi) == ms_mod summary
+                , mi_src_hash (hm_iface hmi) == ms_hs_hash summary ]
+              _ -> Map.empty
+        pure sources
       Failed -> do
         diagnostics <- liftIO (nub . reverse <$> readIORef errorRef)
         liftIO $ throwIO $ if null diagnostics
@@ -1612,8 +1704,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                                  [ capturedBindingType occ tcGblEnv
                                  | occ <- cpResultBinders plan ]
                 packageRoots <- if captureProducts || isJust mMemoRef
-                  then liftIO (directPackageImportRoots hscEnv tcGblEnv)
-                  else pure []
+                  then liftIO (directPackageImports hscEnv tcGblEnv)
+                  else pure emptyPackageImports
                 when (ms_mod_name modSum == targetModName') $ liftIO $ hPutStrLn stderr $
                   "tidepool-target phase=desugar module=" ++ targetModName
                 dependentFiles <- liftIO (readIORef (tcg_dependent_files tcGblEnv))
@@ -1638,7 +1730,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 pure ModuleFront { mfSummary    = modSum
                                  , mfHscEnv     = hscEnv
                                  , mfTcGblEnv   = tcGblEnv
-                                 , mfPackageRoots = packageRoots
+                                 , mfPackageImports = packageRoots
                                  , mfDesugared  = desugared
                                  , mfCapturedType = capturedType
                                  , mfCheckedBinderPins = checkedBinderPins
@@ -1964,7 +2056,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                 cpBeforeModule plan modSum
                 let mn = ms_mod_name modSum
                 case Map.lookup mn acceptedCandidates of
-                  Just (_, roots) -> do
+                  Just candidate -> do
                     hmi <- case lookupHpt (hsc_HPT certifiedEnv) mn of
                       Just value -> pure value
                       Nothing -> liftIO $ ioError $ userError
@@ -1973,7 +2065,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     recordExecutableValidity modSum True
                     when captureProducts $ liftIO $
                       modifyIORef' productInterfacesRef (Map.insert mn (hm_iface hmi))
-                    pure (HydratedObservation modSum hmi roots, Nothing, Nothing)
+                    pure (HydratedObservation modSum hmi (admittedCandidateRoots candidate), Nothing, Nothing)
                   Nothing -> do
                     cached <- lookupValidMemo modSum
                     case cached of
@@ -2305,7 +2397,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
             (zip (map (ms_mod_name . observationSummary) observations) moduleFacts))
           productInterfaces <- liftIO (readIORef productInterfacesRef)
           let packageRoots = Map.fromList
-                [(ms_mod_name (observationSummary observation), moduleFactPackageRoots facts)
+                [(ms_mod_name (observationSummary observation), moduleFactPackageImports facts)
                 | (observation, facts) <- zip observations moduleFacts]
           pure (pipelineResult, preparedModules, dependencies, productInterfaces, packageRoots)
     let compileChecked :: Ghc CheckedEnvironmentResult
@@ -2319,71 +2411,109 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           -- module can consume an interface we build here. Completed modules no
           -- longer consult the HPT, while the returned target environment owns
           -- its types and reader scope directly.
+          unless (Map.null loadedHomeSources) $ do
+            hydrated <- getSession
+            liftIO (validateEnvironmentFamilies hydrated)
           checkedFactsRef <- liftIO (newIORef [])
           checked <- forM (zip summaries (homeInterfaceConsumers summaries)) $ \(summary, laterConsumers) -> do
             cpBeforeModule plan summary
             current <- getSession
             let isTarget = ms_mod_name summary == targetName
                 loaded = lookupHpt (hsc_HPT current) (ms_mod_name summary)
-            if not isTarget && not (isNothing loaded)
-                && (isNothing (pvExactScope variant) || ms_mod_name summary `Map.member` acceptedCandidates)
-              then do
-                forM_ loaded $ \hmi -> do
-                  facts <- liftIO (observationFacts (HydratedObservation summary hmi (maybe [] snd (Map.lookup (ms_mod_name summary) acceptedCandidates))))
-                  liftIO (modifyIORef' checkedFactsRef ((ms_mod_name summary, facts) :))
+            sourceFacts <- case (Map.lookup (ms_mod_name summary) loadedHomeSources, loaded) of
+              (Just (owner, fingerprint, selected), Just hmi)
+                | owner == ms_mod summary
+                , fingerprint == ms_hs_hash summary
+                , mi_module (hm_iface hmi) == owner
+                , mi_iface_hash (mi_final_exts (hm_iface hmi))
+                    == mi_iface_hash (mi_final_exts (hm_iface selected)) -> do
+                    -- Unsupported compile-time inputs stay on the fresh
+                    -- frontend path. The actual loaded interface records
+                    -- dependent-file use; source parsing preserves quote
+                    -- provenance without repeating its typecheck.
+                    let flags = ms_hspp_opts summary
+                        hasFiles = any (\case UsageFile{} -> True; _ -> False)
+                          (mi_usages (hm_iface hmi))
+                    if hasUnconditionallyUntrackedCompileTimeExecution flags || hasFiles
+                      then pure Nothing
+                      else do
+                        origins <- if xopt LangExt.QuasiQuotes flags
+                          then parseModule summary >>= liftIO . classifyQuasiQuoteOrigins current
+                          else pure NoQuasiQuotes
+                        pure $ case origins of
+                          HasUntrackedQuasiQuote _ -> Nothing
+                          _ -> Just ModuleFacts
+                            { moduleFactTyCons = typeEnvTyCons (md_types (hm_details hmi))
+                            , moduleFactReferences = Set.empty
+                            , moduleFactPackageImports = emptyPackageImports
+                            , moduleFactHasDependentFiles = hasFiles
+                            , moduleFactQuasiQuoteOrigins = origins }
+              _ -> pure Nothing
+            case sourceFacts of
+              Just facts -> do
+                liftIO (modifyIORef' checkedFactsRef ((ms_mod_name summary, facts) :))
+                when timing $ liftIO $ hPutStrLn stderr $
+                  "tidepool-checked-loaded-source module=" ++ moduleNameString (ms_mod_name summary)
                 pure Nothing
-              else do
-                liftIO $ hPutStrLn stderr $
-                  "tidepool-checked module=" ++ moduleNameString (ms_mod_name summary)
-                    ++ " target=" ++ show isTarget
-                parsed <- parseModule summary
-                origins <- liftIO (classifyQuasiQuoteOrigins current parsed)
-                transformed <- liftIO (pvTransformParsed variant current summary parsed)
-                typed <- typecheckModule transformed
-                familyEnvironment <- getSession
-                liftIO (validateCompilationFamilies familyEnvironment (fst (tm_internals_ typed)))
-                let tcg = fst (tm_internals_ typed)
-                    inspectionProbes = capturedInspectionProbes typed tcg
-                    retainInterface reason = do
-                      -- A later source module's normal home import resolves via
-                      -- this HPT entry. A source-less Val interface injected before
-                      -- a later module can also mention an earlier generated Lib
-                      -- without importing it from source. SOURCE imports keep using
-                      -- the boot iface installed by GHC's load phase, and no returned
-                      -- metadata consumer reads the target back through HPT.
-                      env <- scopeRetainedHscEnv (ms_mod summary) <$> getSession
-                      details <- liftIO (mkBootModDetailsTc (hsc_logger env) tcg)
-                      (iface, _ifaceMs) <- liftIO $ measureModuleInterface timing requestIdentity
-                        (moduleNameString (ms_mod_name summary)) CheckedEnvironmentInterface HptMiss $
-                          mkIfaceTc env Sf_None details summary Nothing tcg
-                      let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
-                      setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name summary) hmi) env)
-                      when timing $ liftIO $ hPutStrLn stderr $
-                        "tidepool-checked-interface-retained module="
-                          ++ moduleNameString (ms_mod_name summary) ++ reason
-                dependentFiles <- liftIO (readIORef (tcg_dependent_files tcg))
-                liftIO (modifyIORef' checkedFactsRef ((ms_mod_name summary, ModuleFacts
-                  { moduleFactTyCons = typeEnvTyCons (tcg_type_env tcg)
-                  , moduleFactReferences = Set.empty
-                  , moduleFactPackageRoots = []
-                  , moduleFactHasDependentFiles = not (null dependentFiles)
-                  , moduleFactQuasiQuoteOrigins = origins }) :))
-                case homeInterfaceUse summary laterConsumers of
-                  HomeInterfaceLeaf -> when timing $ liftIO $ hPutStrLn stderr $
-                    "tidepool-checked-interface-elided module="
-                      ++ moduleNameString (ms_mod_name summary)
-                      ++ " reason=no-later-home-importer"
-                  HomeInterfaceNeededBy consumer ->
-                    retainInterface (" consumer=" ++ moduleNameString consumer)
-                  HomeInterfaceNeededForSessionInjection ->
-                    retainInterface " reason=session-value-interface"
-                pure (if isTarget then Just (tcg, inspectionProbes) else Nothing)
+              Nothing -> if not isTarget && not (isNothing loaded)
+                  && (isNothing (pvExactScope variant) || ms_mod_name summary `Map.member` acceptedCandidates)
+                then do
+                  forM_ loaded $ \hmi -> do
+                    facts <- liftIO (observationFacts (HydratedObservation summary hmi (maybe emptyPackageImports admittedCandidateRoots (Map.lookup (ms_mod_name summary) acceptedCandidates))))
+                    liftIO (modifyIORef' checkedFactsRef ((ms_mod_name summary, facts) :))
+                  pure Nothing
+                else do
+                  liftIO $ hPutStrLn stderr $
+                    "tidepool-checked module=" ++ moduleNameString (ms_mod_name summary)
+                      ++ " target=" ++ show isTarget
+                  parsed <- parseModule summary
+                  origins <- liftIO (classifyQuasiQuoteOrigins current parsed)
+                  transformed <- liftIO (pvTransformParsed variant current summary parsed)
+                  typed <- typecheckModule transformed
+                  familyEnvironment <- getSession
+                  liftIO (validateCompilationFamilies familyEnvironment (fst (tm_internals_ typed)))
+                  let tcg = fst (tm_internals_ typed)
+                      inspectionProbes = capturedInspectionProbes typed tcg
+                      retainInterface reason = do
+                        -- A later source module's normal home import resolves via
+                        -- this HPT entry. A source-less Val interface injected before
+                        -- a later module can also mention an earlier generated Lib
+                        -- without importing it from source. SOURCE imports keep using
+                        -- the boot iface installed by GHC's load phase, and no returned
+                        -- metadata consumer reads the target back through HPT.
+                        env <- scopeRetainedHscEnv (ms_mod summary) <$> getSession
+                        details <- liftIO (mkBootModDetailsTc (hsc_logger env) tcg)
+                        (iface, _ifaceMs) <- liftIO $ measureModuleInterface timing requestIdentity
+                          (moduleNameString (ms_mod_name summary)) CheckedEnvironmentInterface HptMiss $
+                            mkIfaceTc env Sf_None details summary Nothing tcg
+                        let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
+                        setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name summary) hmi) env)
+                        when timing $ liftIO $ hPutStrLn stderr $
+                          "tidepool-checked-interface-retained module="
+                            ++ moduleNameString (ms_mod_name summary) ++ reason
+                  dependentFiles <- liftIO (readIORef (tcg_dependent_files tcg))
+                  liftIO (modifyIORef' checkedFactsRef ((ms_mod_name summary, ModuleFacts
+                    { moduleFactTyCons = typeEnvTyCons (tcg_type_env tcg)
+                    , moduleFactReferences = Set.empty
+                    , moduleFactPackageImports = emptyPackageImports
+                    , moduleFactHasDependentFiles = not (null dependentFiles)
+                    , moduleFactQuasiQuoteOrigins = origins }) :))
+                  case homeInterfaceUse summary laterConsumers of
+                    HomeInterfaceLeaf -> when timing $ liftIO $ hPutStrLn stderr $
+                      "tidepool-checked-interface-elided module="
+                        ++ moduleNameString (ms_mod_name summary)
+                        ++ " reason=no-later-home-importer"
+                    HomeInterfaceNeededBy consumer ->
+                      retainInterface (" consumer=" ++ moduleNameString consumer)
+                    HomeInterfaceNeededForSessionInjection ->
+                      retainInterface " reason=session-value-interface"
+                  pure (if isTarget then Just (tcg, inspectionProbes) else Nothing)
           warnings <- liftIO (nub . reverse <$> readIORef warnRef)
           cpBeforeMerge plan
           case [(tcg, probes) | Just (tcg, probes) <- checked] of
             [(tcg, probes)] -> do
               env <- getSession
-              valid <- liftIO (revalidateAcceptedCandidates (map fst (Map.elems acceptedCandidates)))
+              valid <- liftIO (revalidateAcceptedCandidates (map admittedCandidateOriginal (Map.elems acceptedCandidates)))
               unless valid $ liftIO $ ioError $ userError
                 "accepted metadata candidate changed before checked receipt"
               forM_ exactCompilation $ \compilation -> do
@@ -2411,13 +2541,13 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           , pprModules = modules
           , pprDependencies = dependencies
           , pprProductInterfaces = productInterfaces
-          , pprPackageRoots = packageRoots
+          , pprPackageImports = packageRoots
           , pprAcceptedCandidates = []
           , pprExactCompilation = exactCompilation
           }
       PreparedProducts _ -> do
         (result, modules, dependencies, productInterfaces, packageRoots) <- compileExecutable
-        valid <- liftIO $ revalidateAcceptedCandidates (map fst (Map.elems acceptedCandidates))
+        valid <- liftIO $ revalidateAcceptedCandidates (map admittedCandidateOriginal (Map.elems acceptedCandidates))
         when (not valid) $ liftIO $ ioError $ userError
           "accepted module candidate changed before artifact publication"
         pure PreparedPipelineResult
@@ -2425,8 +2555,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           , pprModules = modules
           , pprDependencies = dependencies
           , pprProductInterfaces = productInterfaces
-          , pprPackageRoots = packageRoots
-          , pprAcceptedCandidates = map fst (Map.elems acceptedCandidates)
+          , pprPackageImports = packageRoots
+          , pprAcceptedCandidates = map admittedCandidateOriginal (Map.elems acceptedCandidates)
           , pprExactCompilation = exactCompilation
           }
       CheckedEnvironment -> compileChecked
@@ -2458,12 +2588,39 @@ captureDependencySources graph = do
 -- source bytes, negative home selections, GHC's own recompilation decision,
 -- and every interface in a closed home dependency set must agree in this
 -- transaction before any source module can be skipped.
+data CandidateLoading = CandidateInterfaceOnly | CandidateLoadForExecution
+  deriving (Eq, Show)
+
+data AdmittedSourceCandidate = AdmittedSourceCandidate
+  { admittedCandidateOriginal :: ModuleCandidate
+  , admittedCandidateRoots :: PackageImportEvidence
+  , admittedCandidateLoading :: CandidateLoading
+  }
+
+data CandidateAdmissionReason
+  = CandidateManifestDecode | CandidateMissingSummary | CandidateMissingNode
+  | CandidateTarget | CandidateExactOwner | CandidateExactImport | CandidateUnit
+  | CandidateImportTuple | CandidateUntrackedExecution | CandidateExecutionBoot
+  | CandidatePreprocessor | CandidateSourcePath | CandidateSourceRead
+  | CandidateSourceSha | CandidateSummaryHash | CandidateNativeRead | CandidateNativeSha
+  | CandidatePackageRead | CandidatePackageSelection | CandidateClosedHome
+  | CandidateInterfaceRead | CandidateInterfaceTH | CandidateHydration | CandidateExecutionProof | CandidateAccepted
+  deriving (Eq, Ord, Show)
+
 certifyModuleCandidates
-  :: FilePath -> ModuleGraph -> FilePath -> Ghc (Map.Map ModuleName (ModuleCandidate, [PackageImportRoot]))
-certifyModuleCandidates manifest graph targetPath = do
+  :: Maybe ExactScope -> Set.Set ModuleName -> FilePath -> ModuleGraph -> FilePath
+  -> Ghc (Map.Map ModuleName AdmittedSourceCandidate)
+certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = do
+  timing <- liftIO readTimingEnabled
+  observations <- liftIO (newIORef Map.empty)
+  let record owner reason detail = when timing $ liftIO $
+        modifyIORef' observations (Map.insert owner (reason, fmap (take 192) detail))
+      recordCandidate candidate = record (candidateUnit candidate, candidateModule candidate)
   decoded <- liftIO (readModuleCandidates manifest)
-  case decoded of
-    Left _ -> pure Map.empty
+  result <- case decoded of
+    Left reason -> do
+      record ("", "<manifest>") CandidateManifestDecode (Just reason)
+      pure Map.empty
     Right candidates -> do
       env <- getSession
       targetName <- liftIO (targetModuleNameFor targetPath)
@@ -2486,6 +2643,16 @@ certifyModuleCandidates manifest graph targetPath = do
           candidateImportsMatch candidate node =
             sort (map importTuple (candidateImports candidate)) ==
               sort (map evidenceTuple (dependencyModuleImports node))
+          candidateExecutionMatches candidate = case (exactScope,candidateExecutionSources candidate) of
+            (Just scope,Just (graphs,_)) ->
+              let combined = Map.fromList [(executionGraphSha256 value,executionGraphBytes value)
+                    | value <- scopeExecutionGraphs scope ++ graphs]
+              in all ((== scopeProducerSha256 scope) . executionGraphProducer) graphs
+                && Map.size combined <= 4096
+                && length (scopeExecutionOwners scope)
+                  + length [value | value <- candidates, isJust (candidateExecutionSources value)] <= 4096
+                && sum (map BS.length (Map.elems combined)) <= 4 * 1024 * 1024
+            _ -> True
           importTuple imported =
             (qualifierText (candidateImportQualifier imported)
             , candidateImportModule imported
@@ -2500,16 +2667,27 @@ certifyModuleCandidates manifest graph targetPath = do
       preflight <- fmap catMaybes $ forM candidates $ \candidate ->
         case (Map.lookup (mkModuleName (candidateModule candidate)) summaries,
               Map.lookup (candidateModule candidate) currentModules) of
-          (Just summary, Just node)
-            | ms_mod_name summary /= targetName
-            , candidateUnit candidate == unitString (moduleUnit (ms_mod summary))
-            , candidateImportsMatch candidate node
-            , not (hasUntrackedCompileTimeExecution (ms_hspp_opts summary))
-            , not (gopt Opt_Pp (ms_hspp_opts summary)) -> do
+          (Just summary, Just node) -> case
+              [reason | (rejected, reason) <-
+                [ (ms_mod_name summary == targetName, CandidateTarget)
+                , (not (candidateExecutionMatches candidate), CandidateExecutionProof)
+                , (ms_mod_name summary `Set.member` sourceFreeOwners, CandidateExactOwner)
+                , (any (\(_, imported) -> unLoc imported `Set.member` sourceFreeOwners)
+                    (ms_textual_imps summary ++ ms_srcimps summary), CandidateExactImport)
+                , (candidateUnit candidate /= unitString (moduleUnit (ms_mod summary)), CandidateUnit)
+                , (not (candidateImportsMatch candidate node), CandidateImportTuple)
+                , (hasUntrackedCompileTimeExecution (ms_hspp_opts summary), CandidateUntrackedExecution)
+                , (backendGeneratesCode (backend (ms_hspp_opts summary))
+                    && (Map.member (ms_mod_name summary) bootSummaries
+                      || any candidateImportBoot (candidateImports candidate)), CandidateExecutionBoot)
+                , (gopt Opt_Pp (ms_hspp_opts summary), CandidatePreprocessor) ]
+              , rejected] of
+              reason : _ -> recordCandidate candidate reason Nothing >> pure Nothing
+              [] -> do
                 source <- liftIO $ traverse canonicalizePath
                   (ml_hs_file (ms_location summary))
                 if source /= Just (candidateSource candidate)
-                  then pure Nothing
+                  then recordCandidate candidate CandidateSourcePath Nothing >> pure Nothing
                   else do
                     inspected <- liftIO (try (sourceEvidenceWithFingerprint
                       (candidateSource candidate))
@@ -2520,11 +2698,13 @@ certifyModuleCandidates manifest graph targetPath = do
                       (ExactIfaceArtifact (candidateUnit candidate)
                         (candidateModule candidate) (candidateInterface candidate)
                         (candidateInterfaceSha256 candidate) [])
+                    originalProduct <- liftIO (try (BS.readFile (candidateProductPath candidate))
+                      :: IO (Either IOException BS.ByteString))
                     packageSelected <- liftIO $ case packageWitness of
                       Left _ -> pure False
                       Right roots -> do
                         recorded <- and <$> mapM (fmap (either (const False) (const True))
-                          . validatePackageImportRoot env) roots
+                          . validatePackageImportRoot env) (packageInterfaces roots)
                         selectedImports <- forM (ms_textual_imps summary ++ ms_srcimps summary) $ \(qualifier, name) -> do
                           resolved <- findImportedModule env (unLoc name) qualifier
                           case resolved of
@@ -2536,15 +2716,23 @@ certifyModuleCandidates manifest graph targetPath = do
                             _ -> pure (Left "direct import does not resolve")
                         pure $ recorded && case sequence selectedImports of
                           Left _ -> False
-                          Right selected -> all (`elem` roots) (catMaybes selected)
-                    pure $ case (inspected, packageWitness) of
-                      (Right (evidence, fingerprint), Right roots)
-                        | dependencySourceSha256 evidence == candidateSourceSha256 candidate
-                        , fingerprint == ms_hs_hash summary
-                        , packageSelected ->
-                            Just (ms_mod_name summary, (candidate, summary, node, roots))
-                      _ -> Nothing
-          _ -> pure Nothing
+                          Right selected -> all (`elem` packageInterfaces roots) (catMaybes selected)
+                    case (inspected, packageWitness, originalProduct) of
+                      (Right (evidence, fingerprint), Right roots, Right productBytes)
+                        | dependencySourceSha256 evidence /= candidateSourceSha256 candidate ->
+                            recordCandidate candidate CandidateSourceSha Nothing >> pure Nothing
+                        | fingerprint /= ms_hs_hash summary ->
+                            recordCandidate candidate CandidateSummaryHash Nothing >> pure Nothing
+                        | hexBytes (SHA256.hash productBytes) /= candidateProductSha256 candidate ->
+                            recordCandidate candidate CandidateNativeSha Nothing >> pure Nothing
+                        | not packageSelected ->
+                            recordCandidate candidate CandidatePackageSelection Nothing >> pure Nothing
+                        | otherwise -> pure (Just (ms_mod_name summary, (candidate, summary, node, roots)))
+                      (Left _, _, _) -> recordCandidate candidate CandidateSourceRead Nothing >> pure Nothing
+                      (_, Left reason, _) -> recordCandidate candidate CandidatePackageRead (Just reason) >> pure Nothing
+                      (_, _, Left _) -> recordCandidate candidate CandidateNativeRead Nothing >> pure Nothing
+          (Nothing, _) -> recordCandidate candidate CandidateMissingSummary Nothing >> pure Nothing
+          (_, Nothing) -> recordCandidate candidate CandidateMissingNode Nothing >> pure Nothing
       let initial = Map.fromList preflight
           requiredHome node =
             [ mkModuleName (dependencyImportName imported)
@@ -2571,39 +2759,68 @@ certifyModuleCandidates manifest graph targetPath = do
             (candidateInterface candidate) (candidateInterfaceSha256 candidate)
             [ (candidateUnit candidate, moduleNameString requirement)
             | requirement <- requiredHome node ]
+      forM_ (Map.elems (Map.difference initial admitted)) $ \(candidate, _, _, _) ->
+        recordCandidate candidate CandidateClosedHome Nothing
+      let recordAdmitted reason detail = forM_ (Map.elems admitted) $ \(candidate, _, _, _) ->
+            recordCandidate candidate reason detail
       if Map.null admitted
         then pure Map.empty
         else do
           loaded <- liftIO $ readExactIfaceArtifacts env
             (map artifact (Map.elems admitted))
           case loaded of
-            Left _ -> pure Map.empty
+            Left reason -> recordAdmitted CandidateInterfaceRead (Just reason) >> pure Map.empty
             Right interfaces
-              | any (mi_used_th . snd) interfaces -> pure Map.empty
+              | any (mi_used_th . snd) interfaces ->
+                  recordAdmitted CandidateInterfaceTH Nothing >> pure Map.empty
               | otherwise -> do
                   let selectedBoots = [summary | (name,summary) <- Map.toList bootSummaries,
                         Map.member name admitted]
                   let canonicalLoadGraph = mapMG (\summary -> summary
                         { ms_hspp_opts = canonicalizeRepresentationFlags (ms_hspp_opts summary) }) graph
-                  hydratedResult <- hydrateCandidateHomeProducts env canonicalLoadGraph interfaces
-                    [summary | (_,summary,_,_) <- Map.elems admitted] selectedBoots
+                      nativeGraph = mapMG (\summary -> summary
+                        { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts summary) }) (hsc_mod_graph env)
+                      nativeSummary summary = summary
+                        { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts summary) }
+                  -- Original native products use the extraction profile. GHC's
+                  -- separate source load keeps its interpreter profile and
+                  -- provisions every executable needed by a splice.
+                  hydratedResult <- hydrateCandidateHomeProducts env { hsc_mod_graph = nativeGraph }
+                    canonicalLoadGraph interfaces
+                    [nativeSummary summary | (_,summary,_,_) <- Map.elems admitted] selectedBoots
                   case hydratedResult of
-                    Left _ -> pure Map.empty
+                    Left reason -> recordAdmitted CandidateHydration (Just reason) >> pure Map.empty
                     Right hydrated -> do
-                      setSession hydrated
-                      pure (Map.map (\(candidate, _, _, roots) -> (candidate, roots)) admitted)
+                      setSession hydrated { hsc_mod_graph = hsc_mod_graph env }
+                      recordAdmitted CandidateAccepted Nothing
+                      pure (Map.map (\(candidate, summary, _, roots) -> AdmittedSourceCandidate
+                        candidate roots (if backendGeneratesCode (backend (ms_hspp_opts summary))
+                          then CandidateLoadForExecution else CandidateInterfaceOnly)) admitted)
+  when timing $ liftIO $ do
+    observed <- readIORef observations
+    let counts = Map.fromListWith (+)
+          [(reason, 1 :: Integer) | (reason, _) <- Map.elems observed]
+    forM_ (Map.toAscList counts) $ \(reason, count) ->
+      emitCount timing ("candidate_admission." ++ show reason) count
+    forM_ (take 128 (Map.toAscList observed)) $ \((unit, name), (reason, detail)) ->
+      hPutStrLn stderr ("tidepool-candidate-admission owner=" ++ show (take 192 (unit ++ ":" ++ name))
+        ++ " reason=" ++ show reason ++ maybe "" ((" detail=" ++) . show) detail)
+    emitCount timing "candidate_admission_rows_omitted" (toInteger (max 0 (Map.size observed - 128)))
+  pure result
 
 revalidateAcceptedCandidates :: [ModuleCandidate] -> IO Bool
 revalidateAcceptedCandidates candidates = and <$> forM candidates (\candidate -> do
   readBack <- try $ do
     (source, _) <- sourceEvidenceWithFingerprint (candidateSource candidate)
     interface <- BS.readFile (candidateInterface candidate)
+    productBytes <- BS.readFile (candidateProductPath candidate)
     packageImports <- readPackageImports (candidatePackageImports candidate)
       (candidatePackageImportsSha256 candidate)
       (ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
         (candidateInterface candidate) (candidateInterfaceSha256 candidate) [])
     pure (dependencySourceSha256 source == candidateSourceSha256 candidate
       && hexBytes (SHA256.hash interface) == candidateInterfaceSha256 candidate
+      && hexBytes (SHA256.hash productBytes) == candidateProductSha256 candidate
       && either (const False) (const True) packageImports)
     :: IO (Either IOException Bool)
   pure (either (const False) id readBack))
@@ -2820,6 +3037,7 @@ withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
     cache   <- liftIO newIfaceCache
     memoRef <- liftIO (newIORef Map.empty)
     requestTargetsRef <- liftIO (newIORef Set.empty)
+    stateOriginRef <- liftIO (newIORef OrdinarySourceState)
     let baseImportPaths = importPaths dflags'
     reifyGhc $ \session ->
       let finishRequest = do
@@ -2839,7 +3057,7 @@ withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
             evictTargetMemo targetModName' memoRef
             (writeIORef retainedRef (retainedContext retained) >>
               reflectGhc
-                (residentCompileOne selection cache memoRef retainedRef dflags' baseImportPaths
+                (residentCompileOne selection cache memoRef retainedRef stateOriginRef dflags' baseImportPaths
                   timing requestIdentity purpose mscope path extraIncludes buildProductsDir)
                 session)
               `finally` writeIORef retainedRef emptyRetainedContext
@@ -2877,15 +3095,30 @@ type RequestRunner = forall requestResult.
 -- Reads the context that the request runner wrote into the plugin's cell
 -- once at cycle start, then shares that value with memo validation.
 residentCompileOne
-  :: PipelineSelection result -> ModIfaceCache -> IORef GutsMemo -> IORef RetainedContext -> DynFlags -> [FilePath]
+  :: PipelineSelection result -> ModIfaceCache -> IORef GutsMemo -> IORef RetainedContext -> IORef ResidentStateOrigin -> DynFlags -> [FilePath]
   -> Bool -> Word64 -> CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath
   -> Ghc result
-residentCompileOne selection cache memoRef retainedRef baseDFlags baseImportPaths timing requestIdentity purpose mscope path extraIncludes buildProductsDir = do
+residentCompileOne selection cache memoRef retainedRef stateOriginRef baseDFlags baseImportPaths timing requestIdentity purpose mscope path extraIncludes buildProductsDir = do
   sessionT0 <- monotonicTime
   retained <- liftIO (readIORef retainedRef)
   variant <- liftIO $ case mscope of
     Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
     _                                        -> normalVariant purpose path
+  previousOrigin <- liftIO (readIORef stateOriginRef)
+  let currentOrigin = residentStateOrigin selection variant
+      reset = case (previousOrigin,currentOrigin) of
+        (ExactState,ExactState) -> False
+        (ExactState,_) -> True
+        (LegacySourceFreeState,OrdinarySourceState) -> True
+        _ -> False
+  when reset $ do
+      -- A source-free scope leaves virtual summaries, exact interfaces and
+      -- splice executables. Ordinary source admission needs a fresh GHC
+      -- environment, while its independently validated memo can stay warm.
+      -- Keep reset-required provenance until the replacement is installed;
+      -- cancellation during unload must require another reset next time.
+      getSession >>= liftIO . freshExactState >>= setSession
+  liftIO (writeIORef stateOriginRef currentOrigin)
   requestImportPaths <- liftIO (compileSearchPaths variant extraIncludes baseImportPaths)
   hsc0 <- getSession
   let sourceState
@@ -3094,10 +3327,12 @@ normalVariant purpose path = do
   pure PipelineVariant
    { pvLabel = "runPipeline"
    , pvExactScope = Nothing
+   , pvGeneratedScaffold = generatedRecipe purpose
    , pvDownsweepExcludes = []
    , pvTransformParsed = transformFor purpose targetModName'
    , pvPlan = \_timing modGraphRaw -> pure CompilePlan
       { cpLoadGraph = modGraphRaw
+      , cpLoadTargets = Nothing
       , cpAfterLoad = pure ()
         -- Parse/typecheck each source in dependency order after the shared
         -- load barrier has established a complete environment.
@@ -3139,13 +3374,251 @@ normalVariant purpose path = do
 -- registered interfaces. A
 -- reference turn imports @Tidepool.Prelude@ via the eval preamble; the
 -- @load'@ also keeps those source deps "loaded" (GHC-58427).
+-- Recipes grant execution only. The ordinary graph and its lexical admission
+-- are checked before discovering any source needed by an original quoter.
+data ExactExecutionPlan = ExactExecutionPlan
+  { executionLoadGraph :: ModuleGraph
+  , executionLoadTargets :: Maybe [Target]
+  , executionOriginalNodes :: [ExecutionSourceNode]
+  , executionFreshProviders :: [ModSummary]
+  , executionLinkGraph :: ModuleGraph
+  , executionNegativePaths :: [FilePath]
+  , executionPackageRoots :: [PackageImportRoot]
+  }
+
+-- Hooks carry only a cycle's linker view. Restore them even when a source
+-- refusal or cancellation prevents the final pipeline environment handoff.
+withCycleHooks :: Ghc a -> Ghc a
+withCycleHooks action = reifyGhc $ \session -> bracket
+  (reflectGhc (hsc_hooks <$> getSession) session)
+  (\hooks -> reflectGhc (getSession >>= \env -> setSession env {hsc_hooks=hooks}) session)
+  (const (reflectGhc action session))
+
+-- GHC's whole-module pipeline consults targets to choose bytecode generation.
+-- Restore only this field in the current environment, retaining the load's HPT.
+withLoadTargets :: Maybe [Target] -> Ghc a -> Ghc a
+withLoadTargets Nothing action = action
+withLoadTargets (Just targets) action = reifyGhc $ \session -> bracket
+  (reflectGhc (hsc_targets <$> getSession) session)
+  (\original -> reflectGhc (getSession >>= \env -> setSession env {hsc_targets=original}) session)
+  (const (reflectGhc (setTargets targets >> action) session))
+
+planExactExecutionLoad
+  :: ExactScope -> [(ExactIfaceArtifact, ModIface)] -> [(ExactIfaceArtifact, ModIface)] -> ModuleName
+  -> ModuleGraph -> ModuleGraph -> Ghc ExactExecutionPlan
+planExactExecutionLoad admitted interfaces checkedInterfaces targetName sourceGraph ordinaryLoad = do
+  initial <- getSession
+  parsed <- mapM parseModule [summary | ModuleNode _ summary <- mgModSummaries' sourceGraph
+    , xopt LangExt.QuasiQuotes (ms_hspp_opts summary)]
+  let quoted = [(parsedModule, occurrences)
+        | parsedModule <- parsed
+        , let occurrences = everything (++) (mkQ [] quasiQuoteRdrName)
+                (unLoc (pm_parsed_source parsedModule))
+        , not (null occurrences)]
+      home = homeUnitId (hsc_home_unit initial)
+      ownerKey owner = (unitString (moduleUnit owner), moduleNameString (moduleName owner))
+      originalByOwner = Map.fromList [((exactUnit artifact,exactModule artifact),iface)
+        | (artifact,iface) <- interfaces]
+      demandByOwner = Map.union originalByOwner (Map.fromList
+        [((exactUnit artifact,exactModule artifact),iface) | (artifact,iface) <- checkedInterfaces])
+      localImport (qualifier, name) = case qualifier of
+        NoPkgQual -> Just (unitString home,moduleNameString (unLoc name))
+        ThisPkg unit | unit == home -> Just (unitString unit,moduleNameString (unLoc name))
+        _ -> Nothing
+      candidates imports rdr = case rdr of
+        Qual qualifier occurrence -> (occurrence,
+          [decl | L _ decl <- imports
+            , fromMaybe (unLoc (ideclName decl)) (fmap unLoc (ideclAs decl)) == qualifier])
+        Unqual occurrence -> (occurrence,
+          [decl | L _ decl <- imports
+            , ideclQualified decl == NotQualified])
+        _ -> (rdrNameOcc rdr,[])
+      defining parsedModule rdr =
+        let summary = pm_mod_summary parsedModule
+            (occurrence,declarations) = candidates (hsmodImports (unLoc (pm_parsed_source parsedModule))) rdr
+        in fmap concat $ forM [(importedKey,decl,iface) | imported <- ms_textual_imps summary
+            , decl <- declarations
+            , getLoc (snd imported) == getLocA (ideclName decl)
+            , Just importedKey <- [localImport imported]
+            , Just iface <- [Map.lookup importedKey demandByOwner]] $ \(importedKey,decl,iface) -> do
+              names <- either (const (liftIO (throwIO (ExecutionSourceUnsupported importedKey)))) pure
+                (selectedImportNames (mi_exports iface) (ideclImportList decl))
+              pure [key | name <- names, nameOccName name == occurrence
+                , Just owner <- [nameModule_maybe name]
+                , let key = ownerKey owner, Map.member key demandByOwner]
+      providers = [key | ModuleNode _ summary <- mgModSummaries' sourceGraph
+        , ms_mod_name summary /= targetName
+        , backendGeneratesCode (backend (ms_hspp_opts summary))
+        , imported <- ms_textual_imps summary, Just key <- [localImport imported]
+        , Map.member key demandByOwner]
+  definers <- concat <$> mapM (\(parsedModule,occurrences) -> concat <$> mapM (defining parsedModule) occurrences) quoted
+  let roots = if null quoted then [] else Set.toAscList (Set.fromList (providers ++ definers))
+  if null roots then pure (ExactExecutionPlan ordinaryLoad Nothing [] [] sourceGraph [] []) else withLoadTargets (Just (hsc_targets initial)) $ do
+    forM_ roots $ \key -> unless (isNothing (hscCompileCoreExprHook (hsc_hooks initial))) $
+      liftIO (throwIO (ExecutionSourceUnsupported key))
+    nodes <- either (liftIO . throwIO) pure (executionSourceClosure
+      (scopeExecutionGraphs admitted) (scopeExecutionOwners admitted) (scopeExecutionNativeOwners admitted) roots)
+    let selected = Map.fromList [(executionIdentityKey (executionNodeIdentity node),node) | node <- nodes]
+        selectedNames = Set.fromList [mkModuleName name | (_,name) <- Map.keys selected]
+        excluded = [mkModuleName (exactModule artifact) | (artifact,_,_) <- scopeInterfaces admitted
+          , mkModuleName (exactModule artifact) `Set.notMember` selectedNames]
+          ++ [mkModuleName (exactModule artifact) | artifact <- scopeValueInterfaces admitted]
+    extraTargets <- forM nodes $ \node -> do
+      let source = dependencyModuleSource (executionNodeModule node)
+          key = executionIdentityKey (executionNodeIdentity node)
+      bytes <- liftIO (BS.readFile source)
+      unless (hexBytes (SHA256.hash bytes) == executionNodeSourceSha256 node) $
+        liftIO (throwIO (ExecutionSourceChanged key))
+      contents <- either (const (liftIO (throwIO (ExecutionSourceUnsupported key)))) pure
+        (TextEncoding.decodeUtf8' bytes)
+      now <- liftIO (getModificationTime source)
+      target <- guessTarget source Nothing Nothing
+      pure target {targetContents=Just (stringToStringBuffer (Text.unpack contents),now)
+        ,targetAllowObjCode=False}
+    -- The baseline preflight installed virtual Finder locations. Execution
+    -- selection must use real current source resolution, never those locations.
+    finder <- liftIO initFinderCache
+    setSession initial {hsc_FC=finder}
+    setTargets (hsc_targets initial ++ extraTargets)
+    executionGraph <- depanal excluded False
+    env <- getSession
+    current <- liftIO (dependencyEvidenceFor env ([],True) executionGraph [])
+    let summaries = Map.fromList [(ownerKey (ms_mod summary),summary)
+          | ModuleNode _ summary <- mgModSummaries' executionGraph, ms_hsc_src summary == HsSrcFile]
+        currentNodes = Map.fromList [((dependencyModuleUnit node,dependencyModuleName node),node)
+          | node <- dependencyModules current, not (dependencyModuleBoot node)]
+        originalNames = Map.keysSet originalByOwner
+        freshSummaries = Map.fromList [((ownerKey (ms_mod summary),ms_hsc_src summary == HsBootFile),summary)
+          | ModuleNode _ summary <- mgModSummaries' sourceGraph]
+    forM_ (mgModSummaries' executionGraph) $ \graphNode -> case graphNode of
+      ModuleNode _ summary -> do
+        let key = ownerKey (ms_mod summary)
+            sourceKey = (key,ms_hsc_src summary == HsBootFile)
+        unless (Map.member sourceKey freshSummaries || Map.member key selected) $
+          liftIO (throwIO (ExecutionSourceIncomplete key))
+        forM_ (Map.lookup sourceKey freshSummaries) $ \originalFresh -> do
+          originalPath <- liftIO (traverse canonicalizePath (ml_hs_file (ms_location originalFresh)))
+          executionPath <- liftIO (traverse canonicalizePath (ml_hs_file (ms_location summary)))
+          unless (ms_mod summary == ms_mod originalFresh && executionPath == originalPath
+              && ms_hs_hash summary == ms_hs_hash originalFresh) $
+            liftIO (throwIO (ExecutionSourceChanged key))
+      _ -> pure ()
+    observations <- forM nodes $ \node -> do
+      let key = executionIdentityKey (executionNodeIdentity node)
+          original = executionNodeModule node
+          source = dependencyModuleSource original
+      summary <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key summaries)
+      actual <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key currentNodes)
+      canonical <- liftIO (traverse canonicalizePath (ml_hs_file (ms_location summary)))
+      (sourceProof,fingerprint) <- liftIO (sourceEvidenceWithFingerprint source)
+      unless (canonical == Just source && dependencySourceSha256 sourceProof == executionNodeSourceSha256 node
+          && fingerprint == ms_hs_hash summary) $ liftIO (throwIO (ExecutionSourceChanged key))
+      originalQuotes <- if xopt LangExt.QuasiQuotes (ms_hspp_opts summary)
+        then do parsedOriginal <- parseModule summary
+                pure (everything (++) (mkQ [] quasiQuoteRdrName) (unLoc (pm_parsed_source parsedOriginal)))
+        else pure []
+      unless (not (hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary))
+          && not (gopt Opt_Pp (ms_hspp_opts summary))
+          && not (xopt LangExt.StaticPointers (ms_hspp_opts summary))
+          && null originalQuotes) $
+        liftIO (throwIO (ExecutionSourceUnsupported key))
+      let expectedPath imported = case dependencyImportSelected imported of
+            Just path' -> Just path'
+            Nothing | (fst key,dependencyImportName imported) `elem` executionNodeRequirements node ->
+              dependencyModuleSource . executionNodeModule <$> Map.lookup
+                (fst key,dependencyImportName imported) selected
+            Nothing -> Nothing
+          tuple imported path' = (dependencyImportQualifier imported,dependencyImportName imported,
+            dependencyImportBoot imported,path')
+      unless (sort [tuple imported (expectedPath imported) | imported <- dependencyModuleImports original]
+          == sort [tuple imported (dependencyImportSelected imported) | imported <- dependencyModuleImports actual]) $
+        liftIO (throwIO (ExecutionSourceResolutionChanged key))
+      -- Explicit source roots must not override an earlier current search-path
+      -- candidate. Original negative-resolution witnesses remain live as well.
+      let imports = Set.fromList [(dependencyImportQualifier imported,dependencyImportName imported,
+            dependencyImportBoot imported) | imported <- dependencyModuleImports original]
+          applicable resolution = (dependencyResolutionQualifier resolution,dependencyResolutionModule resolution,
+            dependencyResolutionBoot resolution) `Set.member` imports
+          currentResolutions = filter applicable (dependencyResolutions current)
+          originalResolutions = filter applicable (dependencyResolutions
+            (executionGraphEvidence (executionNodeGraph node)))
+          negative resolution = case dependencyResolutionSelected resolution of
+            Nothing -> dependencyResolutionCandidates resolution
+            Just path' -> takeWhile (/= path') (dependencyResolutionCandidates resolution)
+          originalNegative resolution
+            | (fst key,dependencyResolutionModule resolution) `Set.member` originalNames = []
+            | otherwise = negative resolution
+      absent <- liftIO $ and <$> mapM (fmap not . doesFileExist)
+        (nub (concatMap negative currentResolutions ++ concatMap originalNegative originalResolutions))
+      unless absent $ liftIO (throwIO (ExecutionSourceResolutionChanged key))
+      let proof = [(artifact,path',sha) | (artifact,path',sha) <- scopeInterfaces admitted
+            , (exactUnit artifact,exactModule artifact) == key]
+      packageProof <- case proof of
+        [(artifact,path',sha)] -> liftIO (readPackageImports path' sha artifact)
+          >>= either (const (liftIO (throwIO (ExecutionSourceResolutionChanged key)))) pure
+        _ -> liftIO (throwIO (ExecutionSourceIncomplete key))
+      forM_ (ms_textual_imps summary) $ \(qualifier,name) -> do
+        resolved <- liftIO (findImportedModule env (unLoc name) qualifier)
+        case resolved of
+          Found _ owner | isHomeUnit (hsc_home_unit env) (moduleUnit owner) -> pure ()
+          Found _ owner | owner == gHC_PRIM -> unless (CompilerPrimitive `elem` compilerProvided packageProof) $
+            liftIO (throwIO (ExecutionSourceResolutionChanged key))
+          Found _ owner -> do
+            package <- liftIO (packageImportRoot env owner) >>= either
+              (const (liftIO (throwIO (ExecutionSourceResolutionChanged key)))) pure
+            unless (package `elem` packageInterfaces packageProof) $
+              liftIO (throwIO (ExecutionSourceResolutionChanged key))
+          _ -> liftIO (throwIO (ExecutionSourceResolutionChanged key))
+      pure (concatMap negative currentResolutions ++ concatMap originalNegative originalResolutions,
+        packageInterfaces packageProof)
+    let shadowNames = Set.fromList [mkModuleName name | (_,name) <- Map.keys selected]
+        blockedSeed = Set.fromList (targetName : excluded)
+        deferred names =
+          let grown = names `Set.union` Set.fromList [ms_mod_name summary
+                | ModuleNode _ summary <- mgModSummaries' executionGraph
+                , any ((`Set.member` names) . unLoc . snd) (ms_textual_imps summary)]
+          in if grown == names then names else deferred grown
+        blocked = deferred blockedSeed
+        ordinaryNames = Set.fromList [ms_mod_name summary | ModuleNode _ summary <- mgModSummaries' ordinaryLoad]
+        loadGraph = mkModuleGraph [graphNode | graphNode <- mgModSummaries' executionGraph
+          , case graphNode of ModuleNode _ summary -> ms_mod_name summary `Set.member` Set.union shadowNames ordinaryNames
+                              _ -> True]
+        freshProviders = [summary | ModuleNode _ summary <- flattenSCCs (topSortModuleGraph True sourceGraph Nothing)
+          , ms_mod_name summary `Set.notMember` ordinaryNames
+          , ms_mod_name summary /= targetName
+          , backendGeneratesCode (backend (ms_hspp_opts summary))]
+    forM_ (Set.toList (Set.intersection shadowNames blocked)) $ \name ->
+      liftIO (throwIO (ExecutionSourceUnsupported (unitString home,moduleNameString name)))
+    forM_ freshProviders $ \summary -> unless
+        (ms_mod_name summary `Set.notMember` blocked
+          && null (ms_srcimps summary)
+          && not (any (\case ModuleNode _ boot -> ms_hsc_src boot == HsBootFile && ms_mod boot == ms_mod summary
+                             _ -> False) (mgModSummaries' sourceGraph))
+          && not (xopt LangExt.StaticPointers (ms_hspp_opts summary))) $
+          liftIO (throwIO (ExecutionSourceUnsupported (ownerKey (ms_mod summary))))
+    -- Native interface validity and executable loading use their respective
+    -- profiles. No equality with a newly emitted bytecode interface is assumed.
+    native <- liftIO (hydrateExactScope env interfaces)
+    let nativeEnv = native {hsc_mod_graph=mapMG (\summary -> summary
+          {ms_hspp_opts=canonicalizeDFlags (ms_hspp_opts summary)}) executionGraph}
+    forM_ nodes $ \node -> do
+      let key = executionIdentityKey (executionNodeIdentity node)
+      summary <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key summaries)
+      iface <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key originalByOwner)
+      decision <- liftIO (checkOldIface (scopeRetainedHscEnv (ms_mod summary) nativeEnv)
+        summary {ms_hspp_opts=canonicalizeDFlags (ms_hspp_opts summary)} (Just iface))
+      case decision of
+        UpToDateItem _ -> pure ()
+        OutOfDateItem _ _ -> liftIO (throwIO (ExecutionSourceChanged key))
+    setSession env {hsc_targets=hsc_targets initial}
+    pure (ExactExecutionPlan loadGraph (Just (hsc_targets initial ++ extraTargets)) nodes freshProviders executionGraph
+      (nub (concatMap fst observations)) (Set.toAscList (Set.fromList (concatMap snd observations))))
+
 sessionVariant :: CompilePurpose -> SessionScope -> FilePath -> IO PipelineVariant
 sessionVariant purpose scope path = do
   targetModName' <- targetModuleNameFor path
   completedValuesRef <- newIORef Nothing
-  let effectivePurpose = case purpose of
-        CellProgramCompile inner _ -> inner
-        _ -> purpose
+  let effectivePurpose = originalPurpose purpose
       completedValues = case effectivePurpose of
         CheckedItemCompile _ _ values -> values
         ProgramItemCompile _ _ _ values -> values
@@ -3170,6 +3643,7 @@ sessionVariant purpose scope path = do
   pure PipelineVariant
    { pvLabel = "runSessionPipeline"
    , pvExactScope = exact
+   , pvGeneratedScaffold = generatedRecipe purpose
    , pvDownsweepExcludes = excludedOwners
    , pvTransformParsed = \env summary parsed -> do
        captured <- readIORef completedValuesRef
@@ -3212,14 +3686,56 @@ sessionVariant purpose scope path = do
                        ModuleNode _ ms -> not (ms_mod_name ms `Set.member` deferredMods)
                        _               -> True ]
       injectedRef <- liftIO (newIORef Set.empty)
+      originalHooks <- hsc_hooks <$> getSession
+      verifiedClosureRef <- liftIO (newIORef Nothing)
+      scaffoldRef <- liftIO (newIORef noGeneratedScaffoldImports)
       injectMsRef <- liftIO (newIORef (0 :: Integer))
+      executionPlan <- case exact of
+        Nothing -> pure (ExactExecutionPlan depGraph Nothing [] [] modGraphRaw [] [])
+        Just admitted -> do
+          env <- getSession
+          let originals = [iface | (iface,_,_) <- scopeInterfaces admitted]
+              values = scopeValueInterfaces admitted
+          closure' <- liftIO (readVerifiedExactIfaceClosureWithCheckedValues env originals values)
+            >>= either (liftIO . ioError . userError) pure
+          interfaces <- either (liftIO . ioError . userError) pure (selectVerifiedExactInterfaces closure' originals)
+          checkedValues <- either (liftIO . ioError . userError) pure
+            (checkedValueImportAuthorityFromVerified closure' values)
+          checkedInterfaces <- either (liftIO . ioError . userError) pure
+            (selectVerifiedValueInterfaces closure' values)
+          hydrated <- liftIO (hydrateExactScope env interfaces)
+          liftIO (validateEnvironmentFamilies hydrated)
+          let byOwner = Map.fromList [((exactUnit iface,exactModule iface),iface) | (iface,_) <- interfaces]
+              lexical = [(iface,imports) | (owner,imports) <- scopeLexical admitted
+                , Just iface <- [Map.lookup owner byOwner]]
+          scaffold <- case generatedRecipe purpose of
+            Nothing -> pure noGeneratedScaffoldImports
+            Just recipe -> do
+              targetSummary <- case [summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw
+                  , ms_mod_name summary == targetModName'] of
+                [summary] -> pure summary
+                _ -> liftIO (fail "generated scaffold target summary is missing or duplicated")
+              parsedScaffold <- parseModule targetSummary
+              liftIO (readGeneratedScaffoldImportAuthority closure'
+                (scopeExecutionNativeOwners admitted) recipe parsedScaffold modGraphRaw hydrated)
+                >>= either (liftIO . fail) pure
+          liftIO (writeIORef scaffoldRef scaffold)
+          preflight <- liftIO (installExactLexicalGraphWithScaffold modGraphRaw lexical checkedValues scaffold hydrated)
+          _ <- either (liftIO . ioError . userError) pure preflight
+          liftIO (writeIORef verifiedClosureRef (Just closure'))
+          planExactExecutionLoad admitted interfaces checkedInterfaces targetModName' modGraphRaw depGraph
+      let executionNodes = executionOriginalNodes executionPlan
+      liftIO $ do
+        emitCount timing "exact_execution_original_load_owners" (toInteger (length executionNodes))
+        emitCount timing "exact_execution_fresh_provider_compiles" (toInteger (length (executionFreshProviders executionPlan)))
       pure CompilePlan
         -- Compile the turn's home-package SOURCE dependencies
         -- (@Tidepool.Prelude@, @Tidepool.Effects@, @Lib.G<g>@) into the HPT,
         -- but NOT the turn target itself. LoadAllTargets on depGraph (target
         -- filtered out above) — equivalent to the old @LoadDependenciesOf@
         -- but without compiling the target prematurely.
-        { cpLoadGraph = depGraph
+        { cpLoadGraph = executionLoadGraph executionPlan
+        , cpLoadTargets = executionLoadTargets executionPlan
         , cpAfterLoad = do
             -- Restore the FULL module graph (target included) so the
             -- per-module typecheck can see HPT instances from dep modules:
@@ -3231,10 +3747,36 @@ sessionVariant purpose scope path = do
                case exact of
                  Nothing -> setSession hscMG { hsc_mod_graph = modGraphRaw }
                  Just admitted -> do
-                   loaded <- liftIO (readExactIfaceArtifacts hscMG
-                     [iface | (iface, _, _) <- scopeInterfaces admitted])
-                   interfaces <- either (liftIO . ioError . userError) pure loaded
+                   let originals = [iface | (iface, _, _) <- scopeInterfaces admitted]
+                       values = scopeValueInterfaces admitted
+                   closure' <- liftIO (readIORef verifiedClosureRef) >>= maybe
+                     (liftIO $ ioError $ userError "exact hydration lacks its verified closure") pure
+                   interfaces <- either (liftIO . ioError . userError) pure
+                     (selectVerifiedExactInterfaces closure' originals)
+                   checkedValues <- either (liftIO . ioError . userError) pure
+                     (checkedValueImportAuthorityFromVerified closure' values)
+                   when timing $ forM_ (take 128 executionNodes) $ \node -> do
+                     let key@(_,owner) = executionIdentityKey (executionNodeIdentity node)
+                         loaded = lookupHpt (hsc_HPT hscMG) (mkModuleName owner)
+                     liftIO $ hPutStrLn stderr $ "tidepool-exact-execution-load owner=" ++ show key
+                       ++ " allow_object=False bytecode=" ++ show (maybe False (isJust . homeMod_bytecode . hm_linkable) loaded)
+                       ++ " object=" ++ show (maybe False (isJust . homeMod_object . hm_linkable) loaded)
+                   executable <- forM executionNodes $ \node -> do
+                     let original = executionNodeIdentity node
+                         key = executionIdentityKey original
+                         name = mkModuleName (executionModule original)
+                     case lookupHpt (hsc_HPT hscMG) name of
+                       Just hmi | (unitString (moduleUnit (mi_module (hm_iface hmi))),
+                           moduleNameString (moduleName (mi_module (hm_iface hmi)))) == key
+                         , let links = hm_linkable hmi
+                         , isJust (homeMod_bytecode links) || isJust (homeMod_object links)
+                         , not (any usageFile (mi_usages (hm_iface hmi))) -> pure (name,links)
+                       _ -> liftIO (throwIO (ExecutionSourceLinkableMissing key))
                    hydrated <- liftIO (hydrateExactScope hscMG interfaces)
+                   let withExecutables = hscUpdateHPT (\table -> foldr
+                         (\(name,links) result -> case lookupHpt result name of
+                           Just hmi -> addToHpt result name hmi {hm_linkable=links}
+                           Nothing -> result) table executable) hydrated
                    let verifiedOwners = Map.fromList
                          [((exactUnit iface, exactModule iface), iface)
                          | (iface, _) <- interfaces]
@@ -3242,8 +3784,38 @@ sessionVariant purpose scope path = do
                          [(iface, imports)
                          | (owner, imports) <- scopeLexical admitted
                          , Just iface <- [Map.lookup owner verifiedOwners]]
-                   graph <- liftIO (installExactLexicalGraph modGraphRaw selected hydrated)
-                   either (liftIO . ioError . userError) setSession graph
+                   scaffold <- liftIO (readIORef scaffoldRef)
+                   graph <- liftIO (installExactLexicalGraphWithScaffold modGraphRaw selected checkedValues scaffold withExecutables)
+                   baseline <- either (liftIO . ioError . userError) pure graph
+                   linked <- if null executionNodes then pure baseline else do
+                     forM_ executionNodes $ \node ->
+                       unless (isNothing (hscCompileCoreExprHook (hsc_hooks baseline))) $
+                         liftIO (throwIO (ExecutionSourceUnsupported (executionIdentityKey (executionNodeIdentity node))))
+                     let executionKeys = Set.fromList (map (executionIdentityKey . executionNodeIdentity) executionNodes)
+                         shadows = [node | node@(ModuleNode _ summary) <- mgModSummaries' (executionLinkGraph executionPlan)
+                           , (unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary))
+                             `Set.member` executionKeys]
+                         shadowKeys = Set.fromList (map mkNodeKey shadows)
+                         link invocation location expression = hscCompileCoreExpr' invocation
+                           {hsc_mod_graph=mkModuleGraph
+                             (shadows ++ [node | node <- mgModSummaries' (hsc_mod_graph invocation)
+                               , mkNodeKey node `Set.notMember` shadowKeys])} location expression
+                     pure baseline {hsc_hooks=(hsc_hooks baseline) {hscCompileCoreExprHook=Just link}}
+                   setSession linked
+                   -- A fresh provider is authored in the current lexical
+                   -- environment. Compile its whole GHC pipeline after
+                   -- restoring that environment; hidden execution owners may
+                   -- supply bytecode, never an orphan instance or family rule.
+                   forM_ (executionFreshProviders executionPlan) $ \summary -> do
+                     current <- getSession
+                     hmi <- liftIO (compileOne' (Just batchMsg) current
+                       summary {ms_hspp_opts=canonicalizeRepresentationFlags (ms_hspp_opts summary)}
+                       1 1 Nothing emptyHomeModInfoLinkable)
+                     unless (mi_module (hm_iface hmi) == ms_mod summary
+                         && (isJust (homeMod_bytecode (hm_linkable hmi)) || isJust (homeMod_object (hm_linkable hmi)))) $
+                       liftIO (throwIO (ExecutionSourceLinkableMissing
+                         (unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary))))
+                     setSession (hscUpdateHPT (\table -> addToHpt table (ms_mod_name summary) hmi) current)
             -- Dependency order matters now that MULTIPLE modules (not just
             -- one leaf target) may need deferred, post-injection compilation:
             -- a deferred module that itself depends on another deferred
@@ -3301,12 +3873,17 @@ sessionVariant purpose scope path = do
                           -- allocations authorize thin-interface refinement.
                           let completedOwners = map completedValueModule completedValues
                               dependencies = filter ((`notElem` completedOwners) . exactModule) artifacts
-                          readback <- liftIO (hydrateCompletedValueImportsWithDependencies dependencies completedValues hsc0)
+                          closure' <- liftIO (readIORef verifiedClosureRef) >>= maybe
+                            (liftIO $ ioError $ userError "completed value injection lacks its verified closure") pure
+                          readback <- liftIO (hydrateCompletedValueImportsWithVerifiedDependencies
+                            closure' dependencies completedValues hsc0)
                           (hydrated, captured) <- either (liftIO . ioError . userError) pure readback
                           pure (hydrated, Just captured)
                         else do
-                          readback <- liftIO (readExactIfaceArtifacts hsc0 artifacts)
-                          captured <- either (liftIO . ioError . userError) pure readback
+                          closure' <- liftIO (readIORef verifiedClosureRef) >>= maybe
+                            (liftIO $ ioError $ userError "checked value injection lacks its verified closure") pure
+                          captured <- either (liftIO . ioError . userError) pure
+                            (selectVerifiedValueInterfaces closure' artifacts)
                           hydrated <- liftIO (hydrateExactScope hsc0 captured)
                           liftIO $ forM_ needed $ \owner -> case
                               [artifact | artifact <- artifacts,
@@ -3328,10 +3905,25 @@ sessionVariant purpose scope path = do
                   modifyIORef' injectMsRef (+ injectMs)
         , cpTier = OptimizeEveryModule
         , cpBeforeMerge =
-            liftIO (readIORef injectMsRef >>= emitPhase timing "inject")
-        , cpFinalEnv = hscUpdateFlags canonicalizeDFlags
+            do liftIO (readIORef injectMsRef >>= emitPhase timing "inject")
+               forM_ executionNodes $ \node -> do
+                 actual <- liftIO (sourceEvidenceWithFingerprint (dependencyModuleSource (executionNodeModule node)))
+                 unless (dependencySourceSha256 (fst actual) == executionNodeSourceSha256 node) $
+                   liftIO (throwIO (ExecutionSourceChanged (executionIdentityKey (executionNodeIdentity node))))
+               forM_ (executionNegativePaths executionPlan) $ \path' -> do
+                 exists <- liftIO (doesFileExist path')
+                 when exists $ liftIO (throwIO (ExecutionSourceResolutionChanged ("",path')))
+               env <- getSession
+               forM_ (executionPackageRoots executionPlan) $ \root -> do
+                 unchanged <- liftIO (validatePackageImportRoot env root)
+                 either (const (liftIO (throwIO (ExecutionSourceResolutionChanged
+                   (packageUnit root,packageModule root))))) pure unchanged
+        , cpFinalEnv = \env -> hscUpdateFlags canonicalizeDFlags env {hsc_hooks=originalHooks}
         }
    }
+  where
+    usageFile UsageFile{} = True
+    usageFile _ = False
 -- | Render the exact type held by the typechecked environment before the
 -- executable pipeline can simplify the binding away.
 capturedBindingDisplay :: String -> TcGblEnv -> Maybe String

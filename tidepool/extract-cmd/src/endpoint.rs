@@ -74,16 +74,13 @@ impl std::fmt::Display for CompilerIdentity {
     }
 }
 
-pub(crate) fn producer_identity(
-    frontend: &[u8],
-    worker_selection: &OsStr,
-    worker: &[u8],
-    ghc_libdir: &OsStr,
-) -> [u8; 32] {
+pub(crate) fn producer_identity(frontend: &[u8], worker: &[u8], ghc_libdir: &OsStr) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    frame(&mut hasher, b"tidepool-compiler-producer-v1");
+    // Executable locations are deployment provenance. Retaining identical
+    // compiler bytes for a run must preserve its configured authority and
+    // certified module products. The GHC directory still selects package inputs.
+    frame(&mut hasher, b"tidepool-compiler-producer-v2");
     frame(&mut hasher, frontend);
-    frame(&mut hasher, worker_selection.as_encoded_bytes());
     frame(&mut hasher, worker);
     frame(&mut hasher, ghc_libdir.as_encoded_bytes());
     *hasher.finalize().as_bytes()
@@ -169,7 +166,10 @@ enum CancellationTarget {
 #[derive(Debug)]
 enum TransactionTransport {
     Direct(DirectEndpoint),
-    Daemon { stream: UnixStream, socket: PathBuf },
+    Daemon {
+        transaction: daemon::DaemonTransaction,
+        socket: PathBuf,
+    },
 }
 
 #[derive(Debug)]
@@ -474,9 +474,11 @@ impl CompilerEndpoint {
                         io::Error::new(io::ErrorKind::BrokenPipe, "bound endpoint is closed"),
                     )
                 })?;
-                stdin.write_all(daemon::TRANSACTION).map_err(|source| {
-                    SpawnError::indeterminate(endpoint.program.clone(), source)
-                })?;
+                stdin
+                    .write_all(daemon::DIRECT_TRANSACTION)
+                    .map_err(|source| {
+                        SpawnError::indeterminate(endpoint.program.clone(), source)
+                    })?;
                 stdin.flush().map_err(|source| {
                     SpawnError::indeterminate(endpoint.program.clone(), source)
                 })?;
@@ -499,7 +501,7 @@ impl CompilerEndpoint {
                 TransactionTransport::Direct(endpoint)
             }
             Transport::Daemon { socket, epoch } => {
-                let stream = daemon::begin_transaction_with_cancellation(
+                let transaction = daemon::begin_transaction_with_cancellation(
                     &socket,
                     &epoch,
                     cancellation.as_ref(),
@@ -515,7 +517,10 @@ impl CompilerEndpoint {
                         SpawnError::indeterminate(socket.as_os_str(), source)
                     }
                 })?;
-                TransactionTransport::Daemon { stream, socket }
+                TransactionTransport::Daemon {
+                    transaction,
+                    socket,
+                }
             }
             Transport::Scoped => {
                 return Err(SpawnError::not_submitted(
@@ -545,9 +550,8 @@ impl CompilerEndpoint {
     pub fn execute(mut self, cmd: &ExtractCmd) -> Result<ExtractRun, SpawnError> {
         let cwd = std::env::current_dir()
             .map_err(|source| SpawnError::not_submitted("current directory", source))?;
-        // The client side of the compile-request span. Its `compile_request`
-        // is the digest the daemon computes for the same request, so a run's
-        // host trace and compiler trace name one compile identically.
+        // Both sides retain the same input digest. Daemon acceptance adds
+        // an exact invocation identity in the transport-owned request event.
         let span = tracing::info_span!(
             "compile_request",
             compile_request = %daemon::compile_request_correlation(&cwd, &cmd.request.worker_argv()),
@@ -815,15 +819,16 @@ impl CompilerTransaction {
                     )
                 })?
             }
-            TransactionTransport::Daemon { stream, socket } => {
-                daemon::execute_transaction_request(stream, &cwd, &cmd.request.worker_argv())
-                    .map_err(|error| {
-                        SpawnError::indeterminate(
-                            socket.as_os_str(),
-                            io::Error::other(error.to_string()),
-                        )
-                    })?
-            }
+            TransactionTransport::Daemon {
+                transaction,
+                socket,
+            } => daemon::execute_transaction_request(transaction, &cwd, &cmd.request.worker_argv())
+                .map_err(|error| {
+                    SpawnError::indeterminate(
+                        socket.as_os_str(),
+                        io::Error::other(error.to_string()),
+                    )
+                })?,
         };
         Ok(ExtractRun {
             output,
@@ -866,14 +871,17 @@ impl CompilerTransaction {
                         result
                     }
                 }
-                TransactionTransport::Daemon { stream, socket } => {
+                TransactionTransport::Daemon {
+                    transaction,
+                    socket,
+                } => {
                     if self.failed {
                         // best-effort: the transaction already failed; the
                         // peer may already have closed its end.
-                        stream.shutdown(Shutdown::Both).ok();
+                        transaction.stream.shutdown(Shutdown::Both).ok();
                         Ok(())
                     } else {
-                        daemon::end_transaction(stream).map_err(|error| {
+                        daemon::end_transaction(transaction).map_err(|error| {
                             SpawnError::indeterminate(
                                 socket.as_os_str(),
                                 io::Error::other(error.to_string()),
@@ -916,13 +924,25 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn producer_identity_retains_each_compiler_input() {
+        let identity = producer_identity(b"frontend", b"worker", OsStr::new("/ghc/lib"));
+        for changed in [
+            producer_identity(b"changed", b"worker", OsStr::new("/ghc/lib")),
+            producer_identity(b"frontend", b"changed", OsStr::new("/ghc/lib")),
+            producer_identity(b"frontend", b"worker", OsStr::new("/other/ghc/lib")),
+        ] {
+            assert_ne!(identity, changed);
+        }
+    }
+
+    #[test]
     fn a_failed_transaction_refuses_later_requests() {
         let (stream, peer) = UnixStream::pair().unwrap();
         drop(peer);
         let mut transaction = CompilerTransaction {
             identity: CompilerIdentity::direct([1; 32], [2; 32]),
             transport: Some(TransactionTransport::Daemon {
-                stream,
+                transaction: daemon::DaemonTransaction::for_test(stream),
                 socket: "/tmp/compiler.sock".into(),
             }),
             failed: false,

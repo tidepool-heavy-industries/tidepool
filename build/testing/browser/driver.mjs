@@ -72,8 +72,10 @@ function decodeWsFrame(payload) {
 }
 
 function hostActor(snapshot, actor) {
-  return snapshot?.actors?.find((candidate) => candidate.identity?.actor === actor.name
-    && candidate.identity?.incarnation === actor.incarnation);
+  const path = actor.path ?? actor.name ?? actor.actor;
+  return snapshot?.actors?.find((candidate) => candidate.identity?.actor === path
+    && candidate.identity?.incarnation === actor.incarnation
+    && (actor.run === undefined || candidate.identity?.run === actor.run));
 }
 
 async function releaseBarrier(spec, defaultExpectedInput) {
@@ -114,12 +116,12 @@ async function signIn(page, secret) {
   await page.goto(new URL('/', secret.baseUrl).toString(), { waitUntil: 'domcontentloaded' });
   await page.getByLabel('Session secret').fill(secret.value);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await page.getByRole('status').filter({ hasText: /^Session authenticated$/ }).waitFor({ timeout: 30_000 });
-  await page.getByRole('heading', { name: 'Tree' }).waitFor({ timeout: 30_000 });
+  await page.getByRole('status').filter({ hasText: /^Session authenticated(?: · .+)?$/ }).waitFor({ timeout: 30_000 });
+  await page.getByRole('heading', { name: 'Active worker' }).waitFor({ timeout: 30_000 });
 }
 
 async function selectHostActor(page, actor) {
-  await page.getByRole('button', { name: 'Host', exact: true }).click();
+  await page.getByRole('link', { name: 'Host', exact: true }).click();
   const target = page.getByLabel('Target actor');
   await target.waitFor({ timeout: 15_000 });
   const options = await target.locator('option').evaluateAll((items) => items.map((item) => ({ value: item.value, text: item.textContent ?? '' })));
@@ -136,6 +138,42 @@ async function sendHostInput(page, text) {
   await page.getByRole('button', { name: 'Send input' }).click();
 }
 
+async function waitForHostActorState(getSnapshot, actor, state, timeoutMs) {
+  const deadline = performance.now() + timeoutMs;
+  let expectedIdentity;
+  while (performance.now() < deadline) {
+    const projection = hostActor(getSnapshot(), actor);
+    if (projection?.identity) {
+      expectedIdentity ??= projection.identity;
+      if (projection.identity.run === expectedIdentity.run
+          && projection.identity.actor === expectedIdentity.actor
+          && projection.identity.incarnation === expectedIdentity.incarnation
+          && projection.lifecycle === state) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, deadline - performance.now()))));
+  }
+  throw new Error(`actor ${actor.name}@${actor.incarnation} did not reach ${state} in the authoritative host projection`);
+}
+
+async function retainedOperations(page) {
+  return page.evaluate(() => {
+    const ledger = JSON.parse(sessionStorage.getItem('harness.embeddedCommands.v2') ?? 'null');
+    if (ledger?.version !== 2 || !Array.isArray(ledger.records)) {
+      throw new Error('browser operation storage must contain the version 2 records envelope');
+    }
+    return ledger.records;
+  });
+}
+
+function assertAdmittedOperation(record, original) {
+  assert.ok(record, 'original browser operation was not retained');
+  assert.deepEqual(record.submission, original, 'retained operation changed its original ID or payload');
+  assert.ok(['status', 'receipt'].includes(record.authority), 'admission must have authoritative evidence');
+  assert.equal(record.state, 'input_admitted', 'original browser input was not admitted');
+  assert.ok(Number.isSafeInteger(record.envelopeId) && record.envelopeId > 0, 'admission omitted its envelope');
+  assert.equal(record.receipt?.outcome, 'admitted', 'admission omitted its original receipt');
+}
+
 async function runJourney(ready) {
   const baseUrl = requireString(ready.base_url, 'base_url');
   const sessionSecret = requireString(ready.session_secret, 'session_secret');
@@ -143,6 +181,11 @@ async function runJourney(ready) {
   if (!actor || typeof actor !== 'object') throw new Error('ready frame is missing actor identity');
   requireString(actor.name, 'actor.name');
   requireString(actor.incarnation, 'actor.incarnation');
+  const scenario = ready.scenario;
+  if (!scenario || typeof scenario !== 'object' || !Array.isArray(scenario.steps) || scenario.steps.length === 0) {
+    throw new Error('ready frame must provide a nonempty scenario.steps list');
+  }
+  assert.equal(scenario.steps[0].retry_unresolved, true, 'first browser input must exercise an unresolved retry');
   if (!process.env.PLAYWRIGHT_BROWSERS_PATH) throw new Error('PLAYWRIGHT_BROWSERS_PATH must point to the declared Nix browser closure');
 
   let browser;
@@ -164,6 +207,19 @@ async function runJourney(ready) {
     let droppedFirstAck = 0;
     let droppedFirstReceipt = 0;
     let filteredSnapshotReceipt = 0;
+    let dropInitialStatusLookup = true;
+    const droppedStatusLookups = [];
+    let statusLookupDropped;
+    await page.route('**/api/commands/*', async (route) => {
+      if (!dropInitialStatusLookup) {
+        await route.continue();
+        return;
+      }
+      const operationId = decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-1));
+      await route.abort('failed');
+      droppedStatusLookups.push(operationId);
+      statusLookupDropped?.();
+    });
     const requestsForConversation = (conversationId) => (latestSnapshot?.requests ?? [])
       .filter((request) => request.conversationId === conversationId);
     const completedRequest = (conversationId, requestId) => requestsForConversation(conversationId)
@@ -211,7 +267,7 @@ async function runJourney(ready) {
       server.onMessage((payload) => {
         const frame = decodeWsFrame(payload);
         const operationId = firstOperation?.operation_id;
-        if (operationId && frame?.type === 'command.accepted' && frame.command_id === operationId) {
+        if (droppedFirstAck === 0 && operationId && frame?.type === 'command.accepted' && frame.command_id === operationId) {
           droppedFirstAck += 1;
           return;
         }
@@ -335,10 +391,6 @@ async function runJourney(ready) {
       assert.match(await page.locator('.brand').innerText(), /Harness\s*\/ operator/);
       await selectHostActor(page, actor);
 
-      const scenario = ready.scenario;
-      if (!scenario || typeof scenario !== 'object' || !Array.isArray(scenario.steps) || scenario.steps.length === 0) {
-        throw new Error('ready frame must provide a nonempty scenario.steps list');
-      }
       for (const step of scenario.steps) {
         if (step.action === 'input') {
           const text = requireString(step.text, 'scenario input text');
@@ -353,7 +405,7 @@ async function runJourney(ready) {
           }
           const sentBeforeInput = hostOperations.length;
           await sendHostInput(page, text);
-          const retained = await page.evaluate(() => JSON.parse(sessionStorage.getItem('harness.embeddedCommands.v1') ?? '[]'));
+          const retained = await retainedOperations(page);
           lastOperation = [...retained].reverse().find((record) => record?.submission?.command?.action === 'input' && record.submission.command.text === text)?.submission;
           if (!lastOperation || typeof lastOperation.operation_id !== 'string') {
             throw new Error('submitted browser input was not retained with an operation ID');
@@ -363,13 +415,56 @@ async function runJourney(ready) {
           if (!sent || JSON.stringify(sent.command) !== JSON.stringify(lastOperation.command)) {
             throw new Error('browser did not send the exact retained host operation');
           }
+          if (step.retry_unresolved === true) {
+            if (droppedStatusLookups.length === 0) {
+              await new Promise((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error('initial status lookup was not dropped')), 30_000);
+                statusLookupDropped = () => { clearTimeout(timer); resolve(); };
+              });
+            }
+            assert.ok(droppedStatusLookups.every((id) => id === lastOperation.operation_id),
+              'status loss affected another original operation');
+            await page.getByRole('status').filter({ hasText: /^Session authenticated · ready$/ })
+              .waitFor({ timeout: 30_000 });
+            const unresolved = (await retainedOperations(page)).find((record) =>
+              record.submission?.operation_id === lastOperation.operation_id);
+            assert.equal(unresolved?.authority, 'local', 'positive retry must precede authoritative admission');
+            assert.equal(unresolved.hostRun, lastOperation.command.target.run, 'retry retained another host run');
+            assert.deepEqual(unresolved.submission, lastOperation, 'unresolved original operation changed');
+            const retry = page.locator(`[data-operation-id="${lastOperation.operation_id}"]`)
+              .getByRole('button', { name: 'Retry same operation' });
+            const beforeRetry = hostOperations.length;
+            const statusResponse = page.waitForResponse((response) =>
+              new URL(response.url()).pathname === `/api/commands/${lastOperation.operation_id}`
+              && response.status() === 200, { timeout: 30_000 });
+            statusResponse.catch(() => {});
+            await retry.click();
+            await waitForHostOperations(beforeRetry + 1);
+            assert.deepEqual(hostOperations.at(-1), sent, 'explicit retry changed its original ID or payload');
+            const retried = (await retainedOperations(page)).find((record) =>
+              record.submission?.operation_id === lastOperation.operation_id);
+            assert.equal(retried?.authority, 'local', 'positive retry must remain locally unresolved');
+            assert.deepEqual(retried.submission, lastOperation, 'retry changed its retained original operation');
+            dropInitialStatusLookup = false;
+            const response = await statusResponse;
+            const status = await response.json();
+            assert.equal(status.operationId, lastOperation.operation_id, 'restored lookup returned another operation');
+            assert.deepEqual(status.command, lastOperation.command, 'restored lookup changed the original payload');
+            assert.equal(status.state, 'input_admitted', 'restored lookup did not prove original admission');
+            assert.ok(Number.isSafeInteger(status.envelopeId) && status.envelopeId > 0, 'restored lookup omitted its envelope');
+            assert.equal(status.receipt?.outcome, 'admitted', 'restored lookup omitted its admitted receipt');
+            await page.locator(`[data-operation-id="${lastOperation.operation_id}"]`)
+              .getByText(/^input\s*·\s*input_admitted$/).waitFor({ timeout: 30_000 });
+            assertAdmittedOperation((await retainedOperations(page)).find((record) =>
+              record.submission?.operation_id === lastOperation.operation_id), lastOperation);
+          }
           const barriers = step.provider_barriers ?? [{ phase: step.barrier, expected_request_text: text }];
           if (!Array.isArray(barriers) || barriers.length === 0) throw new Error('input step must declare provider barriers');
           for (const barrier of barriers) {
             historyRequestId = await releaseBarrier(barrier, text);
           }
           if (step.wait_for_receipt !== false) {
-            await page.getByRole('list', { name: 'Command handoff receipts' }).waitFor({ timeout: 30_000 });
+            await page.getByRole('region', { name: 'Command handoff receipts' }).waitFor({ timeout: 30_000 });
             await page.getByText('Admitted for processing').last().waitFor({ timeout: 30_000 });
           }
           if (typeof step.wait_for_text === 'string') {
@@ -379,7 +474,7 @@ async function runJourney(ready) {
           if (!['running', 'waiting', 'retiring', 'retired', 'lost'].includes(step.state)) {
             throw new Error('scenario contains an unsupported actor lifecycle');
           }
-          await page.getByText(step.state, { exact: true }).last().waitFor({ timeout: step.timeout_ms ?? 60_000 });
+          await waitForHostActorState(() => latestSnapshot, actor, step.state, step.timeout_ms ?? 60_000);
         } else if (step.action === 'interrupt') {
           const actorProjection = hostActor(latestSnapshot, actor);
           const expectedRound = actorProjection?.activeRound;
@@ -413,7 +508,7 @@ async function runJourney(ready) {
           const retireReceipt = waitForReceipt(retirement.operation_id);
           const requested = page.getByText('Retire requested').last().waitFor({ timeout: 30_000 });
           const [, receipt] = await Promise.all([
-            requested.then(() => page.getByText('retired', { exact: true }).last().waitFor({ timeout: 60_000 })),
+            requested.then(() => waitForHostActorState(() => latestSnapshot, actor, 'retired', 60_000)),
             retireReceipt,
           ]);
           assert.equal(receipt.outcome, 'control_requested');
@@ -421,48 +516,40 @@ async function runJourney(ready) {
           assert.deepEqual(receipt.target, retirement.command.target);
         } else if (step.action === 'reload') {
           const sentBeforeReload = hostOperations.length;
-          const operationId = lastOperation?.operation_id;
-          const statusResponse = operationId
-            ? page.waitForResponse((response) => new URL(response.url()).pathname === `/api/commands/${operationId}`, { timeout: 30_000 })
-            : undefined;
+          if (!lastOperation) throw new Error('reload step has no earlier retained browser operation');
+          await page.locator(`[data-operation-id="${lastOperation.operation_id}"]`)
+            .getByText(/^input\s*·\s*input_admitted$/).waitFor({ timeout: 30_000 });
+          assertAdmittedOperation((await retainedOperations(page)).find((record) =>
+            record.submission?.operation_id === lastOperation.operation_id), lastOperation);
           await page.reload({ waitUntil: 'domcontentloaded' });
-          await page.getByRole('status').filter({ hasText: /^Session authenticated$/ }).waitFor({ timeout: 30_000 });
-          await page.getByRole('heading', { name: 'Tree' }).waitFor({ timeout: 30_000 });
+          await page.getByRole('status').filter({ hasText: /^Session authenticated · ready$/ }).waitFor({ timeout: 30_000 });
           await selectHostActor(page, actor);
-          if (statusResponse && lastOperation) {
-            const response = await statusResponse;
-            assert.equal(response.status(), 200, 'reconnect status lookup did not succeed');
-            const status = await response.json();
-            assert.equal(status.operationId, lastOperation.operation_id, 'reconnect status returned another operation');
-            assert.deepEqual(status.command, lastOperation.command, 'reconnect status changed the retained target or payload');
-            assert.equal(status.state, 'input_admitted', 'reconnect did not recover the admitted input status');
-            assert.ok(Number.isSafeInteger(status.envelopeId) && status.envelopeId > 0, 'recovered input status omitted its envelope');
-            assert.equal(status.receipt?.outcome, 'admitted', 'recovered status omitted its admitted receipt');
-            await page.locator(`[data-operation-id="${lastOperation.operation_id}"]`).getByText('input_admitted', { exact: true }).waitFor({ timeout: 30_000 });
-            if (step.expect_no_replay !== false && hostOperations.length !== sentBeforeReload) {
-              throw new Error('reconnect replayed a retained browser operation automatically');
-            }
-            if (droppedFirstAck !== 1 || droppedFirstReceipt < 1 || filteredSnapshotReceipt < 1) {
-              throw new Error('browser journey did not lose and recover the retained operation acknowledgement and receipt');
-            }
-          } else if (step.expect_no_replay !== false && hostOperations.length !== sentBeforeReload) {
+          await page.locator(`[data-operation-id="${lastOperation.operation_id}"]`)
+            .getByText(/^input\s*·\s*input_admitted$/).waitFor({ timeout: 30_000 });
+          assertAdmittedOperation((await retainedOperations(page)).find((record) =>
+            record.submission?.operation_id === lastOperation.operation_id), lastOperation);
+          if (hostOperations.length !== sentBeforeReload) {
             throw new Error('reconnect replayed a retained browser operation automatically');
           }
-        } else if (step.action === 'retry') {
-          if (!lastOperation) throw new Error('retry step has no earlier retained browser operation');
+        } else if (step.action === 'assert_settled_retry') {
+          if (!lastOperation) throw new Error('settled retry step has no earlier retained browser operation');
           const operation = page.locator(`[data-operation-id="${lastOperation.operation_id}"]`);
           await operation.waitFor({ timeout: 30_000 });
+          assertAdmittedOperation((await retainedOperations(page)).find((record) =>
+            record.submission?.operation_id === lastOperation.operation_id), lastOperation);
           const before = hostOperations.length;
-          await operation.getByRole('button', { name: 'Retry same operation' }).click();
-          await waitForHostOperations(before + 1);
-          const retried = hostOperations.at(-1);
-          if (retried?.operation_id !== lastOperation.operation_id || JSON.stringify(retried.command) !== JSON.stringify(lastOperation.command)) {
-            throw new Error('explicit retry changed the retained operation ID or command');
-          }
+          assert.equal(await operation.getByRole('button', { name: 'Retry same operation' }).isDisabled(), true,
+            'authoritatively settled operations must disable retry');
+          assert.equal(hostOperations.length, before, 'settled retry assertion sent another operation');
         } else {
           throw new Error('scenario contains an unsupported browser action');
         }
       }
+      assert.equal(dropInitialStatusLookup, false, 'original status lookup was never restored');
+      assert.ok(droppedStatusLookups.length > 0, 'journey did not drop the initial status lookup');
+      assert.equal(droppedFirstAck, 1, 'journey did not lose exactly the first acknowledgement');
+      assert.ok(droppedFirstReceipt > 0, 'journey did not lose the original receipt');
+      assert.ok(filteredSnapshotReceipt > 0, 'journey did not omit the original snapshot receipt');
   } catch (error) {
     journeyError = error;
   } finally {

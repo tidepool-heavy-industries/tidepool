@@ -11,7 +11,7 @@ do
         path childEntry Nothing group
         Core.ActorResearchRole Core.ActorReadOnlyProfile []
         Nothing Core.RequireClean [] Nothing Nothing Nothing
-        Core.InheritedContext (Just "CHECKPOINT_TOKEN") Nothing Core.ParentOwned)
+        Core.InheritedContext (Just "CHECKPOINT_TOKEN") Nothing Core.ActorOwned)
       case started of
         Right _ -> do
           committed <- send (Core.ForksCommitCapturedWith group)

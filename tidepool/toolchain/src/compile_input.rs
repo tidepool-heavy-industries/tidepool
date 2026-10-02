@@ -190,25 +190,41 @@ impl ValidatedInputPackages {
         }
         let body = header[3].as_array().ok_or(CompileInputError::Malformed)?;
         if body.first().and_then(Value::as_text) == Some("unsupported-wired") {
-            let row = proof_row(&header[3], 3)?;
+            let row = proof_row(&header[3], 4)?;
             let owner = proof_owner(&row[1])?;
-            let imported = proof_owner(&row[2])?;
-            if !evidence.modules.iter().any(|module| {
-                (module.unit.as_str(), module.module.as_str())
-                    == (owner.0.as_str(), owner.1.as_str())
-                    && !module.boot
-                    && module.imports.iter().any(|edge| {
-                        edge.selected.is_none()
-                            && package_import_matches(edge, &imported.0, &imported.1)
-                    })
-            }) {
+            let checked: Vec<_> = evidence
+                .modules
+                .iter()
+                .filter(|module| {
+                    (module.unit.as_str(), module.module.as_str())
+                        == (owner.0.as_str(), owner.1.as_str())
+                        && !module.boot
+                })
+                .collect();
+            if checked.len() != 1 {
                 return Err(CompileInputError::OwnerCoverage);
+            }
+            let source = evidence
+                .sources
+                .iter()
+                .filter(|source| source.path == checked[0].source)
+                .collect::<Vec<_>>();
+            if source.len() != 1 || source[0].sha256 != proof_string(&row[2])? {
+                return Err(CompileInputError::SourceMismatch {
+                    unit: owner.0,
+                    module: owner.1,
+                });
+            }
+            let provided = crate::recovery_artifacts::decode_compiler_provided_imports(&row[3])
+                .map_err(|_| CompileInputError::Malformed)?;
+            if provided != [crate::recovery_artifacts::CompilerProvidedImport::Primitive] {
+                return Err(CompileInputError::Malformed);
             }
             return Err(CompileInputError::UnsupportedWiredInput {
                 unit: owner.0,
                 module: owner.1,
-                imported_unit: imported.0,
-                imported_module: imported.1,
+                imported_unit: "ghc-prim".into(),
+                imported_module: "GHC.Prim".into(),
             });
         }
         if body.first().and_then(Value::as_text) == Some("unsupported-boot") {
@@ -929,10 +945,20 @@ mod tests {
         value.as_array_mut().unwrap()[3] = Value::Array(vec![
             Value::Text("unsupported-wired".into()),
             owner.clone(),
-            Value::Array(vec![
-                Value::Text("package".into()),
-                Value::Text("Facade".into()),
-            ]),
+            Value::Text(
+                evidence
+                    .sources
+                    .iter()
+                    .find(|source| source.path == evidence.modules[0].source)
+                    .unwrap()
+                    .sha256
+                    .clone(),
+            ),
+            Value::Array(vec![Value::Array(vec![
+                Value::Text("primitive".into()),
+                Value::Text("ghc-prim".into()),
+                Value::Text("GHC.Prim".into()),
+            ])]),
         ]);
         let path = root.path().join("compiler-inputs.cbor");
         std::fs::write(&path, packet_bytes(&value)).unwrap();
@@ -945,6 +971,23 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        let mut bare = value.clone();
+        bare.as_array_mut().unwrap()[3]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        std::fs::write(&path, packet_bytes(&bare)).unwrap();
+        assert!(matches!(
+            ValidatedInputPackages::read_supported(&path, &raw, &evidence),
+            Err(CompileInputError::Malformed)
+        ));
+        let mut changed = value.clone();
+        changed.as_array_mut().unwrap()[3].as_array_mut().unwrap()[2] = Value::Text("0".repeat(64));
+        std::fs::write(&path, packet_bytes(&changed)).unwrap();
+        assert!(matches!(
+            ValidatedInputPackages::read_supported(&path, &raw, &evidence),
+            Err(CompileInputError::SourceMismatch { .. })
+        ));
         value.as_array_mut().unwrap()[3] = Value::Array(vec![
             Value::Text("unsupported-boot".into()),
             Value::Array(vec![owner]),

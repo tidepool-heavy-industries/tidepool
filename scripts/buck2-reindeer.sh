@@ -106,24 +106,32 @@ def current_harness_source_output():
         cwd=root, check=True, capture_output=True, text=True,
     ).stdout.strip()
     evaluation = ['nix', 'eval', '--raw', f'{flake}#packages.{system}.buck-matched-harness-source.outPath']
-    if harness_source_override:
-        if not re.fullmatch(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._?=-]+', harness_source_override):
-            raise SystemExit('Cannot select matched harness source: override must be an immutable Nix store path')
+    return subprocess.run(
+        evaluation,
+        cwd=root, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+def verified_harness_source_override(nar_hash):
+    if not re.fullmatch(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._?=-]+', harness_source_override):
+        raise SystemExit('Cannot select matched harness source: override must be an immutable Nix store path')
+    try:
         subprocess.run(['nix', 'path-info', harness_source_override], cwd=root, check=True, capture_output=True)
         actual_hash = subprocess.run(
             ['nix', 'hash', 'path', '--sri', harness_source_override],
             cwd=root, check=True, capture_output=True, text=True,
         ).stdout.strip()
-        expected_hash = json.loads((root / 'flake.lock').read_text())['nodes']['harnessWeb']['locked'].get('narHash')
-        if actual_hash != expected_hash:
+        if actual_hash != nar_hash:
             raise SystemExit('Cannot select matched harness source: override hash differs from the canonical locked narHash')
-        # An unpublished join can use its exported bytes without choosing a
-        # different version. The canonical lock still supplies source authority.
-        evaluation.extend(['--override-input', 'harnessWeb', harness_source_override, '--no-write-lock-file'])
-    return subprocess.run(
-        evaluation,
-        cwd=root, check=True, capture_output=True, text=True,
-    ).stdout.strip()
+        for filename in ('crates/harness/src/lib.rs', 'web/package.json', 'web/package-lock.json'):
+            entry = json.loads(subprocess.run(
+                ['nix', 'store', 'ls', '--json', harness_source_override + '/' + filename],
+                cwd=root, check=True, capture_output=True, text=True,
+            ).stdout)
+            if entry.get('type') != 'regular':
+                raise SystemExit('Cannot select matched harness source: override lacks the expected harness crate and web source layout')
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
+        raise SystemExit(f'Cannot select matched harness source: override is unavailable or has invalid source layout: {error}')
+    return harness_source_override
 
 def parse_harness_lock():
     try:
@@ -136,6 +144,8 @@ def parse_harness_lock():
         if not match or match.group(1) != match.group(2):
             raise ValueError('Cargo.lock harness source is not the canonical pinned Git revision')
         flake = json.loads((root / 'flake.lock').read_text())
+        if flake['nodes']['root']['inputs'].get('harnessWeb') != 'harnessWeb':
+            raise ValueError('flake.lock harnessWeb is not connected to the root input graph')
         node = flake['nodes']['harnessWeb']
         for kind in ('original', 'locked'):
             pin = node[kind]
@@ -145,24 +155,32 @@ def parse_harness_lock():
                 raise ValueError(f'flake.lock harnessWeb {kind} pin does not match Cargo.lock')
         if node.get('flake') is not False:
             raise ValueError('flake.lock harnessWeb must be a non-flake source')
-        return match.group(1)
+        nar_hash = node['locked'].get('narHash')
+        if not isinstance(nar_hash, str) or not re.fullmatch(r'sha256-[A-Za-z0-9+/]{43}=', nar_hash):
+            raise ValueError('flake.lock harnessWeb narHash is missing or malformed')
+        return match.group(1), nar_hash
     except (KeyError, OSError, ValueError, tomllib.TOMLDecodeError, json.JSONDecodeError) as error:
         raise SystemExit(f'Cannot select matched harness source: {error}')
 
-def use_local_harness_source(buck):
-    rev = parse_harness_lock()
-    expected_source_path = current_harness_source_output()
-    config = configparser.ConfigParser()
-    try:
-        with (root / '.buckconfig.local').open() as stream:
-            config.read_file(stream)
-        source_path = config['nix']['matched_harness_source'].strip()
-    except (OSError, KeyError, configparser.Error) as error:
-        raise SystemExit(f'Cannot select matched harness source: missing configured Nix source: {error}')
-    if source_path != expected_source_path:
-        raise SystemExit('Cannot select matched harness source: configured source is stale or differs from the current pinned Nix output')
-    if not re.fullmatch(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-tidepool-matched-harness-source', expected_source_path):
-        raise SystemExit('Cannot select matched harness source: current flake output is not the declared immutable Nix source')
+def guard_harness_source(buck):
+    rev, nar_hash = parse_harness_lock()
+    expected_source_path = None
+    if local_harness_source:
+        if harness_source_override:
+            expected_source_path = verified_harness_source_override(nar_hash)
+        else:
+            expected_source_path = current_harness_source_output()
+            config = configparser.ConfigParser()
+            try:
+                with (root / '.buckconfig.local').open() as stream:
+                    config.read_file(stream)
+                source_path = config['nix']['matched_harness_source'].strip()
+            except (OSError, KeyError, configparser.Error) as error:
+                raise SystemExit(f'Cannot select matched harness source: missing configured Nix source: {error}')
+            if source_path != expected_source_path:
+                raise SystemExit('Cannot select matched harness source: configured source is stale or differs from the current pinned Nix output')
+            if not re.fullmatch(r'/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-tidepool-matched-harness-source', expected_source_path):
+                raise SystemExit('Cannot select matched harness source: current flake output is not the declared immutable Nix source')
 
     stanzas = re.findall(r'git_fetch\(\n(.*?)\n\)', buck, re.DOTALL)
     matches = [stanza for stanza in stanzas if f'repo = "{HARNESS_REPO}"' in stanza]
@@ -183,18 +201,28 @@ def use_local_harness_source(buck):
         raise SystemExit('Cannot select matched harness source: generated harness crate root layout changed')
     if f'srcs = [":{fetch_name}"]' not in buck:
         raise SystemExit('Cannot select matched harness source: generated harness target does not reference its git_fetch source')
-    if 'load("@toolchains//:tidepool.bzl", "nix_directory")' in buck:
-        raise SystemExit('Cannot select matched harness source: generated BUCK already has a local source rule')
+    if 'load("@toolchains//:tidepool.bzl", "checked_harness_source")' in buck:
+        raise SystemExit('Cannot select matched harness source: generated BUCK already has a checked source rule')
 
+    selection = f'    store_path = "{expected_source_path}",\n' if local_harness_source else f'    source = ":{fetch_name}",\n'
     rendered = (
-        'nix_directory(\n'
+        'checked_harness_source(\n'
         f'    name = "{directory_name}",\n'
         '    cp = read_root_config("nix", "coreutils") + "/cp",\n'
-        '    store_path = read_root_config("nix", "matched_harness_source"),\n'
-        '    visibility = [],\n'
+        '    python = read_root_config("nix", "python"),\n'
+        f'    revision = "{rev}",\n'
+        f'    nar_hash = "{nar_hash}",\n'
+        '    cargo_lock = "root//:workspace_cargo_lock",\n'
+        '    flake_lock = "root//:workspace_flake_lock",\n'
+        '    provenance_script = "root//:embedded_web_provenance_script",\n'
+        + selection
+        + '    visibility = [],\n'
         ')'
     )
-    buck = buck.replace(f'git_fetch(\n{stanza}\n)', rendered, 1)
+    if local_harness_source:
+        buck = buck.replace(f'git_fetch(\n{stanza}\n)', rendered, 1)
+    else:
+        buck += '\n' + rendered + '\n'
     source_reference = f'srcs = [":{fetch_name}"]'
     if buck.count(source_reference) != 1:
         raise SystemExit('Cannot select matched harness source: expected one harness crate source reference')
@@ -202,7 +230,7 @@ def use_local_harness_source(buck):
     buck = buck.replace(
         'load("@prelude//rust:cargo_package.bzl", "cargo")',
         'load("@prelude//rust:cargo_package.bzl", "cargo")\n'
-        'load("@toolchains//:tidepool.bzl", "nix_directory")',
+        'load("@toolchains//:tidepool.bzl", "checked_harness_source")',
         1,
     )
     return buck, directory_name
@@ -222,31 +250,27 @@ with tempfile.TemporaryDirectory(prefix='tidepool-buck-deps-') as temporary:
     # The generated Rust crate target remains private; this public filegroup
     # only forwards the exact locked checkout as a declared source input.
     buck = (stage / 'BUCK').read_text()
-    if local_harness_source:
-        buck, harness_fetch = use_local_harness_source(buck)
-        harness_web_source = harness_fetch
-    else:
-        harness_fetch = next(
-            (
-                re.search(r'name = "([^\"]+)"', stanza).group(1)
-                for stanza in re.findall(r'git_fetch\(\n(.*?)\n\)', buck, re.DOTALL)
-                if f'repo = "{HARNESS_REPO}"' in stanza
-            ),
-            None,
-        )
-        harness_web_source = harness_fetch
+    harness_fetch = None
+    if local_harness_source or any(f'repo = "{HARNESS_REPO}"' in stanza for stanza in re.findall(r'git_fetch\(\n(.*?)\n\)', buck, re.DOTALL)):
+        buck, harness_fetch = guard_harness_source(buck)
+    harness_web_source = harness_fetch
     if harness_fetch:
-        if 'load("@prelude//:rules.bzl", "filegroup")' not in buck:
+        if 'load("@prelude//:rules.bzl", "alias", "filegroup")' not in buck:
             buck = buck.replace(
                 'load("@prelude//rust:cargo_package.bzl", "cargo")',
                 'load("@prelude//rust:cargo_package.bzl", "cargo")\n'
-                'load("@prelude//:rules.bzl", "filegroup")',
+                'load("@prelude//:rules.bzl", "alias", "filegroup")',
                 1,
             )
         buck += (
             '\nfilegroup(\n'
             '    name = "matched_harness_source",\n'
             f'    srcs = [":{harness_web_source}"],\n'
+            '    visibility = ["PUBLIC"],\n'
+            ')\n'
+            '\nalias(\n'
+            '    name = "matched_harness_source_revision",\n'
+            f'    actual = ":{harness_web_source}[revision]",\n'
             '    visibility = ["PUBLIC"],\n'
             ')\n'
         )

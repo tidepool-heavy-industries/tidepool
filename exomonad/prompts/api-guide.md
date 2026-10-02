@@ -8,16 +8,20 @@ Cells enable the usual extensions, including `TypeApplications`, `DataKinds`,
 
 ## Choose the workflow
 
-Use a pure function for a deterministic transform, an ordinary Haskell `do`
-program for commands, suspended waits and dependent evidence reads, Jev for a bounded semantic judgment,
-and a record actor for ongoing sources or stateful joins that do not need a
-model round. Use a model actor when open-ended investigation or adaptation
-needs model reasoning. These choices compose: code gathers authoritative facts;
-Jev judges supplied evidence and never grants resource authority.
+Use pure functions for deterministic transforms, Haskell `do` for effects and
+dependent waits, Jev for bounded judgment, record actors for ongoing sources or
+stateful joins, and model actors for open-ended investigation. Jev judges
+supplied evidence; it never grants resource authority.
 
-Try uncertain workflows in small cells; compose repeated sequences when a real
-consumer needs them. Retain complete evidence, project compact typed views and
-page `cellDisplay.more` without replaying effects.
+Try uncertain workflows in small cells. Retain complete evidence, project typed
+views and page `cellDisplay.more` without replaying effects.
+
+Where the actor admits `ModelCall`, `Tidepool.Model` provides
+`invokeModel turn input` with `textTurn` or `typedTurn @Reply` and supplied
+`AgentSpec` tools. Callbacks use your available effects; ambient tools and hooks
+are not inherited. Calls in one cell share its model budget. Match `modelOutcome`,
+retain `modelReceipt`, and handle typed failure before cleanup. An absent admitted
+service returns a typed boundary failure.
 
 ## Delegate and inspect
 
@@ -103,16 +107,14 @@ publish, release, write stdin, or mutate its worktree.
 
 ## Review and integrate
 
-A reply identifies a candidate, not an integrated result. Recover its exact
-commit through `responseWorktree`; inspect it from your repository view with
-`git show`/`git diff`, not the child's live working directory. Commission review
-seeded at that revision (`atRef`); give the reviewer the contract, the owned
-paths and the implementer reference for repairs. Refuse a candidate whose
-diff touches paths outside its ownership before merging. Reviewers running
-checks need coding authority. Integrate the accepted
-revision with `tryMerge` for a managed target or ordinary Git in your checkout;
-verify that resulting revision before delivery. Load `exomonad-review` for the
-compiled project review/repair recipe and `exomonad-unfold` for submission evidence.
+A reply identifies a candidate. Recover its exact commit through
+`responseWorktree`; inspect `git show`/`git diff` from your repository view.
+Seed review at that revision (`atRef`) with the contract, owned paths and
+implementer reference for repairs. Refuse out-of-ownership diffs before merging.
+Reviewers running checks need coding authority. Integrate with `tryMerge` for
+a managed target or Git in your checkout; verify the resulting revision before
+delivery. Load `exomonad-review` for the compiled review/repair recipe and
+`exomonad-unfold` for submission evidence.
 
 ## Core signatures
 
@@ -139,12 +141,11 @@ pollResponse :: Member Replies effects => Response result -> Eff effects (Respon
 
 ## Compose commands and judgment
 
-In a cell, `Cmd.run` returns a retained result: `Cmd.stdout` is complete
-successful stdout or an explicit issue; for failed commands inspect outcome and
-stderr. `J.ask` batches semantic questions over supplied evidence; load
-`exomonad-jev` for the worked composition. `me` is lexically captured;
-`parentAgent` is your supervising actor, which receives `sendMessage` and
-settles your request, or `Nothing` for a root.
+`Cmd.run` returns a retained result: `Cmd.stdout` is complete successful stdout
+or an explicit issue; inspect failed outcomes and stderr. `J.ask` batches
+judgments over supplied evidence; load `exomonad-jev` for composition. `me` is
+lexically captured. `parentAgent` is your supervisor, receiving `sendMessage`
+and settling requests, or `Nothing` for a root.
 
 `Cmd.run command = Cmd.start command >>= Cmd.await` preserves the continuation until terminal
 completion, including nonzero exits. `Cmd.observe` returns bounded status normally;
@@ -166,14 +167,12 @@ Handle refusal and retain cleanup; see `exomonad-define-actors`.
 
 ## Discover missing information
 
-Start from this guide and the assignment; no startup inventory ritual.
-`lookup` accepts names, modules, and Hoogle-like types such as `:: Cmd.Command -> _`.
-It may attach up to four Jev-selected related declarations or alternatives;
-original failures remain failures. `polymorphic` is usable with call-site constraints; `unknown` needs more type
-information. Use `doc topics` for guides and workspace modules; inspect their
-exports/source where needed. `status` offers `summary`, `detailed`, `watches`,
-`recovery`, `lineage`, `trace`, and `bindings` for runtime uncertainty without
-compiling a cell.
+Start with this guide and assignment. `lookup` accepts names, modules and
+Hoogle-like types (`:: Cmd.Command -> _`). It may add up to four Jev-selected
+related declarations or alternatives; original failures remain. `polymorphic`
+needs call-site constraints; `unknown` needs type information. `doc topics`
+locates guides and modules. `status` offers `summary`, `detailed`, `watches`,
+`recovery`, `lineage`, `trace` and `bindings` without compiling a cell.
 
 Lookup examples name tested fixtures and prerequisites, not proof of the current
 workspace's compilation. Ambiguous, unavailable and live bindings have no example.

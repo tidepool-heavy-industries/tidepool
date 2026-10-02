@@ -11,7 +11,7 @@ test -n "${TIDEPOOL_GHC_LIBDIR:-}"
 # Force a direct request to this package's worker instead of adopting any
 # ambient resident daemon from the test runner.
 unset TIDEPOOL_EXTRACT_DAEMON_SOCKET
-export TIDEPOOL_EXTRACT_WORKER="$bundle/bin/tidepool-extract-bin"
+unset TIDEPOOL_EXTRACT_WORKER
 
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/tidepool-worker-compile.XXXXXX")"
 trap 'rm -rf "$scratch"' EXIT

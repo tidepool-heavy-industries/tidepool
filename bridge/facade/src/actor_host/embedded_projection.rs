@@ -62,13 +62,26 @@ impl LifecyclePublisher for watch::Sender<(Option<ActorRef>, HostActorLifecycle)
 #[derive(Default)]
 pub(super) struct EmbeddedProjection {
     // Conversation identity is immutable. Keep it after its Engine task leaves
-    // so a terminal actor remains linked to its conversation in the snapshot.
-    conversations: HashMap<ActorRef, HostIdentity>,
+    // so a terminal actor remains linked to its exact history head in the snapshot.
+    // Cold restart cannot reconstruct these associations from logical paths alone.
+    conversations: HashMap<ActorRef, ConversationObservation>,
+}
+
+struct ConversationObservation {
+    identity: HostIdentity,
+    head: Option<String>,
+    frozen: bool,
 }
 
 impl EmbeddedProjection {
     pub(super) fn attached(&mut self, actor: ActorRef, identity: &HostIdentity) {
-        self.conversations.insert(actor, identity.clone());
+        self.conversations
+            .entry(actor)
+            .or_insert_with(|| ConversationObservation {
+                identity: identity.clone(),
+                head: None,
+                frozen: false,
+            });
     }
 
     pub(super) fn resolve_identity(
@@ -92,7 +105,7 @@ impl EmbeddedProjection {
     fn identity(&self, run: &str, actor: ActorRef) -> HostIdentity {
         self.conversations
             .get(&actor)
-            .cloned()
+            .map(|conversation| conversation.identity.clone())
             .unwrap_or_else(|| HostIdentity {
                 run: run.to_owned(),
                 actor: AgentPath(format!("/actors/a{}_i{}", actor.id.0, actor.incarnation.0)),
@@ -101,12 +114,15 @@ impl EmbeddedProjection {
     }
 
     fn projection(
-        &self,
+        &mut self,
         run: &str,
         nodes: &[ActorGraphNode],
         states: &LifecycleState,
         active_round_for: impl Fn(ActorRef) -> Option<EmbeddedRoundId>,
-    ) -> (Vec<HostActorProjection>, Vec<serde_json::Value>) {
+        head_for: impl Fn(&HostIdentity) -> Result<Option<String>, harness::store::StoreError>,
+        history_finished_for: impl Fn(ActorRef) -> bool,
+    ) -> Result<(Vec<HostActorProjection>, Vec<serde_json::Value>), harness::store::StoreError>
+    {
         let mut actors = Vec::new();
         let mut conversations = Vec::new();
         for node in nodes {
@@ -131,10 +147,34 @@ impl EmbeddedProjection {
                     }
                 }),
             };
-            let conversation = self
-                .conversations
-                .get(&node.actor)
-                .map(|identity| identity.actor.0.clone());
+            let terminal = matches!(
+                lifecycle,
+                HostActorLifecycle::Retired | HostActorLifecycle::Lost
+            );
+            let observation = self.conversations.get_mut(&node.actor);
+            let (conversation, model_head_request) = if let Some(observation) = observation {
+                if !observation.frozen {
+                    match head_for(&observation.identity) {
+                        Ok(head) => {
+                            if head.is_some() {
+                                observation.head = head;
+                            }
+                        }
+                        Err(harness::store::StoreError::InvalidEmbeddedBinding) => {
+                            observation.frozen = true;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                    // Kernel retirement can precede the driver committing its last request.
+                    observation.frozen |= terminal && history_finished_for(node.actor);
+                }
+                (
+                    Some(observation.identity.actor.0.clone()),
+                    observation.head.clone(),
+                )
+            } else {
+                (None, None)
+            };
             actors.push(HostActorProjection {
                 identity,
                 parent: node
@@ -156,6 +196,7 @@ impl EmbeddedProjection {
                     active_round_for(node.actor)
                 },
                 model_conversation: conversation.clone(),
+                model_head_request,
             });
             if let Some(path) = conversation {
                 conversations.push(serde_json::json!({
@@ -165,7 +206,7 @@ impl EmbeddedProjection {
                 }));
             }
         }
-        (actors, conversations)
+        Ok((actors, conversations))
     }
 
     pub(super) fn publish(
@@ -175,9 +216,19 @@ impl EmbeddedProjection {
         nodes: &[ActorGraphNode],
         states: &LifecycleState,
         active_round_for: impl Fn(ActorRef) -> Option<EmbeddedRoundId>,
-    ) {
-        let (actors, conversations) = self.projection(run, nodes, states, active_round_for);
+        head_for: impl Fn(&HostIdentity) -> Result<Option<String>, harness::store::StoreError>,
+        history_finished_for: impl Fn(ActorRef) -> bool,
+    ) -> Result<(), harness::store::StoreError> {
+        let (actors, conversations) = self.projection(
+            run,
+            nodes,
+            states,
+            active_round_for,
+            head_for,
+            history_finished_for,
+        )?;
         control.update_host_projection(run.to_owned(), actors, conversations);
+        Ok(())
     }
 }
 
@@ -241,12 +292,16 @@ mod tests {
             incarnation: "1".into(),
         };
         projection.attached(actor(2), &child_identity);
-        let (actors, conversations) = projection.projection(
-            "run",
-            &[node(1, None, false), node(2, Some(actor(1)), true)],
-            &LifecycleState::new(),
-            |_| None,
-        );
+        let (actors, conversations) = projection
+            .projection(
+                "run",
+                &[node(1, None, false), node(2, Some(actor(1)), true)],
+                &LifecycleState::new(),
+                |_| None,
+                |_| Ok(None),
+                |_| true,
+            )
+            .unwrap();
         assert_eq!(actors.len(), 2);
         assert_eq!(actors[0].kind, HostActorKind::Workflow);
         assert_eq!(actors[0].model_conversation, None);
@@ -277,8 +332,16 @@ mod tests {
             summary: "root completed".into(),
         });
         let child = node(2, Some(actor(1)), true);
-        let (actors, conversations) =
-            projection.projection("run", &[root, child], &LifecycleState::default(), |_| None);
+        let (actors, conversations) = projection
+            .projection(
+                "run",
+                &[root, child],
+                &LifecycleState::default(),
+                |_| None,
+                |_| Ok(None),
+                |_| true,
+            )
+            .unwrap();
 
         assert_eq!(actors.len(), 2);
         let projected_root = actors
@@ -312,27 +375,260 @@ mod tests {
         projection.attached(actor(1), &identity);
         let round = EmbeddedRoundId(uuid::Uuid::new_v4());
         let mut root = node(1, None, true);
-        let (actors, _) = projection.projection(
-            "run",
-            std::slice::from_ref(&root),
-            &LifecycleState::default(),
-            |_| Some(round),
-        );
+        let (actors, _) = projection
+            .projection(
+                "run",
+                std::slice::from_ref(&root),
+                &LifecycleState::default(),
+                |_| Some(round),
+                |_| Ok(None),
+                |_| true,
+            )
+            .unwrap();
         assert_eq!(actors[0].active_round, Some(round));
-        let (actors, _) = projection.projection(
-            "run",
-            std::slice::from_ref(&root),
-            &LifecycleState::default(),
-            |_| None,
-        );
+        let (actors, _) = projection
+            .projection(
+                "run",
+                std::slice::from_ref(&root),
+                &LifecycleState::default(),
+                |_| None,
+                |_| Ok(None),
+                |_| true,
+            )
+            .unwrap();
         assert_eq!(actors[0].active_round, None);
         root.terminal = Some(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "retired".into(),
         });
-        let (actors, _) =
-            projection.projection("run", &[root], &LifecycleState::default(), |_| Some(round));
+        let (actors, _) = projection
+            .projection(
+                "run",
+                &[root],
+                &LifecycleState::default(),
+                |_| Some(round),
+                |_| Ok(None),
+                |_| true,
+            )
+            .unwrap();
         assert_eq!(actors[0].active_round, None);
+    }
+
+    #[test]
+    fn terminal_head_is_retained_and_observed_only_once() {
+        for kind in [ActorExitKind::Cancelled, ActorExitKind::Failed] {
+            let mut projection = EmbeddedProjection::default();
+            let identity = HostIdentity {
+                run: "run".into(),
+                actor: AgentPath("/root/old".into()),
+                incarnation: "1".into(),
+            };
+            projection.attached(actor(1), &identity);
+            let mut root = node(1, None, true);
+            let (actors, _) = projection
+                .projection(
+                    "run",
+                    std::slice::from_ref(&root),
+                    &LifecycleState::default(),
+                    |_| None,
+                    |_| Ok(None),
+                    |_| true,
+                )
+                .unwrap();
+            assert_eq!(actors[0].model_head_request, None);
+            let (actors, _) = projection
+                .projection(
+                    "run",
+                    std::slice::from_ref(&root),
+                    &LifecycleState::default(),
+                    |_| None,
+                    |observed| {
+                        assert_eq!(observed, &identity);
+                        Ok(Some("first-head".into()))
+                    },
+                    |_| true,
+                )
+                .unwrap();
+            assert_eq!(actors[0].model_head_request.as_deref(), Some("first-head"));
+            root.terminal = Some(ActorTerminal {
+                kind,
+                summary: "terminal".into(),
+            });
+            let (actors, _) = projection
+                .projection(
+                    "run",
+                    std::slice::from_ref(&root),
+                    &LifecycleState::default(),
+                    |_| None,
+                    |_| Ok(Some("final-head".into())),
+                    |_| true,
+                )
+                .unwrap();
+            assert_eq!(actors[0].model_head_request.as_deref(), Some("final-head"));
+            assert!(matches!(
+                actors[0].lifecycle,
+                HostActorLifecycle::Retired | HostActorLifecycle::Lost
+            ));
+            // Subsequent publications do no Store query for the immutable terminal head.
+            for _ in 0..130 {
+                let (actors, _) = projection
+                    .projection(
+                        "run",
+                        std::slice::from_ref(&root),
+                        &LifecycleState::default(),
+                        |_| None,
+                        |_| panic!("terminal head was queried again"),
+                        |_| true,
+                    )
+                    .unwrap();
+                assert_eq!(actors[0].model_head_request.as_deref(), Some("final-head"));
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_actor_waits_for_driver_cleanup_before_freezing_head() {
+        let mut projection = EmbeddedProjection::default();
+        let identity = HostIdentity {
+            run: "run".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "1".into(),
+        };
+        projection.attached(actor(1), &identity);
+        let mut root = node(1, None, true);
+        root.terminal = Some(ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "cancelled".into(),
+        });
+        let (actors, _) = projection
+            .projection(
+                "run",
+                std::slice::from_ref(&root),
+                &LifecycleState::default(),
+                |_| None,
+                |_| Ok(Some("previous-head".into())),
+                |_| false,
+            )
+            .unwrap();
+        assert_eq!(
+            actors[0].model_head_request.as_deref(),
+            Some("previous-head")
+        );
+        let (actors, _) = projection
+            .projection(
+                "run",
+                std::slice::from_ref(&root),
+                &LifecycleState::default(),
+                |_| None,
+                |_| Ok(Some("cancelled-final-head".into())),
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(
+            actors[0].model_head_request.as_deref(),
+            Some("cancelled-final-head")
+        );
+        let (actors, _) = projection
+            .projection(
+                "run",
+                &[root],
+                &LifecycleState::default(),
+                |_| None,
+                |_| panic!("finished driver queried again"),
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(
+            actors[0].model_head_request.as_deref(),
+            Some("cancelled-final-head")
+        );
+    }
+
+    #[test]
+    fn binding_loss_freezes_previous_head_and_attachment_identity() {
+        let mut projection = EmbeddedProjection::default();
+        let old = HostIdentity {
+            run: "run".into(),
+            actor: AgentPath("/root/old".into()),
+            incarnation: "1".into(),
+        };
+        projection.attached(actor(1), &old);
+        let root = node(1, None, true);
+        projection
+            .projection(
+                "run",
+                std::slice::from_ref(&root),
+                &LifecycleState::default(),
+                |_| None,
+                |_| Ok(Some("old-head".into())),
+                |_| true,
+            )
+            .unwrap();
+        let successor = HostIdentity {
+            incarnation: "2".into(),
+            ..old.clone()
+        };
+        projection.attached(actor(1), &successor);
+        let (actors, _) = projection
+            .projection(
+                "run",
+                std::slice::from_ref(&root),
+                &LifecycleState::default(),
+                |_| None,
+                |identity| {
+                    assert_eq!(identity, &old);
+                    Err(harness::store::StoreError::InvalidEmbeddedBinding)
+                },
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(actors[0].identity, old);
+        assert_eq!(actors[0].model_head_request.as_deref(), Some("old-head"));
+        let (actors, _) = projection
+            .projection(
+                "run",
+                &[root],
+                &LifecycleState::default(),
+                |_| None,
+                |_| panic!("lost binding queried successor"),
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(actors[0].model_head_request.as_deref(), Some("old-head"));
+    }
+
+    #[test]
+    fn unavailable_binding_without_observation_has_no_head_and_store_failure_propagates() {
+        let mut projection = EmbeddedProjection::default();
+        let identity = HostIdentity {
+            run: "run".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "1".into(),
+        };
+        projection.attached(actor(1), &identity);
+        let root = node(1, None, true);
+        assert!(matches!(
+            projection.projection(
+                "run",
+                std::slice::from_ref(&root),
+                &LifecycleState::default(),
+                |_| None,
+                |_| Err(harness::store::StoreError::MissingRequest("corrupt".into())),
+                |_| true
+            ),
+            Err(harness::store::StoreError::MissingRequest(_))
+        ));
+        let (actors, _) = projection
+            .projection(
+                "run",
+                &[root],
+                &LifecycleState::default(),
+                |_| None,
+                |_| Err(harness::store::StoreError::InvalidEmbeddedBinding),
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(actors[0].model_head_request, None);
     }
 
     #[test]

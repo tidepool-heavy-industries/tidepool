@@ -33,7 +33,7 @@
     };
     # Browser assets must come from the exact harness source used by Cargo.
     harnessWeb = {
-      url = "github:tidepool-heavy-industries/exomonad-harness/9df6a7c66b5eeb3c075c53a2790f094310b77836";
+      url = "github:tidepool-heavy-industries/exomonad-harness/206f85c761d78f654217795b86c4bef062cdde1b";
       flake = false;
     };
     # Match the harness web verification shell's pinned Node 24 package.
@@ -132,7 +132,7 @@
           harnessPkgs = import harnessNixpkgs { inherit system; };
           embeddedWebNpmCache = harnessPkgs.fetchNpmDeps {
             src = "${harnessWeb}/web";
-            hash = "sha256-yJrPGaSazF06w91mddpNlOyoB6d1cYKXumyaoeWCfeU=";
+            hash = "sha256-R1WPUQzu8+knK7B5mSx7i6sneSBLgKmX7HDCSsWwekI=";
           };
           browserTestNpmCache = harnessPkgs.fetchNpmDeps {
             src = ./nix/browser-test;
@@ -252,7 +252,7 @@
           interactiveCodex = codex.packages.${system}.default;
           embeddedWebAssets = harnessPkgs.buildNpmPackage {
             pname = "exomonad-harness-web";
-            version = "9df6a7c66b5eeb3c075c53a2790f094310b77836";
+            version = "206f85c761d78f654217795b86c4bef062cdde1b";
             src = "${harnessWeb}/web";
             nodejs = harnessPkgs.nodejs_24;
             npmDepsHash = "sha256-yJrPGaSazF06w91mddpNlOyoB6d1cYKXumyaoeWCfeU=";
@@ -262,7 +262,7 @@
               cp -R dist/. "$out/share/exomonad/web/"
               runHook postInstall
             '';
-            passthru.sourceRevision = "9df6a7c66b5eeb3c075c53a2790f094310b77836";
+            passthru.sourceRevision = "206f85c761d78f654217795b86c4bef062cdde1b";
           };
           # Tidepool consumes only the standalone private wire crate from the
           # matched Codex checkout. Keep the rest of Codex in its independent
@@ -363,6 +363,8 @@
               harness =
                 pkgs.haskell.lib.overrideCabal (hsPkgs.callCabal2nix "tidepool-extract" ./bridge/haskell { })
                   (old: {
+                    configureFlags = (old.configureFlags or [ ]) ++ [ "--enable-optimization=2" ];
+                    buildFlags = (old.buildFlags or [ ]) ++ [ "--verbose" ];
                     preCheck = (old.preCheck or "") + ''
                       export TIDEPOOL_EXTRACT_WORKER="$PWD/dist/build/tidepool-extract-bin/tidepool-extract-bin"
                       # Test suites (prepared-stg-pipeline-test, extract-fidelity-test,
@@ -429,9 +431,12 @@
             cp -a ${
               pkgs.lib.cleanSourceWith {
                 src = ./bridge/haskell/lib;
-                filter = path: type:
-                  if type == "directory" then builtins.baseNameOf path != "Prelude_cbor"
-                  else type == "regular" && pkgs.lib.hasSuffix ".hs" path;
+                filter =
+                  path: type:
+                  if type == "directory" then
+                    builtins.baseNameOf path != "Prelude_cbor"
+                  else
+                    type == "regular" && pkgs.lib.hasSuffix ".hs" path;
               }
             }/. "$out/lib/"
           '';
@@ -460,8 +465,12 @@
 
           packages.runtime-stdlib-products = pkgs.runCommand "tidepool-runtime-stdlib-products" { } ''
             export TIDEPOOL_EXTRACT="${self.packages.${system}.tidepool-extract}/bin/tidepool-extract"
-            export TIDEPOOL_EXTRACT_WORKER="${self.packages.${system}.tidepool-extract}/bin/tidepool-extract-bin"
-            export TIDEPOOL_COMPILER_DEPLOYMENT="${self.packages.${system}.tidepool-extract}/share/exomonad/compiler-deployment.json"
+            export TIDEPOOL_EXTRACT_WORKER="${
+              self.packages.${system}.tidepool-extract
+            }/bin/tidepool-extract-bin"
+            export TIDEPOOL_COMPILER_DEPLOYMENT="${
+              self.packages.${system}.tidepool-extract
+            }/share/exomonad/compiler-deployment.json"
             export TIDEPOOL_PRELUDE_DIR="${self.packages.${system}.runtime-stdlib-sources}/lib"
             export TIDEPOOL_GHC_LIBDIR="$(${ghcEnv}/bin/ghc --print-libdir)"
             ${self.packages.${system}.tidepool-module-package}/bin/tidepool-module-package build \
@@ -526,7 +535,9 @@
                   self.packages.${system}.tidepool-extract
                 }/share/exomonad/compiler-deployment.json" \
                 --set TIDEPOOL_PRELUDE_DIR "${self.packages.${system}.runtime-stdlib-sources}/lib" \
-                --set TIDEPOOL_COMPILER_MODULES "${self.packages.${system}.runtime-stdlib-products}/catalog.json" \
+                --set TIDEPOOL_COMPILER_MODULES "${
+                  self.packages.${system}.runtime-stdlib-products
+                }/catalog.json" \
                 --set EXOMONAD_INTERACTIVE_CODEX_BIN "${interactiveCodex}/bin/codex" \
                 --set EXOMONAD_CODEX_CLOSURE "${interactiveCodex}" \
                 --set EXOMONAD_NIX_STORE_BIN "${pkgs.nix}/bin/nix-store" \
@@ -558,6 +569,7 @@
           packages.buck-tar = pkgs.gnutar;
           packages.buck-gzip = pkgs.gzip;
           packages.buck-python = pkgs.python3;
+          packages.buck-bubblewrap = pkgs.bubblewrap;
           packages.buck-cmake = pkgs.cmake;
           packages.buck-perl = pkgs.perl;
           packages.buck-pkg-config = pkgs.pkg-config;
@@ -576,12 +588,25 @@
               pkgs.gnutar
               pkgs.gzip
               pkgs.python3
+              pkgs.bubblewrap
               pkgs.cmake
               pkgs.perl
               pkgs.pkg-config
               pkgs.openssl
               pkgs.git
             ];
+          };
+          packages.buck-exomonad-runtime-tools = pkgs.symlinkJoin {
+            name = "exomonad-runtime-tools";
+            paths = [
+              pkgs.bash
+              pkgs.coreutils
+              pkgs.git
+              pkgs.bubblewrap
+              pkgs.tmux
+              pkgs.nix
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd ];
           };
           packages.buck-test-tools-closure = pkgs.closureInfo {
             rootPaths = [

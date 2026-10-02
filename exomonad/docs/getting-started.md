@@ -6,10 +6,12 @@ that has one. Everything else on this page is what happens around those two.
 
 ## What you need
 
-Linux, with Nix 2.27 or newer, systemd user services on cgroup v2, Bubblewrap and tmux. Exomonad
-drives a pinned Tidepool fork of the Codex client as each agent's interface, so
-authenticate that client before starting model work. For Jev, put a TypeSafe
-key in `TYPESAFE_API_KEY` before launching.
+Linux, with Nix 2.27 or newer, systemd user services on cgroup v2, Bubblewrap and
+tmux. The embedded backend serves the root conversation in a browser and calls
+the provider through the harness. Its current authentication bridge reads an
+existing Codex credential file; authenticate that account before model work.
+The Codex compatibility backend uses the pinned Tidepool fork of the client.
+For Jev, put a TypeSafe key in `TYPESAFE_API_KEY` before launching.
 
 Agents run shell commands as you. Read
 [what Exomonad does not protect you from](../README.md#what-it-does-not-protect-you-from)
@@ -50,8 +52,8 @@ input hash and does not reuse this checkout's Cabal and Cargo incremental
 outputs. The wrapper selects the matched extractor and client itself; it does
 not replace `codex` on your `PATH`.
 
-The matched Codex package uses its `local` Cargo profile: no LTO, no debug
-information, and unoptimized code with release runtime semantics. This reduces
+For Codex compatibility, the matched package uses its `local` Cargo profile:
+no LTO, no debug information, and unoptimized code with release runtime semantics. This reduces
 compiler memory and build work; runtime throughput may be lower than a release
 build. An optimized distribution build remains available with
 `nix build ./vendor/codex#codex-rs-release`.
@@ -136,10 +138,34 @@ workspace's own model-free recipe checks, if it declares any.
 
 ## `exomonad init`: start a run
 
+Select the embedded backend in the project's `.exomonad/config.toml`:
+
+```toml
+[launch]
+backend = "embedded"
+```
+
+Configure `[launch.embedded]` with `listen`, `session_secret_file`,
+`codex_auth_file`, and the model's `context_capacity_tokens`. The listener must
+use loopback or a local Tailscale address. File paths must be absolute;
+`asset_root` must contain the browser's `index.html`, or be supplied by the
+package through `EXOMONAD_EMBEDDED_ASSET_ROOT`. The session secret file supplies
+browser authentication; the Codex credential file is read-only provider
+authentication. Model and effort selection remain in `[defaults]` and the
+workspace's `[models]` aliases. Backend selection is a config setting; `init`
+has no `--backend` flag.
+
 ```bash
 cd /path/to/your/project
 exomonad init
 ```
+
+The first live run is operator-driven: start it when ready, open the browser
+listener reported by the host, authenticate with the session secret, and submit
+the root task there. Embedded implementation and focused checks do not by
+themselves establish full engine acceptance; see the
+[current delivery status](../../plans/README.md). Selecting this backend for a
+workspace does not change the generated default or publish a release.
 
 `exomonad init` scaffolds nothing. With no workspace it stops and says to run
 `exomonad new`. With one, it captures the workspace, starts a tmux session named
@@ -161,11 +187,11 @@ refuses to start a separate state-root run until that work is inspected and
 retired; it does not move or delete the old tree automatically. `exomonad proxy`
 discovers live sessions in both roots and refuses an ambiguous session name.
 
-The host is a restart-bounded per-run systemd user service. The session has a
-`Host` window following that service, a `Compiler` window
-running the Haskell compile service, and a `exomonad-root` window with the root
-agent's client. Give the root a task there. Each child agent gets a window of its own
-when it starts.
+The host is a restart-bounded per-run systemd user service. The tmux session has
+a `Host` window following that service and a `Compiler` window running the
+Haskell compile service. Embedded root and child conversations appear in the
+browser; they do not require Codex client processes. With the Codex compatibility
+backend, `exomonad-root` and child windows hold the clients instead.
 
 | Option | Effect |
 |---|---|

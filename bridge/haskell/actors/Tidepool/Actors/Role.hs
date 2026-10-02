@@ -18,6 +18,7 @@ module Tidepool.Actors.Role
   , WorktreeIntegration
   , Forks
   , Jev
+  , ModelCall
   , Lookup
   , Reflect
   , Source
@@ -51,6 +52,7 @@ import Tidepool.Effects.Core
   , BoundWorktree
   , Forks
   , Jev
+  , ModelCall
   , Lookup
   , Reflect
   , Source
@@ -65,8 +67,8 @@ import Tidepool.Effects.Row
 -- are supplied by their owner modules. Actor supplies typed Haskell actor
 -- execution; workspace operations retain their separate capabilities.
 
-type CoreEffects = '[Replies, Watches, ActorContext, Notifications, Jev, Commands, Actor, Reflect, Lookup]
-type ResearchLeafEffects = '[Replies, Watches, ActorContext, BoundWorktree, Notifications, Jev, Commands, Actor, Reflect, Lookup]
+type CoreEffects = '[Replies, Watches, ActorContext, Notifications, Jev, ModelCall, Commands, Actor, Reflect, Lookup]
+type ResearchLeafEffects = '[Replies, Watches, ActorContext, BoundWorktree, Notifications, Jev, ModelCall, Commands, Actor, Reflect, Lookup]
 -- What a child DECLARES, which is a subset of the role ceiling in
 -- `exomonad/actor/src/role.rs`. The ceiling may be wider: it is a maximum, not
 -- a request, and every effect named here must have a handler installed in each
@@ -74,7 +76,7 @@ type ResearchLeafEffects = '[Replies, Watches, ActorContext, BoundWorktree, Noti
 -- them). A test in `role.rs` checks the subset direction, not equality.
 type ResearchEffects =
   '[ Replies, Watches, Forks, ActorContext
-   , AgentInspection, AgentControl, BoundWorktree, Notifications, Jev, Commands, Actor, Reflect, Lookup
+   , AgentInspection, AgentControl, BoundWorktree, Notifications, Jev, ModelCall, Commands, Actor, Reflect, Lookup
    ]
 -- A coding child reloads the source layer of the checkout it holds; the layer
 -- its calls reach is fixed when the actor is constructed, so this never lets
@@ -82,12 +84,12 @@ type ResearchEffects =
 type CodingEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentInspection, AgentControl, BoundWorktree
-   , WorktreeAllocation, WorktreeIntegration, Notifications, Jev, Commands, Actor, Reflect, Lookup
+   , WorktreeAllocation, WorktreeIntegration, Notifications, Jev, ModelCall, Commands, Actor, Reflect, Lookup
    , Source
    ]
 type IntegrationEffects =
   '[ Replies, Watches, ActorContext
-   , AgentInspection, BoundWorktree, WorktreeIntegration, Notifications, Jev, Commands, Actor, Reflect, Lookup
+   , AgentInspection, BoundWorktree, WorktreeIntegration, Notifications, Jev, ModelCall, Commands, Actor, Reflect, Lookup
    ]
 
 -- | Capabilities installed for the interactive root incarnation.
@@ -100,7 +102,7 @@ type ActorEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentLaunch, AgentInspection, AgentControl
    , BoundWorktree, WorktreeRegistry, WorktreeAllocation
-   , WorktreeIntegration, Notifications, Jev, Commands, Actor, Reflect, Lookup
+   , WorktreeIntegration, Notifications, Jev, ModelCall, Commands, Actor, Reflect, Lookup
    , Source
    , Journal
    , RepoEvent

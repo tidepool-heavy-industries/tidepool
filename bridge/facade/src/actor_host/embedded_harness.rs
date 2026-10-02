@@ -1162,7 +1162,6 @@ mod tests {
             .unwrap();
         match engine_result {
             Ok(()) => {}
-            Err(error) if error == "engine cancelled" => {}
             Err(error) => panic!("embedded Engine failed: {error}"),
         }
         let requests = transport.requests.lock().unwrap();
@@ -1193,13 +1192,23 @@ mod tests {
         drop(requests);
         let mut projection = EmbeddedProjection::default();
         projection.attached(actor, conversation.identity());
-        projection.publish(
-            &service.control,
-            &conversation.identity().run,
-            &campaign.forest.inspect_host_graph(),
-            &LifecycleState::default(),
-            |_| conversation.active_round(),
-        );
+        projection
+            .publish(
+                &service.control,
+                &conversation.identity().run,
+                &campaign.forest.inspect_host_graph(),
+                &LifecycleState::default(),
+                |_| conversation.active_round(),
+                |identity| {
+                    service
+                        .runtime
+                        .store()
+                        .embedded_agent_head(identity)
+                        .map(|head| head.map(|request| request.0))
+                },
+                |_| true,
+            )
+            .unwrap();
         let mut reconnect_identity = None;
         for _ in 0..2 {
             let mut request = format!("ws://{}/api/ws", service.address)

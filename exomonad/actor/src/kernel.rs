@@ -130,6 +130,8 @@ pub enum KernelInvocationFailure {
     Rejected { actor: ActorRef, detail: String },
     #[error("actor {actor} invocation failed: {detail}")]
     Failed { actor: ActorRef, detail: String },
+    #[error("actor {actor} invocation cleanup remains unconfirmed: {detail}")]
+    CleanupUnconfirmed { actor: ActorRef, detail: String },
     #[error(transparent)]
     Workbench(#[from] KernelWorkbenchFailure),
 }

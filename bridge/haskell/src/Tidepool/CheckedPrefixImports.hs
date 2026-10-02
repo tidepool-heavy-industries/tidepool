@@ -3,9 +3,11 @@
 module Tidepool.CheckedPrefixImports
   ( CompletedValueImport(..), CompletedValueImports
   , hydrateCompletedValueImports, hydrateCompletedValueImportsWithDependencies
+  , hydrateCompletedValueImportsWithVerifiedDependencies
   , transformCompletedValueImports
   , refineOriginalDeclarationImports, refineOriginalDeclarationImportsWithCompleted
   , refineProgramDeclarationImports
+  , selectedImportNames
   ) where
 
 import Control.Exception (evaluate)
@@ -36,7 +38,9 @@ import GHC.Utils.Fingerprint (Fingerprint)
 import GHC.Utils.Outputable (ppr)
 import System.Mem.StableName (StableName, makeStableName)
 import Tidepool.DeclarationJoin (ExportIdentity(..), ExportNamespace(..), exportIdentity)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), readExactIfaceArtifacts, hydrateExactScope)
+import Tidepool.ExactHydration
+  ( ExactIfaceArtifact(..), VerifiedExactIfaceClosure, readExactIfaceArtifacts
+  , selectVerifiedValueInterfaces, hydrateExactScope )
 import Tidepool.Identity (stableVarId)
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule,
   sessionModuleString, scaffoldTargetName, registerSessionInterfaceLocation)
@@ -76,14 +80,26 @@ hydrateCompletedValueImports = hydrateCompletedValueImportsWithDependencies []
 hydrateCompletedValueImportsWithDependencies
   :: [ExactIfaceArtifact] -> [CompletedValueImport] -> HscEnv
   -> IO (Either String (HscEnv, CompletedValueImports))
-hydrateCompletedValueImportsWithDependencies dependencies requested env
+hydrateCompletedValueImportsWithDependencies = hydrateCompletedValueInputs readExactIfaceArtifacts
+
+hydrateCompletedValueImportsWithVerifiedDependencies
+  :: VerifiedExactIfaceClosure -> [ExactIfaceArtifact] -> [CompletedValueImport] -> HscEnv
+  -> IO (Either String (HscEnv, CompletedValueImports))
+hydrateCompletedValueImportsWithVerifiedDependencies closure =
+  hydrateCompletedValueInputs (\_ artifacts -> pure (selectVerifiedValueInterfaces closure artifacts))
+
+hydrateCompletedValueInputs
+  :: (HscEnv -> [ExactIfaceArtifact] -> IO (Either String [(ExactIfaceArtifact,ModIface)]))
+  -> [ExactIfaceArtifact] -> [CompletedValueImport] -> HscEnv
+  -> IO (Either String (HscEnv, CompletedValueImports))
+hydrateCompletedValueInputs readInputs dependencies requested env
   | null artifacts = pure (Right (env, CompletedValueImports []))
   | any invalidOwner requested = pure (Left "completed values require canonical Val owners and nonempty selections")
   | any invalidDependency dependencies = pure (Left "completed value dependencies require canonical Val owners")
   | length winners /= length (nub winners) = pure (Left "completed value selections contain duplicate lexical winners")
   | length owners /= length (nub owners) = pure (Left "completed value hydration contains duplicate interface owners")
   | otherwise = do
-      decoded <- readExactIfaceArtifacts env artifacts
+      decoded <- readInputs env artifacts
       case decoded of
         Left diagnostic -> pure (Left diagnostic)
         Right interfaces -> do
