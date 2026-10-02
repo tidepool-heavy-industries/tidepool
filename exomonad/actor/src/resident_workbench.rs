@@ -482,6 +482,9 @@ impl ActorWorkbenchSource {
 pub(crate) struct ResidentWorkbenchTools {
     pub(crate) declarations: Vec<exomonad_tool::HostedTool>,
     pub(crate) dispatch: Arc<RootCustody>,
+    /// Installer source roots belong to the installed implementation, not the
+    /// actor's published declaration and value surface.
+    _installation_scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
     /// Exact installer row retained with its rooted dispatcher.
     pub(crate) dispatcher_effects: String,
     /// Which slots the installed record fills, by name, as the same compile
@@ -3695,6 +3698,23 @@ where
                 insert_preamble_imports(&source.preamble, "qualified Tidepool.Effects.Core").into();
             let mut compile_context = context.clone();
             compile_context.haskell_effects_alias = dispatcher_effects.clone();
+            let installation_scope = self
+                .access
+                .with_machine(context.clone(), |session, context, _| {
+                    session
+                        .retain_lexical_scope(context.placement.lexical_scope)
+                        .map_err(Into::into)
+                })
+                .await?;
+            compile_context.placement.lexical_scope = installation_scope.scope();
+            let abort_guard = ParkedHoleAbortGuard::with_retained_latest(
+                &self.access,
+                compile_context.clone(),
+                None,
+                "tool installation was abandoned before settlement".into(),
+                Some(installation_scope.clone()),
+            );
+            let registration = abort_guard.registration();
             let block = ParsedBlock {
                 ordinal: 1,
                 total: 1,
@@ -3725,7 +3745,7 @@ where
                 block,
                 Some(verdict),
             ));
-            let step = fragment.await?;
+            let step = registration.scope(fragment).await?;
             let ResidentWorkbenchStep::Running { outcome, .. } = step else {
                 let detail = match step {
                     ResidentWorkbenchStep::Rejected(detail) => detail.output,
@@ -3744,17 +3764,10 @@ where
             // parked. `ParkedHoleAbortGuard` covers that gap the same way
             // `HostInputRetirement` covers the split cell's mounted input:
             // Drop can't await, so it spawns one more checkout in the
-            // background to abort the hole there. Disarmed the moment the
-            // checkout below is actually in hand, since everything past that
-            // point settles the hole synchronously inside it.
-            let abort_guard = ParkedHoleAbortGuard::new(
-                &self.access,
-                compile_context.clone(),
-                hole.cont_id().to_string(),
-                "tool installer's parked hole was abandoned before its resuming checkout".into(),
-            );
-            let registration = abort_guard.registration();
-            let publication = self
+            // background to abort the hole there, retaining the installer
+            // scope until retirement. Successful publication disarms it.
+            let resumption_registration = registration.clone();
+            let publication = registration.scope(self
                 .access
                 .with_machine(compile_context, move |session, context, _| {
                     let publication = (|| {
@@ -3816,7 +3829,7 @@ where
                         Err(error) => {
                             match session.abort(hole.cont_id(), "tool publication rejected".into())
                             {
-                                Ok(outcome) => registration.replace_in_checkout(session, &outcome),
+                                Ok(outcome) => resumption_registration.replace_in_checkout(session, &outcome),
                                 Err(abort_error) => tracing::warn!(
                                     hole = hole.cont_id(),
                                     %abort_error,
@@ -3829,7 +3842,7 @@ where
                     let settled = session
                         .resume_classified(hole, ())
                         .map_err(classify_resumption)?;
-                    registration.replace_in_checkout(session, &settled);
+                    resumption_registration.replace_in_checkout(session, &settled);
                     if !matches!(
                         settled,
                         ResidentOutcome::Completed { .. }
@@ -3840,7 +3853,7 @@ where
                                 hole.cont_id(),
                                 "tool installer must finish after publication".into(),
                             ) {
-                                Ok(outcome) => registration.replace_in_checkout(session, &outcome),
+                                Ok(outcome) => resumption_registration.replace_in_checkout(session, &outcome),
                                 Err(abort_error) => tracing::warn!(
                                     hole = hole.cont_id(),
                                     %abort_error,
@@ -3855,13 +3868,14 @@ where
                     Ok(ResidentWorkbenchTools {
                         declarations,
                         dispatch: Arc::new(dispatch),
+                        _installation_scope: installation_scope,
                         dispatcher_effects,
                         slots,
                         resolved: publication_resolved,
                         install,
                         revision,
                     })
-                })
+                }))
                 .await;
             if publication.is_ok() {
                 abort_guard.disarm();
@@ -12599,6 +12613,17 @@ mod request_tests {
         ActorWorkbenchSource,
         tempfile::TempDir,
     ) {
+        host_mount_fixture_with_lib(|_| {})
+    }
+
+    fn host_mount_fixture_with_lib(
+        configure: impl FnOnce(&mut tidepool_runtime::session::SessionLib),
+    ) -> (
+        ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        crate::ActorSessionContext,
+        ActorWorkbenchSource,
+        tempfile::TempDir,
+    ) {
         use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
         use tidepool_runtime::session::{ModuleEnv, SessionLib};
 
@@ -12618,13 +12643,14 @@ mod request_tests {
         let effects_alias = "'[Exomonad.Notifications, Sleep]";
         let session_id = tidepool_repr::SessionId((u64::from(std::process::id()) << 16) | 4_244);
         let session_root = tempfile::tempdir().expect("session root");
-        let lib = SessionLib::open(
+        let mut lib = SessionLib::open(
             session_id,
             session_root.path(),
             ModuleEnv::standalone_default(),
         )
         .expect("declaration plane")
         .with_validation_include(include.clone());
+        configure(&mut lib);
         let mut session = ResidentSession::unbootstrapped(
             frunk::HNil,
             tidepool_mcp::CapturedOutput::new(),
@@ -14696,6 +14722,127 @@ mod request_tests {
         >::new());
         machines.insert_idle(session_id, Box::new(session));
         (machines, context, source, root)
+    }
+
+    #[tokio::test]
+    async fn tool_installation_preserves_durable_child_private_admission() {
+        struct RunOwner {
+            root: PathBuf,
+            _lock: std::fs::File,
+        }
+        impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
+            fn owns_run(&self, root: &std::path::Path) -> std::io::Result<bool> {
+                Ok(root.canonicalize()? == self.root)
+            }
+        }
+        let durable = tempfile::tempdir().unwrap();
+        let manifest = durable.path().join("declarations.json");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(durable.path().join("run-owner.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        let authority = Arc::new(RunOwner {
+            root: durable.path().canonicalize().unwrap(),
+            _lock: lock,
+        });
+        let (mut session, context, source, _root) = host_mount_fixture_with_lib(|lib| {
+            lib.attach_owned_recovery_graph_v3(&manifest, authority)
+                .unwrap();
+        });
+        let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/installer-child").unwrap(),
+            context.actor.incarnation.0,
+        )
+        .unwrap();
+        // Durable children publish their inherited view before native boot
+        // installs tools. The installer must preserve that admitted surface.
+        session
+            .initialize_durable_public_scope(owner.clone(), context.placement.lexical_scope)
+            .unwrap();
+        let before = session
+            .public_visibility_snapshot_in(context.placement.lexical_scope)
+            .unwrap();
+        let manifest_before = std::fs::read(&manifest).unwrap();
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
+        let workbench =
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+        let tools = workbench
+            .prepare_tools(context.clone(), 1, vec![])
+            .await
+            .unwrap();
+        assert!(!tools.declarations.is_empty());
+        let installation_scope = tools._installation_scope.scope();
+        assert_ne!(installation_scope, context.placement.lexical_scope);
+        let cleanup_owner = owner.clone();
+        let admission = workbench
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                assert_eq!(
+                    session.public_visibility_snapshot_in(context.placement.lexical_scope),
+                    Some(before)
+                );
+                assert_eq!(std::fs::read(&manifest).unwrap(), manifest_before);
+                assert!(session
+                    .public_visibility_snapshot_in(installation_scope)
+                    .is_some());
+                session
+                    .begin_durable_private_execution(&owner, context.placement.lexical_scope)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await
+            .expect("ordinary private notebook admission after tool installation");
+        let mut private_context = context.clone();
+        private_context.placement.lexical_scope = admission.private_scope();
+        let step = workbench
+            .begin_fragment_split(
+                private_context.clone(),
+                source,
+                vec![],
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "pure (7 :: Int)".into(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        match step {
+            ResidentWorkbenchStep::Running { fragment, outcome } => {
+                workbench
+                    .settle_item(private_context, *fragment, *outcome)
+                    .await
+                    .unwrap();
+            }
+            ResidentWorkbenchStep::Committed { .. } => {}
+            _ => panic!(
+                "ordinary private notebook did not execute: {}",
+                describe_step(&step)
+            ),
+        }
+        drop(admission);
+        drop(tools);
+        workbench
+            .access
+            .with_machine(context, move |session, context, _| {
+                let _next = session.begin_durable_private_execution(
+                    &cleanup_owner,
+                    context.placement.lexical_scope,
+                )?;
+                assert!(session
+                    .public_visibility_snapshot_in(installation_scope)
+                    .is_none());
+                Ok(())
+            })
+            .await
+            .expect("installed implementation releases its lexical scope");
     }
 
     /// A bare, unbootstrapped-but-idle machine at an arbitrary session id —
