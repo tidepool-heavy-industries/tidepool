@@ -264,7 +264,7 @@ verifyProjectionInterning dir output = do
     ++ show (length (Schema.programSignatures program), length (Schema.programGlobals program),
       length (Schema.programConstructors program), length (Schema.programOperations program)))
   strictPlain <- writePlainConstructorEvidenceFixture dir
-  strictPlainResult <- runPipelineSelected PreparedStg strictPlain [dir, "lib"]
+  strictPlainResult <- runPipelineSelected PreparedStg strictPlain [dir, "test/prepared-stg", "lib"]
   verifyRepeatedConstructorEvidence strictPlainResult
   putStrLn "projection interning: deterministic bytes and 16 constructor-conflict paths passed"
 
@@ -340,7 +340,7 @@ verifyConstructorRepresentations dir = do
     ])
   writeFile scientificMetadataPlain (scientificMetadataSource "ScientificMetadataPlain" False)
   writeFile scientificMetadataQuoted (scientificMetadataSource "ScientificMetadataQuoted" True)
-  strictPlainResult <- runPipelineSelected PreparedStg strictPlain [dir, "lib"]
+  strictPlainResult <- runPipelineSelected PreparedStg strictPlain [dir, "test/prepared-stg", "lib"]
   strictQuotedResult <- runPipelineSelected PreparedStg strictQuoted [dir, "lib"]
   scientificPlainResult <- runPipelineSelected PreparedStg scientificPlain [dir, "lib"]
   scientificQuotedResult <- runPipelineSelected PreparedStg scientificQuoted [dir, "lib"]
