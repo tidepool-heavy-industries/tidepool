@@ -266,7 +266,8 @@ async fn production_engine_store_eight_actors_sequential_cells() {
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),
-        codex_auth_file: auth_file,
+        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        credential_file: auth_file,
         context_capacity_tokens: 2_000_000,
         concurrent_jobs: ACTORS + 1,
     };

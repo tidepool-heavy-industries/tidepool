@@ -12,7 +12,7 @@
 //! failure after copying began retires the invocation while retaining both
 //! spaces.
 
-use super::raw::{self, DescriptorSpace};
+use super::raw::{self, CopyFailureOrigin, DescriptorSpace};
 use crate::descriptor_region::{DescriptorArena, DescriptorOldSpace, DescriptorSourceSpace};
 use crate::execution_descriptor::DescriptorTraceError;
 use crate::external_storage::{ExternalPayloadOwner, ExternalStorageKind};
@@ -26,6 +26,47 @@ pub struct PromotionResult {
     pub promoted_external_payloads: Vec<(usize, ExternalStorageKind)>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromotionPhase {
+    SelectedGraph,
+    SiblingFixup,
+    ArenaCompaction,
+    /// The graph copy finished, but publication bookkeeping failed.
+    PostCopy,
+}
+
+/// One bounded failure capsule. It keeps the original cause and records only
+/// addresses already read by the copier, never a heap view across failure.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("{cause} (phase={phase:?}, origin={origin:#x?})")]
+pub struct PromotionDiagnostic {
+    pub cause: DescriptorTraceError,
+    pub phase: PromotionPhase,
+    pub origin: Option<CopyFailureOrigin>,
+}
+
+impl PromotionDiagnostic {
+    pub fn post_copy(cause: DescriptorTraceError) -> Self {
+        Self {
+            cause,
+            phase: PromotionPhase::PostCopy,
+            origin: None,
+        }
+    }
+
+    fn copying(
+        phase: PromotionPhase,
+        cause: DescriptorTraceError,
+        space: &DescriptorSpace,
+    ) -> Self {
+        Self {
+            cause,
+            phase,
+            origin: space.copy_failure_origin(),
+        }
+    }
+}
+
 /// Preparation has not changed objects. Incomplete means roots or either heap
 /// may already have changed: retain all owners and permanently retire the
 /// invocation, even if the underlying cause is ordinarily a resource failure.
@@ -34,7 +75,7 @@ pub enum PromotionFailure {
     #[error("promotion preparation: {0}")]
     Preparation(DescriptorTraceError),
     #[error("incomplete promotion; invocation must retire: {0}")]
-    Incomplete(DescriptorTraceError),
+    Incomplete(PromotionDiagnostic),
 }
 
 struct PromotedAndOld<'a> {
@@ -167,16 +208,26 @@ unsafe fn promote_and_fixup_inner(
         previous,
         external,
     )
-    .map_err(Incomplete)?;
+    .map_err(|cause| {
+        Incomplete(PromotionDiagnostic::copying(
+            PromotionPhase::SelectedGraph,
+            cause,
+            descriptors,
+        ))
+    })?;
     let mut promoted_external_payloads = Vec::new();
     let payload_count = descriptors.visited_external_payloads().count();
     promoted_external_payloads
         .try_reserve(payload_count)
-        .map_err(|_| Incomplete(DescriptorTraceError::MetadataAllocation))?;
+        .map_err(|_| {
+            Incomplete(PromotionDiagnostic::post_copy(
+                DescriptorTraceError::MetadataAllocation,
+            ))
+        })?;
     promoted_external_payloads.extend(descriptors.visited_external_payloads());
     destination
         .seal(promoted.bytes_copied)
-        .map_err(Incomplete)?;
+        .map_err(|cause| Incomplete(PromotionDiagnostic::post_copy(cause)))?;
     let admitted = PromotedAndOld {
         promoted: destination,
         previous,
@@ -194,7 +245,13 @@ unsafe fn promote_and_fixup_inner(
         Some(&admitted),
         external,
     )
-    .map_err(Incomplete)?;
+    .map_err(|cause| {
+        Incomplete(PromotionDiagnostic::copying(
+            PromotionPhase::SiblingFixup,
+            cause,
+            descriptors,
+        ))
+    })?;
     Ok(PromotionResult {
         promoted_bytes: promoted.bytes_copied,
         nursery_bytes: nursery.bytes_copied,
@@ -255,14 +312,26 @@ pub unsafe fn compact_descriptor_arenas(
         admitted,
         Some(external),
     )
-    .map_err(Incomplete)?;
+    .map_err(|cause| {
+        Incomplete(PromotionDiagnostic::copying(
+            PromotionPhase::ArenaCompaction,
+            cause,
+            descriptors,
+        ))
+    })?;
     let mut compacted_external_payloads = Vec::new();
     let payload_count = descriptors.visited_external_payloads().count();
     compacted_external_payloads
         .try_reserve(payload_count)
-        .map_err(|_| Incomplete(DescriptorTraceError::MetadataAllocation))?;
+        .map_err(|_| {
+            Incomplete(PromotionDiagnostic::post_copy(
+                DescriptorTraceError::MetadataAllocation,
+            ))
+        })?;
     compacted_external_payloads.extend(descriptors.visited_external_payloads());
-    destination.seal(copied.bytes_copied).map_err(Incomplete)?;
+    destination
+        .seal(copied.bytes_copied)
+        .map_err(|cause| Incomplete(PromotionDiagnostic::post_copy(cause)))?;
     Ok(CompactionResult {
         bytes_copied: copied.bytes_copied,
         compacted_external_payloads,
@@ -432,10 +501,151 @@ mod tests {
             )
         }
         .unwrap_err();
-        assert!(matches!(failure, PromotionFailure::Incomplete(_)));
+        let PromotionFailure::Incomplete(diagnostic) = failure else {
+            panic!("a failed copy must retain its owners");
+        };
+        assert_eq!(diagnostic.phase, PromotionPhase::SelectedGraph);
+        assert_eq!(
+            diagnostic.cause,
+            DescriptorTraceError::InvalidManagedPointer {
+                address: root_object as usize + 8
+            }
+        );
+        assert!(matches!(diagnostic.origin,
+            Some(CopyFailureOrigin { edge: raw::CopyEdge::ObjectField { descriptor: header, offset, value, .. }, indirection: None })
+                if header == descriptor.initial_header_word()
+                    && offset == descriptor.trace_offsets()[0] as usize
+                    && value == root_object as usize + 8));
         let state = unsafe { descriptor.state(root_object, extent) }.unwrap();
         assert_eq!(state, DescriptorState::Forwarded);
         assert!(!destination.destination().is_empty());
+    }
+
+    #[test]
+    fn sibling_failure_names_the_root_and_resets_copy_provenance() {
+        let descriptor = descriptor();
+        let extent = descriptor.allocation_extent() as usize;
+        let mut descriptors = DescriptorSpace::new([Arc::clone(&descriptor)]).unwrap();
+        for corrupt_sibling in [true, false] {
+            let mut source = vec![0_u64; extent / 8];
+            let mut spare = vec![0_u64; extent / 8];
+            let mut destination =
+                DescriptorArena::reserve(extent, [Arc::clone(&descriptor)]).unwrap();
+            let mut selected = unsafe {
+                write_node(
+                    source.as_mut_ptr().cast(),
+                    0,
+                    &descriptor,
+                    std::ptr::null_mut(),
+                )
+            };
+            let invalid = 0xdead_0008;
+            let mut sibling = if corrupt_sibling {
+                invalid as *mut u8
+            } else {
+                selected
+            };
+            let roots = [&mut selected as *mut *mut u8, &mut sibling as *mut *mut u8];
+            let result = unsafe {
+                promote_and_fixup(
+                    &roots[..1],
+                    &roots,
+                    source.as_ptr().cast(),
+                    extent,
+                    std::slice::from_raw_parts_mut(spare.as_mut_ptr().cast(), extent),
+                    &mut destination,
+                    &mut descriptors,
+                    None,
+                )
+            };
+            if corrupt_sibling {
+                let PromotionFailure::Incomplete(diagnostic) = result.unwrap_err() else {
+                    panic!("sibling copy has already followed promotion");
+                };
+                assert_eq!(diagnostic.phase, PromotionPhase::SiblingFixup);
+                assert_eq!(
+                    diagnostic.cause,
+                    DescriptorTraceError::InvalidManagedPointer { address: invalid }
+                );
+                assert_eq!(
+                    diagnostic.origin,
+                    Some(CopyFailureOrigin {
+                        edge: raw::CopyEdge::Root {
+                            slot: roots[1] as usize,
+                            value: invalid
+                        },
+                        indirection: None,
+                    })
+                );
+                assert_eq!(destination.bytes_used(), extent);
+            } else {
+                result.unwrap();
+                assert_eq!(descriptors.copy_failure_origin(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn updated_target_failure_names_only_the_admitted_thunk_hop() {
+        let field = descriptor();
+        let thunk = Arc::new(
+            ObjectDescriptor::new(
+                crate::execution_descriptor::ObjectKind::Thunk,
+                field.payload().clone(),
+                None,
+            )
+            .unwrap(),
+        );
+        let extent = thunk.allocation_extent() as usize;
+        let mut source = vec![0_u64; extent / 8];
+        let mut spare = vec![0_u64; extent / 8];
+        let mut destination = DescriptorArena::reserve(extent, [Arc::clone(&thunk)]).unwrap();
+        let mut descriptors = DescriptorSpace::new([Arc::clone(&thunk)]).unwrap();
+        let invalid = 0xdead_0008;
+        let mut root = source.as_mut_ptr().cast::<u8>();
+        unsafe {
+            thunk.initialize_header(root);
+            root.cast::<usize>()
+                .write(thunk.initial_header_word() | DescriptorState::Updated as usize);
+            root.add(8).cast::<usize>().write(invalid);
+        }
+        let roots = [&mut root as *mut *mut u8];
+        let failure = unsafe {
+            promote_and_fixup(
+                &roots,
+                &roots,
+                source.as_ptr().cast(),
+                extent,
+                std::slice::from_raw_parts_mut(spare.as_mut_ptr().cast(), extent),
+                &mut destination,
+                &mut descriptors,
+                None,
+            )
+        }
+        .unwrap_err();
+        let PromotionFailure::Incomplete(diagnostic) = failure else {
+            panic!("copy failed")
+        };
+        assert_eq!(diagnostic.phase, PromotionPhase::SelectedGraph);
+        assert_eq!(
+            diagnostic.cause,
+            DescriptorTraceError::InvalidManagedPointer { address: invalid }
+        );
+        assert_eq!(
+            diagnostic.origin,
+            Some(CopyFailureOrigin {
+                edge: raw::CopyEdge::Root {
+                    slot: roots[0] as usize,
+                    value: root as usize
+                },
+                indirection: Some(raw::CopyIndirection {
+                    object: root as usize,
+                    descriptor: thunk.initial_header_word(),
+                    state: DescriptorState::Updated,
+                    target: invalid,
+                }),
+            })
+        );
     }
 
     #[test]
@@ -589,6 +799,44 @@ mod tests {
             DescriptorState::Live,
             "the dead object is never visited"
         );
+
+        let invalid = 0xdead_0008;
+        let mut broken = DescriptorArena::reserve(extent, [Arc::clone(&descriptor)]).unwrap();
+        let mut root = unsafe {
+            write_node(
+                broken.destination().as_mut_ptr(),
+                0,
+                &descriptor,
+                invalid as *mut u8,
+            )
+        };
+        broken.seal(extent).unwrap();
+        let source = [broken];
+        let roots = [&mut root as *mut *mut u8];
+        let mut destination = DescriptorArena::reserve(extent, [Arc::clone(&descriptor)]).unwrap();
+        let failure = unsafe {
+            compact_descriptor_arenas(
+                &roots,
+                &Arenas(&source),
+                0,
+                &mut destination,
+                &mut descriptors,
+                None,
+                &NoPayloads,
+            )
+        }
+        .unwrap_err();
+        let PromotionFailure::Incomplete(diagnostic) = failure else {
+            panic!("arena copy failed")
+        };
+        assert_eq!(diagnostic.phase, PromotionPhase::ArenaCompaction);
+        assert_eq!(
+            diagnostic.cause,
+            DescriptorTraceError::InvalidManagedPointer { address: invalid }
+        );
+        assert!(matches!(diagnostic.origin,
+            Some(CopyFailureOrigin { edge: raw::CopyEdge::ObjectField { descriptor: header, offset, value, .. }, indirection: None })
+                if header == descriptor.initial_header_word() && offset == descriptor.trace_offsets()[0] as usize && value == invalid));
     }
 
     struct NoPayloads;
@@ -703,5 +951,49 @@ mod tests {
         );
         assert_eq!(tag_of(payload_value), leaf.tag());
         let _ = leaf_object;
+
+        // A later copy authenticates the same external owner but refuses its
+        // corrupt managed element without reading the element's target.
+        let invalid = 0xdead_0008;
+        unsafe { *payload.0.get() = invalid as *mut u8 };
+        let mut next_source = vec![0_u64; extent / 8];
+        let mut next_spare = vec![0_u64; extent / 8];
+        let mut next_destination =
+            DescriptorArena::reserve(extent, [Arc::clone(&external)]).unwrap();
+        let mut next_root = unsafe {
+            write_external(
+                next_source.as_mut_ptr().cast(),
+                0,
+                &external,
+                payload.0.get().cast(),
+            )
+        };
+        let roots = [&mut next_root as *mut *mut u8];
+        let failure = unsafe {
+            promote_and_fixup_with_external(
+                &roots,
+                &roots,
+                next_source.as_ptr().cast(),
+                extent,
+                std::slice::from_raw_parts_mut(next_spare.as_mut_ptr().cast(), extent),
+                &mut next_destination,
+                &mut descriptors,
+                None,
+                &*payload,
+            )
+        }
+        .unwrap_err();
+        let PromotionFailure::Incomplete(diagnostic) = failure else {
+            panic!("external copy failed")
+        };
+        assert_eq!(diagnostic.phase, PromotionPhase::SelectedGraph);
+        assert_eq!(
+            diagnostic.cause,
+            DescriptorTraceError::InvalidManagedPointer { address: invalid }
+        );
+        assert!(matches!(diagnostic.origin,
+            Some(CopyFailureOrigin { edge: raw::CopyEdge::ExternalSlot { descriptor: header, payload: published, kind: ExternalStorageKind::BoxedArray, slot, value, .. }, indirection: None })
+                if header == external.initial_header_word() && published == payload.0.get() as usize
+                    && slot == payload.0.get() as usize && value == invalid));
     }
 }

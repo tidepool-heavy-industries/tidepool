@@ -709,61 +709,6 @@ impl ExtractRequest {
     pub(crate) fn worker_argv(&self) -> Vec<OsString> {
         vec![WORKER_REQUEST_FLAG.into(), hex(&self.encode()).into()]
     }
-
-    /// Rewrites this request into a side-effect-free copy for a pooled
-    /// daemon slot's pre-warm compile (see `daemon::warm_up_slot`): the same
-    /// module graph loads and lowers against the same includes, session
-    /// root, target, and input files — warming the memo — but nothing is
-    /// written anywhere the real request's own consumer might still read.
-    ///
-    /// Two kinds of write are involved:
-    ///
-    /// - The worker's six output-path fields — `requestOutDir`,
-    ///   `requestTurnOut`, `requestClassifyOut`, `requestCellOut`,
-    ///   `requestInspectOut`, `requestBuildProductsDir` in
-    ///   `Tidepool.ExtractRequest` — each name a file or directory the
-    ///   worker writes its result to. Every one this request set is
-    ///   redirected to a path under `dir`; a field it did not set stays
-    ///   absent (this never adds a write the original request didn't
-    ///   already ask for, only relocates where an existing one lands).
-    /// - A `--turn` request whose template selects a session bind writes a
-    ///   thin session interface directly under `--session-root`
-    ///   (`Tidepool.SessionArtifacts.mkBoundBinders` /
-    ///   `writeSessionIface`), keyed off `--bind-gen` — not through any of
-    ///   the six output-path fields, and not something a redirected path
-    ///   can intercept, since the write target isn't request-controlled.
-    ///   Session root itself is left untouched (it also feeds session-scope
-    ///   *reads* needed for the same module graph to resolve), but the
-    ///   `BindGen` field is dropped so `Main.hs`'s `requireArg "--bind-gen"`
-    ///   fails before that write is ever reached — turning a would-be bind
-    ///   into a harmless diagnostic failure after the load/lowering this
-    ///   warm-up exists for has already happened.
-    pub(crate) fn redirect_outputs_for_warm_up(&mut self, dir: &Path) {
-        self.fields.retain(|field| {
-            !matches!(
-                field,
-                Field::BindGen(_)
-                    | Field::ModuleCandidates(_)
-                    | Field::CertifyHomeProducts
-                    | Field::SessionArtifacts(_)
-                    | Field::DeclarationJoin(_)
-                    | Field::DeclarationJoinOut(_)
-            )
-        });
-        for field in &mut self.fields {
-            match field {
-                Field::OutputDir(value) => *value = dir.join("output-dir").into_os_string(),
-                Field::TurnOut(value) => *value = dir.join("turn-out").into_os_string(),
-                Field::ClassifyOut(value) => *value = dir.join("classify-out").into_os_string(),
-                Field::CellOut(value) => *value = dir.join("cell-out").into_os_string(),
-                Field::InspectOut(value) => *value = dir.join("inspect-out").into_os_string(),
-                Field::BuildProductsDir(value) => {
-                    *value = dir.join("build-products").into_os_string()
-                }
-                _ => {}
-            }
-        }
-    }
 }
 
 struct Decoder<'a> {
@@ -1247,7 +1192,7 @@ mod tests {
     }
 
     #[test]
-    fn module_candidates_round_trip_and_do_not_enter_warm_up() {
+    fn module_candidates_round_trip() {
         let mut request = ExtractRequest::default();
         request.input("Expr.hs");
         request.module_candidates(Path::new("/tmp/candidates.cbor"));
@@ -1257,13 +1202,10 @@ mod tests {
             decoded.fields.as_slice(),
             [Field::Input(_), Field::ModuleCandidates(_)]
         ));
-        let mut warm = decoded;
-        warm.redirect_outputs_for_warm_up(Path::new("/tmp/warm"));
-        assert!(matches!(warm.fields.as_slice(), [Field::Input(_)]));
     }
 
     #[test]
-    fn certify_home_products_round_trips_and_does_not_enter_warm_up() {
+    fn certify_home_products_round_trips() {
         let mut request = ExtractRequest::default();
         request.input("Probe.hs");
         request.certify_home_products();
@@ -1273,13 +1215,10 @@ mod tests {
             decoded.fields.as_slice(),
             [Field::Input(_), Field::CertifyHomeProducts]
         ));
-        let mut warm = decoded;
-        warm.redirect_outputs_for_warm_up(Path::new("/tmp/warm"));
-        assert!(matches!(warm.fields.as_slice(), [Field::Input(_)]));
     }
 
     #[test]
-    fn exact_session_artifacts_round_trip_and_do_not_enter_warm_up() {
+    fn exact_session_artifacts_round_trip() {
         let mut request = ExtractRequest::default();
         request.input("Expr.hs");
         request.session_artifacts(Path::new("/tmp/session-artifacts.cbor"));
@@ -1289,9 +1228,6 @@ mod tests {
             decoded.fields.as_slice(),
             [Field::Input(_), Field::SessionArtifacts(_)]
         ));
-        let mut warm = decoded;
-        warm.redirect_outputs_for_warm_up(Path::new("/tmp/warm"));
-        assert!(matches!(warm.fields.as_slice(), [Field::Input(_)]));
     }
 
     #[test]
@@ -1342,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    fn declaration_join_paths_round_trip_and_do_not_enter_warm_up() {
+    fn declaration_join_paths_round_trip() {
         let mut request = ExtractRequest::default();
         request.input("Candidate.hs");
         request.declaration_join(Path::new("/tmp/join-input.cbor"));
@@ -1357,9 +1293,6 @@ mod tests {
                 Field::DeclarationJoinOut(_)
             ]
         ));
-        let mut warm = decoded;
-        warm.redirect_outputs_for_warm_up(Path::new("/tmp/warm"));
-        assert!(matches!(warm.fields.as_slice(), [Field::Input(_)]));
     }
 
     #[test]
@@ -1562,7 +1495,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_only_cell_mode_round_trips_and_redirects_its_output() {
+    fn parser_only_cell_mode_round_trips() {
         let args = [
             "cell.txt".into(),
             "--cell-plan".into(),
@@ -1572,12 +1505,8 @@ mod tests {
             "/tmp/plan.cbor".into(),
         ];
         let request = ExtractRequest::from_cli(&args).unwrap();
-        let mut decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
         assert_eq!(decoded.cli_argv(), request.cli_argv());
-        decoded.redirect_outputs_for_warm_up(Path::new("/tmp/warm"));
-        assert!(decoded
-            .cli_argv()
-            .contains(&OsString::from("/tmp/warm/cell-out")));
         assert!(decoded.cli_argv().contains(&OsString::from("--cell-plan")));
     }
 

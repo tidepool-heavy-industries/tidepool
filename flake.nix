@@ -33,7 +33,7 @@
     };
     # Browser assets must come from the exact harness source used by Cargo.
     harnessWeb = {
-      url = "github:tidepool-heavy-industries/exomonad-harness/9d7bb2c3c7b6e63298e4253cb28f1285d1308049";
+      url = "github:tidepool-heavy-industries/exomonad-harness/143eebd4cf7e84c6bc4d9c3e46f37eb6544f00f3";
       flake = false;
     };
     # Match the harness web verification shell's pinned Node 24 package.
@@ -252,7 +252,7 @@
           interactiveCodex = codex.packages.${system}.default;
           embeddedWebAssets = harnessPkgs.buildNpmPackage {
             pname = "exomonad-harness-web";
-            version = "9d7bb2c3c7b6e63298e4253cb28f1285d1308049";
+            version = "143eebd4cf7e84c6bc4d9c3e46f37eb6544f00f3";
             src = "${harnessWeb}/web";
             nodejs = harnessPkgs.nodejs_24;
             npmDepsHash = "sha256-yJrPGaSazF06w91mddpNlOyoB6d1cYKXumyaoeWCfeU=";
@@ -262,7 +262,7 @@
               cp -R dist/. "$out/share/exomonad/web/"
               runHook postInstall
             '';
-            passthru.sourceRevision = "9d7bb2c3c7b6e63298e4253cb28f1285d1308049";
+            passthru.sourceRevision = "143eebd4cf7e84c6bc4d9c3e46f37eb6544f00f3";
           };
           # Tidepool consumes only the standalone private wire crate from the
           # matched Codex checkout. Keep the rest of Codex in its independent

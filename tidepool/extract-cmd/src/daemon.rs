@@ -89,12 +89,6 @@ const DEFAULT_ROTATE_AFTER: u64 = 1024;
 /// three-3.2-GiB-slot failure this module's sizing exists to prevent, not
 /// routine turnover.
 const EARLY_REPLACEMENT_SERVED_THRESHOLD: u64 = 8;
-/// How often an idle pooled worker slot (one that has not yet served any
-/// request) checks whether it should run its one-time pre-warm compile,
-/// instead of blocking indefinitely for a real job. Small relative to any
-/// real compile request, so it adds negligible latency to ordinary job
-/// dispatch — see `serve_workers`'s per-slot loop.
-const WARM_UP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Number of concurrent GHC worker slots a `--persistent` daemon runs by
 /// default (`--workers`). Each slot is a full `Worker`: its own transaction
 /// pinning, request deadline, peer-disconnect kill, and served/RSS rotation.
@@ -219,124 +213,6 @@ fn worker_sizing_from_budget(budget_mb: u64) -> WorkerSizing {
         workers,
         rss_ceiling_mb,
         can_stay_warm: rss_ceiling_mb >= WARM_WORKER_MB,
-    }
-}
-
-/// Consecutive confirmed-empty job polls (each `WARM_UP_POLL_INTERVAL`) an
-/// idle slot must observe before it starts its pre-warm compile. This is a
-/// debounce, not a cost: it exists only so a slot that is about to receive
-/// a real job concurrently dispatched to it (two requests landing on a
-/// freshly started pool at nearly the same instant) does not instead spend
-/// that time on a self-initiated warm-up and make the real request wait
-/// behind it — a genuinely idle slot easily clears this many empty polls
-/// before any real request would reasonably still be inbound.
-const WARM_UP_IDLE_DEBOUNCE: u32 = 4;
-
-/// Pure gate for whether an idle pooled worker slot should attempt its
-/// one-time pre-warm compile right now: only a slot that has not yet served
-/// a real request, has not already attempted (successfully or not) its own
-/// warm-up, has been confirmed idle (no job received) for
-/// `WARM_UP_IDLE_DEBOUNCE` consecutive polls, and only once some request's
-/// include set (workspace/source root and argv) is actually known
-/// daemon-wide.
-fn should_attempt_warm_up(
-    served: u64,
-    warm_up_attempted: bool,
-    idle_polls: u32,
-    include_set_known: bool,
-) -> bool {
-    served == 0 && !warm_up_attempted && idle_polls >= WARM_UP_IDLE_DEBOUNCE && include_set_known
-}
-
-/// A scratch directory made solely to catch one warm-up compile's redirected
-/// output writes; never a caller-visible artifact, so cleanup is best-effort
-/// and unconditional (every exit path from `warm_up_slot`'s inner closure —
-/// early `?` return included — drops this guard).
-struct WarmUpScratch(std::path::PathBuf);
-
-impl Drop for WarmUpScratch {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-/// Best-effort warm-up compile for a pooled worker slot's freshly spawned
-/// worker, using the include set (`cwd`, `argv`) revealed by the first real
-/// request any slot has served. This is what lets the daemon's *other* idle
-/// slots find a warm module memo on their own first real request, instead
-/// of every slot independently paying the cold `ghc_load` + `lowering` cost
-/// the production incident this module's sizing fix exists for showed
-/// (12s + 20-26s per cold worker, versus ~150ms warm). Never fails the
-/// slot: a failed warm-up logs a WARN and respawns the worker so the slot
-/// still serves normally, just cold on its first real request as before
-/// this change.
-///
-/// The real request's argv is never replayed verbatim: it names output
-/// paths (`ExtractRequest::redirect_outputs_for_warm_up`'s doc comment lists
-/// exactly which) that the real request's own consumer may still be reading
-/// or that name shared session state, so this decodes the typed request,
-/// rewrites it into a side-effect-free copy — same includes, session root,
-/// target, and files, so the same module graph loads and lowers and the
-/// memo warms, but every output redirected into a scratch directory removed
-/// immediately after — and only replays *that*.
-fn warm_up_slot(
-    worker: &mut Worker,
-    prepared: &PreparedWorker,
-    cwd: &Path,
-    argv: &[OsString],
-    run_id: &str,
-    slot: usize,
-) {
-    let started = Instant::now();
-    let result: Result<WorkerResponse, FrontendError> = (|| {
-        let mut request = ExtractRequest::decode_worker_argv(argv).map_err(|error| {
-            FrontendError::Daemon(format!(
-                "compiler worker pre-warm request could not be decoded: {error}"
-            ))
-        })?;
-        let scratch_dir = std::env::temp_dir().join(format!(
-            "tidepool-warm-up-{}-slot{slot}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&scratch_dir).map_err(FrontendError::Io)?;
-        let _scratch = WarmUpScratch(scratch_dir.clone());
-        request.redirect_outputs_for_warm_up(&scratch_dir);
-        let warm_up_argv = request.worker_argv();
-        worker.begin_transaction()?;
-        let outcome = worker.request(cwd, &warm_up_argv)?;
-        worker.end_transaction()?;
-        Ok(outcome)
-    })();
-    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    match result {
-        Ok(_) => {
-            tracing::info!(
-                run_id,
-                worker = slot,
-                elapsed_ms,
-                "compiler worker slot pre-warmed"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                run_id,
-                worker = slot,
-                elapsed_ms,
-                %error,
-                "compiler worker slot pre-warm failed; replacing worker and continuing"
-            );
-            match Worker::spawn(prepared) {
-                Ok(fresh) => *worker = fresh,
-                Err(spawn_error) => {
-                    tracing::warn!(
-                        run_id,
-                        worker = slot,
-                        %spawn_error,
-                        "failed to respawn compiler worker after a failed pre-warm"
-                    );
-                }
-            }
-        }
     }
 }
 
@@ -1142,7 +1018,9 @@ fn service_transaction(
         phase = "compiler_queue",
         "compiler job dequeued"
     );
-    let mut transaction_failed = worker.begin_transaction().err();
+    let mut transaction_failed = worker
+        .begin_transaction_while_connected(&connection, request_deadline)
+        .err();
     let mut orderly_end = false;
     let mut request_ordinal = RequestOrdinal(0);
     while transaction_failed.is_none() {
@@ -1232,7 +1110,9 @@ fn service_transaction(
         }
     }
     if transaction_failed.is_none() {
-        transaction_failed = worker.end_transaction().err();
+        transaction_failed = worker
+            .end_transaction_while_connected(&connection, request_deadline)
+            .err();
     }
     if let Some(error) = transaction_failed {
         if matches!(error, FrontendError::WorkerClientDisconnected) {
@@ -1496,36 +1376,6 @@ fn admit_job(
     Admission::Continue
 }
 
-/// Result of one bounded attempt to fetch the next job for a pooled worker
-/// slot: a real job, the accept thread having shut down (`Disconnected`), or
-/// `Idle` — this slot held `job_rx`'s receiver for a full
-/// `WARM_UP_POLL_INTERVAL` and found no job. Acquiring the receiver itself
-/// still blocks (a plain, fair `Mutex::lock`, not a `try_lock` retry loop):
-/// with only a couple of slots sharing one receiver, a thread that releases
-/// and immediately re-acquires a `try_lock` in a sleep/retry cycle can starve
-/// another slot indefinitely, since nothing about `try_lock` guarantees the
-/// two threads' independent poll timers ever land in the brief gap between
-/// release and re-acquire. Blocking on the OS mutex instead lets the kernel
-/// arbitrate fairly between waiters.
-enum PollOutcome {
-    Job(PendingJob),
-    Disconnected,
-    Idle,
-}
-
-/// Fetch the next job with a bounded wait, instead of blocking indefinitely
-/// on `job_rx`, so an idle slot periodically comes back out to check whether
-/// it should run its own pre-warm compile (`should_attempt_warm_up`) between
-/// attempts.
-fn poll_for_job(job_rx: &Mutex<std::sync::mpsc::Receiver<PendingJob>>) -> PollOutcome {
-    let receiver = job_rx.lock().unwrap_or_else(|poison| poison.into_inner());
-    match receiver.recv_timeout(WARM_UP_POLL_INTERVAL) {
-        Ok(job) => PollOutcome::Job(job),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => PollOutcome::Idle,
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => PollOutcome::Disconnected,
-    }
-}
-
 /// One accept thread handles fences and PREFLIGHT/STOP for both ordinary and
 /// persistent modes. It reserves capacity with a nonblocking send, then
 /// acknowledges acceptance before the worker may start. Ordinary mode has no
@@ -1561,19 +1411,12 @@ fn serve_workers(
     let job_rx = std::sync::Arc::new(Mutex::new(job_rx));
     let ordinary_busy = (!config.persistent).then(|| std::sync::Arc::new(AtomicBool::new(false)));
     let retire = AtomicBool::new(false);
-    // Populated with the first real request's (cwd, argv) any slot serves,
-    // daemon-wide. The other idle slots (still on their first, `served ==
-    // 0` worker) use it to run a pre-warm compile before their own first
-    // real request arrives — see `warm_up_slot` and `should_attempt_warm_up`.
-    let include_set: std::sync::Arc<std::sync::OnceLock<(std::path::PathBuf, Vec<OsString>)>> =
-        std::sync::Arc::new(std::sync::OnceLock::new());
     std::thread::scope(|scope| -> Result<u8, FrontendError> {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let mut slots = Vec::with_capacity(worker_count);
         for slot in 0..worker_count {
             let job_rx = std::sync::Arc::clone(&job_rx);
             let retire = &retire;
-            let include_set = std::sync::Arc::clone(&include_set);
             let ready_tx = ready_tx.clone();
             slots.push(scope.spawn(move || -> Result<(), FrontendError> {
                 let mut worker = Worker::spawn(prepared)?;
@@ -1593,41 +1436,12 @@ fn serve_workers(
                 // Counts this slot's RSS-driven replacements that lost a
                 // fresh worker's memo before it warmed up.
                 let mut early_replacements = 0u64;
-                // Set once this slot has attempted its own pre-warm compile
-                // (successfully or not), so it is attempted at most once.
-                let mut warm_up_attempted = false;
-                // Consecutive confirmed-empty polls this slot itself has
-                // observed while holding the shared receiver — see
-                // `WARM_UP_IDLE_DEBOUNCE`. Once `served` leaves 0 the count
-                // no longer matters (`should_attempt_warm_up` excludes it).
-                let mut idle_polls = 0u32;
                 loop {
-                    // A job pending for this slot always wins over starting
-                    // a pre-warm compile: check for one first, and only
-                    // consider warm-up once a poll comes back confirmed
-                    // idle.
-                    let job = loop {
-                        match poll_for_job(&job_rx) {
-                            PollOutcome::Job(job) => break Some(job),
-                            PollOutcome::Disconnected => break None,
-                            PollOutcome::Idle => {
-                                idle_polls = idle_polls.saturating_add(1);
-                            }
-                        }
-                        if should_attempt_warm_up(
-                            served,
-                            warm_up_attempted,
-                            idle_polls,
-                            include_set.get().is_some(),
-                        ) {
-                            if let Some((cwd, argv)) = include_set.get() {
-                                warm_up_slot(&mut worker, prepared, cwd, argv, run_id, slot);
-                            }
-                            warm_up_attempted = true;
-                        }
+                    let pending = {
+                        let receiver = job_rx.lock().unwrap_or_else(|poison| poison.into_inner());
+                        receiver.recv()
                     };
-                    let Some(pending) = job else {
-                        // The accept thread dropped the sender: shutting down.
+                    let Ok(pending) = pending else {
                         break;
                     };
                     let _permit = pending.permit;
@@ -1647,10 +1461,6 @@ fn serve_workers(
                     let (connection, transaction, mut first_request) = match job {
                         Job::Transaction(connection) => (connection, true, None),
                         Job::Request(connection, cwd, argv) => {
-                            // Other idle slots pre-warm from whichever
-                            // request (plain or transaction-pinned) reveals
-                            // the include set first.
-                            include_set.get_or_init(|| (cwd.clone(), argv.clone()));
                             (connection, false, Some((cwd, argv)))
                         }
                     };
@@ -1689,12 +1499,6 @@ fn serve_workers(
                                         };
                                         match normalize_worker_argv(argv) {
                                             Ok(argv) => {
-                                                // Other idle slots pre-warm from
-                                                // whichever request (plain or
-                                                // transaction-pinned) reveals the
-                                                // include set first.
-                                                include_set
-                                                    .get_or_init(|| (cwd.clone(), argv.clone()));
                                                 RequestStep::Request(cwd, argv)
                                             }
                                             Err(error) => {
@@ -2358,42 +2162,48 @@ fn worker_rss_mb(pid: u32) -> io::Result<u64> {
 
 #[cfg(target_os = "linux")]
 fn peer_disconnected(stream: &UnixStream) -> bool {
-    const MSG_PEEK: std::os::raw::c_int = 0x2;
-    const MSG_DONTWAIT: std::os::raw::c_int = 0x40;
-    unsafe extern "C" {
-        fn recv(
-            socket: std::os::raw::c_int,
-            buffer: *mut std::ffi::c_void,
-            length: usize,
-            flags: std::os::raw::c_int,
-        ) -> isize;
+    const POLLERR: std::os::raw::c_short = 0x8;
+    const POLLHUP: std::os::raw::c_short = 0x10;
+    const POLLRDHUP: std::os::raw::c_short = 0x2000;
+    #[repr(C)]
+    struct PollFd {
+        fd: std::os::raw::c_int,
+        events: std::os::raw::c_short,
+        revents: std::os::raw::c_short,
     }
-    let mut byte = 0u8;
-    // SAFETY: `byte` is writable for the one-byte length supplied, and the
-    // stream owns a live socket descriptor for the duration of this call.
-    let received = unsafe {
-        recv(
-            stream.as_raw_fd(),
-            (&mut byte as *mut u8).cast(),
-            1,
-            MSG_PEEK | MSG_DONTWAIT,
-        )
+    unsafe extern "C" {
+        fn poll(
+            fds: *mut PollFd,
+            count: std::os::raw::c_ulong,
+            timeout: std::os::raw::c_int,
+        ) -> std::os::raw::c_int;
+    }
+    let mut descriptor = PollFd {
+        fd: stream.as_raw_fd(),
+        events: POLLRDHUP,
+        revents: 0,
     };
-    if received == 0 {
-        true
-    } else if received < 0 {
-        !matches!(
-            io::Error::last_os_error().kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-        )
+    // SAFETY: the descriptor points to one initialized pollfd and the stream
+    // retains ownership of its live descriptor throughout this nonblocking call.
+    // Read-half closure must remain observable behind queued request bytes.
+    let ready = unsafe { poll(&mut descriptor, 1, 0) };
+    if ready < 0 {
+        io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
     } else {
-        false
+        descriptor.revents & (POLLRDHUP | POLLHUP | POLLERR) != 0
     }
 }
 
 #[cfg(not(target_os = "linux"))]
 fn peer_disconnected(_stream: &UnixStream) -> bool {
     false
+}
+
+#[derive(Clone, Copy, Debug)]
+enum WorkerOperation {
+    BeginTransaction,
+    Request,
+    EndTransaction,
 }
 
 pub(crate) struct Worker {
@@ -2462,11 +2272,19 @@ impl Worker {
         decode_response(&mut self.stdout).map_err(daemon_frontend_error)
     }
 
-    /// Serve one request against the pinned worker, bounded on two axes: the
-    /// caller's own connection (dropping the client interrupts an in-flight
-    /// compile promptly) and an absolute `deadline` from when this request
-    /// started (a wedged worker — hung GHC, a stuck external tool — must not
-    /// block a worker slot forever, even while the caller stays connected).
+    fn begin_transaction_while_connected(
+        &mut self,
+        connection: &UnixStream,
+        deadline: Duration,
+    ) -> Result<(), FrontendError> {
+        self.operation_while_connected(
+            connection,
+            deadline,
+            WorkerOperation::BeginTransaction,
+            Self::begin_transaction,
+        )
+    }
+
     fn request_while_connected(
         &mut self,
         connection: &UnixStream,
@@ -2474,6 +2292,36 @@ impl Worker {
         argv: &[OsString],
         deadline: Duration,
     ) -> Result<WorkerResponse, FrontendError> {
+        self.operation_while_connected(connection, deadline, WorkerOperation::Request, |worker| {
+            worker.request(cwd, argv)
+        })
+    }
+
+    fn end_transaction_while_connected(
+        &mut self,
+        connection: &UnixStream,
+        deadline: Duration,
+    ) -> Result<(), FrontendError> {
+        self.operation_while_connected(
+            connection,
+            deadline,
+            WorkerOperation::EndTransaction,
+            Self::end_transaction,
+        )
+    }
+
+    /// Each worker operation has its own deadline and peer-disconnect monitor.
+    /// Deadline expiry or disconnect kills the worker and joins its blocked IO
+    /// before the transaction owner replaces it. Other failures also settle
+    /// through that owner's quarantine path. Waiting between client
+    /// requests remains governed by the connection's existing idle policy.
+    fn operation_while_connected<T: Send>(
+        &mut self,
+        connection: &UnixStream,
+        deadline: Duration,
+        operation: WorkerOperation,
+        action: impl FnOnce(&mut Self) -> Result<T, FrontendError> + Send,
+    ) -> Result<T, FrontendError> {
         let pid = self.child.id();
         let started = Instant::now();
         let result = std::thread::scope(|scope| {
@@ -2481,14 +2329,14 @@ impl Worker {
             scope.spawn(move || {
                 // best-effort: the receiver may already have returned via the
                 // deadline or disconnect branch below and dropped its end.
-                completed_tx.send(self.request(cwd, argv)).ok();
+                completed_tx.send(action(self)).ok();
             });
             loop {
                 match completed_rx.recv_timeout(Duration::from_millis(50)) {
                     Ok(result) => return result,
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         return Err(FrontendError::Daemon(
-                            "compiler worker request monitor disconnected".to_owned(),
+                            "compiler worker operation monitor disconnected".to_owned(),
                         ));
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -2499,10 +2347,11 @@ impl Worker {
                         tracing::warn!(pid, %error, "failed to kill deadline-exceeded compiler worker");
                     }
                     tracing::warn!(
-                        cwd = %cwd.display(),
+                        ?operation,
+                        worker_pid = pid,
                         elapsed_secs = elapsed.as_secs(),
                         deadline_secs = deadline.as_secs(),
-                        "compiler worker exceeded its request deadline; killing it"
+                        "compiler worker exceeded its operation deadline; killing it"
                     );
                     // The kill unblocks whatever the worker was doing (a read
                     // or a write) so the monitor thread settles quickly; its
@@ -2511,7 +2360,7 @@ impl Worker {
                     // own definite report below.
                     completed_rx.recv().ok();
                     return Err(FrontendError::Daemon(format!(
-                        "compiler worker exceeded its {}s request deadline and was killed",
+                        "compiler worker exceeded its {}s operation deadline ({operation:?}) and was killed",
                         deadline.as_secs()
                     )));
                 }
@@ -2707,34 +2556,6 @@ mod tests {
             "an explicit --workers 3 on a 9 GiB budget must fall below the warm-worker ceiling, \
              which is exactly the case `serve` warns on"
         );
-    }
-
-    /// The pure gate a pooled slot's warm-up decision reduces to: only an
-    /// unserved, not-yet-attempted, confirmed-idle slot with a known
-    /// include set warms up.
-    #[test]
-    fn should_attempt_warm_up_requires_unserved_unattempted_debounced_and_known() {
-        // Nothing known yet: never warm up, no matter how idle.
-        assert!(!should_attempt_warm_up(0, false, 100, false));
-        // Known, but this slot already served (or already has) a request:
-        // it has its own real memo, warming up would be redundant.
-        assert!(!should_attempt_warm_up(1, false, 100, true));
-        // Known and idle long enough, but already attempted once.
-        assert!(!should_attempt_warm_up(0, true, 100, true));
-        // Known but not yet debounced: a job may still be inbound.
-        assert!(!should_attempt_warm_up(
-            0,
-            false,
-            WARM_UP_IDLE_DEBOUNCE - 1,
-            true
-        ));
-        // Every condition satisfied.
-        assert!(should_attempt_warm_up(
-            0,
-            false,
-            WARM_UP_IDLE_DEBOUNCE,
-            true
-        ));
     }
 
     /// `/proc/meminfo` parsing itself, against a real MemAvailable line —
@@ -3767,6 +3588,19 @@ tidepool-target phase=desugar module=Execute\n",
         worker.abort();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn peer_disconnect_is_visible_behind_unread_request_bytes() {
+        let (mut connection, mut client) = UnixStream::pair().unwrap();
+        client.write_all(&[TRANSACTION_REQUEST]).unwrap();
+        assert!(!peer_disconnected(&connection));
+        client.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(peer_disconnected(&connection));
+        let mut queued = [0];
+        connection.read_exact(&mut queued).unwrap();
+        assert_eq!(queued, [TRANSACTION_REQUEST]);
+    }
+
     #[test]
     fn independently_exited_worker_is_not_a_client_disconnect() {
         let cwd = Path::new("/tmp");
@@ -3846,6 +3680,166 @@ tidepool-target phase=desugar module=Execute\n",
             DaemonError::AfterAcceptance(inner) if matches!(*inner, DaemonError::IncompleteResponse)
         ));
         std::fs::remove_file(socket).ok();
+    }
+
+    #[derive(Clone, Copy)]
+    enum ControlRecovery {
+        Deadline,
+        Cancel,
+        Stop,
+    }
+
+    fn control_ack_recovery_cases(recovery: ControlRecovery) {
+        let scratch = tempfile::tempdir().unwrap();
+        let source = scratch.path().join("worker.rs");
+        std::fs::write(&source, include_str!("test_fixtures/control_ack_worker.rs")).unwrap();
+        let fixture = scratch.path().join("worker");
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "test fixture: compile one immutable fake worker"
+        )]
+        let built = std::process::Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&fixture)
+            .status()
+            .unwrap();
+        assert!(built.success());
+
+        for operation in [
+            WorkerOperation::BeginTransaction,
+            WorkerOperation::EndTransaction,
+        ] {
+            let dir = scratch.path().join(format!("{operation:?}"));
+            std::fs::create_dir(&dir).unwrap();
+            let worker_bin = dir.join("worker");
+            std::fs::copy(&fixture, &worker_bin).unwrap();
+            let phase = match operation {
+                WorkerOperation::BeginTransaction => TRANSACTION_REQUEST,
+                WorkerOperation::EndTransaction => TRANSACTION_END,
+                WorkerOperation::Request => unreachable!(),
+            };
+            std::fs::write(dir.join("phase"), [phase]).unwrap();
+            let socket = dir.join("daemon.sock");
+            let prepared = PreparedWorker::for_test(worker_bin).unwrap();
+            let config = DaemonConfig {
+                socket: socket.clone(),
+                rotate_after: None,
+                rss_ceiling_mb: None,
+                request_deadline_secs: Some(match recovery {
+                    ControlRecovery::Cancel => 20,
+                    _ => 1,
+                }),
+                watch_stamp: None,
+                persistent: true,
+                run_id: None,
+                log_path: None,
+                workers: Some(1),
+            };
+            let (settled_tx, settled_rx) = std::sync::mpsc::channel();
+            let server = std::thread::spawn(move || {
+                let result = crate::daemon::serve(&config, prepared);
+                settled_tx.send(()).unwrap();
+                result
+            });
+            let ready_deadline = Instant::now() + Duration::from_secs(10);
+            let binding = loop {
+                if let Ok(binding) = preflight(&socket) {
+                    break binding;
+                }
+                assert!(Instant::now() < ready_deadline);
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "test fixture: await owned daemon startup"
+                )]
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let cancellation = crate::CompilerTransactionCancellation::new();
+            let mut transaction =
+                begin_transaction_with_cancellation(&socket, &binding.epoch, Some(&cancellation))
+                    .unwrap();
+            let argv = vec![OsString::from("Expr.hs")];
+            if matches!(operation, WorkerOperation::EndTransaction) {
+                let output = execute_transaction_request(&mut transaction, &dir, &argv).unwrap();
+                assert_eq!(output.status.code(), Some(0));
+            }
+            let client_dir = dir.clone();
+            let client_argv = argv.clone();
+            let (client_settled_tx, client_settled_rx) = std::sync::mpsc::channel();
+            let client = std::thread::spawn(move || {
+                let result = match operation {
+                    WorkerOperation::BeginTransaction => {
+                        execute_transaction_request(&mut transaction, &client_dir, &client_argv)
+                            .map(|_| ())
+                    }
+                    WorkerOperation::EndTransaction => end_transaction(&mut transaction),
+                    WorkerOperation::Request => unreachable!(),
+                };
+                client_settled_tx.send(()).unwrap();
+                result
+            });
+            while !dir.join("stalled").exists() {
+                assert!(
+                    Instant::now() < ready_deadline,
+                    "worker never stalled at {operation:?}"
+                );
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "test fixture: await fake worker control phase"
+                )]
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let started = Instant::now();
+            match recovery {
+                ControlRecovery::Deadline => {}
+                ControlRecovery::Cancel => cancellation.cancel(),
+                ControlRecovery::Stop => {
+                    request_stop(&socket).unwrap();
+                    assert!(
+                        started.elapsed() < Duration::from_secs(1),
+                        "STOP waited on control acknowledgement"
+                    );
+                }
+            }
+            client_settled_rx
+                .recv_timeout(Duration::from_secs(4))
+                .expect("control operation did not settle");
+            let error = client.join().unwrap().unwrap_err();
+            assert!(error.was_accepted(), "{error}");
+            assert!(!error.permits_rebind(), "{error}");
+            if !matches!(recovery, ControlRecovery::Stop) {
+                let next = preflight(&socket).unwrap();
+                assert_eq!(next.epoch, binding.epoch);
+                let output = execute(&socket, &binding.epoch, &dir, &argv).unwrap();
+                assert_eq!(output.status.code(), Some(0));
+                if matches!(recovery, ControlRecovery::Cancel) {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(2),
+                        "worker replacement waited for the 20s deadline"
+                    );
+                }
+                request_stop(&socket).unwrap();
+            }
+            settled_rx
+                .recv_timeout(Duration::from_secs(4))
+                .expect("STOP did not drain the worker");
+            assert_eq!(server.join().unwrap().unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn worker_control_ack_deadlines_replace_hung_workers() {
+        control_ack_recovery_cases(ControlRecovery::Deadline);
+    }
+
+    #[test]
+    fn worker_control_ack_cancellation_replaces_hung_workers() {
+        control_ack_recovery_cases(ControlRecovery::Cancel);
+    }
+
+    #[test]
+    fn worker_control_ack_stop_drains_at_deadline() {
+        control_ack_recovery_cases(ControlRecovery::Stop);
     }
 
     #[test]
@@ -4671,95 +4665,53 @@ fn main() {{
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The pre-warm behaviour this section exists for: a `--workers 2` pool
-    /// serves exactly one real client request, so only one slot's worker
-    /// ever sees a real job — but after the idle debounce clears, the
-    /// *other* slot's own worker independently completes one full
-    /// begin/request/end cycle against the same include set on its own,
-    /// with no client involved. A multi-shot fake worker (unlike the other
-    /// fixtures' one-shot fakes) logs its own pid AND the hex request
-    /// payload it received on every completed cycle (parsing the wire's
-    /// length-prefixed frames itself, since the pre-warm's redirected
-    /// request is not the same byte length as the real one), so this test
-    /// asserts on the *decoded* requests: two distinct worker processes each
-    /// served exactly one transaction, and the pre-warm's own request wrote
-    /// its output to a different directory than the real request's —
-    /// verifying `ExtractRequest::redirect_outputs_for_warm_up` actually ran
-    /// rather than the real request's argv being replayed verbatim.
+    /// Idle slots must not replay a real request's source or compile-time IO.
     #[test]
-    fn an_idle_pooled_slot_pre_warms_from_the_first_requests_include_set() {
-        let dir = std::env::temp_dir().join(format!("tp-prewarm-{}", std::process::id()));
-        // best-effort: test cleanup of a temp path.
+    fn idle_pooled_slots_do_not_repeat_requests_or_mutate_outputs() {
+        let dir = std::env::temp_dir().join(format!("tp-idle-pool-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("daemon.sock");
-        let stamp = dir.join("stamp");
-        std::fs::write(&stamp, b"boot").unwrap();
-        // An output-path field (here `--output-dir`) is exactly what a
-        // verbatim replay would get wrong: it names a real, caller-owned
-        // directory the pre-warm compile must never write into.
-        let real_out_dir = dir.join("real-out");
-        let argv = vec![
-            OsString::from("Expr.hs"),
-            OsString::from("--output-dir"),
-            real_out_dir.clone().into_os_string(),
-        ];
-        let served_log = dir.join("served.log");
         let source = dir.join("fake_worker.rs");
         std::fs::write(
             &source,
             r#"
 use std::io::{Read, Write};
-
-fn read_u32(stdin: &mut impl Read) -> u32 {
-    let mut buf = [0u8; 4];
-    stdin.read_exact(&mut buf).unwrap();
-    u32::from_le_bytes(buf)
+fn read_u32(input: &mut impl Read) -> u32 {
+    let mut bytes = [0u8; 4];
+    input.read_exact(&mut bytes).unwrap();
+    u32::from_le_bytes(bytes)
 }
-
-fn read_frame(stdin: &mut impl Read) -> Vec<u8> {
-    let len = read_u32(stdin) as usize;
-    let mut buf = vec![0u8; len];
-    stdin.read_exact(&mut buf).unwrap();
-    buf
+fn read_frame(input: &mut impl Read) -> Vec<u8> {
+    let length = read_u32(input) as usize;
+    let mut bytes = vec![0; length];
+    input.read_exact(&mut bytes).unwrap();
+    bytes
 }
-
 fn main() {
-    let log_path = std::env::var("TP_TEST_PREWARM_SERVED_LOG").unwrap();
-    let mut stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
+    let mut input = std::io::stdin();
+    let mut output = std::io::stdout();
     loop {
-        let mut one = [0u8; 1];
-        // Daemon shutdown closes stdin; a clean EOF here ends this worker.
-        if stdin.read_exact(&mut one).is_err() {
-            break;
-        }
-        stdout.write_all(&[1]).unwrap(); // begin_transaction ack
-        stdout.flush().unwrap();
-
-        stdin.read_exact(&mut one).unwrap(); // request prefix
-        let _cwd = read_frame(&mut stdin); // frame(cwd)
-        let argc = read_u32(&mut stdin);
-        let mut args = Vec::with_capacity(argc as usize);
-        for _ in 0..argc {
-            args.push(String::from_utf8(read_frame(&mut stdin)).unwrap());
-        }
-
-        stdout.write_all(&[0u8; 12]).unwrap(); // code=0, empty stdout/stderr frames
-        stdout.flush().unwrap();
-
-        stdin.read_exact(&mut one).unwrap(); // end_transaction
-        stdout.write_all(&[1]).unwrap();
-        stdout.flush().unwrap();
-
-        // args[0] is the worker-request flag, args[1] the hex payload.
-        let payload = args.get(1).cloned().unwrap_or_default();
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .unwrap();
-        writeln!(file, "{} {}", std::process::id(), payload).unwrap();
+        let mut command = [0u8; 1];
+        if input.read_exact(&mut command).is_err() { break; }
+        output.write_all(&[1]).unwrap();
+        output.flush().unwrap();
+        input.read_exact(&mut command).unwrap();
+        let cwd = std::path::PathBuf::from(String::from_utf8(read_frame(&mut input)).unwrap());
+        let argc = read_u32(&mut input);
+        for _ in 0..argc { let _ = read_frame(&mut input); }
+        let log = cwd.join("dispatch.log");
+        let mut dispatches = std::fs::read_to_string(&log).unwrap_or_default();
+        dispatches.push_str(&format!("{}\n", std::process::id()));
+        std::fs::write(&log, &dispatches).unwrap();
+        let implicit_output = cwd.join("Expr_cbor");
+        std::fs::create_dir_all(&implicit_output).unwrap();
+        std::fs::write(implicit_output.join("result"), dispatches.lines().count().to_string()).unwrap();
+        output.write_all(&[0u8; 12]).unwrap();
+        output.flush().unwrap();
+        input.read_exact(&mut command).unwrap();
+        output.write_all(&[1]).unwrap();
+        output.flush().unwrap();
     }
 }
 "#,
@@ -4768,29 +4720,22 @@ fn main() {
         let worker_bin = dir.join("fake-worker");
         #[allow(
             clippy::disallowed_methods,
-            reason = "test fixture: compiles a throwaway fake worker binary, not a production launch site"
+            reason = "test fixture: compile its own worker"
         )]
-        let rustc = std::process::Command::new("rustc")
+        let built = std::process::Command::new("rustc")
             .arg(&source)
             .arg("-o")
             .arg(&worker_bin)
             .status()
             .unwrap();
-        assert!(rustc.success(), "fake worker failed to compile");
-
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "test fixture: points the fake worker at its own log file, not production config"
-        )]
-        std::env::set_var("TP_TEST_PREWARM_SERVED_LOG", &served_log);
-
+        assert!(built.success());
         let prepared = PreparedWorker::for_test(worker_bin).unwrap();
         let config = DaemonConfig {
             socket: socket.clone(),
             rotate_after: None,
             rss_ceiling_mb: None,
-            request_deadline_secs: None,
-            watch_stamp: Some(stamp.clone()),
+            request_deadline_secs: Some(2),
+            watch_stamp: None,
             persistent: true,
             run_id: None,
             log_path: None,
@@ -4802,112 +4747,42 @@ fn main() {
             if let Ok(binding) = preflight(&socket) {
                 break binding;
             }
-            assert!(
-                Instant::now() < ready_deadline,
-                "daemon did not become ready"
-            );
+            assert!(Instant::now() < ready_deadline);
             #[allow(
                 clippy::disallowed_methods,
-                reason = "test: sync polling loop waiting for the daemon/fake worker, not async code"
+                reason = "test fixture: await own daemon startup"
             )]
             std::thread::sleep(Duration::from_millis(10));
         };
-
-        // Exactly one real client request: only one of the two slots ever
-        // sees a real job.
+        // No explicit output directory: compiler defaults also belong to the caller.
+        let argv = vec![
+            OsString::from("Expr.hs"),
+            OsString::from("--target"),
+            OsString::from("result"),
+        ];
         let output = execute(&socket, &binding.epoch, &dir, &argv).unwrap();
         assert_eq!(output.status.code(), Some(0));
-
-        // Give the other, still-idle slot time to clear the debounce
-        // (`WARM_UP_IDLE_DEBOUNCE` confirmed-empty polls) and run its
-        // pre-warm compile, generously bounded.
-        let settle_deadline = Instant::now() + Duration::from_secs(10);
-        let served = loop {
-            let served: Vec<String> = std::fs::read_to_string(&served_log)
-                .unwrap_or_default()
-                .lines()
-                .map(String::from)
-                .collect();
-            if served.len() >= 2 || Instant::now() >= settle_deadline {
-                break served;
-            }
-            #[allow(
-                clippy::disallowed_methods,
-                reason = "test: sync polling loop waiting for the daemon/fake worker, not async code"
-            )]
-            std::thread::sleep(Duration::from_millis(20));
-        };
-
-        assert!(request_stop(&socket).is_ok());
-        assert_eq!(server.join().unwrap().unwrap(), 0);
-
-        assert_eq!(
-            served.len(),
-            2,
-            "expected the real request plus one pre-warm compile, got: {served:?}"
-        );
-        let pids: Vec<&str> = served
-            .iter()
-            .map(|line| line.split_once(' ').expect("pid and payload").0)
-            .collect();
-        let distinct_pids: std::collections::HashSet<_> = pids.iter().collect();
-        assert_eq!(
-            distinct_pids.len(),
-            2,
-            "the pre-warm must run on the OTHER slot's own idle worker process, \
-             not the one that already served the real request: {served:?}"
-        );
-
-        // Decode both requests' output directory the same way the daemon
-        // itself does, rather than pattern-matching the hex payload.
-        let output_dirs: Vec<Option<std::path::PathBuf>> = served
-            .iter()
-            .map(|line| {
-                let (_pid, payload) = line.split_once(' ').expect("pid and payload");
-                let argv = vec![
-                    OsString::from(crate::request::WORKER_REQUEST_FLAG),
-                    OsString::from(payload),
-                ];
-                ExtractRequest::decode_worker_argv(&argv)
-                    .expect("both requests were encoded by this crate's own worker_argv")
-                    .output_directory()
-                    .map(std::path::PathBuf::from)
-            })
-            .collect();
-        let matching_real_dir = output_dirs
-            .iter()
-            .filter(|dir| dir.as_deref() == Some(real_out_dir.as_path()))
-            .count();
-        assert_eq!(
-            matching_real_dir,
-            1,
-            "exactly the real client request should write to {}: {output_dirs:?}",
-            real_out_dir.display()
-        );
-        let redirected = output_dirs
-            .iter()
-            .find(|dir| dir.is_some() && dir.as_deref() != Some(real_out_dir.as_path()))
-            .and_then(|dir| dir.as_deref())
-            .expect("the pre-warm compile's own request should carry a redirected output dir");
-        assert!(
-            redirected.starts_with(std::env::temp_dir()),
-            "the pre-warm's redirected output dir should live under a scratch \
-             temp directory, not {}",
-            redirected.display()
-        );
-
         #[allow(
             clippy::disallowed_methods,
-            reason = "test fixture: cleans up its own env var, not production config"
+            reason = "test fixture: expose speculative idle dispatch"
         )]
-        std::env::remove_var("TP_TEST_PREWARM_SERVED_LOG");
-        // best-effort: test cleanup of a temp path.
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(request_stop(&socket).is_ok());
+        assert_eq!(server.join().unwrap().unwrap(), 0);
+        let dispatches = std::fs::read_to_string(dir.join("dispatch.log")).unwrap();
+        assert_eq!(
+            dispatches.lines().count(),
+            1,
+            "idle worker repeated a request: {dispatches}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("Expr_cbor/result")).unwrap(),
+            "1"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `STOP` with two requests in flight across two worker slots lets both
-    /// finish before the daemon exits — the pooled daemon's drain applies to
-    /// every slot, not just whichever one happened to accept the connection.
+    /// STOP drains accepted requests across both worker slots.
     #[test]
     fn stop_with_two_workers_lets_both_in_flight_requests_finish() {
         let dir = std::env::temp_dir().join(format!("tp-stop-pool-{}", std::process::id()));

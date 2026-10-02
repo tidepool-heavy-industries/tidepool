@@ -1745,13 +1745,21 @@ impl<'code> PreparedMachine<'code> {
     ) -> Result<BTreeSet<ProgramId>, ExecutionError> {
         let (heap, nursery_base, nursery_starts) = self.observation_heap_and_starts()?;
 
-        let mut live: BTreeSet<ProgramId> = self.pins.iter().copied().collect();
+        let mut live = BTreeSet::new();
         // One worklist of program ids still needing their root block
         // snapshotted into `work`, seeded with the programs live from the
         // start (pins); a program discovered live later by the trace below
         // is pushed here exactly once (`live.insert` guards it), never
         // re-snapshotted.
-        let mut program_work: Vec<ProgramId> = live.iter().copied().collect();
+        let mut program_work = Vec::new();
+        let mark_program = |id, live: &mut BTreeSet<_>, work: &mut Vec<_>| {
+            if live.insert(id) {
+                work.push(id);
+            }
+        };
+        for id in &self.pins {
+            mark_program(*id, &mut live, &mut program_work);
+        }
         let mut work: Vec<usize> = self
             .handles
             .handle_slots()
@@ -1770,8 +1778,8 @@ impl<'code> PreparedMachine<'code> {
         for (root, evidence) in self.handles.frame_roots() {
             work.push(unsafe { root.read() } as usize);
             if let Some(evidence) = evidence {
-                live.insert(evidence.owner);
-                live.insert(evidence.runner);
+                mark_program(evidence.owner, &mut live, &mut program_work);
+                mark_program(evidence.runner, &mut live, &mut program_work);
             }
         }
         let mut visited: HashSet<usize> = HashSet::new();
@@ -1804,9 +1812,7 @@ impl<'code> PreparedMachine<'code> {
                 }
             };
             if let Some(program) = reached {
-                if live.insert(program) {
-                    program_work.push(program);
-                }
+                mark_program(program, &mut live, &mut program_work);
             }
         }
         Ok(live)
@@ -3291,6 +3297,11 @@ impl<'code> InstalledProgram<'code> {
             }
         }
         if !slots.is_empty() {
+            // Reserve ledger ownership before retention publishes roots. An
+            // allocation refusal must not leave roots with no releasing handle.
+            handles
+                .try_reserve_handles(slots.len())
+                .map_err(|_| runtime_error(machine, RuntimeError::HeapOverflow))?;
             if unsafe { machine.prepared_old_space() }.is_some() {
                 return Err(runtime_error(machine, crate::host_fns::bad_pointer()));
             }
@@ -3307,9 +3318,6 @@ impl<'code> InstalledProgram<'code> {
                 }
                 return Err(runtime_error(machine, crate::host_fns::bad_pointer()));
             }
-            handles
-                .try_reserve_handles(roots.len())
-                .map_err(|_| runtime_error(machine, RuntimeError::HeapOverflow))?;
             let managed =
                 result_reps.iter().copied().enumerate().filter(|(_, rep)| {
                     matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)
@@ -4278,6 +4286,83 @@ mod tests {
         };
         assert!(machine.release(*handle));
         assert!(!machine.release(*handle));
+    }
+
+    #[test]
+    fn promotion_failure_classifies_the_original_persistent_sibling_root() {
+        // This slot outlives the machine that registers it. The invalid target
+        // is diagnostic data; neither the collector nor the capsule reads it.
+        let invalid = 0xdead_0008;
+        let mut corrupt = Box::new(invalid as *mut u8);
+        let (mut machine, _) = machine();
+        machine.machine.register_persistent_root(&mut *corrupt);
+        let mut builder = machine.managed_builder().unwrap();
+        let unit = builder.constructor(DataConId(900), &[]).unwrap();
+        let error = builder.finish(RealmId::ROOT, unit).unwrap_err();
+        let ExecutionError::Runtime(failure) = error else {
+            panic!("runtime failure")
+        };
+        let RuntimeError::IncompletePromotion(diagnostic) = &failure.cause else {
+            panic!("promotion failure")
+        };
+        assert_eq!(failure.disposition, MachineDisposition::Unavailable);
+        assert_eq!(
+            diagnostic.promotion.phase,
+            tidepool_heap::gc::promotion::PromotionPhase::SiblingFixup
+        );
+        assert_eq!(
+            diagnostic.promotion.cause,
+            tidepool_heap::execution_descriptor::DescriptorTraceError::InvalidManagedPointer {
+                address: invalid
+            }
+        );
+        assert!(diagnostic
+            .root_classes
+            .unwrap()
+            .contains(crate::machine_state::GcRootClass::Persistent));
+        assert_eq!(
+            diagnostic.promotion.origin,
+            Some(tidepool_heap::gc::raw::CopyFailureOrigin {
+                edge: tidepool_heap::gc::raw::CopyEdge::Root {
+                    slot: &mut *corrupt as *mut *mut u8 as usize,
+                    value: invalid
+                },
+                indirection: None,
+            })
+        );
+        assert_eq!(machine.machine.last_failure(), Some(failure));
+    }
+
+    #[test]
+    fn managed_result_handle_allocation_failure_leaves_no_unowned_roots() {
+        let (mut machine, program) = machine();
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: false,
+        };
+        let roots_before = machine.total_persistent_roots();
+        let handles_before = machine.handle_count();
+        let old_bytes_before = machine.old_bytes_live();
+        machine.handles.fail_next_handle_reservation = true;
+        assert!(matches!(
+            machine.run_entry_retained(program, ValueId(0), &[], call, RealmId::ROOT),
+            Err(ExecutionError::Runtime(MachineFailure {
+                cause: RuntimeError::HeapOverflow,
+                disposition: MachineDisposition::Reusable,
+            }))
+        ));
+        assert_eq!(machine.handle_count(), handles_before);
+        assert_eq!(machine.total_persistent_roots(), roots_before);
+        assert_eq!(machine.machine.rust_roots_len(), 0);
+        assert_eq!(machine.old_bytes_live(), old_bytes_before);
+        let batch = machine
+            .run_entry_retained(program, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("allocation refusal leaves the machine reusable");
+        let [PreparedResult::Managed(value)] = batch.values.as_slice() else {
+            panic!("CAF returns one managed result");
+        };
+        assert!(machine.release(*value));
+        assert_eq!(machine.total_persistent_roots(), roots_before);
     }
 
     #[test]
@@ -10159,6 +10244,91 @@ mod tests {
     /// released; unpinning the consumer retires both. A pinned program is
     /// never retired, and the gate refuses a collection while a temporary
     /// root is registered.
+    #[test]
+    fn parked_frame_evidence_traces_owner_and_runner_import_blocks() {
+        let producer_code = Arc::new(s3_closure_producer_program());
+        let (mut machine, first_producer) = PreparedMachine::new_shared(
+            Arc::clone(&producer_code),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .unwrap();
+        let second_producer = machine
+            .install_shared(producer_code, ImportBindings::new())
+            .unwrap();
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: false,
+        };
+        let linked =
+            s3_import_consumer_program(s3_closure_producer_identity(), RuntimeRep::LiftedRef, true);
+        let consumer_code = Arc::new(machine.compile_for_install(&linked).unwrap());
+        let mut consumers = Vec::new();
+        for producer in [first_producer, second_producer] {
+            let batch = machine
+                .run_entry_retained(producer, ValueId(0), &[], call, RealmId::ROOT)
+                .unwrap();
+            let [PreparedResult::Managed(value)] = batch.values.as_slice() else {
+                panic!("producer returns its static closure");
+            };
+            let mut imports = ImportBindings::new();
+            imports.insert(s3_closure_producer_identity(), *value);
+            consumers.push(
+                machine
+                    .install_shared(Arc::clone(&consumer_code), imports)
+                    .unwrap(),
+            );
+            assert!(machine.release(*value));
+        }
+        let realm = RealmId::fresh();
+        let source = machine.retain_top(consumers[0], ValueId(0)).unwrap();
+        let continuation = machine.retain_handle_value(source, realm).unwrap();
+        assert!(machine.release(source));
+        let id = machine
+            .park(
+                continuation,
+                realm,
+                None,
+                ParkRequest {
+                    principal: PrincipalId::SYSTEM,
+                    effect_policy: EffectRunPolicy::SuspendAll,
+                    live_payload: LivePayloadPolicy::None,
+                    evidence: PreparedFrameEvidence {
+                        owner: consumers[0],
+                        runner: consumers[1],
+                        site: 7,
+                        resume_entry: ValueId(0),
+                        continuation_rep: RuntimeRep::LiftedRef,
+                    },
+                },
+            )
+            .unwrap();
+        assert_eq!(machine.handle_count(), 0);
+
+        // The frame's static function carries no captures. Each producer is
+        // reachable only through its consumer's installation environment.
+        let receipt = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert!(
+            receipt.programs.is_empty(),
+            "live imports retired: {receipt:?}"
+        );
+        for consumer in consumers {
+            let batch = machine
+                .run_entry_retained(consumer, ValueId(0), &[], call, realm)
+                .expect("both frame programs retain usable imports");
+            let [PreparedResult::Managed(value)] = batch.values.as_slice() else {
+                panic!("consumer returns its imported closure");
+            };
+            assert!(machine.release(*value));
+        }
+        let (continuation, _) = machine.take_parked(id).unwrap();
+        assert!(machine.release(continuation));
+        let receipt = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(receipt.programs.len(), 4);
+        assert_eq!(machine.residency().programs, 0);
+    }
+
     #[test]
     fn a_static_import_keeps_its_producer_live_until_the_consumer_retires() {
         let (mut machine, program_a) = PreparedMachine::new(

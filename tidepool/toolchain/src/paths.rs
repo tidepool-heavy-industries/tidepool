@@ -121,7 +121,7 @@ pub fn secrets_dir() -> PathBuf {
 }
 
 /// Legacy single-home root (`~/.tidepool`), honored only if it exists so setups
-/// predating the XDG split keep resolving their `lib/`/`secrets/`.
+/// predating the XDG split keep resolving their `secrets/`.
 fn legacy_dir() -> Option<PathBuf> {
     home().map(|h| h.join(".tidepool")).filter(|d| d.is_dir())
 }
@@ -243,24 +243,6 @@ pub fn listen_frames_path(run_id: &str) -> PathBuf {
 /// The listen channel's durable ack cursor file for `run_id`.
 pub fn listen_cursor_path(run_id: &str) -> PathBuf {
     listen_dir(run_id).join("cursor")
-}
-
-/// Actor-incarnation-owned mutable build output for one Exomonad run.
-///
-/// `run_id` is the composition root's filesystem-safe lease identity. Actor
-/// numbers are separate path segments so no model-visible path depends on
-/// them; the process mount boundary projects this directory at a stable alias.
-pub fn actor_build_resource_dir(run_id: &str, actor: u64, incarnation: u64) -> PathBuf {
-    cache_dir()
-        .join("actor-builds")
-        .join(run_id)
-        .join(format!("{actor}-{incarnation}"))
-}
-
-/// Existing user-global verb-library dirs, in search precedence (canonical config
-/// first, then legacy `~/.tidepool/lib`). Only existing dirs are returned.
-pub fn global_lib_dirs() -> Vec<PathBuf> {
-    existing_roots("lib")
 }
 
 /// Existing user-global secrets dirs (canonical config first, then legacy).
