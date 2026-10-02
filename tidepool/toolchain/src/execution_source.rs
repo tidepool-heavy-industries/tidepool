@@ -2113,6 +2113,23 @@ impl CertifiedExecutionSourceGraph {
                 .contains(&(owner.unit.clone(), owner.module.clone()))
     }
 
+    /// Direct native dependencies authenticated by this owner's original
+    /// recipe. Package dependencies retain their separate package witnesses.
+    pub(crate) fn direct_source_owners(
+        &self,
+        owner: &CachedHomeOwner,
+    ) -> Option<Vec<&CachedHomeOwner>> {
+        if !self.matches_owner(owner) {
+            return None;
+        }
+        self.source_imports
+            .get(&(owner.unit.clone(), owner.module.clone()))
+            .into_iter()
+            .flatten()
+            .map(|key| self.owners.get(key))
+            .collect()
+    }
+
     /// Exact native owners of every positive source in this root's recipe.
     /// Fresh local edges need owner equality, while retained edges additionally
     /// require their separately sealed original graph.
