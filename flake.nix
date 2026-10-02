@@ -255,7 +255,7 @@
             version = "8b245274c49aabfc64c3f72e1e211e6f3bbb9532";
             src = "${harnessWeb}/web";
             nodejs = harnessPkgs.nodejs_24;
-            npmDepsHash = "sha256-yJrPGaSazF06w91mddpNlOyoB6d1cYKXumyaoeWCfeU=";
+            npmDeps = embeddedWebNpmCache;
             installPhase = ''
               runHook preInstall
               mkdir -p "$out/share/exomonad/web"
