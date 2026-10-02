@@ -10,11 +10,12 @@ import Tidepool.Effects.Core (BoundWorktree, Commands, Jev, Lookup, Reflect)
 import Tidepool.Agent.Reply (Replies)
 
 agentSpec ::
-  ( Member Commands effects, Member Lookup effects, Member Jev effects
+  ( KnownToolEffects effects, AsyncEffects effects
+  , Member Commands effects, Member Lookup effects, Member Jev effects
   , Member Reflect effects
   , Member Replies effects, Member BoundWorktree effects
   ) =>
-  AgentSpec Tools.WorkspaceTools effects
+  AgentSpec (Tools.WorkspaceTools effects) effects
 agentSpec = defaultSpec
   { specTools = Tools.tools
   }

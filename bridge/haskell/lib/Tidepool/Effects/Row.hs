@@ -16,9 +16,10 @@ import Data.Kind (Type)
 
 import Tidepool.Agent.Reply (Replies)
 import Tidepool.Agent.Watch (Watches)
-import Tidepool.Effects (Journal, RepoEvent)
 import Tidepool.Effects.Core
-  ( ActorContext
+  ( Journal
+  , RepoEvent
+  , ActorContext
   , AgentControl
   , Commands
   , Console
