@@ -194,6 +194,7 @@ main = getArgs >>= \case
   ["--exact-to-ordinary"] -> exactToOrdinary
   ["--checked-value-imports"] -> checkedValueImports
   ["--exact-loaded-metadata"] -> exactLoadedMetadata
+  ["--quasiquote-codegen-transition"] -> quasiQuoteCodegenTransition
   ["--exact-bash-metadata", effects] -> exactBashMetadata effects
   ["--package-inputs"] -> packageInputs
   ["--home-instance-edges"] -> selectedHomeInstanceEdges
@@ -2137,6 +2138,39 @@ hasIntResultLiteral expected = any (\case
       Core.Cast body _ -> contains body
       Core.Tick _ body -> contains body
       _ -> False
+
+quasiQuoteCodegenTransition :: IO ()
+quasiQuoteCodegenTransition = withTiming $ withScratch $ \work -> do
+  let fixture name = "test-source-boot/fixtures" </> name
+      target = work </> "MetadataQuoteFreeTarget.hs"
+      providers = ["MetadataQuoter", "MetadataQuoteSupport"]
+      providerExecutable name env = case lookupHpt (hsc_HPT env) (mkModuleName name) of
+        Just hmi -> let linkable = hm_linkable hmi
+          in isJust (homeMod_bytecode linkable) || isJust (homeMod_object linkable)
+        Nothing -> False
+  forM_ ["MetadataQuoteFreeTarget.hs", "MetadataQuoter.hs", "MetadataQuoteSupport.hs"] $ \name ->
+    copyFile (fixture name) (work </> name)
+  quoteFree <- readFile (fixture "MetadataQuoteFreeTarget.hs")
+  quoted <- readFile (fixture "MetadataQuotedTarget.hs")
+  let quotedTarget = T.unpack (T.replace "MetadataQuotedTarget" "MetadataQuoteFreeTarget" (T.pack quoted))
+  withResidentPipelineSelected [work] $ \compile -> do
+    let run = captureDiagnostics $
+          compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] Nothing
+        requireFree label (result, diagnostics) = do
+          unless (hasIntResultLiteral 0 (prBinds (pprPipelineResult result))
+              && counterValues "quasiquote_codegen_elided_modules" diagnostics == [2]
+              && all (\name -> not (providerExecutable name (prHscEnv (pprPipelineResult result)))) providers) $
+            fail (label ++ ": quote-free graph retained executable providers or changed its result")
+    run >>= requireFree "cold"
+    writeFile target quotedTarget
+    (executing, diagnostics) <- run
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult executing))
+        && null (counterValues "quasiquote_codegen_elided_modules" diagnostics)
+        && all (\name -> providerExecutable name (prHscEnv (pprPipelineResult executing))) providers) $
+      fail "warm real quote did not provision and execute its transitive providers"
+    writeFile target quoteFree
+    run >>= requireFree "warm after quotation"
+  putStrLn "quasiquote codegen: resident quote-free/real-quote/quote-free transition passed"
 
 exactLoadedMetadata :: IO ()
 exactLoadedMetadata = withTiming $ withScratch $ \work -> do
