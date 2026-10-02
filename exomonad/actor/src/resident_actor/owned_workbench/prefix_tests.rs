@@ -67,6 +67,28 @@ fn prefix_publication_preserves_failed_cell_eligibility_and_cancellation_veto() 
     let mut declaration = receipt(WorkbenchItemStatus::Committed);
     declaration.kind = Some(WorkbenchCellItemKind::Declaration);
     declaration.installed_bindings = vec!["privateDeclaration".into()];
+    let mut raw_declaration = declaration.clone();
+    raw_declaration.kind = None;
+    let mut raw_failure = failure(vec![raw_declaration]);
+    let span = CellSourceSpan {
+        start_line: 1,
+        start_column: 1,
+        end_line: 1,
+        end_column: 8,
+    };
+    let checked = [tidepool_runtime::session::CellAnalysisItem {
+        span,
+        source: String::new(),
+        prologue_only: false,
+        verdict: tidepool_runtime::session::TurnClassification {
+            kind: TurnKind::Decl,
+            binders: Vec::new(),
+            items: Vec::new(),
+        },
+        source_items: Vec::new(),
+    }];
+    annotate_workbench_receipts(&mut raw_failure.receipts, Some(&checked));
+    assert!(private_publication_intent(&Err(raw_failure)).is_none());
     let declarations_only = Err(failure(vec![declaration.clone()]));
     assert!(private_publication_intent(&declarations_only).is_none());
     let mixed = Err(failure(vec![

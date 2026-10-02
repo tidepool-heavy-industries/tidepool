@@ -1,6 +1,6 @@
 //! Single-admission preparation and watch tasks retain one execution cursor.
 
-use tidepool_runtime::session::{workbench::WorkbenchCellItemKind, ExecutionPublicationIntent};
+use tidepool_runtime::session::ExecutionPublicationIntent;
 
 mod reload;
 
@@ -1831,9 +1831,27 @@ where
         behavior: &mut Self,
         kernel: &KernelContext,
         owned: OwnedExecution<H, O>,
-        result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+        mut result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> Result<WorkbenchAdvance<Self>, KernelInvocationFailure> {
         owned.state.effects.invocation_work.close();
+        // Error paths bypass response rendering, but publication requires the
+        // same checked item kinds as a successful response.
+        let receipts = match &mut result {
+            Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
+            | Ok(KernelStep::Stop {
+                output: response, ..
+            }) => &mut response.items,
+            Err(failure) => &mut failure.receipts,
+        };
+        annotate_workbench_receipts(
+            receipts,
+            owned
+                .state
+                .cursor
+                .cell_check
+                .as_ref()
+                .map(|checked| checked.items.as_slice()),
+        );
         // Native prefixes survive failure; declarations require whole-cell success.
         // Cancellation retains the original publication decision's veto.
         if let Some(publication) = owned

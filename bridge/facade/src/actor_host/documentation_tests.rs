@@ -483,6 +483,22 @@ async fn notebook_failed_cells_preserve_completed_native_prefix() {
             .phase,
         tidepool_toolchain::failclass::Phase::Run,
     );
+    let Some(tidepool_runtime::session::WorkbenchPublicationOutcome::Published { bindings }) =
+        &failure.publication
+    else {
+        panic!("completed native prefix publication required: {failure}");
+    };
+    assert!(
+        !bindings
+            .iter()
+            .any(|binding| binding == "privatePrefixHelper"),
+        "private declaration falsely reported as published: {failure}"
+    );
+    assert!(
+        failure.receipts.iter().any(|receipt| receipt.kind
+            == Some(tidepool_runtime::session::WorkbenchCellItemKind::Declaration)),
+        "error receipts must retain checked declaration metadata: {failure}"
+    );
     for binding in ["actorsBeforeFailure", "prefixGetter", "prefixValue"] {
         assert!(
             failure.receipts.iter().any(|receipt| receipt

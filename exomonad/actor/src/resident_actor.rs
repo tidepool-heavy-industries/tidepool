@@ -13363,20 +13363,17 @@ fn committed_declaration_warnings(
     (warnings, diagnostics)
 }
 
-fn workbench_response(
-    status: WorkbenchRunStatus,
-    mut items: Vec<WorkbenchItemReceipt>,
-    next_index: usize,
-    total: usize,
+fn annotate_workbench_receipts(
+    items: &mut [WorkbenchItemReceipt],
     cell_check: Option<&[tidepool_runtime::session::CellAnalysisItem]>,
-) -> WorkbenchResponse {
+) {
     let receipt_kind = |kind| match kind {
         TurnKind::Decl => WorkbenchCellItemKind::Declaration,
         TurnKind::Bind => WorkbenchCellItemKind::Statement,
         TurnKind::Expr => WorkbenchCellItemKind::Expression,
     };
     if let Some(checked) = cell_check {
-        for receipt in &mut items {
+        for receipt in items {
             if let Some(item) = checked.get(receipt.index) {
                 receipt.kind = Some(receipt_kind(item.verdict.kind));
                 receipt.span = Some(item.span);
@@ -13392,6 +13389,16 @@ fn workbench_response(
             }
         }
     }
+}
+
+fn workbench_response(
+    status: WorkbenchRunStatus,
+    mut items: Vec<WorkbenchItemReceipt>,
+    next_index: usize,
+    total: usize,
+    cell_check: Option<&[tidepool_runtime::session::CellAnalysisItem]>,
+) -> WorkbenchResponse {
+    annotate_workbench_receipts(&mut items, cell_check);
     let essential = items.iter().rposition(|item| {
         matches!(
             item.status,
