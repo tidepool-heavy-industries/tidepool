@@ -8,6 +8,8 @@ next inference and alone can include `ContextReadWrite` (`setNextModel`,
 effects are not undone. Use `unfoldDeferred` for actor-owned children after
 curation; never await them in their creating invocation. `editableTexts` exposes
 full eligible message/result bodies and authored text; tool source/input and
-function arguments stay pinned. Use `C.trimText reason retainedText` for exact
-source plus `[Trimmed: reason]`. Same-model continuation forwards opaque
+function arguments stay pinned. With
+`import qualified Tidepool.Agent.Context as C`, use `C.trimText reason retainedText`
+for exact source plus `[Trimmed: reason]`.
+Same-model continuation forwards opaque
 reasoning unchanged. See `doc workbench` for restore rules.

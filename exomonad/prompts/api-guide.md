@@ -79,9 +79,10 @@ the enclosing call's completed context. Use `[label|orbit-motif|]`
 for compile-checked static assignment labels; use `labelFromText` for dynamic
 labels and handle its `Either`.
 
-Only a synchronous profile can declare `ContextReadWrite`; async remains the
-default. `editableTexts` traverses authored text and eligible visible
-message/result bodies, not display previews; tool source/input and function
+With `import qualified Tidepool.Agent.Context as C`, only a synchronous
+profile can declare `ContextReadWrite`; async remains the default.
+`editableTexts` traverses authored text and eligible visible message/result
+bodies, not display previews; tool source/input and function
 arguments stay pinned. `C.trimText reason retained` prefixes exact retained
 text with an ordinary `[Trimmed: reason]` marker. Context, model and effort
 commit together on whole-cell success. Same-model continuation forwards opaque
