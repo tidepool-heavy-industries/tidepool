@@ -807,12 +807,12 @@ mod tests {
             closure,
             vec![
                 ExactLexicalNode {
-                    owner: child,
-                    imports: vec![],
-                },
-                ExactLexicalNode {
                     owner: retained.clone(),
                     imports: vec![module("InheritedChild")],
+                },
+                ExactLexicalNode {
+                    owner: child,
+                    imports: vec![],
                 },
             ]
         );

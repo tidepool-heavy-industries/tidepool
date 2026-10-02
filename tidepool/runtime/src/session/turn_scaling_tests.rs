@@ -1267,6 +1267,11 @@ fn following_declaration_publishes_current_source_selected_originals() {
         include_str!("fixtures/checked-home-value.hs"),
     )
     .unwrap();
+    std::fs::write(
+        root.path().join("UnrelatedHomeValue.hs"),
+        include_str!("fixtures/unrelated-home-value.hs"),
+    )
+    .unwrap();
     let effects = TestEffectSurface::minimal(&[]).unwrap();
     let images = Arc::new(ImageRegistry::new());
     let lib = SessionLib::open(
@@ -1296,6 +1301,21 @@ fn following_declaration_publishes_current_source_selected_originals() {
         &SourceImports::from_specs(["qualified CheckedHomeValue"]),
     )
     .unwrap();
+    try_execute_cell_with_template_imports(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "retained_unrelated_home",
+        "let unrelated = UnrelatedHomeValue.unrelatedValue",
+        0,
+        None,
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &SourceImports::from_specs(["qualified UnrelatedHomeValue"]),
+    )
+    .unwrap();
     assert!(resident
         .compile_view_in(public)
         .unwrap()
@@ -1322,6 +1342,10 @@ fn following_declaration_publishes_current_source_selected_originals() {
         .lexical_graph()
         .iter()
         .any(|node| node.owner.module == "CheckedHomeValue"));
+    assert!(!context
+        .lexical_graph()
+        .iter()
+        .any(|node| node.owner.module == "UnrelatedHomeValue"));
     execute_cell(
         &mut resident,
         public,
@@ -1334,6 +1358,14 @@ fn following_declaration_publishes_current_source_selected_originals() {
         Some("41"),
         &ScalePublication::Ephemeral,
     );
+    assert!(!resident
+        .compile_view_in(public)
+        .unwrap()
+        .exact_declaration_context()
+        .unwrap()
+        .lexical_graph()
+        .iter()
+        .any(|node| node.owner.module == "UnrelatedHomeValue"));
 }
 
 #[test]
@@ -1392,6 +1424,29 @@ fn following_cells_reprove_template_imports_of_retained_rich_originals() {
                 .iter()
                 .any(|node| node.owner.module == "Tidepool.Aeson")));
     }
+    try_execute_cell_with_template_imports(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "following_without_rich_import",
+        "let independent = 42",
+        0,
+        None,
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &SourceImports::default(),
+    )
+    .unwrap();
+    assert!(resident
+        .compile_view_in(public)
+        .unwrap()
+        .exact_declaration_context()
+        .is_none_or(|context| !context
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner.module == "Tidepool.Aeson")));
 }
 
 #[test]

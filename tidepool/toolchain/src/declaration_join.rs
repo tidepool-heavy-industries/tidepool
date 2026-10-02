@@ -1321,12 +1321,12 @@ mod tests {
             closure.lexical,
             vec![
                 ExactLexicalNode {
-                    owner: child,
-                    imports: vec![],
-                },
-                ExactLexicalNode {
                     owner: inherited,
                     imports: vec![owner("InheritedChild")],
+                },
+                ExactLexicalNode {
+                    owner: child,
+                    imports: vec![],
                 },
             ]
         );

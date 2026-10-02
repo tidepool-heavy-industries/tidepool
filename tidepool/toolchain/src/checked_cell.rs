@@ -351,6 +351,7 @@ pub struct ExactCheckedCell {
     producer: [u8; 32],
     context: [u8; 32],
     declaration_context: Arc<crate::declaration_context::ExactDeclarationContext>,
+    publication_context: Arc<crate::declaration_context::ExactDeclarationContext>,
     receipt_digest: [u8; 32],
     checked_source: String,
     evidence: Vec<(String, crate::cache::DependencyEvidence)>,
@@ -1694,7 +1695,11 @@ impl ExactCompiledPrefix {
         let certificate = item
             .planned_declaration()
             .ok_or_else(|| failure("completed declaration has no original certificate"))?;
-        let baseline = &self.cell.declaration_context;
+        // The cell's exact compiler context also contains temporary retained
+        // value lexical authority. Revalidation reconstructs the declaration
+        // publication surface from the original declaration baseline and the
+        // certificate's reachable source closure, as publication does.
+        let baseline = &self.cell.publication_context;
         let inherited = baseline
             .lexical_graph()
             .iter()
@@ -2636,6 +2641,7 @@ pub(crate) fn admit_checked_cell(
     producer: &[u8],
     context: [u8; 32],
     declaration_context: Arc<crate::declaration_context::ExactDeclarationContext>,
+    publication_context: Arc<crate::declaration_context::ExactDeclarationContext>,
     request_digest: &str,
     specification: &CheckedCellSpecification,
     admissions: Vec<ExactSourceAdmission>,
@@ -2859,6 +2865,7 @@ pub(crate) fn admit_checked_cell(
         .sha256(),
         context,
         declaration_context,
+        publication_context,
         receipt_digest: Sha256::digest(&receipt).into(),
         evidence,
         checked_source,
@@ -3164,6 +3171,10 @@ mod tests {
             producer: [7; 32],
             context: [8; 32],
             declaration_context: Arc::new(
+                crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
+                    .unwrap(),
+            ),
+            publication_context: Arc::new(
                 crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
                     .unwrap(),
             ),
