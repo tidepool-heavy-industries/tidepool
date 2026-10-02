@@ -85,6 +85,39 @@ async fn next_round(rounds: &mut mpsc::UnboundedReceiver<RequestedRound>) -> Req
         .expect("scripted provider closed")
 }
 
+async fn next_round_with_state(
+    rounds: &mut mpsc::UnboundedReceiver<RequestedRound>,
+    fixture: &RunningBrowserHost,
+) -> RequestedRound {
+    let root = fixture.campaign.actor.identity();
+    let waiting = async {
+        loop {
+            tokio::select! {
+                round = rounds.recv() => return round.expect("scripted provider closed"),
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    let graph = fixture.campaign.forest.inspect_host_graph();
+                    if let Some(child) = graph.iter().find(|node| {
+                        node.actor != root
+                            && node.terminal.as_ref().is_some_and(|terminal| {
+                                terminal.kind != exomonad_actor::ActorExitKind::Completed
+                            })
+                    }) {
+                        panic!("native child exited before acceptance completed: {child:?}; graph={graph:?}");
+                    }
+                }
+            }
+        }
+    };
+    tokio::time::timeout(CELL_TIMEOUT, waiting)
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "native actor did not reach the next model request; graph={:?}",
+                fixture.campaign.forest.inspect_host_graph()
+            )
+        })
+}
+
 fn retained_output(request: &ResponsesRequest, call_id: &str) -> Value {
     let item = request
         .input
@@ -298,7 +331,7 @@ async fn resident_sync_context_commits_before_deferred_children_and_child_model_
     let mut root_committed = false;
     let mut children_committed = 0;
     while !root_committed || children_committed != 2 {
-        let round = next_round(&mut rounds).await;
+        let round = next_round_with_state(&mut rounds, &fixture).await;
         if round.is_root() {
             assert!(
                 !root_committed,
