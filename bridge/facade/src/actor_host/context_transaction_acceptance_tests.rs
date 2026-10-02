@@ -159,7 +159,12 @@ fn retained_output(request: &ResponsesRequest, call_id: &str) -> Value {
 }
 
 fn retained_output_items(items: &[Item], call_id: &str) -> Value {
-    let item = items
+    let item = retained_output_item(items, call_id);
+    serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap()
+}
+
+fn retained_output_item<'a>(items: &'a [Item], call_id: &str) -> &'a Item {
+    items
         .iter()
         .find(|item| {
             matches!(
@@ -167,8 +172,7 @@ fn retained_output_items(items: &[Item], call_id: &str) -> Value {
                 Some("custom_tool_call_output" | "function_call_output")
             ) && item.0["call_id"] == call_id
         })
-        .unwrap_or_else(|| panic!("next inference omitted terminal output for {call_id}"));
-    serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap()
+        .unwrap_or_else(|| panic!("next inference omitted terminal output for {call_id}"))
 }
 
 fn successful_output(request: &ResponsesRequest, call_id: &str) -> Value {
@@ -229,7 +233,7 @@ fn raw_request_items(fixture: &RunningBrowserHost, request: &ResponsesRequest) -
         .collect()
 }
 
-fn assert_portable_exchange(request: &ResponsesRequest, call_id: &str, tool: &str) {
+fn assert_portable_exchange(request: &ResponsesRequest, raw: &[Item], call_id: &str, tool: &str) {
     assert!(
         request
             .input
@@ -239,12 +243,52 @@ fn assert_portable_exchange(request: &ResponsesRequest, call_id: &str, tool: &st
         request.model,
         request.input
     );
-    let input = serde_json::to_string(&request.input).unwrap();
     assert!(
-        input.contains(&format!("visible reasoning for {call_id}")),
-        "{input}"
+        request
+            .input
+            .iter()
+            .all(|item| item.0["call_id"] != call_id),
+        "foreign native call/output for {call_id} escaped into {} input: {:?}",
+        request.model,
+        request.input
     );
-    assert!(input.contains(call_id) && input.contains(tool), "{input}");
+    let input = serde_json::to_string(&request.input).unwrap();
+    assert!(!input.contains(&format!("opaque-{call_id}")), "{input}");
+    let summary = format!("visible reasoning for {call_id}");
+    let notes = request
+        .input
+        .iter()
+        .filter(|item| item.0["type"] == "message" && item.0["role"] == "assistant")
+        .filter_map(|item| item.0["content"].as_str())
+        .filter(|text| text.contains(&summary))
+        .collect::<Vec<_>>();
+    assert_eq!(notes.len(), 1, "{input}");
+    let note = notes[0];
+    let call = raw
+        .iter()
+        .find(|item| {
+            matches!(
+                item.0["type"].as_str(),
+                Some("custom_tool_call" | "function_call")
+            ) && item.0["call_id"] == call_id
+        })
+        .unwrap_or_else(|| panic!("raw history omitted issuing call {call_id}"));
+    assert_eq!(call.0["name"], tool);
+    let arguments = match call.0["type"].as_str().unwrap() {
+        "custom_tool_call" => &call.0["input"],
+        "function_call" => &call.0["arguments"],
+        _ => unreachable!(),
+    };
+    let output = &retained_output_item(raw, call_id).0["output"];
+    for visible in [
+        json!(call_id),
+        json!(tool),
+        arguments.clone(),
+        output.clone(),
+    ] {
+        let expected = serde_json::to_string(&visible).unwrap();
+        assert!(note.contains(&expected), "missing {expected} in {note}");
+    }
 }
 
 fn context_operations(output: &Value) -> Vec<&Value> {
@@ -463,7 +507,7 @@ async fn resident_sync_context_commits_before_deferred_children_and_child_model_
             let raw = raw_request_items(&fixture, &round.request);
             successful_output_items(&raw, "context-parent");
             assert!(raw.contains(&reasoning_item("context-parent")));
-            assert_portable_exchange(&round.request, "context-parent", "haskell_sync");
+            assert_portable_exchange(&round.request, &raw, "context-parent", "haskell_sync");
             assert_eq!(round.request.model, "parent-curated-model");
             assert!(has_user_text(&round.request, "parent-curated"));
             assert!(!has_user_text(&round.request, "parent-original"));
@@ -477,7 +521,7 @@ async fn resident_sync_context_commits_before_deferred_children_and_child_model_
             let raw = raw_request_items(&fixture, &round.request);
             successful_output_items(&raw, "context-parent");
             assert!(raw.contains(&reasoning_item("context-parent")));
-            assert_portable_exchange(&round.request, "context-parent", "haskell_sync");
+            assert_portable_exchange(&round.request, &raw, "context-parent", "haskell_sync");
             round.cell_with_reasoning(
                 "context-child",
                 include_str!("fixtures/context_acceptance_child.hs"),
@@ -486,7 +530,7 @@ async fn resident_sync_context_commits_before_deferred_children_and_child_model_
             let raw = raw_request_items(&fixture, &round.request);
             let output = successful_output_items(&raw, "context-child");
             assert!(raw.contains(&reasoning_item("context-child")));
-            assert_portable_exchange(&round.request, "context-child", "haskell_sync");
+            assert_portable_exchange(&round.request, &raw, "context-child", "haskell_sync");
             assert_eq!(round.request.model, "gpt-6.1-sol");
             assert!(has_user_text(&round.request, "child-curated"));
             assert!(!has_user_text(&round.request, "parent-curated"));
@@ -539,7 +583,7 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
     let raw = raw_request_items(&fixture, &successor.request);
     let output = successful_output_items(&raw, "compiled-context");
     assert!(raw.contains(&reasoning_item("compiled-context")));
-    assert_portable_exchange(&successor.request, "compiled-context", "curate");
+    assert_portable_exchange(&successor.request, &raw, "compiled-context", "curate");
     assert_eq!(output["total"], 1, "{output}");
     assert_eq!(output["nextIndex"], 1, "{output}");
     assert_eq!(
