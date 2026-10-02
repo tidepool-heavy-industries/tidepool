@@ -58,6 +58,23 @@ library, cache state, and toolchain stamp as one operation. For deliberate
 mixed local testing, set `TIDEPOOL_TOOLCHAIN_HANDSHAKE=warn`; do not weaken the
 default handshake.
 
+## Exact-scope transport
+
+Execution-bearing requests use `TPEXACTSCOPE` version 6. The execution parcel
+contains `[sha256, absolute graph-file path]` descriptors followed by the same
+six-field exact original references. The request owner captures distinct graph
+files beside the manifest; their unchanged `TPEXECUTIONSOURCE` bytes and digests
+remain independent of the metadata envelope. The worker reads each graph once,
+verifies its digest and validates its exact native owner and compiler producer.
+Both metadata and aggregate graph bytes retain separate four MiB limits; graphs
+retain the 4096-count limit. Metadata overflow rejects the request and never
+removes admitted execution authority.
+
+This is a strict internal migration: version 5 execution-bearing scopes are
+rejected, and old workers reject version 6. Deploy the Rust frontend and Haskell
+worker together. Graph-free version 2/4 requests retain their format; candidate
+execution parcels keep their existing inline graph-byte format.
+
 ## Regenerate fixtures
 
 After changing translation or serialization, regenerate through the canonical

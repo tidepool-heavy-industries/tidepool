@@ -52,7 +52,7 @@ import System.Directory
   , removeFile, renameFile, listDirectory, doesFileExist, getPermissions, setPermissions, executable )
 import System.Environment (getArgs, getExecutablePath, setEnv, lookupEnv, unsetEnv)
 import System.Exit (ExitCode(..))
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, hFlush, hPutStrLn, hSeek, SeekMode(AbsoluteSeek), openTempFile, stderr)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Process (readProcessWithExitCode)
@@ -242,7 +242,7 @@ checkedValueImports = withScratch $ \work -> do
   putStrLn "checked value imports: HPT parity, delayed injection and wrong-input refusal passed"
 
 executionSourceWire :: FilePath -> IO ()
-executionSourceWire path = withScratch $ \work -> do
+executionSourceWire path = do
   scope <- readExactScope path >>= either fail pure
   unless (length (scopeExecutionGraphs scope) == 1 && length (scopeExecutionOwners scope) == 1
       && scopeCheckedCell scope == Nothing && scopeCheckedItem scope == Nothing
@@ -260,12 +260,68 @@ executionSourceWire path = withScratch $ \work -> do
       pure (TList [magic,version,semantic,producer,interfaces,lexical,products,
         TList [graphs,TList [TList [unit,name,original,iface,TString (T.replicate 64 "0"),graph]]],purpose])
     _ -> fail "Rust exact scope has another frozen execution layout"
-  let changedPath = work </> "changed-native-reference.cbor"
+  let changedPath = takeDirectory path </> "changed-native-reference.cbor"
   BS.writeFile changedPath (toStrictByteString (encodeTerm changed))
   refused <- readExactScope changedPath
   unless (case refused of Left _ -> True; Right _ -> False) $
     fail "execution graph accepted a reference to another native product"
-  putStrLn "Rust execution wire: v5 NULL purpose, original graph closure and wrong-native refusal passed"
+  let budgetPath = takeDirectory path </> "budget-scope.cbor"
+  budgetScope <- readExactScope budgetPath >>= either fail pure
+  budgetBytes <- BS.readFile budgetPath
+  unless (scopeExecutionGraphs budgetScope == scopeExecutionGraphs scope
+      && scopeExecutionOwners budgetScope == scopeExecutionOwners scope
+      && BS.length budgetBytes + sum (map (BS.length . executionGraphBytes) (scopeExecutionGraphs scope)) > 4*1024*1024) $
+    fail "independent valid metadata/graph budgets lost original execution custody"
+  (graphSha, graphPath) <- case term of
+    TList [_,_,_,_,_,_,_,TList [TList [TList [TString sha,TString file]],_],_] -> pure (T.unpack sha,T.unpack file)
+    _ -> fail "Rust scope6 descriptor layout differs"
+  originalBytes <- BS.readFile graphPath
+  let refuse label expected action = do
+        action
+        result <- readExactScope path
+        BS.writeFile graphPath originalBytes
+        unless (case result of Left reason -> expected `isInfixOf` reason; Right _ -> False) $
+          fail ("scope6 failed to enforce " ++ label ++ " before execution")
+  refuse "missing graph" "does not exist" (removeFile graphPath)
+  refuse "truncated graph" "digest differs" (BS.writeFile graphPath (BS.take (BS.length originalBytes - 1) originalBytes))
+  refuse "tampered graph" "digest differs" (BS.writeFile graphPath (BS.cons 0 (BS.drop 1 originalBytes)))
+  BS.writeFile graphPath (BS.replicate (4*1024*1024+1) 0)
+  oversizedResult <- readExactScope path
+  BS.writeFile graphPath originalBytes
+  unless (case oversizedResult of Left reason -> "exceed four MiB" `isInfixOf` reason; Right _ -> False) $
+    fail "scope6 graph aggregate was not refused by its byte bound"
+  let swapped = takeDirectory path </> "swapped-graph.cbor"
+      swappedManifest = takeDirectory path </> "swapped-scope.cbor"
+      wrongGraph = BSC.pack "another immutable graph"
+  BS.writeFile swapped wrongGraph
+  swappedTerm <- case term of
+    TList [magic,version,semantic,producer,interfaces,lexical,products,TList [_,refs],purpose] ->
+      pure (TList [magic,version,semantic,producer,interfaces,lexical,products,
+        TList [TList [TList [TString (T.pack graphSha),TString (T.pack swapped)]],refs],purpose])
+    _ -> fail "scope6 fixture changed layout"
+  BS.writeFile swappedManifest (toStrictByteString (encodeTerm swappedTerm))
+  swappedResult <- readExactScope swappedManifest
+  unless (case swappedResult of Left _ -> True; Right _ -> False) $
+    fail "scope6 accepted swapped graph before execution"
+  let rejectTerm label expected changedTerm = do
+        let changedManifest = takeDirectory path </> (label ++ "-scope.cbor")
+        BS.writeFile changedManifest (toStrictByteString (encodeTerm changedTerm))
+        result <- readExactScope changedManifest
+        unless (case result of Left reason -> expected `isInfixOf` reason; Right _ -> False) $
+          fail ("scope6 failed to enforce " ++ label ++ " before execution")
+  case term of
+    TList [magic,_,semantic,producer,interfaces,lexical,products,TList [_,refs],purpose] ->
+      rejectTerm "legacy-v5" "unsupported exact scope" (TList [magic,TString "5",semantic,producer,interfaces,lexical,products,
+        TList [TList [TList [TString (T.pack graphSha),TBytes originalBytes]],refs],purpose])
+    _ -> fail "scope6 fixture changed version layout"
+  let outsidePath = takeDirectory (takeDirectory path) </> "outside.cbor"
+  BS.writeFile outsidePath originalBytes
+  case term of
+    TList [magic,version,semantic,producer,interfaces,lexical,products,TList [_,refs],purpose] ->
+      rejectTerm "outside-request" "outside its request directory" (TList [magic,version,semantic,producer,interfaces,lexical,products,
+        TList [TList [TList [TString (T.pack graphSha),TString (T.pack outsidePath)]],refs],purpose])
+    _ -> fail "scope6 fixture changed path layout"
+  putStrLn "Rust execution wire: scope6 closure, independent budgets, wrong native/missing/truncated/tampered/swapped/oversized/outside-request/v5 refusals passed (10 checks)"
 
 checkedValueTypeClosure :: FilePath -> IO ()
 checkedValueTypeClosure effects = withScratch $ \work -> do
@@ -722,10 +778,12 @@ writeExecutionScope path work original lexicalNames = do
         ,TList [TList (identity ++ [TBool True,TNull]) | (_,identity,_,_) <- rows],TList [],TList []]
       graphBytes = toStrictByteString (encodeTerm graph)
       graphSha = digest graphBytes
-      scope = TList [text "TPEXACTSCOPE",text "5",text zero,text zero,TList [owner | (_,_,owner,_) <- rows]
+      graphPath = takeDirectory path </> ("execution-" ++ graphSha ++ ".cbor")
+      scope = TList [text "TPEXACTSCOPE",text "6",text zero,text zero,TList [owner | (_,_,owner,_) <- rows]
         ,TList [TList [key "main" name,TList []] | name <- lexicalNames]
         ,TList [productRow | (_,_,_,productRow) <- rows]
-        ,TList [TList [TList [text graphSha,TBytes graphBytes]],TList [TList (identity ++ [text graphSha]) | (_,identity,_,_) <- rows]],TNull]
+        ,TList [TList [TList [text graphSha,text graphPath]],TList [TList (identity ++ [text graphSha]) | (_,identity,_,_) <- rows]],TNull]
+  BS.writeFile graphPath graphBytes
   BS.writeFile path (toStrictByteString (encodeTerm scope))
 
 exactReexportQuoter :: IO ()
@@ -1556,7 +1614,9 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   originalScope <- readExactScope sourceScopePath >>= either fail pure
   originalTerm <- readTerm sourceScopePath
   parcel <- case originalTerm of
-    TList [_,_,_,_,_,_,_,value,_] -> pure value
+    TList [_,_,_,_,_,_,_,TList [_,references],_] -> pure (TList
+      [TList [TList [TString (T.pack (executionGraphSha256 graph)),TBytes (executionGraphBytes graph)]
+        | graph <- scopeExecutionGraphs originalScope],references])
     _ -> fail "candidate fixture lacks original execution parcel"
   let owners = ["MetadataQuoteSupport","MetadataQuoter"]
   writeManifestFor owners work original
