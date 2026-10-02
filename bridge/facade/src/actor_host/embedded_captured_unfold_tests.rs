@@ -35,6 +35,7 @@ struct CapturedHostTransport {
     root_origin: ConversationIdentity,
     root_round: AtomicUsize,
     operations: Mutex<HashMap<(ConversationIdentity, String), OperationId>>,
+    scope_setup_issued: Notify,
     setup_requested: Notify,
     setup_ready: Notify,
     finish_parent: Notify,
@@ -127,6 +128,49 @@ impl CapturedHostTransport {
                 state.round += 1;
                 (state.ordinal, state.round)
             };
+            if round == 2 {
+                let input = serde_json::to_value(&request.input).unwrap();
+                let items = input.as_array().unwrap();
+                let call_id = format!("captured-child-{path}");
+                let returned: Vec<_> = items
+                    .iter()
+                    .filter(|item| {
+                        item["type"] == "custom_tool_call_output" && item["call_id"] == call_id
+                    })
+                    .collect();
+                assert_eq!(
+                    returned.len(),
+                    1,
+                    "child follow-up must return exactly its original synchronous Haskell call"
+                );
+                let receipt: Value = serde_json::from_str(
+                    returned[0]["output"]
+                        .as_str()
+                        .expect("returned Haskell receipt is encoded as JSON text"),
+                )
+                .expect("returned Haskell receipt is valid JSON");
+                assert_eq!(receipt["status"], "replied", "{receipt}");
+                assert_eq!(
+                    receipt["items"].as_array().map(Vec::len),
+                    Some(1),
+                    "{receipt}"
+                );
+                assert_eq!(receipt["items"][0]["status"], "committed", "{receipt}");
+                assert_eq!(receipt["publication"]["status"], "published", "{receipt}");
+                assert_eq!(
+                    receipt["items"][0]["terminalTransfer"], "replyAccepted",
+                    "{receipt}"
+                );
+                assert!(
+                    receipt["items"][0]["operations"]
+                        .as_array()
+                        .is_some_and(|operations| operations.iter().any(|operation| {
+                            operation["effect"] == "reply"
+                                && operation["disposition"] == "committed"
+                        })),
+                    "typed reply effect was not committed: {receipt}"
+                );
+            }
             let items = match round {
                 1 => {
                     let current = if ordinal < 2 {
@@ -239,10 +283,13 @@ impl CapturedHostTransport {
                 assert!(
                     self.operations
                         .lock()
-                        .insert((origin.clone(), call_id), operation)
+                        .insert((origin.clone(), call_id.clone()), operation)
                         .is_none(),
                     "fixture unexpectedly reused a provider call identity"
                 );
+                if origin == self.root_origin && call_id == "captured-scope-setup" {
+                    self.scope_setup_issued.notify_one();
+                }
             }
         }
         Ok(ResponsesTurn {
@@ -395,6 +442,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         root_origin: root_origin.clone(),
         root_round: AtomicUsize::new(0),
         operations: Mutex::new(HashMap::new()),
+        scope_setup_issued: Notify::new(),
         setup_requested: Notify::new(),
         setup_ready: Notify::new(),
         finish_parent: Notify::new(),
@@ -463,6 +511,10 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             Arc::new(move || forest.inspect_host_graph())
         },
     };
+    let scheduler = runtime.scheduler();
+    // The provider records its operation before Harness admits it. Observe
+    // settlement from before launch rather than waiting on an unadmitted ID.
+    let mut setup_settlements = scheduler.operation_settlements();
     let host = tokio::spawn(run_interactive_applications(
         lifecycle_rx,
         Arc::new(Mutex::new(HashMap::new())),
@@ -480,19 +532,38 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
 
     tokio::time::timeout(
         Duration::from_secs(60),
+        transport.scope_setup_issued.notified(),
+    )
+    .await
+    .expect("root provider did not issue its original scope setup operation");
+    let setup_operation = transport.operation(&root_origin, "captured-scope-setup");
+    let setup = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+        loop {
+            let settled = setup_settlements
+                .recv()
+                .await
+                .expect("scope setup settlement observation must remain available");
+            if settled == setup_operation {
+                break;
+            }
+        }
+        embedded_operation(
+            &runtime,
+            &setup_operation,
+            COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+        )
+        .await
+        .unwrap()
+    })
+    .await
+    .expect("original scope setup operation did not settle within its cold budget");
+    assert_committed_haskell_value(&setup, "True");
+    tokio::time::timeout(
+        Duration::from_secs(60),
         transport.setup_requested.notified(),
     )
     .await
-    .expect("root Engine did not request a turn after scope setup");
-    let setup = embedded_operation(
-        &runtime,
-        &transport.operation(&root_origin, "captured-scope-setup"),
-        COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
-    )
-    .await
-    .unwrap();
-    assert_committed_haskell_value(&setup, "True");
-    let scheduler = runtime.scheduler();
+    .expect("root Engine did not request a turn after scope setup settled");
     // Subscribe before issuing the parent call: settlement may precede observation,
     // and Scheduler::wait refuses operations that are not admitted yet.
     let mut parent_settlements = scheduler.operation_settlements();
@@ -618,7 +689,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                     policy.dispatch_boxed(preflight_invocation(
                         &format!("captured-parent-private-probe-{name}"),
                         &format!("captured-parent-private-probe-{name}"),
-                        format!("{name} :: Int"),
+                        format!("({name} :: Int)"),
                     )),
                 )
                 .await

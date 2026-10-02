@@ -20,6 +20,13 @@ pub(crate) struct WorkbenchCompilationAuthority {
 }
 
 impl WorkbenchCompilationAuthority {
+    #[cfg(test)]
+    pub(crate) fn for_test(context: ActorSessionContext) -> Arc<Self> {
+        Self::admit(context, crate::CheckpointSourceLayer::default(), None, None)
+            .expect("test actor has an unowned source baseline")
+            .1
+    }
+
     pub(super) fn admit(
         context: ActorSessionContext,
         source: crate::CheckpointSourceLayer,
@@ -786,6 +793,7 @@ where
                         capture,
                     },
                     after_tool_active: false,
+                    terminal_transfer: None,
                 },
                 request,
                 replay_request,
@@ -1260,7 +1268,10 @@ where
                         owned.state.cursor.receipts.push(slot.receipt);
                         let failure = WorkbenchExecutionFailure {
                             receipts: std::mem::take(&mut owned.state.cursor.receipts),
-                            failed_index: owned.state.cursor.index,
+                            point: WorkbenchFailurePoint::InputUnit {
+                                index: owned.state.cursor.index,
+                            },
+                            publication: None,
                             total: owned.state.request.items.len(),
                             source: binding.expect_err("failed exact cleanup"),
                         };
@@ -1896,7 +1907,12 @@ where
                 match published {
                     Ok(PrivateExecutionPublication::Manifest(
                         PublicManifestCommit::Durable | PublicManifestCommit::Ephemeral,
-                    )) => Self::settle_owned_execution(behavior, &kernel, owned, result),
+                    )) => Self::settle_owned_execution(
+                        behavior,
+                        &kernel,
+                        owned,
+                        mark_private_publication(result),
+                    ),
                     Ok(PrivateExecutionPublication::Manifest(
                         PublicManifestCommit::PublishedDurabilityUnconfirmed { detail },
                     )) => Ok(WorkbenchAdvance::Park(
@@ -1930,11 +1946,14 @@ where
                             .expect("owned execution retains its original control")
                             .publication_decision()
                             .terminate();
+                        let publication = WorkbenchPublicationOutcome::Rejected {
+                            detail: error.to_string(),
+                        };
                         Self::settle_owned_execution(
                             behavior,
                             &kernel,
                             owned,
-                            Err(private_publication_failure(result, error)),
+                            Err(private_publication_failure(result, error, publication)),
                         )
                     }
                 }
@@ -1969,13 +1988,21 @@ where
             },
             move |behavior, kernel, owned, confirmed| {
                 let result = match confirmed {
-                    Ok(()) => result,
-                    Err(error) => Err(private_publication_failure(
-                        result,
-                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                    Ok(()) => mark_private_publication(result),
+                    Err(error) => {
+                        let unconfirmed = private_publication_bindings(&result);
+                        let failure_detail = format!(
                             "published write durability remains unconfirmed: {detail}; {error}"
-                        )),
-                    )),
+                        );
+                        Err(private_publication_failure(
+                            result,
+                            ResidentActorWorkbenchError::ActorProtocol(failure_detail.clone()),
+                            WorkbenchPublicationOutcome::DurabilityUnconfirmed {
+                                bindings: unconfirmed,
+                                detail: failure_detail,
+                            },
+                        ))
+                    }
                 };
                 Self::settle_owned_execution(behavior, kernel, owned, result)
             },
@@ -1995,27 +2022,56 @@ where
                 })
             },
             |behavior, _kernel, mut owned, result| {
-                let result = behavior.complete_workbench_finalization(&mut owned.state, result);
-                let outcome = match &result {
-                    Ok(
-                        KernelStep::Continue(response)
-                        | KernelStep::ContinueLater(response)
-                        | KernelStep::Stop {
-                            output: response, ..
+                let (result, notifications) =
+                    behavior.complete_workbench_finalization(&mut owned.state, result);
+                if !notifications.is_empty()
+                    || behavior.environment.requests.has_settlement_notifications()
+                {
+                    let environment = behavior.environment.clone();
+                    return Ok(WorkbenchAdvance::Park(Self::owned_step_task(
+                        owned,
+                        move |_owned| {
+                            Box::pin(async move {
+                                publish_request_notifications(
+                                    &environment.requests,
+                                    &environment.deployments,
+                                    notifications,
+                                )
+                                .await;
+                            })
                         },
-                    ) => format!("{:?}", response.status),
-                    Err(_) => "error".into(),
-                };
-                owned
-                    .timing
-                    .take()
-                    .expect("one terminal timing owner")
-                    .finish(&outcome);
-                // Exact resources and continuation custody cross the last fence.
-                let _owned = owned;
-                result.map(WorkbenchAdvance::Complete)
+                        move |_behavior, _kernel, owned, ()| {
+                            Self::complete_owned_finalization(owned, result)
+                        },
+                    )));
+                }
+                Self::complete_owned_finalization(owned, result)
             },
         )
+    }
+
+    fn complete_owned_finalization(
+        mut owned: OwnedExecution<H, O>,
+        result: Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
+    ) -> Result<WorkbenchAdvance<Self>, KernelInvocationFailure> {
+        let outcome = match &result {
+            Ok(
+                KernelStep::Continue(response)
+                | KernelStep::ContinueLater(response)
+                | KernelStep::Stop {
+                    output: response, ..
+                },
+            ) => format!("{:?}", response.status),
+            Err(_) => "error".into(),
+        };
+        owned
+            .timing
+            .take()
+            .expect("one terminal timing owner")
+            .finish(&outcome);
+        // Exact resources and continuation custody cross the last fence.
+        let _owned = owned;
+        result.map(WorkbenchAdvance::Complete)
     }
 }
 
@@ -2041,9 +2097,43 @@ fn private_publication_required(
     }
 }
 
+fn private_publication_bindings(
+    result: &Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+) -> Vec<String> {
+    let receipts = match result {
+        Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
+        | Ok(KernelStep::Stop {
+            output: response, ..
+        }) => &response.items,
+        Err(failure) => &failure.receipts,
+    };
+    receipts
+        .iter()
+        .flat_map(|receipt| receipt.installed_bindings.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn mark_private_publication(
+    mut result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
+    let bindings = private_publication_bindings(&result);
+    let publication = WorkbenchPublicationOutcome::Published { bindings };
+    match &mut result {
+        Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
+        | Ok(KernelStep::Stop {
+            output: response, ..
+        }) => response.publication = Some(publication),
+        Err(failure) => failure.publication = Some(publication),
+    }
+    result
+}
+
 fn private_publication_failure(
     result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     source: ResidentActorWorkbenchError,
+    publication: WorkbenchPublicationOutcome,
 ) -> WorkbenchExecutionFailure {
     match result {
         Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
@@ -2051,7 +2141,10 @@ fn private_publication_failure(
             output: response, ..
         }) => WorkbenchExecutionFailure {
             receipts: response.items,
-            failed_index: response.next_index.saturating_sub(1),
+            point: WorkbenchFailurePoint::Publication {
+                completed_input_units: response.next_index,
+            },
+            publication: Some(publication),
             total: response.total,
             source,
         },
@@ -2060,6 +2153,7 @@ fn private_publication_failure(
                 original: Box::new(failure.source),
                 publication: Box::new(source),
             },
+            publication: Some(publication),
             ..failure
         },
     }

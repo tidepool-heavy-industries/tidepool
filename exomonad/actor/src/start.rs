@@ -854,6 +854,7 @@ mod tests {
         let (session, root) = facade_selection_fixture();
         let provenance = tidepool_runtime::session::ProgramProvenance::from_sites(&[
             tidepool_runtime::YieldSite {
+                input_type_witnesses: Vec::new(),
                 site: 17,
                 origin: "entry".into(),
                 ordinal: 0,

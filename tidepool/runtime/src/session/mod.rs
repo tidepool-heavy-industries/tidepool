@@ -54,14 +54,15 @@ pub use inspection::{
 pub use kernel::{admit_checkout, Aged, SuspendableSession};
 
 pub use persistent::{
-    DeclarationPlaneCommit, MachineLease, MaterializationSetCommit, PersistentSession,
-    ScopeRetirement, ValuePlaneCommit,
+    DeclarationPlaneCommit, DurablePublicBootstrap, MachineLease, MaterializationSetCommit,
+    PersistentSession, ScopeRetirement, ValuePlaneCommit,
 };
 
 pub use admission::{
-    CheckedDisplaySettlement, PrivateExecutionAdmission, RuntimeCellAdmission,
-    RuntimeCheckedDisplayAdmission, RuntimeCheckedItemAdmission, RuntimeCheckedPrefix,
-    RuntimeCheckedPrefixSnapshot, RuntimeLexicalScopeLease,
+    CheckedDisplaySettlement, NativeSetupAdmissionFailure, NativeSetupInputInventory,
+    PrivateExecutionAdmission, RuntimeCellAdmission, RuntimeCheckedDisplayAdmission,
+    RuntimeCheckedItemAdmission, RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot,
+    RuntimeLexicalScopeLease,
 };
 pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{
@@ -110,11 +111,12 @@ pub use facade::{
 pub use supervisor::{GraceOutcome, TurnSupervisor};
 
 pub use resident::{
-    truncate_preview_at_line, HostBindingType, HostCarrier, HostPayload, PendingDisplayInstall,
-    PendingPreparedInstall, PendingPreparedMode, PreparedStartupEntry, ProgramProvenance,
-    ProgramProvenanceError, ReadyDisplayInstall, ReadyPreparedInstall, ResidentContinuationEvent,
-    ResidentDisplayBundle, ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError,
-    ResidentSession, RootCustody, SessionRunContext,
+    truncate_preview_at_line, CompiledActivationInput, HostBindingType, HostCarrier, HostPayload,
+    MountedActivationInput, PendingDisplayInstall, PendingPreparedInstall, PendingPreparedMode,
+    PreparedStartupEntry, ProgramProvenance, ProgramProvenanceError, ReadyDisplayInstall,
+    ReadyPreparedInstall, ResidentContinuationEvent, ResidentDisplayBundle, ResidentError,
+    ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
+    RuntimeActivationInput, RuntimeActivationInputAdmission, SessionRunContext,
 };
 
 pub use view::{hide_preamble_exports, SessionCompileView, SourceImports};
@@ -125,10 +127,10 @@ pub use workbench::{
     run_block_sequence, BlockExecution, BlockSequenceOutcome, CommittedBlock, MetaCommandLine,
     ParsedBlock, SourceOrderCollision, WorkSequence, WorkbenchBinding, WorkbenchBindingKind,
     WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchDiscovery, WorkbenchExecutionId,
-    WorkbenchFailureLayer, WorkbenchForkBoundary, WorkbenchItem, WorkbenchItemReceipt,
-    WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
-    WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
-    WorkbenchTerminalTransfer,
+    WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchForkBoundary, WorkbenchItem,
+    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+    WorkbenchOperationReceipt, WorkbenchPublicationOutcome, WorkbenchRequest, WorkbenchResponse,
+    WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
 
 pub use turn::{
@@ -304,6 +306,37 @@ impl std::fmt::Display for DeclarationValidationFailure {
     }
 }
 
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+pub enum DurablePublicAdmissionFailure {
+    #[error("durable graph is absent")]
+    MissingGraph,
+    #[error("durable run owner is absent")]
+    MissingRunOwner,
+    #[error("canonical owner surface is absent")]
+    MissingSurface,
+    #[error("bootstrap seal belongs to a different runtime, scope, or machine")]
+    BootstrapIdentity,
+    #[error("canonical surface changed after bootstrap admission")]
+    BootstrapSurface,
+    #[error("publication is not durably confirmed")]
+    Unconfirmed,
+    #[error("canonical scope differs: mapped={mapped:?}")]
+    Scope { mapped: Option<ScopeId> },
+    #[error("declaration tip differs: published={published:?}, current={current:?}")]
+    DeclarationTip {
+        published: Option<Generation>,
+        current: Option<Generation>,
+    },
+    #[error("public visibility epoch differs: published={published}, current={current}")]
+    Epoch { published: u64, current: u64 },
+    #[error("published manifest is not recognized")]
+    UnrecognizedManifest,
+    #[error("published manifest has {count} unavailable artifacts")]
+    ArtifactLoss { count: usize },
+    #[error("published manifest checksum differs: published={published:?}, current={current:?}")]
+    ManifestChecksum { published: String, current: String },
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum SessionError {
     #[error(transparent)]
@@ -339,10 +372,25 @@ pub enum SessionError {
     MissingRetainedValueInterface(SessionModule),
     #[error("staged public manifest belongs to a different session, actor, or manifest")]
     WrongPublicManifestTicket,
+    #[error("durable public admission owner={owner:?}, scope={scope:?}: {reason}")]
+    InvalidDurablePublicAdmission {
+        owner: RecoveryPublicOwner,
+        scope: ScopeId,
+        reason: DurablePublicAdmissionFailure,
+    },
     #[error("recovery initialization for scope {scope:?}: {reason}")]
     InvalidRecoveryInitialization {
         scope: ScopeId,
         reason: RecoveryInitializationFailure,
+    },
+    #[error(
+        "native setup admission owner={owner}, epoch={owner_epoch}, scope={scope:?}: {reason}"
+    )]
+    InvalidNativeSetupAdmission {
+        owner: uuid::Uuid,
+        owner_epoch: u64,
+        scope: ScopeId,
+        reason: NativeSetupAdmissionFailure,
     },
     #[error("private value replacement requires a certified lexical overlay")]
     UnsupportedPrivateValueReplacement,

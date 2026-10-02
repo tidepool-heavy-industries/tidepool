@@ -5,21 +5,29 @@ import Codec.CBOR.Write (toStrictByteString)
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Data.ByteString.Lazy qualified as BSL
-import Control.Exception (SomeException, bracket, evaluate, finally, try)
-import Control.Monad (foldM, forM, unless, void)
+import Control.Exception (SomeException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException)
+import Control.Concurrent (MVar, forkIO, killThread, newEmptyMVar, putMVar, takeMVar)
+import Control.Monad (foldM, forM, unless, void, when)
 import GHC.Clock (getMonotonicTimeNSec)
 import Data.Word (Word64)
+import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
 import Data.List (isInfixOf, isPrefixOf, sortOn)
-import Data.Maybe (isJust, isNothing)
+import Data.Maybe (isJust, isNothing, maybeToList)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import GHC (runGhc, setSession, ms_mod_name, ms_hsc_src, parseModule, typecheckModule, Target(..))
 import GHC.Core qualified as Core
 import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy)
+import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
+import GHC.Builtin.Types (liftedTypeKind)
+import GHC.Types.Var (mkTyVar, VarBndr(..))
+import GHC.Types.Name.Occurrence (mkTyVarOcc)
+import GHC.Types.SrcLoc (noSrcSpan)
+import Language.Haskell.Syntax.Specificity (ForAllTyFlag(..), Specificity(..))
 import GHC.Types.Id (idName, setIdName)
 import GHC.Types.Literal (Literal(..), LitNumType(..))
 import GHC.Types.Name (getOccString, nameOccName, nameSrcSpan, mkExternalName, mkInternalName)
@@ -31,6 +39,7 @@ import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt, addToHpt)
 import GHC.Utils.Logger (Logger, popLogHook)
 import GHC.Unit.Finder (initFinderCache, addModuleToFinder)
+import GHC.Unit.Finder.Types (FinderCache(..))
 import GHC.Unit.Module.Location (ml_hi_file)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Builtin.Names (gHC_PRIM)
@@ -49,7 +58,8 @@ import GHC.Unit.Types (unitString, stringToUnit, GenWithIsBoot(..))
 import Numeric (showHex)
 import System.Directory
   ( copyFile, createDirectory, createDirectoryIfMissing, getTemporaryDirectory, removeDirectoryRecursive
-  , removeFile, renameFile, listDirectory, doesFileExist, getPermissions, setPermissions, executable )
+  , removeFile, renameFile, listDirectory, doesFileExist, getPermissions, setPermissions, executable
+  , getModificationTime, setModificationTime )
 import System.Environment (getArgs, getExecutablePath, setEnv, lookupEnv, unsetEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeDirectory)
@@ -84,7 +94,7 @@ import Tidepool.DependencyEvidence
   , DependencyResolution(..), ProductAvailability(..), DependencySource(..), sourceEvidence
   , selectedHomeRequirements, renderDependencyEvidence )
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
+  ( newOriginalInterfaceArtifacts, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
   , readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified )
@@ -92,18 +102,21 @@ import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..), CheckedEnvironmentResult(..)
-  , renderType, generatedScaffoldRecipe
+  , renderType, generatedScaffoldRecipe, activationPreviewInputType
   , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
   , readModuleCandidates, candidateExecutionSources, candidateOriginalIdentity)
-import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports)
+import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports)
 import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
 import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule)
 import Tidepool.Session (sessionHiPath)
-import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), CheckedCellAdmission(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
+import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
+import Tidepool.CheckedCell (CheckedSignature(..), captureCheckedSignature, encodeCheckedSignature
+  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness)
+import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
 import Tidepool.Binders (BoundBinder(..))
 import Tidepool.ExecutionSource
   ( ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
@@ -125,6 +138,8 @@ main = getArgs >>= \case
   ["--generated-scaffold-retained",scope,seal] -> generatedScaffoldRetained scope seal
   ["--hydrated-site-siblings"] -> hydratedSiteSiblings
   ["--fresh-execution-recipe"] -> freshExecutionRecipeTest
+  ["--host-activation-purpose"] -> hostActivationPurposeTest Nothing
+  ["--host-activation-purpose", destination] -> hostActivationPurposeTest (Just destination)
   ["--candidate-execution-sources"] -> candidateExecutionSourcesTest
   ["--candidate-execution-wire", path] -> candidateExecutionWire path
   ["--checked-value-type-closure", effects] -> checkedValueTypeClosure effects
@@ -1621,6 +1636,119 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
 
 -- Pure issuer and scope-budget controls; the runtime suite separately drives
 -- cold parser -> whole checked program -> per-item original certification.
+hostActivationPurposeTest :: Maybe FilePath -> IO ()
+hostActivationPurposeTest destination = withScratch $ \work -> do
+  let previewMarker = "{{ACTIVATION_PREVIEW}}"
+      template = "preview = " ++ previewMarker ++ "\n__result = do {\n{{TURN_STMT}}\n}\n"
+      literalInput = "sessionInput <- pure \"" ++ previewMarker ++ "\""
+  replaced <- either fail pure (replaceTemplateMarker previewMarker "opaque" template)
+  unless (literalInput `isInfixOf` spliceTemplate replaced literalInput "sessionInput"
+      && case replaceTemplateMarker previewMarker "opaque" (template ++ previewMarker) of
+        Left _ -> True; Right _ -> False) $
+    fail "preview replacement rescanned input text or accepted duplicated protected markers"
+  let sha = TString (T.replicate 64 "a")
+      empty = TList []
+      text = TString . T.pack
+      signature = TList [text "__tidepool_cell_pin_0_sessionInput",text "Int",empty]
+      authorization = [text "host-activation-input1",sha,sha,TInt 0,sha,text "bind"
+        ,TList [text "sessionInput"],TList [TList [text "bind",sha]],empty,TList [signature]
+        ,TNull,TInt 1,sha,empty,TNull,TNull,empty,empty,TList [text work]]
+      hostManifest auth = TList [text "TPEXACTSCOPE",text "5",sha,sha,empty,empty,empty
+        ,TList [empty,empty],TList auth]
+      path = work </> "host-scope.cbor"
+      decode auth = BS.writeFile path (toStrictByteString (encodeTerm (hostManifest auth))) >> readExactScope path
+      replace index value fields = [if ordinal == index then value else field | (ordinal,field) <- zip [0::Int ..] fields]
+  admitted <- decode authorization >>= either fail pure
+  unless (fmap itemPurpose (scopeCheckedItem admitted) == Just HostActivationInput) $
+    fail "host purpose lost its sealed role"
+  authored <- decode (replace 0 (text "checked-item2") authorization) >>= either fail pure
+  unless (fmap itemPurpose (scopeCheckedItem authored) == Just AuthoredCheckedItem) $
+    fail "ordinary purpose acquired host authority"
+  forM_ [(0,text "host-activation-input2"),(3,TInt 1),(5,text "expr")
+      ,(6,TList [text "other"]),(7,TList [TList [text "expr",sha]])
+      ,(9,empty),(11,TInt 0),(12,TString (T.replicate 64 "0"))] $ \(index,value) -> do
+    refused <- decode (replace index value authorization)
+    unless (case refused of Left _ -> True; Right _ -> False) $
+      fail ("invalid host purpose field was admitted: " ++ show index)
+  _ <- decode authorization >>= either fail pure
+  let sourcePath = work </> "HostActivationInput.hs"
+  inputTemplate <- readFile "test-source-boot/fixtures/HostActivationInput.hs"
+  originalSource <- either fail pure (replaceTemplateMarker "{{CHECKED_TYPE}}" "Int" inputTemplate)
+  writeFile sourcePath originalSource
+  original <- runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile Nothing sourcePath [work] Nothing
+  inputType <- maybe (fail "host input fixture has no inferred type") pure (crResultType original)
+  let checkedSignature = captureCheckedSignature (crHscEnv original) "__tidepool_cell_pin_0_sessionInput" inputType
+  encodedSignature <- either (fail . show) (pure . snd)
+    (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString (encodeCheckedSignature checkedSignature))))
+  _ <- decode (replace 9 (TList [encodedSignature]) authorization) >>= either fail pure
+  checkedSource <- either fail pure (replaceTemplateMarker "{{CHECKED_TYPE}}" (signatureType checkedSignature) inputTemplate)
+  writeFile sourcePath checkedSource
+  let session = emptySessionScope {ssRoot=work,ssExactScope=Just path}
+      purpose = HostActivationInputCompile [("__tidepool_checked_annotation_0",
+        checkedSignature)] Nothing []
+      reject action = do
+        refused <- try (void action) :: IO (Either SomeException ())
+        unless (case refused of Left reason -> "host activation input" `isInfixOf` show reason; Right _ -> False) $
+          fail "host input compiled through an unsealed or general purpose"
+  reject (runPipelineSessionSelected CheckedEnvironment Set.empty purpose Nothing sourcePath [work] Nothing)
+  reject (runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile (Just session) sourcePath [work] Nothing)
+  checked <- runPipelineSessionSelected CheckedEnvironment Set.empty purpose (Just session) sourcePath [work] Nothing
+  unless (fmap renderType (crResultType checked) == Just "Int") $
+    fail "host checked annotation changed the inferred input"
+  actualInput <- either fail pure (activationPreviewInputType (crTargetTcGblEnv checked))
+  originalInterfaces <- newOriginalInterfaceArtifacts (crHscEnv checked) Map.empty work
+  let witness ty = maybe (fail "complete fixture type has no canonical witness") pure
+        (captureCheckedTypeWitness (crHscEnv checked) ty)
+      sealedBytes ty = do
+        raw <- witness ty
+        sealed <- sealCheckedTypeWitness originalInterfaces raw
+          >>= maybe (fail "fixture type witness has no original interface") pure
+        maybe (fail "fixture type witness is unsealed") (pure . toStrictByteString) (encodeCheckedTypeWitness sealed)
+  mismatchedSource <- either fail pure (replaceTemplateMarker "__activationPreview :: Int" "__activationPreview :: Bool" originalSource)
+  writeFile sourcePath mismatchedSource
+  mismatched <- runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile Nothing sourcePath [work] Nothing
+  unless (case activationPreviewInputType (crTargetTcGblEnv mismatched) of Left _ -> True; Right _ -> False) $
+    fail "host preview admitted another type than its checked Val binder"
+  writeFile sourcePath checkedSource
+  originalBytes <- sealedBytes inputType
+  actualBytes <- sealedBytes actualInput
+  forward <- sealedBytes (mkVisFunTyMany intTy boolTy)
+  backward <- sealedBytes (mkVisFunTyMany boolTy intTy)
+  supply <- mkSplitUniqSupply 'w'
+  let (firstUnique, remaining) = takeUniqFromSupply supply
+      (secondUnique, _) = takeUniqFromSupply remaining
+      alphaVariable unique name = mkTyVar (mkInternalName unique (mkTyVarOcc name) noSrcSpan) liftedTypeKind
+      firstVariable = alphaVariable firstUnique "a"
+      secondVariable = alphaVariable secondUnique "renamed"
+      alphaType variable = mkForAllTy (Bndr variable (Invisible SpecifiedSpec))
+        (mkVisFunTyMany (mkTyVarTy variable) (mkTyVarTy variable))
+  alphaFirst <- sealedBytes (alphaType firstVariable)
+  alphaSecond <- sealedBytes (alphaType secondVariable)
+  unless (isNothing (captureCheckedTypeWitness (crHscEnv checked) (mkTyVarTy firstVariable))) $
+    fail "canonical type witness admitted a free type variable"
+  let ownerPath = work </> "HostActivationOwner.hs"
+      ownerWitness fixture = do
+        copyFile ("test-source-boot/fixtures" </> fixture) ownerPath
+        produced <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile Nothing ownerPath [work] Nothing
+        let pipeline = pprPipelineResult produced
+        ty <- maybe (fail "owner fixture has no input type") pure (prResultType pipeline)
+        raw <- maybe (fail "owner fixture has no canonical witness") pure (captureCheckedTypeWitness (prHscEnv pipeline) ty)
+        artifacts <- newOriginalInterfaceArtifacts (prHscEnv pipeline) (pprProductInterfaces produced) work
+        sealed <- sealCheckedTypeWitness artifacts raw
+          >>= maybe (fail "owner fixture lacks its original interface") pure
+        maybe (fail "owner witness is unsealed") (pure . toStrictByteString) (encodeCheckedTypeWitness sealed)
+  originalOwner <- ownerWitness "HostActivationOwnerOriginal.hs"
+  changedOwner <- ownerWitness "HostActivationOwnerChanged.hs"
+  unless (originalOwner /= changedOwner) $ fail "same original Name ignored changed owner interface"
+  forM_ (maybeToList destination) $ \directory -> do
+    createDirectoryIfMissing True directory
+    forM_ [("original-input.cbor",originalBytes),("preview-input.cbor",actualBytes)
+      ,("forward-function.cbor",forward),("backward-function.cbor",backward),("alpha-first.cbor",alphaFirst),("alpha-second.cbor",alphaSecond),("original-owner.cbor",originalOwner),("changed-owner.cbor",changedOwner)] $ \(name,bytes) ->
+      BS.writeFile (directory </> name) bytes
+  unless (originalBytes == actualBytes && forward /= backward) $
+    fail "canonical input witness lost original correspondence or function argument/result order"
+  putStrLn "host activation purpose: sealed payload, checked type pass and ordinary/unsealed refusals passed"
+
 freshExecutionRecipeTest :: IO ()
 freshExecutionRecipeTest = withScratch $ \work -> do
   let source = "module Expr where\nanswer = 42\n"
@@ -1674,7 +1802,7 @@ freshExecutionRecipeTest = withScratch $ \work -> do
   let original = ExactProduct "main" "Support" sha sha sha "" []
       scope = ExactScope "" sha sha sha
         [(ExactIfaceArtifact "main" "Support" "" sha [],"",sha)] [] [original]
-        [] [] Nothing Nothing Nothing Nothing
+        [] [] Nothing Nothing Nothing Nothing Set.empty
       oversized = graph {executionGraphBytes=BS.replicate (4*1024*1024+1) 0}
   bounded <- either (fail . show) pure
     (extendExactExecutionSourcesWithinBudget [oversized] [reference] scope)
@@ -2262,6 +2390,7 @@ packageInputs = withScratch $ \work -> do
       fail "warm input fixture did not retain the executable support product"
     coldBody <- proof work "cold" cold
     warmBody <- proof work "warm" warm
+    verifyCollectivePackageProof work cold
     case coldBody of
       TList [TString "checked", TList owners, TList closure] -> do
         let direct = Set.fromList [(unit, name) | TList [_, _, TList entries] <- owners,
@@ -2308,7 +2437,7 @@ packageInputs = withScratch $ \work -> do
           ++ " resolved-imports=" ++ show [(unitString (moduleUnit owner),
               moduleNameString (moduleName owner), owner == gHC_PRIM) | owner <- imported])
     writeManifestFor ["OptionalWiredSupport"] work wired
-    verifyPackageSidecar work
+    verifyPackageSidecar work (prHscEnv (pprPipelineResult wired))
     wiredReused <- wiredRoot (PreparedProducts (Just (manifest work))) GeneralCompile
     unless (map candidateModule (pprAcceptedCandidates wiredReused) == ["OptionalWiredSupport"]) $
       fail "wired input fixture did not exercise authenticated candidate hydration"
@@ -2344,10 +2473,167 @@ packageInputs = withScratch $ \work -> do
         TList [TString "TPCINPUT", TInt 1, _, body] -> pure body
         _ -> fail "compiler input producer returned another proof category"
 
+-- Reuse real compiled owner bytes and real installed roots. Copies plus an
+-- isolated finder make mutation tests local without changing the Nix packages.
+verifyCollectivePackageProof :: FilePath -> PreparedPipelineResult -> IO ()
+verifyCollectivePackageProof work prepared = withTiming $ do
+  let producer = prHscEnv (pprPipelineResult prepared)
+      installed = Set.toAscList (Set.fromList
+        (concatMap packageInterfaces (Map.elems (pprPackageImports prepared))))
+  selected <- case installed of
+    first:second:_ -> pure [first,second]
+    _ -> fail "package proof fixture needs two distinct installed owners"
+  finder <- initFinderCache
+  mutable <- forM (zip [0 :: Int ..] selected) $ \(index, root) -> do
+    let owner = mkModule (stringToUnit (packageUnit root)) (mkModuleName (packageModule root))
+        path = work </> ("package-proof-root-" ++ show index ++ ".hi")
+    (_, location) <- readExactInterface producer owner >>= either (fail . show) pure
+    bytes <- BS.readFile (packagePath root)
+    BS.writeFile path bytes
+    addModuleToFinder finder (GWIB owner NotBoot) (location { ml_hi_file = path })
+    pure (root { packagePath = path }, location { ml_hi_file = path }, bytes)
+  (root, location, rootBytes) <- case mutable of
+    first:_ -> pure first
+    _ -> fail "package proof lost its mutable installed owners"
+  resolverCalls <- newIORef (0 :: Int)
+  let observedFinder = finder { lookupFinderCache = \owner -> do
+        modifyIORef' resolverCalls (+1)
+        lookupFinderCache finder owner }
+      environment = producer { hsc_FC = observedFinder }
+      roots = [selectedRoot | (selectedRoot,_,_) <- mutable]
+      firstRoot = root
+      count :: String -> String -> Integer
+      count name diagnostics = sum
+        [read value | line <- lines diagnostics, prefix `isPrefixOf` line,
+          value:_ <- [words (drop (length prefix) line)]]
+        where prefix = "tidepool-count name=" ++ name ++ " count="
+      requireRight label = \case
+        Right () -> pure ()
+        Left reason -> fail (label ++ " refused: " ++ reason)
+      requireLeft label = \case
+        Left _ -> pure ()
+        Right () -> fail (label ++ " admitted changed proof inputs")
+  interface <- maybe (fail "package proof lacks the compiled owning interface") pure
+    (Map.lookup (mkModuleName "OptionalRoot") (pprProductInterfaces prepared))
+  let ownerPath = work </> "package-proof-owner.hi"
+  writeBinIface (targetProfile (hsc_dflags producer)) QuietBinIFace NormalCompression ownerPath interface
+  ownerBytes <- BS.readFile ownerPath
+  let owner = mi_module interface
+      artifact = ExactIfaceArtifact (unitString (moduleUnit owner))
+        (moduleNameString (moduleName owner)) ownerPath (digest ownerBytes) []
+      sidecar label iface evidence = do
+        let path = work </> ("package-proof-" ++ label ++ ".packages")
+            bytes = encodePackageImports iface (PackageImportEvidence evidence [])
+        BS.writeFile path bytes
+        pure (iface,path,digest bytes)
+  fanout <- forM [1 :: Int .. 64] $ \index -> do
+    let path = work </> ("package-proof-owner-" ++ show index ++ ".hi")
+    BS.writeFile path ownerBytes
+    sidecar ("fanout-" ++ show index) (artifact { exactPath = path }) [firstRoot]
+  firstWitness <- case fanout of
+    first:_ -> pure first
+    _ -> fail "package proof lost its fanout owner fixtures"
+  forM_ [1,8,64] $ \size -> do
+    writeIORef resolverCalls 0
+    (result, diagnostics) <- captureDiagnostics (revalidatePackageImports environment (take size fanout))
+    requireRight "overlapping package roots" result
+    calls <- readIORef resolverCalls
+    unless (calls == 1
+      && count "package_proof.authenticated_sidecars" diagnostics == fromIntegral size
+      && count "package_proof.staged_references" diagnostics == fromIntegral size
+      && count "package_proof.staged_full_witnesses" diagnostics == 1) $
+      fail "collective proof repeated resolution or skipped owning authentication"
+    putStrLn ("package proof fanout=" ++ show size ++ " full_witnesses=1 resolver_calls=" ++ show calls)
+  separate <- forM (zip [1 :: Int ..] roots) $ \(index, selectedRoot) ->
+    sidecar ("distinct-" ++ show index) artifact [selectedRoot]
+  writeIORef resolverCalls 0
+  revalidatePackageImports environment separate >>= requireRight "distinct package roots"
+  readIORef resolverCalls >>= \calls -> unless (calls == 2) (fail "distinct owners were collapsed")
+  copied <- sidecar "same-owner-other-path" artifact [firstRoot { packagePath = ownerPath }]
+  changedSha <- sidecar "same-owner-other-sha" artifact [firstRoot { packageSha256 = replicate 64 '0' }]
+  forM_ [copied,changedSha] $ \conflict -> do
+    writeIORef resolverCalls 0
+    revalidatePackageImports environment [firstWitness,conflict] >>= requireLeft "conflicting full witness"
+    readIORef resolverCalls >>= \calls -> unless (calls == 0) (fail "conflicting proof reached package resolution")
+  malformed <- forM [("duplicate-root",[firstRoot,firstRoot]),
+    ("ambiguous-owner",[firstRoot,firstRoot { packagePath = ownerPath }]),
+    ("relative-path",[firstRoot { packagePath = "relative.hi" }])] $ \(label,evidence) ->
+      sidecar label artifact evidence
+  forM_ malformed $ \witness ->
+    revalidatePackageImports environment [witness] >>= requireLeft "malformed package sidecar"
+  otherUnit <- sidecar "same-content-other-unit" artifact
+    [firstRoot { packageUnit = "not-the-selected-package-unit" }]
+  (unitResult, unitDiagnostics) <- captureDiagnostics
+    (revalidatePackageImports environment [firstWitness,otherUnit])
+  requireLeft "unresolved equal-content owner" unitResult
+  unless (count "package_proof.staged_full_witnesses" unitDiagnostics == 2) $
+    fail "equal-content owners in different units were collapsed during staging"
+  let proof = take 8 fanout
+  (lastArtifact,lastSidecar,_) <- case reverse proof of
+    lastWitness:_ -> pure lastWitness
+    _ -> fail "package proof lost its mutation fixtures"
+  sidecarBytes <- BS.readFile lastSidecar
+  forM_ [("sidecar",lastSidecar,sidecarBytes),("owning interface",exactPath lastArtifact,ownerBytes)] $ \(label,path,bytes) -> do
+    stamp <- getModificationTime path
+    BS.writeFile path "changed proof bytes"
+    setModificationTime path stamp
+    writeIORef resolverCalls 0
+    revalidatePackageImports environment proof >>= requireLeft label
+    readIORef resolverCalls >>= \calls -> unless (calls == 0) (fail "partially authenticated owners reached resolution")
+    retained <- BS.readFile path
+    unless (retained == "changed proof bytes") (fail "proof refusal changed its input")
+    BS.writeFile path bytes
+    revalidatePackageImports environment proof >>= requireRight ("restored " ++ label)
+  stamp <- getModificationTime (packagePath root)
+  BS.writeFile (packagePath root) "changed selected root"
+  setModificationTime (packagePath root) stamp
+  revalidatePackageImports environment proof >>= requireLeft "same-path package mutation"
+  removeFile (packagePath root)
+  revalidatePackageImports environment proof >>= requireLeft "missing selected root"
+  BS.writeFile (packagePath root) rootBytes
+  revalidatePackageImports environment proof >>= requireRight "restored selected root"
+  let alternate = work </> "package-proof-alternate.hi"
+      installedOwner = mkModule (stringToUnit (packageUnit root)) (mkModuleName (packageModule root))
+  BS.writeFile alternate rootBytes
+  alternateExpected <- sidecar "alternate-expected" artifact [root { packagePath = alternate }]
+  revalidatePackageImports environment [alternateExpected] >>= requireLeft "alternate expected path"
+  addModuleToFinder finder (GWIB installedOwner NotBoot) (location { ml_hi_file = alternate })
+  revalidatePackageImports environment proof >>= requireLeft "changed current finder selection"
+  addModuleToFinder finder (GWIB installedOwner NotBoot) location
+  entered <- newEmptyMVar
+  gate <- newEmptyMVar :: IO (MVar ())
+  settled <- newEmptyMVar
+  cancellationCalls <- newIORef (0 :: Int)
+  let blocked = environment { hsc_FC = finder { lookupFinderCache = \selectedOwner -> do
+        modifyIORef' cancellationCalls (+1)
+        calls <- readIORef cancellationCalls
+        when (calls == 2) $ do
+          putMVar entered ()
+          takeMVar gate
+        lookupFinderCache finder selectedOwner } }
+  bracket (forkIO ((try (revalidatePackageImports blocked separate) :: IO (Either SomeException (Either String ()))) >>= putMVar settled)) killThread $ \thread -> do
+    timeout 1000000 (takeMVar entered) >>= \case
+      Nothing -> fail "package cancellation fixture never reached its second root"
+      Just () -> pure ()
+    readIORef cancellationCalls >>= \calls ->
+      unless (calls == 2) (fail "package cancellation did not follow one validated root")
+    killThread thread
+    timeout 1000000 (takeMVar settled) >>= \case
+      Just (Left exception) | fromException exception == Just ThreadKilled -> pure ()
+      _ -> fail "collective proof swallowed cancellation or returned success"
+  BS.writeFile (packagePath root) "changed after cancellation"
+  revalidatePackageImports environment proof >>= requireLeft "next proof after cancellation"
+  BS.writeFile (packagePath root) rootBytes
+  revalidatePackageImports environment proof >>= requireRight "restored proof after cancellation"
+  BS.writeFile alternate rootBytes
+  renameFile alternate (packagePath root)
+  revalidatePackageImports environment proof >>= requireRight "same-byte replacement"
+  putStrLn "collective-package-proof scenarios=23 assertion_groups=7 status=passed"
+
 -- Mutated fixtures retain their bytes; only the owning sidecar reader decides
 -- whether old, cross-owner or unknown compiler facts can be admitted.
-verifyPackageSidecar :: FilePath -> IO ()
-verifyPackageSidecar work = do
+verifyPackageSidecar :: FilePath -> HscEnv -> IO ()
+verifyPackageSidecar work environment = do
   let path = work </> "OptionalWiredSupport.candidate.hi"
       packages = path ++ ".packages"
   ifaceBytes <- BS.readFile path
@@ -2368,6 +2654,9 @@ verifyPackageSidecar work = do
         readPackageImports changedPath (digest bytes) artifact >>= \case
           Left _ -> pure ()
           Right _ -> fail ("sidecar admitted " ++ label ++ " compiler-provided evidence")
+        revalidatePackageImports environment [(artifact, changedPath, digest bytes)] >>= \case
+          Left _ -> pure ()
+          Right _ -> fail ("collective proof admitted " ++ label ++ " compiler-provided evidence")
         retained <- BS.readFile changedPath
         unless (retained == bytes) (fail "sidecar refusal changed retained input bytes")
       readPackageImports packages (digest original) (artifact { exactModule = "WrongOwner" }) >>= \case
@@ -2376,6 +2665,11 @@ verifyPackageSidecar work = do
       readPackageImports packages (digest original) (artifact { exactSha256 = replicate 64 '0' }) >>= \case
         Left _ -> pure ()
         Right _ -> fail "sidecar admitted another checked interface digest"
+      forM_ [artifact { exactModule = "WrongOwner" }, artifact { exactSha256 = replicate 64 '0' }] $ \changed ->
+        revalidatePackageImports environment [(changed,packages,digest original)] >>= \case
+          Left _ -> pure ()
+          Right _ -> fail "collective proof admitted changed owning interface identity"
+      putStrLn "collective-package-sidecar-negative scenarios=4 status=passed"
     _ -> fail "wired candidate sidecar lacked its typed v2 compiler evidence"
 
 selectedHomeInstanceEdges :: IO ()

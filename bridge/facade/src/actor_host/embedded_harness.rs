@@ -1101,6 +1101,7 @@ mod round_control_tests {
     fn native_completed_owner_preserves_the_original_waiter_result() {
         let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([7; 16]);
         let reply = Ok(tidepool_runtime::session::WorkbenchResponse {
+            publication: None,
             status: tidepool_runtime::session::WorkbenchRunStatus::Completed,
             summary: None,
             items: Vec::new(),
@@ -1132,7 +1133,8 @@ mod round_control_tests {
                 exomonad_actor::KernelWorkbenchFailure {
                     actor: ActorRef::first(exomonad_actor::ActorId(7)),
                     receipts: vec![],
-                    failed_index: 0,
+                    point: tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index: 0 },
+                    publication: None,
                     total: 1,
                     detail: "retained owner missing".into(),
                     diagnostic: Some(diagnostic),

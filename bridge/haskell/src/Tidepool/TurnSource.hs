@@ -8,11 +8,23 @@
 module Tidepool.TurnSource
   ( extractModuleName
   , spliceTemplate
+  , replaceTemplateMarker
   ) where
 
 import Data.Char (isAlphaNum, isSpace)
 import Data.List (isPrefixOf, isSuffixOf, stripPrefix)
 import Data.Maybe (listToMaybe)
+import qualified Data.Text as T
+
+-- | Replace one protected marker before authored text is inserted. Duplicate
+-- or missing markers cannot silently alter the selected compiler recipe.
+replaceTemplateMarker :: String -> String -> String -> Either String String
+replaceTemplateMarker marker replacement template =
+  let (before,after) = T.breakOn (T.pack marker) (T.pack template)
+      remaining = T.drop (length marker) after
+  in if null marker || T.null after || T.pack marker `T.isInfixOf` remaining
+    then Left "checked recipe marker is missing or duplicated"
+    else Right (T.unpack before ++ replacement ++ T.unpack remaining)
 
 -- | Substitute the raw turn, statement-position turn, and binder list without
 -- rescanning inserted text.

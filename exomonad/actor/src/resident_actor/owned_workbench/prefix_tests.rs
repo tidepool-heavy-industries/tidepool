@@ -22,6 +22,7 @@ fn receipt(status: WorkbenchItemStatus) -> WorkbenchItemReceipt {
 fn prefix_publication_preserves_failed_cell_eligibility_and_cancellation_veto() {
     let response = |status, items| WorkbenchResponse {
         status,
+        publication: None,
         summary: None,
         items,
         next_index: 1,
@@ -29,7 +30,8 @@ fn prefix_publication_preserves_failed_cell_eligibility_and_cancellation_veto() 
     };
     let failure = |receipts| WorkbenchExecutionFailure {
         receipts,
-        failed_index: 1,
+        point: WorkbenchFailurePoint::InputUnit { index: 1 },
+        publication: None,
         total: 2,
         source: ResidentActorWorkbenchError::ActorProtocol("native failure".into()),
     };
@@ -97,13 +99,17 @@ fn prefix_publication_failure_retains_original_run_diagnostic_and_secondary_caus
     let diagnostic = original.failure_diagnostic().unwrap();
     let failure = WorkbenchExecutionFailure {
         receipts: vec![receipt(WorkbenchItemStatus::Committed)],
-        failed_index: 1,
+        point: WorkbenchFailurePoint::InputUnit { index: 1 },
+        publication: None,
         total: 3,
         source: original,
     };
     let failed = private_publication_failure(
         Err(failure),
         ResidentActorWorkbenchError::ActorProtocol("manifest rename failed".into()),
+        WorkbenchPublicationOutcome::Rejected {
+            detail: "manifest rename failed".into(),
+        },
     );
     let retained = failed.source.failure_diagnostic().unwrap();
     assert_eq!(retained.phase, tidepool_toolchain::failclass::Phase::Run);
@@ -127,6 +133,12 @@ fn prefix_publication_failure_retains_original_run_diagnostic_and_secondary_caus
         if matches!(*publication, ResidentActorWorkbenchError::ActorProtocol(_)))
     );
     assert_eq!(failed.receipts.len(), 1);
-    assert_eq!(failed.failed_index, 1);
+    assert_eq!(failed.point, WorkbenchFailurePoint::InputUnit { index: 1 });
+    assert_eq!(
+        failed.publication,
+        Some(WorkbenchPublicationOutcome::Rejected {
+            detail: "manifest rename failed".into()
+        })
+    );
     assert_eq!(failed.total, 3);
 }

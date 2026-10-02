@@ -75,6 +75,22 @@ rejected, and old workers reject version 6. Deploy the Rust frontend and Haskell
 worker together. Graph-free version 2/4 requests retain their format; candidate
 execution parcels keep their existing inline graph-byte format.
 
+## Current source selection of retained originals
+
+`TPEXACTCOMPILE` version 2 retains the fresh source receipt fields and adds a
+separate current original-source selection section. Each selected row names the
+exact unit/module, native version, interface/product hashes and ultimate fresh
+original recipe digest. The accompanying source evidence records current path,
+bytes, import adjacency and resolution witnesses; these rows never become fresh
+module products. Version 1 receipts are rejected by the matched Rust consumer.
+
+Only actual current imports under a checked request's complete sealed search
+order can issue this proof. The worker validates the authenticated original
+recipe, current source and GHC interface compatibility before installing its
+source-import graph. Retained artifact requirements alone grant no lexical
+selection. Session implementation anchors use their existing independent
+checked-value and lexical authorities, never ordinary source-selection rows.
+
 ## Regenerate fixtures
 
 After changing translation or serialization, regenerate through the canonical

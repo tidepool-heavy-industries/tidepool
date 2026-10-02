@@ -115,6 +115,7 @@ mod tests {
         cancelled: bool,
     ) -> CellExit {
         let reply = Ok(crate::KernelStep::Continue(WorkbenchResponse {
+            publication: None,
             status,
             summary: None,
             items: Vec::new(),

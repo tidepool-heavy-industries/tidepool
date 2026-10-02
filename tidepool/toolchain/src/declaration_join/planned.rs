@@ -132,6 +132,14 @@ pub(super) fn admit_authored_artifact_closure(
             }),
         });
     }
+    if let Some(admitted) = source_admission {
+        original_imports.extend(admitted.selected_originals.iter().map(|(owner, selected)| {
+            ExactInterfaceOwner {
+                owner: owner.clone(),
+                requirements: selected.imports().to_vec(),
+            }
+        }));
+    }
     let joined_interfaces =
         context.map_or_else(Vec::new, |context| context.joined_interfaces().to_vec());
     if let Some(context) = context {

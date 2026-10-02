@@ -1477,6 +1477,7 @@ mod tests {
             items: Vec::new(),
             next_index: 0,
             total: 1,
+            publication: None,
         })
     }
 
@@ -1580,6 +1581,7 @@ mod tests {
         control.bind_context(binding.clone());
         let execution = WorkbenchExecutionId::from_digest([24; 16]);
         let response = WorkbenchResponse {
+            publication: None,
             status: WorkbenchRunStatus::Committed,
             summary: None,
             items: Vec::new(),
@@ -1637,6 +1639,7 @@ mod tests {
         );
         let execution = WorkbenchExecutionId::from_digest([25; 16]);
         let response = WorkbenchResponse {
+            publication: None,
             status: WorkbenchRunStatus::Committed,
             summary: None,
             items: Vec::new(),
@@ -1937,6 +1940,7 @@ mod tests {
         let control = control.unwrap();
         let execution = control.execution_id(actor.identity());
         let response = WorkbenchResponse {
+            publication: None,
             status: WorkbenchRunStatus::Committed,
             summary: None,
             items: Vec::new(),

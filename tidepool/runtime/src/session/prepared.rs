@@ -61,6 +61,129 @@ pub enum PreparedFailureStage {
     Run,
 }
 
+/// The package evidence observed when a sealed package owner cannot be
+/// resolved. These facts explain the refusal; they never authorize a fallback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CertifiedPackageOwnerEvidence {
+    RetainedExport {
+        interface_digest: Option<[u8; 32]>,
+    },
+    TargetDefinition {
+        present: bool,
+        interfaces_match: bool,
+        interface_digest: Option<[u8; 32]>,
+        diagnostic: Option<Box<CertifiedPackageOwnerDiagnostic>>,
+    },
+    DeclarationMismatch {
+        declaration: SymbolIdentity,
+    },
+    ConflictingPackageProof {
+        previous_interface_digest: [u8; 32],
+    },
+    ConflictingTargetDefinition {
+        previous_binding: ValueId,
+        requested_binding: ValueId,
+        previous_interface_digest: [u8; 32],
+        requested_interface_digest: [u8; 32],
+    },
+}
+
+/// Bounded source facts captured when a package owner is not exportable from
+/// either retained machine state or the sealed target. This is diagnostic
+/// evidence only; none of these facts authorize an alternate owner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CertifiedPackageOwnerDiagnostic {
+    pub target_globals: Vec<PackageTargetGlobalFact>,
+    pub target_globals_omitted: usize,
+    pub target_global_count: usize,
+    pub target_owner_count: usize,
+    pub demanded_groups: Vec<PackageDemandedGroupFact>,
+    pub demanded_groups_omitted: usize,
+    pub demanded_group_count: usize,
+    pub target_top: PackageTargetTopFact,
+    pub retained_export: PackageRetainedExportFact,
+    pub target_interfaces_match: bool,
+    pub target_interface_digest: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageTargetGlobalFact {
+    pub identity: SymbolIdentity,
+    pub required_generation: Option<u64>,
+    pub owner: Option<ImportOwner>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageDemandedGroupFact {
+    pub owner: CachedHomeOwner,
+    pub original_ordinal: u32,
+    pub imports: Vec<PackageDemandedImportFact>,
+    pub imports_omitted: usize,
+    pub import_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageDemandedImportFact {
+    pub position: usize,
+    pub owner: ImportOwner,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackageTargetTopKind {
+    Absent,
+    Bytes,
+    Constructor,
+    Function,
+    Thunk,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackageTargetTopExportability {
+    Exportable,
+    Absent,
+    NotValueNamespace,
+    HomeUnit,
+    ByteLiteralNotAdmitted,
+    ConstructorNotLifted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackageTargetTopFact {
+    pub kind: PackageTargetTopKind,
+    pub exportability: PackageTargetTopExportability,
+    pub literal_admitted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackageRetainedExportFact {
+    Missing,
+    Present {
+        interface_digest: Option<[u8; 32]>,
+        protected_interface_matches: bool,
+    },
+}
+
+const PACKAGE_DIAGNOSTIC_TARGET_GLOBAL_LIMIT: usize = 256;
+const PACKAGE_DIAGNOSTIC_GROUP_LIMIT: usize = 128;
+const PACKAGE_DIAGNOSTIC_IMPORT_LIMIT: usize = 2048;
+
+#[derive(Clone, Copy)]
+struct PackageOwnerDiagnosticLimits {
+    target_globals: usize,
+    groups: usize,
+    imports: usize,
+}
+
+impl Default for PackageOwnerDiagnosticLimits {
+    fn default() -> Self {
+        Self {
+            target_globals: PACKAGE_DIAGNOSTIC_TARGET_GLOBAL_LIMIT,
+            groups: PACKAGE_DIAGNOSTIC_GROUP_LIMIT,
+            imports: PACKAGE_DIAGNOSTIC_IMPORT_LIMIT,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PreparedRuntimeError {
     #[error(transparent)]
@@ -77,6 +200,11 @@ pub enum PreparedRuntimeError {
     Demand(#[from] DemandError),
     #[error("no exact live owner for certified import {0:?}")]
     MissingCertifiedOwner(ImportOwner),
+    #[error("certified package owner {owner:?} has no exact source: {evidence:?}")]
+    CertifiedPackageOwnerUnavailable {
+        owner: ImportOwner,
+        evidence: CertifiedPackageOwnerEvidence,
+    },
     #[error(
         "no exact live owner for certified retained import {identity:?} at generation {generation}"
     )]
@@ -250,6 +378,7 @@ impl PreparedRuntimeError {
             | Self::Install(_)
             | Self::Demand(_)
             | Self::MissingCertifiedOwner(_)
+            | Self::CertifiedPackageOwnerUnavailable { .. }
             | Self::MissingRetainedCertifiedOwner { .. }
             | Self::CertifiedTargetOwners
             | Self::ConflictingSettledConstructors
@@ -294,6 +423,7 @@ impl PreparedRuntimeError {
             | Self::Link(_)
             | Self::Demand(_)
             | Self::MissingCertifiedOwner(_)
+            | Self::CertifiedPackageOwnerUnavailable { .. }
             | Self::MissingRetainedCertifiedOwner { .. }
             | Self::CertifiedTargetOwners
             | Self::ConflictingSettledConstructors
@@ -610,6 +740,115 @@ pub struct SiteTypeEvidence {
     constructors: Vec<SymbolIdentity>,
     input: TypeNodeId,
     answer: TypeNodeId,
+}
+
+impl SiteTypeEvidence {
+    /// Commit to the complete canonical site type graph with explicit framing
+    /// and a versioned domain. This is evidence identity, not a type renderer.
+    pub(crate) fn commitment(&self) -> [u8; 32] {
+        fn frame(hash: &mut blake3::Hasher, bytes: &[u8]) {
+            hash.update(&(bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+        }
+
+        fn count(hash: &mut blake3::Hasher, value: usize) {
+            frame(hash, &(value as u64).to_le_bytes());
+        }
+
+        fn type_node_id(hash: &mut blake3::Hasher, id: TypeNodeId) {
+            frame(hash, &id.0.to_le_bytes());
+        }
+
+        fn constructor_id(
+            hash: &mut blake3::Hasher,
+            id: tidepool_repr::execution_schema::ConstructorId,
+        ) {
+            frame(hash, &id.0.to_le_bytes());
+        }
+
+        fn identity(hash: &mut blake3::Hasher, identity: &SymbolIdentity) {
+            frame(hash, identity.unit.as_bytes());
+            frame(hash, identity.module.as_bytes());
+            frame(hash, identity.namespace.as_bytes());
+            frame(hash, identity.occurrence.as_bytes());
+            match identity.record_parent.as_deref() {
+                Some(parent) => {
+                    frame(hash, &[1]);
+                    frame(hash, parent.as_bytes());
+                }
+                None => frame(hash, &[0]),
+            }
+        }
+
+        fn runtime_rep(hash: &mut blake3::Hasher, rep: RuntimeRep) {
+            match rep {
+                RuntimeRep::Void => frame(hash, &[0]),
+                RuntimeRep::LiftedRef => frame(hash, &[1]),
+                RuntimeRep::UnliftedRef => frame(hash, &[2]),
+                RuntimeRep::Address => frame(hash, &[3]),
+                RuntimeRep::Int(width) => {
+                    frame(hash, &[4]);
+                    frame(hash, &[width]);
+                }
+                RuntimeRep::Word(width) => {
+                    frame(hash, &[5]);
+                    frame(hash, &[width]);
+                }
+                RuntimeRep::Float(width) => {
+                    frame(hash, &[6]);
+                    frame(hash, &[width]);
+                }
+            }
+        }
+
+        let mut hash = blake3::Hasher::new();
+        frame(&mut hash, b"Tidepool.SiteTypeEvidence");
+        frame(&mut hash, b"v1");
+        count(&mut hash, self.types.len());
+        for node in &self.types {
+            match node {
+                TypeNode::Data {
+                    family,
+                    arguments,
+                    rows,
+                } => {
+                    frame(&mut hash, &[0]);
+                    identity(&mut hash, family);
+                    count(&mut hash, arguments.len());
+                    for argument in arguments {
+                        type_node_id(&mut hash, *argument);
+                    }
+                    count(&mut hash, rows.len());
+                    for row in rows {
+                        constructor_id(&mut hash, row.constructor);
+                        count(&mut hash, row.fields.len());
+                        for field in &row.fields {
+                            type_node_id(&mut hash, *field);
+                        }
+                    }
+                }
+                TypeNode::Text => frame(&mut hash, &[1]),
+                TypeNode::Integer => frame(&mut hash, &[2]),
+                TypeNode::Natural => frame(&mut hash, &[3]),
+                TypeNode::Scalar(rep) => {
+                    frame(&mut hash, &[4]);
+                    runtime_rep(&mut hash, *rep);
+                }
+                TypeNode::Unconstructible { reason, rendered } => {
+                    frame(&mut hash, &[5]);
+                    frame(&mut hash, reason.as_bytes());
+                    frame(&mut hash, rendered.as_bytes());
+                }
+            }
+        }
+        count(&mut hash, self.constructors.len());
+        for constructor in &self.constructors {
+            identity(&mut hash, constructor);
+        }
+        type_node_id(&mut hash, self.input);
+        type_node_id(&mut hash, self.answer);
+        *hash.finalize().as_bytes()
+    }
 }
 
 trait TypeGraph {
@@ -1925,6 +2164,198 @@ fn exportable_code_tops(
     exports
 }
 
+fn certified_package_owner_diagnostic(
+    target: &CertifiedTargetImage,
+    target_owners: &[ImportOwner],
+    demanded: &[DemandedImage],
+    owner: &ImportOwner,
+    target_exports: &BTreeMap<SymbolIdentity, ValueId>,
+    code_exports: &BTreeMap<SymbolIdentity, CodeExport>,
+    interfaces_match: bool,
+    interface_digest: Option<[u8; 32]>,
+    limits: PackageOwnerDiagnosticLimits,
+) -> CertifiedPackageOwnerDiagnostic {
+    let ImportOwner::Package { binder, .. } = owner else {
+        unreachable!("package owner diagnostics require package ownership")
+    };
+
+    let globals = target.prepared.globals();
+    let target_globals: Vec<_> = globals
+        .iter()
+        .zip(
+            target_owners
+                .iter()
+                .map(Some)
+                .chain(std::iter::repeat(None)),
+        )
+        .take(limits.target_globals)
+        .map(|(global, owner)| PackageTargetGlobalFact {
+            identity: global.identity.clone(),
+            required_generation: global.required_generation,
+            owner: owner.cloned(),
+        })
+        .collect();
+
+    let direct_groups: BTreeSet<_> = demanded
+        .iter()
+        .enumerate()
+        .filter(|(_, image)| image.group().imports().iter().any(|import| import == owner))
+        .map(|(index, _)| index)
+        .collect();
+    let mut group_order: Vec<_> = direct_groups.iter().copied().collect();
+    group_order.extend(
+        demanded
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !direct_groups.contains(index))
+            .map(|(index, _)| index),
+    );
+    let selected_group_count = group_order.len().min(limits.groups);
+    group_order.truncate(selected_group_count);
+
+    let mut demanded_groups: Vec<_> = group_order
+        .iter()
+        .map(|index| {
+            let group = demanded[*index].group();
+            PackageDemandedGroupFact {
+                owner: group.owner().clone(),
+                original_ordinal: group.original_ordinal(),
+                imports: Vec::new(),
+                imports_omitted: 0,
+                import_count: group.imports().len(),
+            }
+        })
+        .collect();
+    let mut remaining_imports = limits.imports;
+    // Preserve the exact failed import first, then source-owner edges because
+    // they explain how a missing package definition entered the closure.
+    for priority in 0..3 {
+        for (fact_index, demanded_index) in group_order.iter().enumerate() {
+            let imports = demanded[*demanded_index].group().imports();
+            for (position, import) in imports.iter().enumerate() {
+                let selected_priority = if import == owner {
+                    0
+                } else if matches!(import, ImportOwner::Source { .. }) {
+                    1
+                } else {
+                    2
+                };
+                if selected_priority != priority {
+                    continue;
+                }
+                if remaining_imports == 0 {
+                    continue;
+                }
+                demanded_groups[fact_index]
+                    .imports
+                    .push(PackageDemandedImportFact {
+                        position,
+                        owner: import.clone(),
+                    });
+                remaining_imports -= 1;
+            }
+        }
+    }
+    for group in &mut demanded_groups {
+        group.imports.sort_by_key(|import| import.position);
+        group.imports_omitted = group.import_count - group.imports.len();
+    }
+
+    let target_top_binding = target
+        .prepared
+        .bindings()
+        .iter()
+        .flat_map(|group| match group {
+            Group::NonRecursive(top) => std::slice::from_ref(top),
+            Group::Recursive(tops) => tops.as_slice(),
+        })
+        .find(|top| top.identity == *binder);
+    let target_top = target_top_binding.map_or(
+        PackageTargetTopFact {
+            kind: PackageTargetTopKind::Absent,
+            exportability: PackageTargetTopExportability::Absent,
+            literal_admitted: false,
+        },
+        |top| {
+            let literal_admitted = target.package_literals.contains_key(binder);
+            let kind = match &top.binding.rhs {
+                HeapRhs::Bytes(_) => PackageTargetTopKind::Bytes,
+                HeapRhs::Constructor { .. } => PackageTargetTopKind::Constructor,
+                HeapRhs::Function { .. } => PackageTargetTopKind::Function,
+                HeapRhs::Thunk { .. } => PackageTargetTopKind::Thunk,
+            };
+            let (kind, exportability) = if top.identity.unit == HOME_UNIT {
+                (kind, PackageTargetTopExportability::HomeUnit)
+            } else if top.identity.namespace != "value" {
+                (kind, PackageTargetTopExportability::NotValueNamespace)
+            } else {
+                match &top.binding.rhs {
+                    HeapRhs::Bytes(_) if literal_admitted => {
+                        (kind, PackageTargetTopExportability::Exportable)
+                    }
+                    HeapRhs::Bytes(_) => {
+                        (kind, PackageTargetTopExportability::ByteLiteralNotAdmitted)
+                    }
+                    HeapRhs::Constructor { constructor, .. }
+                        if target
+                            .prepared
+                            .constructors()
+                            .get(constructor.0 as usize)
+                            .is_some_and(|row| row.result_rep == RuntimeRep::LiftedRef) =>
+                    {
+                        (kind, PackageTargetTopExportability::Exportable)
+                    }
+                    HeapRhs::Constructor { .. } => {
+                        (kind, PackageTargetTopExportability::ConstructorNotLifted)
+                    }
+                    HeapRhs::Function { .. } => (kind, PackageTargetTopExportability::Exportable),
+                    HeapRhs::Thunk { .. } => (kind, PackageTargetTopExportability::Exportable),
+                }
+            };
+            PackageTargetTopFact {
+                kind,
+                exportability: if target_exports.contains_key(binder) {
+                    PackageTargetTopExportability::Exportable
+                } else {
+                    exportability
+                },
+                literal_admitted,
+            }
+        },
+    );
+    let retained_export =
+        code_exports
+            .get(binder)
+            .map_or(PackageRetainedExportFact::Missing, |export| {
+                PackageRetainedExportFact::Present {
+                    interface_digest: export.interface_digest,
+                    protected_interface_matches: matches_protected_package_interface(
+                        export,
+                        match owner {
+                            ImportOwner::Package {
+                                interface_digest, ..
+                            } => interface_digest,
+                            _ => unreachable!(),
+                        },
+                    ),
+                }
+            });
+
+    CertifiedPackageOwnerDiagnostic {
+        target_globals,
+        target_globals_omitted: globals.len().saturating_sub(limits.target_globals),
+        target_global_count: globals.len(),
+        target_owner_count: target_owners.len(),
+        demanded_groups,
+        demanded_groups_omitted: demanded.len().saturating_sub(selected_group_count),
+        demanded_group_count: demanded.len(),
+        target_top,
+        retained_export,
+        target_interfaces_match: interfaces_match,
+        target_interface_digest: interface_digest,
+    }
+}
+
 /// How many programs may install between major collections before one runs
 /// regardless of byte growth. Bounds the residency test's `programs` count:
 /// `programs <= live_bindings + 1 + MAJOR_COLLECTION_INSTALL_INTERVAL`.
@@ -2998,35 +3429,59 @@ impl PreparedEngine {
             if *interface_digest == [0; 32] {
                 return Err(PreparedRuntimeError::MissingCertifiedOwner(owner.clone()));
             }
-            if self.code_exports.contains_key(binder) {
+            if let Some(export) = self.code_exports.get(binder) {
+                if !matches_protected_package_interface(export, interface_digest) {
+                    return Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                        owner: owner.clone(),
+                        evidence: CertifiedPackageOwnerEvidence::RetainedExport {
+                            interface_digest: export.interface_digest,
+                        },
+                    });
+                }
                 continue;
             }
-            let value = target_exports
-                .get(binder)
-                .copied()
+            let target_definition = target_exports.get(binder).copied();
+            let target_interface_digest = target.package_interfaces.interface_digest(unit, module);
+            let value = target_definition
                 .filter(|_| {
                     binder.unit == *unit
                         && binder.module == *module
                         && matches_target
-                        && target.package_interfaces.interface_digest(unit, module)
-                            == Some(*interface_digest)
+                        && target_interface_digest == Some(*interface_digest)
                 })
-                .ok_or_else(|| {
-                    tracing::warn!(
-                        ?binder,
-                        ?interface_digest,
-                        target_has_definition = target_exports.contains_key(binder),
-                        target_certificate_matches = matches_target,
-                        target_interface_digest = ?target.package_interfaces.interface_digest(unit, module),
-                        "certified package import has no live export or admitted target definition"
-                    );
-                    PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
+                .ok_or_else(|| PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                    owner: owner.clone(),
+                    evidence: CertifiedPackageOwnerEvidence::TargetDefinition {
+                        present: target_definition.is_some(),
+                        interfaces_match: matches_target,
+                        interface_digest: target_interface_digest,
+                        diagnostic: Some(Box::new(certified_package_owner_diagnostic(
+                            &target,
+                            target_owners,
+                            &demanded,
+                            owner,
+                            &target_exports,
+                            &self.code_exports,
+                            matches_target,
+                            target_interface_digest,
+                            PackageOwnerDiagnosticLimits::default(),
+                        ))),
+                    },
                 })?;
-            if target_packages
-                .insert(binder.clone(), (value, *interface_digest))
-                .is_some_and(|previous| previous != (value, *interface_digest))
+            if let Some(previous) =
+                target_packages.insert(binder.clone(), (value, *interface_digest))
             {
-                return Err(PreparedRuntimeError::MissingCertifiedOwner(owner.clone()));
+                if previous != (value, *interface_digest) {
+                    return Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                        owner: owner.clone(),
+                        evidence: CertifiedPackageOwnerEvidence::ConflictingTargetDefinition {
+                            previous_binding: previous.0,
+                            requested_binding: value,
+                            previous_interface_digest: previous.1,
+                            requested_interface_digest: *interface_digest,
+                        },
+                    });
+                }
             }
         }
         self.install_certified_turn_admitted(
@@ -3392,21 +3847,27 @@ impl PreparedEngine {
                                 || binder.unit != *unit
                                 || binder.module != *module
                             {
-                                return Err(PreparedRuntimeError::MissingCertifiedOwner(
-                                    owner.clone(),
-                                ));
+                                return Err(
+                                    PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                                        owner: owner.clone(),
+                                        evidence:
+                                            CertifiedPackageOwnerEvidence::DeclarationMismatch {
+                                                declaration: declaration.identity.clone(),
+                                            },
+                                    },
+                                );
                             }
                             let import = if let Some(export) = self.code_exports.get(binder) {
                                 if !matches_protected_package_interface(export, interface_digest) {
-                                    tracing::warn!(
-                                        ?binder,
-                                        requested_interface_digest = ?interface_digest,
-                                        export_interface_digest = ?export.interface_digest,
-                                        "certified package import differs from its live export interface"
+                                    return Err(
+                                        PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                                            owner: owner.clone(),
+                                            evidence:
+                                                CertifiedPackageOwnerEvidence::RetainedExport {
+                                                    interface_digest: export.interface_digest,
+                                                },
+                                        },
                                     );
-                                    return Err(PreparedRuntimeError::MissingCertifiedOwner(
-                                        owner.clone(),
-                                    ));
                                 }
                                 BatchImport::Existing {
                                     handle: export.handle,
@@ -3417,7 +3878,22 @@ impl PreparedEngine {
                                     .get(binder)
                                     .filter(|(_, digest)| digest == interface_digest)
                                     .ok_or_else(|| {
-                                        PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
+                                        PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                                            owner: owner.clone(),
+                                            evidence:
+                                                CertifiedPackageOwnerEvidence::TargetDefinition {
+                                                    present: exports
+                                                        .iter()
+                                                        .any(|(identity, _, _)| identity == binder),
+                                                    interfaces_match: target
+                                                        .package_interfaces
+                                                        .matches_target(&target.prepared),
+                                                    interface_digest: target
+                                                        .package_interfaces
+                                                        .interface_digest(unit, module),
+                                                    diagnostic: None,
+                                                },
+                                        }
                                     })?;
                                 debug_assert_eq!(digest, *interface_digest);
                                 BatchImport::Source {
@@ -3425,14 +3901,19 @@ impl PreparedEngine {
                                     binding,
                                 }
                             };
-                            if !target.package_literals.contains_key(binder)
-                                && package_updates
-                                    .insert(binder.clone(), *interface_digest)
-                                    .is_some_and(|previous| previous != *interface_digest)
-                            {
-                                return Err(PreparedRuntimeError::MissingCertifiedOwner(
-                                    owner.clone(),
-                                ));
+                            if !target.package_literals.contains_key(binder) {
+                                if let Some(previous) =
+                                    package_updates.insert(binder.clone(), *interface_digest)
+                                {
+                                    if previous != *interface_digest {
+                                        return Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                                            owner: owner.clone(),
+                                            evidence: CertifiedPackageOwnerEvidence::ConflictingPackageProof {
+                                                previous_interface_digest: previous,
+                                            },
+                                        });
+                                    }
+                                }
                             }
                             import
                         }
@@ -6897,6 +7378,13 @@ pub(super) mod tests {
                 required_evaluated: false,
                 required_generation: None,
             });
+            wire.globals.push(GlobalDecl {
+                identity: source.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            });
             CertifiedGroup::admit(
                 CachedHomeOwner {
                     unit: "fixture".into(),
@@ -6906,36 +7394,49 @@ pub(super) mod tests {
                     product_sha256: [3; 32],
                 },
                 testing::projected_group(wire, 2).unwrap(),
-                vec![package_owner(digest)],
+                vec![package_owner(digest), source_owner.clone()],
             )
             .unwrap()
         };
         let registry = ImageRegistry::new();
-        let target = || {
+        let target = |include_package: bool| {
             let mut wire = testing::wire_program();
             let Group::NonRecursive(mut package_top) = wire.bindings[0].clone() else {
                 unreachable!()
             };
             package_top.identity = package.clone();
             package_top.binding.id = ValueId(1);
-            let HeapRhs::Function { body, .. } = &mut package_top.binding.rhs else {
-                unreachable!()
-            };
-            *body = 1;
-            wire.expressions
-                .nodes
-                .push(wire.expressions.nodes[0].clone());
             let mut optional_top = package_top.clone();
             optional_top.identity = optional.clone();
-            optional_top.binding.id = ValueId(2);
-            let HeapRhs::Function { body, .. } = &mut optional_top.binding.rhs else {
+            optional_top.binding.id = ValueId(u32::from(include_package) + 1);
+            let (
+                HeapRhs::Function {
+                    body: package_body, ..
+                },
+                HeapRhs::Function {
+                    body: optional_body,
+                    ..
+                },
+            ) = (&mut package_top.binding.rhs, &mut optional_top.binding.rhs)
+            else {
                 unreachable!()
             };
-            *body = 2;
-            wire.expressions
-                .nodes
-                .push(wire.expressions.nodes[1].clone());
-            wire.bindings.push(Group::NonRecursive(package_top));
+            if include_package {
+                *package_body = 1;
+                *optional_body = 2;
+                wire.expressions
+                    .nodes
+                    .push(wire.expressions.nodes[0].clone());
+                wire.expressions
+                    .nodes
+                    .push(wire.expressions.nodes[1].clone());
+                wire.bindings.push(Group::NonRecursive(package_top));
+            } else {
+                *optional_body = 1;
+                wire.expressions
+                    .nodes
+                    .push(wire.expressions.nodes[0].clone());
+            }
             wire.bindings.push(Group::NonRecursive(optional_top));
             let Group::NonRecursive(top) = &mut wire.bindings[0] else {
                 unreachable!()
@@ -6974,14 +7475,84 @@ pub(super) mod tests {
         // it has the same identity. Producer-sealed admission is tested by the
         // real compiler lane; these fixtures exercise its native transaction.
         assert!(matches!(engine.install_certified_turn(
-            target(), std::slice::from_ref(&source_owner), &evidence, selected(&good), &[],
+            target(true), std::slice::from_ref(&source_owner), &evidence, selected(&good), &[],
             &BTreeMap::new(), &HashMap::new(), &BindingTable::new(),
-        ), Err(PreparedRuntimeError::MissingCertifiedOwner(owner)) if owner == package_owner([9; 32])));
+        ), Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+            owner,
+            evidence: CertifiedPackageOwnerEvidence::TargetDefinition {
+                present: true,
+                interfaces_match: false,
+                interface_digest: None,
+                diagnostic: Some(diagnostic),
+            },
+        }) if owner == package_owner([9; 32])
+            && diagnostic.target_global_count == 1
+            && diagnostic.target_globals[0].identity == source
+            && diagnostic.target_globals[0].owner == Some(source_owner.clone())
+            && diagnostic.target_top.kind == PackageTargetTopKind::Function
+            && diagnostic.target_top.exportability == PackageTargetTopExportability::Exportable
+            && diagnostic.demanded_group_count == 1
+            && diagnostic.demanded_groups[0].owner.module == "Fixture"
+            && diagnostic.demanded_groups[0].original_ordinal == 2
+            && diagnostic.demanded_groups[0].imports.len() == 2
+            && diagnostic.demanded_groups[0].imports[0].position == 0
+            && diagnostic.demanded_groups[0].imports[0].owner == package_owner([9; 32])
+            && diagnostic.demanded_groups[0].imports[1].position == 1
+            && diagnostic.demanded_groups[0].imports[1].owner == source_owner));
         assert_eq!(engine.residency(), before);
+        assert!(matches!(engine.install_certified_turn(
+            target(false), std::slice::from_ref(&source_owner), &evidence, selected(&good), &[],
+            &BTreeMap::new(), &HashMap::new(), &BindingTable::new(),
+        ), Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+            owner,
+            evidence: CertifiedPackageOwnerEvidence::TargetDefinition {
+                present: false,
+                interfaces_match: false,
+                interface_digest: None,
+                diagnostic: Some(diagnostic),
+            },
+        }) if owner == package_owner([9; 32])
+            && diagnostic.target_top.kind == PackageTargetTopKind::Absent
+            && diagnostic.target_top.exportability == PackageTargetTopExportability::Absent
+            && diagnostic.retained_export == PackageRetainedExportFact::Missing));
+        assert_eq!(engine.residency(), before);
+        let capped_target = target(false);
+        let capped_target_exports = exportable_code_tops(&capped_target.prepared)
+            .into_iter()
+            .map(|(identity, value, _)| (identity, value))
+            .collect();
+        let capped_demanded = selected(&good);
+        let capped_diagnostic = certified_package_owner_diagnostic(
+            &capped_target,
+            std::slice::from_ref(&source_owner),
+            &capped_demanded,
+            &package_owner([9; 32]),
+            &capped_target_exports,
+            &engine.code_exports,
+            false,
+            None,
+            PackageOwnerDiagnosticLimits {
+                target_globals: 0,
+                groups: 1,
+                imports: 1,
+            },
+        );
+        assert!(capped_diagnostic.target_globals.is_empty());
+        assert_eq!(capped_diagnostic.target_globals_omitted, 1);
+        assert_eq!(capped_diagnostic.demanded_groups.len(), 1);
+        assert_eq!(capped_diagnostic.demanded_groups_omitted, 0);
+        assert_eq!(capped_diagnostic.demanded_groups[0].import_count, 2);
+        assert_eq!(capped_diagnostic.demanded_groups[0].imports_omitted, 1);
+        assert_eq!(capped_diagnostic.demanded_groups[0].imports.len(), 1);
+        assert_eq!(
+            capped_diagnostic.demanded_groups[0].imports[0].owner,
+            package_owner([9; 32]),
+            "the exact failed import must survive the cap before source-edge context"
+        );
         let admitted = || BTreeMap::from([(package.clone(), (ValueId(1), [9; 32]))]);
         let install = |engine: &mut PreparedEngine, group: &CertifiedGroup| {
             engine.install_certified_turn_admitted(
-                target(),
+                target(true),
                 std::slice::from_ref(&source_owner),
                 &evidence,
                 selected(group),
@@ -7005,7 +7576,8 @@ pub(super) mod tests {
         assert!(engine.programs.is_empty());
         let wrong_digest = group(false, [8; 32]);
         assert!(matches!(install(&mut engine, &wrong_digest),
-            Err(PreparedRuntimeError::MissingCertifiedOwner(owner)) if owner == package_owner([8; 32])));
+            Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable { owner, .. })
+                if owner == package_owner([8; 32])));
         assert_eq!(engine.residency(), before);
         let mut aborted = install(&mut engine, &good).unwrap();
         assert_eq!(aborted.exports.len(), 2);
@@ -7067,8 +7639,13 @@ pub(super) mod tests {
         let stale = group(false, [8; 32]);
         assert!(matches!(
             install(&mut engine, &stale),
-            Err(PreparedRuntimeError::MissingCertifiedOwner(owner))
-                if owner == package_owner([8; 32])
+            Err(PreparedRuntimeError::CertifiedPackageOwnerUnavailable {
+                owner,
+                evidence: CertifiedPackageOwnerEvidence::RetainedExport {
+                    interface_digest,
+                },
+            })
+                if owner == package_owner([8; 32]) && interface_digest == Some([9; 32])
         ));
         assert_eq!(
             engine.code_exports[&package].interface_digest,
@@ -8757,6 +9334,36 @@ pub(super) mod tests {
             inputs: inputs.iter().copied().map(TypeNodeId).collect(),
         }];
         testing::prepare(program).expect("typed site fixture validates")
+    }
+
+    #[test]
+    fn site_type_evidence_commitment_covers_graph_and_endpoints() {
+        let evidence = SiteTypeEvidence {
+            types: vec![
+                TypeNode::Text,
+                TypeNode::Data {
+                    family: testing::identity("Fixture.Types", "Reply"),
+                    arguments: vec![TypeNodeId(0)],
+                    rows: vec![tidepool_repr::execution_schema::CtorRow {
+                        constructor: tidepool_repr::execution_schema::ConstructorId(0),
+                        fields: vec![TypeNodeId(0)],
+                    }],
+                },
+            ],
+            constructors: vec![testing::identity("Fixture.Types", "ReplyValue")],
+            input: TypeNodeId(0),
+            answer: TypeNodeId(1),
+        };
+        let commitment = evidence.commitment();
+        assert_eq!(commitment, evidence.clone().commitment());
+
+        let mut changed_endpoint = evidence.clone();
+        changed_endpoint.answer = TypeNodeId(0);
+        assert_ne!(commitment, changed_endpoint.commitment());
+
+        let mut changed_constructor = evidence;
+        changed_constructor.constructors[0].occurrence = "OtherReplyValue".into();
+        assert_ne!(commitment, changed_constructor.commitment());
     }
 
     #[test]

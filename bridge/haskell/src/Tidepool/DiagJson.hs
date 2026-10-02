@@ -18,6 +18,7 @@ module Tidepool.DiagJson
   ) where
 
 import Control.Exception (Exception, SomeException)
+import Tidepool.ExecutionSource (ExecutionSourceFailure)
 import Data.Foldable (toList)
 import Data.List (intercalate, nub)
 import qualified Data.List.NonEmpty as NE
@@ -54,6 +55,8 @@ data InputRejection
   | InvalidDeclarationReservation
   | InvalidDeclarationWrapper String
   | InvalidCellPlanRequest
+  | OriginalSourceSelectionRejected ExecutionSourceFailure
+  | OriginalSourceSelectionInputUnavailable String
   deriving Show
 instance Exception InputRejection
 

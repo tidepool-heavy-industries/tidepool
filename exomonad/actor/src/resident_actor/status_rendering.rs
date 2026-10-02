@@ -603,6 +603,7 @@ mod tests {
             }],
             next_index: 1,
             total: 1,
+            publication: None,
         };
         (execution, request, Ok(response))
     }

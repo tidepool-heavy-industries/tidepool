@@ -416,22 +416,7 @@ async fn submit(
     match receive.await {
         Ok(Ok(result)) => bounded_response(map_result(result)),
         Ok(Err(KernelInvocationFailure::Workbench(failure))) => {
-            let mut response = map_result(WorkbenchResponse {
-                status: WorkbenchRunStatus::Rejected,
-                summary: None,
-                items: failure.receipts,
-                next_index: failure.failed_index,
-                total: failure.total,
-            });
-            response
-                .blocks
-                .push(Block::Diagnostic(failure.detail.clone()));
-            if let Some(receipt) = &mut response.receipt {
-                if let Some(structured) = &mut receipt.structured {
-                    structured["failure"] = failure.detail.into();
-                }
-            }
-            bounded_response(response)
+            bounded_response(map_failure(failure))
         }
         Ok(Err(e)) => error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -445,6 +430,53 @@ async fn submit(
         ),
     }
 }
+
+fn map_failure(failure: exomonad_actor::KernelWorkbenchFailure) -> SubmitResponse {
+    let durability_unconfirmed = matches!(
+        failure.publication.as_ref(),
+        Some(tidepool_runtime::session::WorkbenchPublicationOutcome::DurabilityUnconfirmed { .. })
+    );
+    let mut response = map_result(WorkbenchResponse {
+        status: WorkbenchRunStatus::Rejected,
+        summary: None,
+        items: failure.receipts,
+        next_index: failure.point.next_index(),
+        total: failure.total,
+        publication: failure.publication,
+    });
+    if let Some(receipt) = &mut response.receipt {
+        receipt.display = match failure.point {
+            tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index } => {
+                format!("Rejected: {} of {} input units", index, failure.total)
+            }
+            tidepool_runtime::session::WorkbenchFailurePoint::Publication {
+                completed_input_units,
+            } if durability_unconfirmed => {
+                format!("Publication durability remains unconfirmed after {completed_input_units} completed input units")
+            }
+            tidepool_runtime::session::WorkbenchFailurePoint::Publication {
+                completed_input_units,
+            } => {
+                format!(
+                    "Rejected: publication rejected after {completed_input_units} completed input units"
+                )
+            }
+            tidepool_runtime::session::WorkbenchFailurePoint::Finalization {
+                completed_input_units,
+            } => {
+                format!(
+                    "Rejected: finalization failed after {completed_input_units} completed input units"
+                )
+            }
+        };
+        if let Some(structured) = &mut receipt.structured {
+            structured["failure"] = failure.detail.clone().into();
+        }
+    }
+    response.blocks.push(Block::Diagnostic(failure.detail));
+    response
+}
+
 fn map_result(result: WorkbenchResponse) -> SubmitResponse {
     let outcome = match result.status {
         WorkbenchRunStatus::Rejected | WorkbenchRunStatus::Backgrounded => Outcome::Rejected,
@@ -487,7 +519,7 @@ fn bounded_response(mut result: SubmitResponse) -> Response {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
                 error_value.to_string(),
-            )
+            );
         }
     };
     if bytes.len() > MAX_RESPONSE_BYTES {
@@ -572,6 +604,101 @@ mod artifact_tests {
     use super::*;
     use exomonad_actor::{ActorId, ActorRef};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn publication_rejection_keeps_completed_items_without_claiming_public_bindings() {
+        use tidepool_runtime::session::{
+            WorkbenchExecutionId, WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
+            WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+            WorkbenchPublicationOutcome,
+        };
+        let failure = exomonad_actor::KernelWorkbenchFailure {
+            actor: ActorRef::first(ActorId(9)),
+            receipts: (0..3)
+                .map(|index| WorkbenchItemReceipt {
+                    index,
+                    kind: None,
+                    span: None,
+                    source_items: Vec::new(),
+                    status: WorkbenchItemStatus::Committed,
+                    output: format!("private result {index}"),
+                    diagnostics: Vec::new(),
+                    failure_layer: None,
+                    warnings: Vec::new(),
+                    installed_bindings: vec![format!("private{index}")],
+                    operations: vec![WorkbenchOperationReceipt {
+                        id: WorkbenchOperationId {
+                            execution: WorkbenchExecutionId::from_digest([index as u8; 16]),
+                            input_unit_index: index,
+                            effect_ordinal: 0,
+                        },
+                        effect: "receipt-bearing effect".into(),
+                        disposition: WorkbenchOperationDisposition::Committed,
+                    }],
+                    terminal_transfer: None,
+                })
+                .collect(),
+            point: WorkbenchFailurePoint::Publication {
+                completed_input_units: 3,
+            },
+            total: 3,
+            publication: Some(WorkbenchPublicationOutcome::Rejected {
+                detail: "staged environment changed".into(),
+            }),
+            detail: "staged environment changed".into(),
+            diagnostic: None,
+        };
+        let response = map_failure(failure);
+        let receipt = response.receipt.unwrap();
+        assert_eq!(
+            receipt.display,
+            "Rejected: publication rejected after 3 completed input units"
+        );
+        let structured = receipt.structured.unwrap();
+        assert_eq!(structured["nextIndex"], 3);
+        assert_eq!(structured["items"].as_array().unwrap().len(), 3);
+        assert_eq!(structured["publication"]["status"], "rejected");
+        assert_eq!(
+            structured["publication"]["detail"],
+            "staged environment changed"
+        );
+        assert!(structured["publication"].get("bindings").is_none());
+        let rejected = WorkbenchPublicationOutcome::Rejected {
+            detail: "not published".into(),
+        };
+        assert!(rejected.public_bindings().is_empty());
+        let unconfirmed = WorkbenchPublicationOutcome::DurabilityUnconfirmed {
+            bindings: vec!["visibleWrite".into()],
+            detail: "journal outcome unknown".into(),
+        };
+        assert_eq!(unconfirmed.public_bindings(), &["visibleWrite"]);
+        let uncertain_failure = exomonad_actor::KernelWorkbenchFailure {
+            actor: ActorRef::first(ActorId(9)),
+            receipts: vec![],
+            point: WorkbenchFailurePoint::Publication {
+                completed_input_units: 3,
+            },
+            total: 3,
+            publication: Some(unconfirmed),
+            detail: "journal outcome unknown".into(),
+            diagnostic: None,
+        };
+        assert!(uncertain_failure
+            .to_string()
+            .contains("publication durability remains unconfirmed"));
+        let uncertain_response = map_failure(uncertain_failure);
+        assert!(uncertain_response
+            .receipt
+            .unwrap()
+            .display
+            .contains("Publication durability remains unconfirmed"));
+        assert_eq!(structured["items"][2]["output"], "private result 2");
+        assert_eq!(
+            structured["items"][2]["operations"][0]["effect"],
+            "receipt-bearing effect"
+        );
+        assert!(!receipt.display.contains("unit 3 failed"));
+    }
 
     #[cfg(target_os = "linux")]
     #[tokio::test]

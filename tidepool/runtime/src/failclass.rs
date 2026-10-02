@@ -76,7 +76,9 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         | SessionError::MissingDeclarationLibrary
         | SessionError::MissingRetainedValueInterface(_)
         | SessionError::WrongPublicManifestTicket
+        | SessionError::InvalidDurablePublicAdmission { .. }
         | SessionError::InvalidRecoveryInitialization { .. }
+        | SessionError::InvalidNativeSetupAdmission { .. }
         | SessionError::UnsupportedPrivateValueReplacement
         | SessionError::InvalidPublicBindingPromotion(_)
         | SessionError::InvalidBindingIdentity(_)

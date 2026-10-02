@@ -398,6 +398,7 @@ mod tests {
             items: Vec::new(),
             next_index: 1,
             total: 1,
+            publication: None,
         });
         let mut completed = WorkbenchExecutions::default();
         let cancellation = crate::WorkbenchCancellationOutcome::Expired {
@@ -499,6 +500,7 @@ mod tests {
         });
         let success = || {
             Ok(crate::KernelStep::Continue(WorkbenchResponse {
+                publication: None,
                 status: WorkbenchRunStatus::Committed,
                 summary: None,
                 items: Vec::new(),
@@ -507,6 +509,7 @@ mod tests {
             }))
         };
         let partial = Ok(crate::KernelStep::Continue(WorkbenchResponse {
+            publication: None,
             status: WorkbenchRunStatus::Committed,
             summary: None,
             items: Vec::new(),
@@ -597,6 +600,7 @@ mod tests {
                 assert!(control.request_cancellation());
             }
             let result = Ok(crate::KernelStep::Continue(WorkbenchResponse {
+                publication: None,
                 status: WorkbenchRunStatus::Committed,
                 summary: None,
                 items: Vec::new(),
@@ -650,6 +654,7 @@ mod tests {
             items: Vec::new(),
             next_index: 1,
             total: 1,
+            publication: None,
         });
         let mut journal = WorkbenchExecutions::default();
         journal.begin(&execution, request.clone(), Some(&invocation));
@@ -717,6 +722,7 @@ mod tests {
                 items: Vec::new(),
                 next_index: 1,
                 total: 1,
+                publication: None,
             });
             journal.record(
                 execution.clone(),
