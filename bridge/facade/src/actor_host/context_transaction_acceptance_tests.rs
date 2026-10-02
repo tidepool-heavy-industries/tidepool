@@ -292,10 +292,13 @@ fn root_context_state(fixture: &RunningBrowserHost) -> harness::context::Context
         actor: AgentPath("/root".into()),
         incarnation: fixture.campaign.actor.identity().incarnation.0.to_string(),
     };
-    let head = store
-        .embedded_agent_head(&identity)
-        .unwrap()
-        .expect("embedded actor has a committed conversation head");
+    // The scripted successor is admitted but has not returned a final answer.
+    // Its current prefix belongs to the pending frontier, before round settlement.
+    let frontier = store.embedded_round_frontier(&identity).unwrap();
+    let head = frontier
+        .pending_head
+        .or(frontier.settled_head)
+        .expect("embedded actor has an admitted conversation head");
     store
         .context_request_state(
             &head,
