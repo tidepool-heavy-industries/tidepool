@@ -234,6 +234,24 @@ impl InputFixture {
                 )
                 .expect("execute original RunRequest through the typed receiver"),
         );
+        let site = parked_site(resident, &activation);
+        let provenance = resident.parked_program_provenance(&activation).unwrap();
+        let metadata_matches = self
+            .producer
+            .asks
+            .iter()
+            .find(|original| original.site == site)
+            .zip(provenance.sites.get(&site))
+            .is_some_and(|(original, parked)| original.same_metadata(parked));
+        eprintln!(
+            "ACTIVATION_TRANSITION {}",
+            serde_json::json!({
+                "site": site,
+                "payload_origin_authenticated": payload.provenance.authenticated_inputs.contains(&site),
+                "parked_origin_authenticated": provenance.authenticated_inputs.contains(&site),
+                "original_metadata_matches": metadata_matches,
+            })
+        );
         (submission, activation)
     }
 }
@@ -334,7 +352,10 @@ fn compile_turn(
             }
             FixtureCompilation::Scoped => view.exact_declaration_context().cloned(),
         },
-        session_id: Some(view.session()),
+        session_id: match purpose {
+            FixtureCompilation::Startup => None,
+            FixtureCompilation::Scoped => Some(view.session()),
+        },
         turn_text: source,
         templates: &templates,
         include: &include,
