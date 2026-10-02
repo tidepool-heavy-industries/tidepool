@@ -3012,14 +3012,14 @@ dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
       qualifierKey NoPkgQual = "none"
       qualifierKey (ThisPkg unit) = "this:" ++ unitString unit
       qualifierKey (OtherPkg unit) = "other:" ++ unitString unit
-  selectedPairs <- forM
-    graphSummaries $ \summary ->
-      case ml_hs_file (ms_location summary) of
-        Nothing -> pure Nothing
-        Just source -> do
-          absolute <- makeAbsolute source
-          pure (Just ((ms_mod_name summary, ms_hsc_src summary == HsBootFile), normalise absolute))
-  let selected = Map.fromList [pair | Just pair <- selectedPairs]
+  summarySources <- forM graphSummaries $ \summary ->
+    case ml_hs_file (ms_location summary) of
+      Nothing -> pure Nothing
+      Just source -> Just . normalise <$> makeAbsolute source
+  let selected = Map.fromList
+        [ ((ms_mod_name summary, ms_hsc_src summary == HsBootFile), source)
+        | (summary, Just source) <- zip graphSummaries summarySources
+        ]
       homeSelection NoPkgQual name boot = Map.lookup (name, boot) selected
       homeSelection (ThisPkg unit) name boot
         | unit == homeUnitId (hsc_home_unit env) = Map.lookup (name, boot) selected
@@ -3059,20 +3059,17 @@ dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
       , dependencyResolutionSelected = chosen
       , dependencyResolutionCandidates = nub throughSelected
       }
-  moduleNodes <- forM graphSummaries $ \summary -> do
+  moduleNodes <- forM (zip graphSummaries summarySources) $ \(summary, sourcePath) -> do
     let name = ms_mod_name summary
         isBoot = ms_hsc_src summary == HsBootFile
         directImports = sort . Set.toList . Set.fromList $
           [ (qualifier, unLoc imported, False) | (qualifier, imported) <- ms_textual_imps summary ] ++
           [ (qualifier, unLoc imported, True) | (qualifier, imported) <- ms_srcimps summary ]
-    source <- case ml_hs_file (ms_location summary) of
-      Nothing -> pure ""
-      Just path -> normalise <$> makeAbsolute path
     pure DependencyModule
       { dependencyModuleUnit = unitString (moduleUnit (ms_mod summary))
       , dependencyModuleName = moduleNameString name
       , dependencyModuleBoot = isBoot
-      , dependencyModuleSource = source
+      , dependencyModuleSource = maybe "" id sourcePath
       , dependencyModuleImports =
           [ DependencyImport (qualifierKey qualifier) (moduleNameString imported) boot
               (homeSelection qualifier imported boot)
