@@ -352,8 +352,7 @@ impl CommandBackend for NativeCommandBackend {
 // Commands raised by an actor that has no process of its own.
 // ---------------------------------------------------------------------------
 
-/// How much of a stream one `read` returns when the caller did not name both
-/// ends of the window.
+/// Default byte budget for one `read` when the caller did not name a count.
 const PAGE_BYTES: u64 = 64 * 1024;
 
 /// A resident actor — one started from a notebook with `R.start`, or an
@@ -584,7 +583,10 @@ fn window(position: CommandPosition, available: u64) -> (u64, u64) {
             let start = start.max(0) as u64;
             (start, start.saturating_add(PAGE_BYTES))
         }
-        CommandPosition::OutputSlice(start, end) => (start.max(0) as u64, end.max(0) as u64),
+        CommandPosition::OutputSlice(offset, bytes) => {
+            let start = offset.max(0) as u64;
+            (start, start.saturating_add(bytes.max(0) as u64))
+        }
     }
 }
 
@@ -787,7 +789,7 @@ mod readiness_tests {
             window(CommandPosition::OutputBeginning, 10),
             (0, PAGE_BYTES)
         );
-        assert_eq!(window(CommandPosition::OutputSlice(2, 5), 10), (2, 5));
+        assert_eq!(window(CommandPosition::OutputSlice(2, 5), 10), (2, 7));
         assert_eq!(
             window(CommandPosition::OutputOffset(4), 10),
             (4, 4 + PAGE_BYTES)
@@ -803,6 +805,85 @@ mod readiness_tests {
             window(CommandPosition::OutputOffset(-3), 10),
             (0, PAGE_BYTES)
         );
+    }
+
+    #[test]
+    fn slice_windows_add_the_count_without_signed_overflow() {
+        assert_eq!(
+            window(CommandPosition::OutputSlice(i64::MAX, 65536), 10),
+            (i64::MAX as u64, i64::MAX as u64 + 65536)
+        );
+        // CommandJobs rejects negatives before dispatch. Conversion still must
+        // not wrap if a backend is called directly.
+        assert_eq!(window(CommandPosition::OutputSlice(-3, 5), 10), (0, 5));
+        assert_eq!(window(CommandPosition::OutputSlice(3, -5), 10), (3, 3));
+    }
+
+    #[tokio::test]
+    async fn retained_slices_advance_beyond_the_page_budget_and_stop_at_eof() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = "0123456789abcdefghijklmn";
+        let command = HostCommand::spawn(HostCommandSpec {
+            argv: &["printf".into(), "%s".into(), output.into()],
+            directory: directory.path(),
+            environment: &[],
+            stdin: HostStdin::Closed,
+            cgroup: None,
+            boundary: None,
+            bubblewrap: None,
+        })
+        .unwrap();
+        assert_eq!(command.wait().await.unwrap(), HostExit::Exited(0));
+
+        let mut offset = 0;
+        let mut collected = String::new();
+        for expected in ["01234", "56789", "abcde", "fghij", "klmn"] {
+            let (start, end) = window(
+                CommandPosition::OutputSlice(offset, 5),
+                command.available(HostStream::Stdout),
+            );
+            let page = command_page(command.page(HostStream::Stdout, start, end));
+            assert_eq!(page.text, expected);
+            assert_eq!(page.start, offset);
+            assert!(page.end > offset);
+            assert_eq!(page.available_end, output.len() as i64);
+            assert_eq!(page.retained_start, 0);
+            collected.push_str(&page.text);
+            offset = page.end;
+        }
+        assert_eq!(collected, output);
+        let (start, end) = window(CommandPosition::OutputSlice(offset, 5), offset as u64);
+        let page = command_page(command.page(HostStream::Stdout, start, end));
+        assert!(page.text.is_empty());
+        assert_eq!((page.start, page.end), (offset, offset));
+        assert!(page.finished);
+    }
+
+    #[tokio::test]
+    async fn retained_slice_count_preserves_utf8_boundary_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let command = HostCommand::spawn(HostCommandSpec {
+            argv: &["printf".into(), "%s".into(), "abéz".into()],
+            directory: directory.path(),
+            environment: &[],
+            stdin: HostStdin::Closed,
+            cgroup: None,
+            boundary: None,
+            bubblewrap: None,
+        })
+        .unwrap();
+        assert_eq!(command.wait().await.unwrap(), HostExit::Exited(0));
+        let available = command.available(HostStream::Stdout);
+        let (start, end) = window(CommandPosition::OutputSlice(2, 2), available);
+        let page = command_page(command.page(HostStream::Stdout, start, end));
+        assert_eq!(page.text, "é");
+        assert_eq!((page.start, page.end), (2, 4));
+        assert!(!page.lossy && !page.leading_fragment && !page.trailing_fragment);
+        let (start, end) = window(CommandPosition::OutputSlice(3, 2), available);
+        let page = command_page(command.page(HostStream::Stdout, start, end));
+        assert_eq!((page.start, page.end), (4, 5));
+        assert!(!page.lossy && page.leading_fragment);
+        assert_eq!(page.text, "z");
     }
 
     #[test]
