@@ -9,6 +9,7 @@
 module Tidepool.Command.Tools
   ( ShellTools (..),
     Execute (..),
+    EnvironmentEntry (..),
     WriteInput (..),
     ReadOutput (..),
     CancelCommand (..),
@@ -43,7 +44,7 @@ import Tidepool.Inspection (Display (..))
 data Execute = Execute
   { cmd :: Text,
     workdir :: Maybe Text,
-    environment :: Maybe (Map.Map Text Text),
+    environment :: Maybe [EnvironmentEntry],
     memory_mib :: Maybe Int,
     tty :: Maybe Bool,
     stdin :: Maybe Bool,
@@ -52,6 +53,12 @@ data Execute = Execute
     intent :: Maybe Text,
     focus :: Maybe Text,
     background :: Maybe Bool
+  }
+  deriving (Generic, FromJSON, JsonSchema)
+
+data EnvironmentEntry = EnvironmentEntry
+  { name :: Text,
+    value :: Text
   }
   deriving (Generic, FromJSON, JsonSchema)
 
@@ -113,11 +120,11 @@ toolsWith presenter =
   ShellTools
     { bash =
         tool
-          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (positive, default 1024), tty or piped stdin (mutually exclusive). By default the invocation owns the command until terminal completion, then presents output once. yield_time_ms (0..300000) opts into bounded observation and actor ownership if still running; no automatic notice. max_output_bytes clamps to 1024..32768 (default 32768). Returns session_id and a retained Cmd.Job. Use focus when output may be large or is a failing build/test: say what you are looking for (\"the failing test and its assertion\") and the result keeps the relevant sections and names what was omitted. Without focus, output is head/tail truncated; read_output pages retained output by byte range without rerunning. background: true returns at once (focus, yield_time_ms, max_output_bytes ignored); a notice with exit status, output tail and starting commit wakes you when it finishes. intent gives the command's purpose to its presenter."
+          "Execute Bash once; no shell profiles. Optional workdir and environment list of {name,value} entries; later duplicate names win. memory_mib (positive, default 1024); tty or piped stdin (mutually exclusive). By default the invocation owns the command until terminal completion, then presents output once. yield_time_ms (0..300000) opts into bounded observation and actor ownership if still running; no automatic notice. max_output_bytes clamps to 1024..32768 (default 32768). Returns session_id and a retained Cmd.Job. Use focus when output may be large or is a failing build/test: say what you are looking for (\"the failing test and its assertion\") and the result keeps the relevant sections and names what was omitted. Without focus, output is head/tail truncated; read_output pages retained output by byte range without rerunning. background: true returns at once (focus, yield_time_ms, max_output_bytes ignored); a notice with exit status, output tail and starting commit wakes you when it finishes. intent gives the command's purpose to its presenter."
           (executeWith presenter),
       writeStdin =
         tool
-          "Send input to an existing session_id or deliberately observe it. Optional chars sends input first; empty/omitted chars only observes. close_stdin sends final bytes then EOF (pipes only). Write acknowledgment does not prove consumption; never replay uncertain input. PTYs accept control characters. Observe 0..300000ms (default 250); output max_output_bytes clamps to 1024..32768 bytes; focus filters as for bash."
+          "Send input to an existing session_id or observe it. With chars or close_stdin, return the write/EOF receipt only; do not infer child consumption from acknowledgment or replay uncertain input. close_stdin sends final bytes then EOF for pipes; PTYs use control characters and reject close_stdin. With empty/omitted chars and no close_stdin, observe the job for 0..300000ms (default 250); max_output_bytes clamps to 1024..32768 bytes."
           (writeInputWith presenter),
       readOutput =
         tool
@@ -129,7 +136,8 @@ toolsWith presenter =
           cancelRetained
     }
 
--- Validate observation options before starting a process or sending input.
+-- Validate observation options before starting or observing; committed stdin
+-- writes do not also perform an observation.
 -- Tools render typed rejections only at their Text result boundary.
 -- max_output_bytes is clamped into the supported range rather than rejected:
 -- any positive request is honored, just at whatever budget the range allows,
@@ -192,13 +200,20 @@ executeWith presenter
       focus = focus,
       background = detached
     } =
-    case executeOptions memory terminal pipe wait limit of
+    let inBackground = fromMaybe False detached
+        observationWait = if inBackground then Nothing else wait
+        observationLimit = if inBackground then Nothing else limit
+     in case executeOptions memory terminal pipe observationWait observationLimit of
       Left rejection -> pure (renderOptionError rejection)
       Right (memoryMiB, options) -> do
-        let inBackground = fromMaybe False detached
-        let command =
+        let environmentVariables =
+              Map.toList . Map.fromList $
+                [ (variableName, variableValue)
+                  | EnvironmentEntry {name = variableName, value = variableValue} <- fromMaybe [] env
+                ]
+            command =
               maybe id Cmd.inDirectory directory $
-                Cmd.withEnvironment (maybe [] Map.toList env) $
+                Cmd.withEnvironment environmentVariables $
                   Cmd.withMemory (Cmd.MiB memoryMiB) $
                     input (Cmd.bashCommand script)
             input =
@@ -233,38 +248,36 @@ writeInput = writeInputWith defaultPresenter
 
 writeInputWith :: (Member Cmd.Commands effects) => ObservationPresenter effects -> WriteInput -> Eff effects Text
 writeInputWith presenter WriteInput {session_id = key, chars = input, close_stdin = close, yield_time_ms = wait, max_output_bytes = limit} =
-  case observation 250 wait limit of
-    Left rejection -> pure (renderOptionError rejection)
-    Right options -> do
-      let text = fromMaybe "" input
-          eof = fromMaybe False close
-      receipt <- case (T.null text, eof) of
-        (True, False) -> pure (Right ())
-        (True, True) -> send (CommandCloseInputWith key)
-        (False, False) -> send (CommandInputWith key text)
-        (False, True) -> send (CommandFinishInputWith key text)
-      case receipt of
-        Left (Cmd.CommandInputRejected detail) ->
-          pure $ "session_id: " <> key <> "\nRejected · input not submitted (including chars); EOF not submitted · " <> detail
-        Left Cmd.CommandUnauthorized ->
-          pure $ "session_id: " <> key <> "\nRejected · input not submitted (including chars); EOF not submitted · input control is not authorized"
-        Left (Cmd.CommandInputAcceptedCloseUnconfirmed detail) ->
-          pure $ "session_id: " <> key <> "\nBackend acknowledged the write; child consumption is unknown. EOF unconfirmed: " <> detail <> "\nRetry close-only with write_stdin(close_stdin=true), without chars. Do not resend these bytes."
-        Left issue -> pure $ "session_id: " <> key <> "\nInput submission unconfirmed: " <> T.pack (show issue) <> "\nInspect the same job before recovery. Do not replay input after an uncertain acknowledgment."
-        Right () ->
-          let receipt =
-                if T.null text
-                  then ""
-                  else "Input acknowledged by backend; child consumption is unknown."
-              closed = if eof then "Stdin is closed." else ""
-           in -- Sending bytes (or EOF) is an irreversible action. Return its
-              -- acknowledgment directly: a later, optional output presentation
-              -- must not turn a successful write into an apparent failed call.
-              if not (T.null text) || eof
-                then pure $ T.intercalate "\n" (filter (not . T.null) [receipt, closed])
-                -- Empty input is an observation poll and keeps the configured
-                -- presenter behavior.
-                else presenter Nothing Nothing Nothing options (Job key)
+  let text = fromMaybe "" input
+      eof = fromMaybe False close
+      observe = case observation 250 wait limit of
+        Left rejection -> pure (renderOptionError rejection)
+        Right options -> presenter Nothing Nothing Nothing options (Job key)
+      submit = do
+        receipt <- case (T.null text, eof) of
+          (True, False) -> pure (Right ())
+          (True, True) -> send (CommandCloseInputWith key)
+          (False, False) -> send (CommandInputWith key text)
+          (False, True) -> send (CommandFinishInputWith key text)
+        case receipt of
+          Left (Cmd.CommandInputRejected detail) ->
+            pure $ "session_id: " <> key <> "\nRejected · input not submitted (including chars); EOF not submitted · " <> detail
+          Left Cmd.CommandUnauthorized ->
+            pure $ "session_id: " <> key <> "\nRejected · input not submitted (including chars); EOF not submitted · input control is not authorized"
+          Left (Cmd.CommandInputAcceptedCloseUnconfirmed detail) ->
+            pure $ "session_id: " <> key <> "\nBackend acknowledged the write; child consumption is unknown. EOF unconfirmed: " <> detail <> "\nRetry close-only with write_stdin(close_stdin=true), without chars. Do not resend these bytes."
+          Left issue -> pure $ "session_id: " <> key <> "\nInput submission unconfirmed: " <> T.pack (show issue) <> "\nInspect the same job before recovery. Do not replay input after an uncertain acknowledgment."
+          Right () ->
+            let receipt =
+                  if T.null text
+                    then ""
+                    else "Input acknowledged by backend; child consumption is unknown."
+                closed = if eof then "Stdin is closed." else ""
+             in -- Sending bytes (or EOF) is an irreversible action. Return its
+                -- acknowledgment directly: a later, optional output presentation
+                -- must not turn a successful write into an apparent failed call.
+                pure $ T.intercalate "\n" (filter (not . T.null) [receipt, closed])
+   in if T.null text && not eof then observe else submit
 
 cancelRetained :: (Member Cmd.Commands effects) => CancelCommand -> Eff effects Text
 cancelRetained CancelCommand {session_id = key, yield_time_ms = wait, max_output_bytes = limit} =

@@ -352,7 +352,7 @@ mod tests {
 
     #[tokio::test]
     async fn installed_builtin_tools_project_strict_schemas_and_preserve_host_omission_defaults() {
-        let campaign = super::super::test_campaign::TestCampaign::start().await;
+        let campaign = super::super::test_campaign::TestCampaign::start_with_shell().await;
         // Take the real installed declarations, rather than fixtures that copy
         // the three actor-local schemas and can drift from their owners.
         let tools = campaign.root_installation.policy.tools().to_vec();
@@ -391,6 +391,20 @@ mod tests {
                 .unwrap();
             assert_eq!(result["arguments"]["structured"], json!({}));
         }
+        let bash = snapshot
+            .tools()
+            .iter()
+            .find(|tool| tool["name"] == "bash")
+            .expect("the installed shell spec exposes bash");
+        assert_eq!(bash["strict"], true);
+        let environment = &bash["parameters"]["properties"]["environment"];
+        let entries = &environment["anyOf"][0];
+        assert_eq!(entries["type"], "array");
+        assert_eq!(entries["items"]["type"], "object");
+        assert_eq!(entries["items"]["required"], json!(["name", "value"]));
+        assert_eq!(entries["items"]["additionalProperties"], false);
+        assert_eq!(entries["items"]["properties"]["name"]["type"], "string");
+        assert_eq!(entries["items"]["properties"]["value"]["type"], "string");
         let request = harness::transport::ResponsesRequest {
             input: vec![],
             instructions: String::new(),
