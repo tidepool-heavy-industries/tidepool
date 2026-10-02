@@ -9,12 +9,9 @@ Cells enable the usual extensions, including `TypeApplications`, `DataKinds`,
 ## Choose the workflow
 
 Use pure functions for deterministic transforms, Haskell `do` for effects and
-dependent waits, Jev for bounded judgment, record actors for ongoing sources or
-stateful joins, and model actors for open-ended investigation. Jev judges
+waits, Jev for judgment, record actors for ongoing sources or stateful joins,
+and model actors for investigation. Jev judges
 supplied evidence; it never grants resource authority.
-
-Try uncertain workflows in small cells. Retain complete evidence, project typed
-views and page `cellDisplay.more` without replaying effects.
 
 Where the actor admits `ModelCall`, `Tidepool.Model` provides
 `invokeModel turn input` with `textTurn` or `typedTurn @Reply` and supplied
@@ -27,7 +24,7 @@ service returns a typed boundary failure.
 
 Scaffold, admit ready parallel work and integrate checked results. Recursive
 owners use `Project.Work` policy and `Exomonad.Contrib.Routing`; see
-`RECURSIVE-WORK.md`. Use these primitives for custom compositions.
+`RECURSIVE-WORK.md`.
 
 ```haskell
 let task = "Remove the stale path and report the focused check." :: Text
@@ -38,8 +35,8 @@ let task = "Remove the stale path and report the focused check." :: Text
 ready
 ```
 
-`spawnWatched` composes immediate `unfold` and a named settlement watch. The
-explicit `ActorOwned` branch survives this cell. Default `InvocationOwned` branches
+`spawnWatched` combines immediate `unfold` and a named settlement watch.
+Explicit `ActorOwned` branches survive the cell. Default `InvocationOwned` branches
 must settle within its creating invocation; returning handles does not extend it.
 A wave composes independent children with `<$>` and `<*>`. Capture an exact
 checkpoint to reuse your current reasoning:
@@ -90,11 +87,10 @@ the enclosing call's completed context. Use `[label|orbit-motif|]`
 for compile-checked static assignment labels; use `labelFromText` for dynamic
 labels and handle its `Either`.
 
-With `import qualified Tidepool.Agent.Context as C`, a synchronous cell with
-`ContextReadWrite` can stage the next request's effort using
-`C.setNextEffort C.High`; `C.Effort` aliases the existing `ForkEffort` type.
-Context, model, and effort changes commit together on whole-cell success.
-Effort changes preserve the model and existing context prefix.
+With `import qualified Tidepool.Agent.Context as C`, synchronous `ContextReadWrite`
+cells stage effort with `C.setNextEffort C.High` (`C.Effort` is `ForkEffort`).
+Context, model and effort commit on whole-cell success; effort alone preserves
+model and prefix.
 
 The activation supplies typed `sessionInput`, its reply declaration, and the
 roster of siblings admitted with you; use `inspectFull sessionInput` only for
