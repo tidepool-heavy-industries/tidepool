@@ -317,7 +317,6 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
         tool["name"] == "curate" && tool["type"] == "function" && tool["strict"] == true
     }));
     let session = first.request.session_id.clone();
-    let before = root_context_state(&fixture);
     first.function("compiled-context", "curate", json!({"proceed": true}));
     let successor = next_round(&mut rounds).await;
     assert!(successor.is_root());
@@ -339,7 +338,7 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
     ));
     assert!(!has_user_text(&successor.request, "parent-original"));
     let after = root_context_state(&fixture);
-    assert_eq!(after.generation, before.generation + 1);
+    assert_eq!(after.generation, 1);
     assert_eq!(after.model.as_deref(), Some("gpt-6.1-sol"));
     assert_eq!(fixture.campaign.actor.identity(), actor);
     assert!(fixture.campaign.actor.terminal().get().is_none());
