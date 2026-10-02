@@ -14,7 +14,7 @@ import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
-import Data.List (isInfixOf, isPrefixOf, sortOn)
+import Data.List (isInfixOf, isPrefixOf, sortOn, stripPrefix)
 import Data.Maybe (isJust, isNothing, maybeToList)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -69,6 +69,7 @@ import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Tidepool.CertifiedProducts (encodeCertifiedProducts)
 import Tidepool.ExecutionEncode (encodeModuleProducts)
+
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, topBinders
@@ -122,6 +123,22 @@ import Tidepool.ExecutionSource
   ( ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
   , executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure, executionIdentityKey
   , ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences )
+
+counterValues :: String -> String -> [Integer]
+counterValues name diagnostics = map parseCount matching
+  where
+    prefix = "tidepool-count name=" ++ name ++ " "
+    matching = [line | line <- lines diagnostics, prefix `isPrefixOf` line]
+    parseCount line = case
+      [raw | field <- words line, Just raw <- [stripPrefix "count=" field]] of
+        [raw] -> case reads raw of
+          [(value, "")] -> value
+          _ -> error ("invalid count field for " ++ name ++ " in diagnostic: " ++ line)
+        _ -> error ("missing or duplicate count field for " ++ name
+          ++ " in diagnostic: " ++ line)
+
+counterTotal :: String -> String -> Integer
+counterTotal name = sum . counterValues name
 
 main :: IO ()
 main = getArgs >>= \case
@@ -862,7 +879,7 @@ exactReexportQuoter = withTiming $ withScratch $ \work -> do
     mapM_ putStrLn [row | row <- lines diagnostics, "tidepool-exact-execution-load " `isPrefixOf` row]
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult result))) $
       fail "retained facade did not execute its original defining quoter"
-    unless ("tidepool-count name=exact_execution_original_load_owners count=2" `elem` lines diagnostics) $
+    unless (counterValues "exact_execution_original_load_owners" diagnostics == [2]) $
       fail "reexport fixture did not select exactly the defining quoter and pure helper"
     let loadRows = [row | row <- lines diagnostics, "tidepool-exact-execution-load " `isPrefixOf` row]
     unless (length loadRows == 2 && all ("allow_object=False bytecode=True" `isInfixOf`) loadRows
@@ -914,7 +931,7 @@ exactExecutionHiddenInstance = withTiming $ withScratch $ \work -> do
       fail "qualified quoter lost its full defining original owner"
     (hiddenQuote,hiddenDiagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
       (work </> "ExecutionHiddenQuoteTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult))
-    unless (case hiddenQuote of Left _ -> "tidepool-count name=exact_execution_original_load_owners count=0" `elem` lines hiddenDiagnostics; _ -> False) $
+    unless (case hiddenQuote of Left _ -> counterValues "exact_execution_original_load_owners" hiddenDiagnostics == [0]; _ -> False) $
       fail "hidden qualified export acquired an execution recipe"
     (fresh,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
       (work </> "ExecutionFreshTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult))
@@ -932,7 +949,7 @@ exactExecutionHiddenInstance = withTiming $ withScratch $ \work -> do
     (classHidden,classDiagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile
       (Just classScope) (work </> "ExecutionClassQuoteHidden.hs") [work] Nothing)
       :: IO (Either SomeException CheckedEnvironmentResult))
-    unless (case classHidden of Left _ -> "tidepool-count name=exact_execution_original_load_owners count=0" `elem` lines classDiagnostics; _ -> False) $
+    unless (case classHidden of Left _ -> counterValues "exact_execution_original_load_owners" classDiagnostics == [0]; _ -> False) $
       fail "hiding a class parent acquired its child quoter execution capability"
   putStrLn "execution instances: sealed quoter executes, fresh provider cannot borrow private orphan, failure recovers"
 
@@ -1554,7 +1571,7 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
           result = pprPipelineResult reused
       unless (accepted == (if expected == 42 then ["MetadataQuoteSupport"] else [])
           && ("MetadataQuoteSupport" `elem` fresh) == (expected /= 42)
-          && ("tidepool-count name=candidate_source_load_required count=" ++ show required) `elem` lines diagnostics
+          && counterValues "candidate_source_load_required" diagnostics == [fromIntegral required]
           && hasIntResultLiteral expected (prBinds result)) $
         fail ("native candidate reuse skipped GHC execution or retained an old quoted helper body: "
           ++ show (expected, accepted, fresh) ++ "\n" ++ diagnostics ++ "\n"
@@ -2073,7 +2090,7 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
     unless (resultType quotedCandidate == Just "Int"
         && "tidepool-checked-loaded-source module=MetadataQuoter" `elem` lines candidateQuoteDiagnostics
         && "tidepool-checked-dependency-executable module=MetadataQuoteSupport bytecode=True object=False" `elem` lines candidateQuoteDiagnostics
-        && "tidepool-count name=candidate_source_load_required count=1" `elem` lines candidateQuoteDiagnostics) $
+        && counterValues "candidate_source_load_required" candidateQuoteDiagnostics == [1]) $
       fail "source candidate discarded a GHC-required quoter executable"
     hidden <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
       (work </> "MetadataHiddenFamily.hs") [work] Nothing
@@ -2434,10 +2451,7 @@ verifyCollectivePackageProof work prepared = withTiming $ do
       roots = [selectedRoot | (selectedRoot,_,_) <- mutable]
       firstRoot = root
       count :: String -> String -> Integer
-      count name diagnostics = sum
-        [read value | line <- lines diagnostics, prefix `isPrefixOf` line,
-          value:_ <- [words (drop (length prefix) line)]]
-        where prefix = "tidepool-count name=" ++ name ++ " count="
+      count = counterTotal
       requireRight label = \case
         Right () -> pure ()
         Left reason -> fail (label ++ " refused: " ++ reason)
@@ -2726,9 +2740,7 @@ verifyRetainedPackageWitness producer evidence = do
 
   where
     count :: String -> String -> Integer
-    count name diagnostics = sum
-      [read (drop (length prefix) line) | line <- lines diagnostics, prefix `isPrefixOf` line]
-      where prefix = "tidepool-count name=" ++ name ++ " count="
+    count = counterTotal
 
 -- A mutable installed interface exercises the same environment on successive
 -- certifications. No successful owner selection may survive into the next one.
@@ -2834,10 +2846,8 @@ mixedGraph required count = withScratch $ \work -> do
   (exit, _, errors) <- readProcessWithExitCode executable ["--mixed-fresh", work, show count] ""
   unless (exit == ExitSuccess) $ fail ("fresh mixed worker failed: " ++ errors)
   let expectedLoad = if required then 3 else 2 :: Int
-      loadCounts = [line | line <- lines errors
-        , "tidepool-count name=home_products_source_load_owners " `isPrefixOf` line]
-      expectedLine = "tidepool-count name=home_products_source_load_owners count=" ++ show expectedLoad
-  unless (loadCounts == [expectedLine]) $
+      loadCounts = counterValues "home_products_source_load_owners" errors
+  unless (loadCounts == [fromIntegral expectedLoad]) $
     fail ("fresh mixed worker loaded unrelated owners: " ++ show loadCounts)
   putStrLn ("mixed SOURCE: PASS independent=" ++ show count ++ " required=" ++ show required)
 
