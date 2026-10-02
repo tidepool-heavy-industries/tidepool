@@ -11300,12 +11300,16 @@ where
             .directory
             .session_context(actor)
             .ok_or_else(|| refuse("child confirmation has no installed placement"))?;
+        if target.terminal().requested_shutdown().is_some() {
+            return Err(refuse(
+                "child confirmation requires its original live allocation",
+            ));
+        }
         let records = self.environment.actors.lock();
         let record = records
             .get(&actor)
             .ok_or_else(|| refuse("child confirmation has no registered allocation"))?;
         if record.terminal.is_some()
-            || target.terminal().requested_shutdown().is_some()
             || record.descriptor.placement() != context.placement
             || record.descriptor.creator().is_none()
         {
