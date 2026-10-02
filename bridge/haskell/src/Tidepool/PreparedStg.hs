@@ -68,10 +68,11 @@ import Tidepool.PreparedFacts (PreparedFacts, extractPreparedFacts)
 
 -- | Typed, pre-CorePrep input to the prepared pipeline.
 --
--- The elaboration owner must populate the exact generated sibling 'Id's from
--- tidied home-module 'CgGuts' and rewrite typed Tidepool sites before handing
--- the bindings to 'prepareModule'. Keeping this as a GHC-typed internal record
--- prevents the later wire schema from becoming a second preparation API.
+-- The elaboration owner must resolve exact generated sibling 'Id's from
+-- tidied home-module 'CgGuts' or hydrated defining interfaces, and rewrite typed
+-- Tidepool sites before handing the bindings to 'prepareModule'. Keeping this
+-- as a GHC-typed internal record prevents the later wire schema from becoming
+-- a second preparation API.
 data PreparedElaboration = PreparedElaboration
   { peGuts :: CgGuts
   , peBindings :: [CoreBind]
