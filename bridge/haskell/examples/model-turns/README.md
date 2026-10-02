@@ -29,3 +29,29 @@ advertised in the always-loaded prompts until that engine hook passes joined
 acceptance; see `plans/model-call-integration-handoff.md`. They have native Haskell
 compile coverage; native contract tests execute callbacks in the caller effect
 row. This is separate from resident/JIT and live-provider acceptance.
+
+## Editing an agent's retained context
+
+`Tidepool.Agent.Context` provides an authority-free `Context` value for
+reviewing and curating the current actor transcript. The runtime retains
+authority: a reference in this value can identify a transcript item, but it
+cannot open or restore one. `editableTexts` focuses authored text blocks,
+while `visibleTexts`, `blockKind`, and `blockProvenance` let a curator inspect
+what a proposed edit contains and where it came from. `toNotes` turns only
+selected completed exchanges into authored notes and preserves each exchange
+reference as note provenance; it leaves pending and protected native groups
+untouched.
+
+Context reads and writes require `ContextReadWrite`. A regular asynchronous
+compiled tool does not receive that effect. Use an explicitly synchronous
+tool or synchronous Haskell cell when the actor must commit context changes
+before the invocation settles. This makes `unfoldDeferred` useful for a
+parent-curates-then-delegates workflow: the parent can store its edit and
+finish the invocation, after which its actor-owned children inherit the
+committed transcript and the same Haskell bindings. The child can choose the
+model for its next request with `setNextModel`.
+
+Keep curation in ordinary Haskell. For a compact semantic choice, `J.each`
+can examine packets while the author retains the exact original text and
+applies only selected original slices. The model's judgment is a selection;
+it does not rewrite source text or confer access to transcript references.
