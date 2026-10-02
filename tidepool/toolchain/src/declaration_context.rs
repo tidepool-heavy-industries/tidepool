@@ -3742,6 +3742,16 @@ mod tests {
                 .extend_checked_original_products(producer_sha256, &[product], &BTreeMap::new())
                 .unwrap(),
         );
+        let collision = root.join("collision");
+        std::fs::create_dir_all(&collision).unwrap();
+        let collision_graph = collision.join(format!("execution-{}.cbor", hex(&graph.digest())));
+        std::fs::write(&collision_graph, b"prior immutable capture").unwrap();
+        assert!(context.prepare_compilation(&collision, producer).is_err());
+        assert_eq!(
+            std::fs::read(&collision_graph).unwrap(),
+            b"prior immutable capture",
+            "graph capture cannot replace or truncate an existing request artifact"
+        );
         let request = context
             .prepare_compilation(&root.join("ordinary"), producer)
             .unwrap();
