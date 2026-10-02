@@ -7062,6 +7062,201 @@ mod authored_publication_tests {
 
     type TestSession = ResidentSession<frunk::HNil, EmptyOutput>;
 
+    #[test]
+    fn checked_interface_publication_conflict_preserves_private_prefix() {
+        checked_interface_publication_failure(false);
+    }
+
+    #[test]
+    fn checked_interface_publication_write_failure_preserves_private_prefix() {
+        checked_interface_publication_failure(true);
+    }
+
+    fn checked_interface_publication_failure(write_failure: bool) {
+        use crate::session::turn::{check_cell_admitted, run_checked_item};
+        use crate::session::{
+            resident_cell_check_template, resident_workbench_templates, CellCheckRequest,
+            SourceImports, TurnRequest, TurnResult,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        use tidepool_testing::effect_surface::TestEffectSurface;
+        use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let library =
+            SessionLib::open(SessionId(999), root.path(), ModuleEnv::standalone_default())
+                .unwrap()
+                .with_validation_include(effects.include_paths().to_vec());
+        let mut state = PersistentSession::new(Some(library), 1024 * 1024);
+        let public = state.mint_scope(ScopeId::ROOT).unwrap();
+        let execution = Arc::new(state.begin_private_execution(public).unwrap());
+        let view = state.compile_view_for_execution(&execution).unwrap();
+        let imports = view.turn_imports(&SourceImports::from_specs(["qualified Prelude as P"]));
+        let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
+        let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+        let source = include_str!("fixtures/checked-interface-publication.hs");
+        let specification = CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: source.into(),
+            template_source: template.clone(),
+            turn_templates: templates
+                .iter()
+                .map(|template| {
+                    let kind = match template.kind {
+                        crate::session::TemplateSelector::Decl => "decl",
+                        crate::session::TemplateSelector::Bind => "bind",
+                        crate::session::TemplateSelector::BindDiscard => "binddiscard",
+                        crate::session::TemplateSelector::Expr => "expr",
+                    };
+                    (kind.into(), template.source.clone())
+                })
+                .collect(),
+            injected_modules: view.injected_module_names(),
+            reserved_declaration_modules: vec![],
+        };
+        let admission = state
+            .admit_cell_for_execution(
+                execution.clone(),
+                0,
+                Arc::new(specification.clone()),
+                specification.specification_digest(),
+                [1; 32],
+                view.include_paths(effects.include_paths()),
+            )
+            .unwrap();
+        let view = admission.view();
+        let include = view.include_paths(effects.include_paths());
+        let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let injected = view.injected_module_names();
+        let (checked, _) = check_cell_admitted(
+            CellCheckRequest {
+                exact_context: view.exact_declaration_context().cloned(),
+                session_id: Some(view.session()),
+                cell_text: source,
+                template: &template,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                compile_generation: admission.initial_value_generation().0,
+                compile_view_evidence: "",
+            },
+            admission.clone(),
+            &templates,
+            None,
+        )
+        .unwrap();
+        let first = checked.checked_item(0).unwrap();
+        let prefix = state
+            .begin_checked_prefix(admission, first.clone())
+            .unwrap();
+        let mut resident = TestSession::from_persistent_for_test(frunk::HNil, EmptyOutput, state);
+        resident
+            .set_run_context(SessionRunContext {
+                lexical_scope: execution.private_scope(),
+                ..Default::default()
+            })
+            .unwrap();
+        let reservation = resident
+            .admit_checked_item(prefix.clone(), first.clone())
+            .unwrap();
+        let snapshot = reservation.snapshot();
+        let view = snapshot.view();
+        let injected = snapshot.compiler_prefix().injected_modules();
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = run_checked_item(
+            TurnRequest {
+                exact_context: view.exact_declaration_context().cloned(),
+                session_id: Some(view.session()),
+                turn_text: first.source(),
+                templates: &templates,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                gen: reservation.generation().0,
+                verdict: Some(checked.items[0].verdict.clone()),
+                target: None,
+                retained_imports: &[],
+            },
+            reservation.clone(),
+        )
+        .unwrap()
+        else {
+            panic!("expected checked binding");
+        };
+        let module = tidepool_repr::SessionModule::val(reservation.generation());
+        let path = root.path().join(module.relative_hi_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        struct RestorePermissions(PathBuf, std::fs::Permissions);
+        impl Drop for RestorePermissions {
+            fn drop(&mut self) {
+                std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+            }
+        }
+        let restore = if write_failure {
+            if path.exists() {
+                std::fs::remove_file(&path).unwrap();
+            }
+            let parent = path.parent().unwrap().to_path_buf();
+            let original = std::fs::metadata(&parent).unwrap().permissions();
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+            Some(RestorePermissions(parent, original))
+        } else {
+            std::fs::write(&path, b"conflicting immutable interface").unwrap();
+            None
+        };
+        let before = prefix.snapshot();
+        let public_bindings = resident.workbench_bindings_in(public);
+        let outcome = resident.run_bind_with_sites(
+            "checkedPublication",
+            compiled.code(),
+            &bound[0],
+            reservation.generation(),
+        );
+        drop(restore);
+        let error = outcome.err().expect("interface publication must fail");
+        let ResidentError::Session(SessionError::Io(error)) = error else {
+            panic!("expected owning I/O refusal, got {error:?}");
+        };
+        assert_eq!(
+            error.kind(),
+            if write_failure {
+                std::io::ErrorKind::PermissionDenied
+            } else {
+                std::io::ErrorKind::InvalidData
+            }
+        );
+        assert!(Arc::ptr_eq(&before, &prefix.snapshot()));
+        assert!(resident.state.retained_value_interface(module).is_none());
+        assert_eq!(resident.workbench_bindings_in(public), public_bindings);
+        if write_failure {
+            assert!(!path.exists());
+        } else {
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                b"conflicting immutable interface"
+            );
+        }
+        let id = SessionVarId::from_extract(bound[0].var_id);
+        assert!(
+            resident.state.bindings().get(id).is_some(),
+            "failed publication still has private native custody"
+        );
+        drop(before);
+        drop(compiled);
+        drop(checked);
+        drop(first);
+        drop(reservation);
+        drop(prefix);
+        drop(execution);
+        resident.state.reap_admission_leases();
+        assert!(
+            resident.state.bindings().get(id).is_none(),
+            "last private lease release retires native binding"
+        );
+    }
+
     fn startup_session() -> (tempfile::TempDir, TestSession) {
         let root = tempfile::tempdir().unwrap();
         let library =

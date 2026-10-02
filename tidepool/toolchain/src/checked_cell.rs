@@ -422,6 +422,48 @@ pub struct CheckedValueArtifact {
     authority: Option<([u8; 32], [u8; 32])>,
 }
 
+/// The exact checked interface bytes named by one compiler authorization.
+/// This permits their imports without making other hydrated owners lexical.
+#[derive(Clone, Default)]
+pub(crate) struct CheckedValueImportAuthority {
+    values: Arc<BTreeMap<String, (Arc<[u8]>, String, std::path::PathBuf)>>,
+}
+
+impl CheckedValueImportAuthority {
+    fn capture<'a>(values: impl Iterator<Item = &'a CheckedValueArtifact>) -> Self {
+        Self {
+            values: Arc::new(
+                values
+                    .map(|artifact| {
+                        (
+                            artifact.module.clone(),
+                            (
+                                artifact.bytes.clone(),
+                                artifact.digest.clone(),
+                                artifact.path.clone(),
+                            ),
+                        )
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    pub(crate) fn owners(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.values.keys().map(|module| ("main", module.as_str()))
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), CompileError> {
+        for (bytes, digest, path) in self.values.values() {
+            let observed = read(path, 32 * 1024 * 1024)?;
+            if hash(&observed) != *digest || observed.as_slice() != bytes.as_ref() {
+                return Err(failure("checked value import interface changed"));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl CheckedValueInputs {
     pub(crate) fn capture(
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
@@ -474,6 +516,10 @@ impl CheckedValueInputs {
                 .map(|artifact| artifact.authorization())
                 .collect(),
         )
+    }
+
+    pub(crate) fn import_authority(&self) -> CheckedValueImportAuthority {
+        CheckedValueImportAuthority::capture(self.baseline.iter().map(AsRef::as_ref))
     }
 
     pub(crate) fn retain_diagnostics(
@@ -1465,6 +1511,12 @@ impl ExactCompiledPrefix {
                 .into_values()
                 .map(CheckedValueArtifact::authorization)
                 .collect(),
+        ))
+    }
+
+    pub(crate) fn import_authority(&self) -> Result<CheckedValueImportAuthority, CompileError> {
+        Ok(CheckedValueImportAuthority::capture(
+            self.value_artifacts()?.into_values(),
         ))
     }
     pub(crate) fn prepared_value_selection(&self) -> Result<CheckedSettledValues, CompileError> {

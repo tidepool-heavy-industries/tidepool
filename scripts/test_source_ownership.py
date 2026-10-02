@@ -38,6 +38,7 @@ TEST_ONLY_SOURCES = {
         'tidepool/runtime/src/session/exact_recovery_acceptance_tests.rs',
         'tidepool/runtime/src/session/fixtures/checked-failed-display-cell.hs',
         'tidepool/runtime/src/session/fixtures/checked-fold-outcome-template.hs',
+        'tidepool/runtime/src/session/fixtures/checked-interface-publication.hs',
         'tidepool/runtime/src/session/fixtures/checked-interleaved-declaration.hs',
         'tidepool/runtime/src/session/fixtures/checked-local-declaration.hs',
         'tidepool/runtime/src/session/fixtures/checked-search-alternate.hs',

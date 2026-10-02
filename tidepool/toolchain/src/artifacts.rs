@@ -654,11 +654,23 @@ impl ModuleCandidateOffer {
             )?,
             producer: producer.to_vec(),
             include: include.to_vec(),
-            exact: Some(context.prepare_compilation_with_authorization(
-                &scratch.join("exact-scope"),
-                producer,
-                Some(authorization),
-            )?),
+            exact: Some(
+                context
+                    .prepare_compilation_with_authorization(
+                        &scratch.join("exact-scope"),
+                        producer,
+                        Some(authorization),
+                    )?
+                    .with_checked_value_imports(checked_values.import_authority())
+                    .with_generated_scaffold_imports(
+                        std::iter::once(specification.template_source.as_str()).chain(
+                            specification
+                                .turn_templates
+                                .iter()
+                                .map(|(_, source)| source.as_str()),
+                        ),
+                    ),
+            ),
             checked_cell: Some(specification),
             planned_cell: None,
             checked_values: Some(checked_values),
@@ -718,11 +730,23 @@ impl ModuleCandidateOffer {
             )?,
             producer: producer.to_vec(),
             include: include.to_vec(),
-            exact: Some(context.prepare_compilation_with_authorization(
-                &scratch.join("exact-scope"),
-                producer,
-                Some(authorization),
-            )?),
+            exact: Some(
+                context
+                    .prepare_compilation_with_authorization(
+                        &scratch.join("exact-scope"),
+                        producer,
+                        Some(authorization),
+                    )?
+                    .with_checked_value_imports(inputs.import_authority())
+                    .with_generated_scaffold_imports(
+                        std::iter::once(specification.template_source.as_str()).chain(
+                            specification
+                                .turn_templates
+                                .iter()
+                                .map(|(_, source)| source.as_str()),
+                        ),
+                    ),
+            ),
             checked_cell: Some(specification),
             planned_cell: Some(planned),
             checked_values: Some(inputs),
@@ -801,7 +825,17 @@ impl ModuleCandidateOffer {
             selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
-            exact: Some(exact),
+            exact: Some(
+                exact
+                    .with_checked_value_imports(checked_item.prefix.import_authority()?)
+                    .with_generated_scaffold_imports(
+                        checked_item
+                            .item
+                            .turn_templates()
+                            .iter()
+                            .map(|(_, source)| source.as_str()),
+                    ),
+            ),
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
@@ -884,7 +918,18 @@ impl ModuleCandidateOffer {
             selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
-            exact: Some(exact),
+            exact: Some(
+                exact
+                    .with_checked_value_imports(display.prefix.import_authority()?)
+                    .with_generated_scaffold_imports(
+                        display
+                            .capture
+                            .item()
+                            .turn_templates()
+                            .iter()
+                            .map(|(_, source)| source.as_str()),
+                    ),
+            ),
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
@@ -2729,6 +2774,11 @@ fn retain_failed_compiler_artifacts(
     std::fs::create_dir_all(&retained_root)?;
     let retained = TempDir::new_in(&retained_root)?;
     if let Some(offer) = offer {
+        if let Some(selected) = &offer.selected {
+            if let Err(failure) = selected.retain_evidence_diagnostics(retained.path()) {
+                tracing::warn!(%failure, "could not retain original selected candidate evidence");
+            }
+        }
         if let Err(failure) = offer.retain_checked_inputs(retained.path()) {
             tracing::warn!(%failure, "could not retain selected checked input diagnostics");
         }

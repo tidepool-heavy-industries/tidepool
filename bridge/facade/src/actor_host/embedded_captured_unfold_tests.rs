@@ -547,23 +547,39 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         "[captured-engine] two child provider branches ready while exact parent claim is pending"
     );
     transport.reply_children.send_replace(true);
+    // Observe each admitted child's terminal reply before waiting for the parent:
+    // a rejected child cell cannot deliver the typed response the parent awaits.
+    let mut replied = std::collections::HashSet::new();
+    tokio::time::timeout(TYPED_CHILD_REPLY_SETTLEMENT_BUDGET, async {
+        while replied.len() < sessions.len() {
+            let operation = parent_settlements
+                .recv()
+                .await
+                .expect("child settlement observer");
+            if sessions.contains(&operation.origin)
+                && operation.call.0 == format!("captured-child-{}", operation.origin.actor().0)
+            {
+                let reply =
+                    embedded_operation(&runtime, &operation, TYPED_CHILD_REPLY_SETTLEMENT_BUDGET)
+                        .await
+                        .unwrap_or_else(|cause| {
+                            panic!(
+                        "captured child cell rejected before typed reply: {operation:?}: {cause}"
+                    )
+                        });
+                assert_eq!(reply["status"], "replied", "{reply}");
+                assert!(replied.insert(operation.origin));
+            }
+        }
+    })
+    .await
+    .expect("both captured child operations settle");
     let result = embedded_operation(
         &runtime,
         &transport.operation(&root_origin, PENDING_CALL),
         COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
     )
     .await;
-    for origin in &sessions {
-        let call = format!("captured-child-{}", origin.actor().0);
-        let reply = embedded_operation(
-            &runtime,
-            &transport.operation(origin, &call),
-            TYPED_CHILD_REPLY_SETTLEMENT_BUDGET,
-        )
-        .await
-        .unwrap();
-        assert_eq!(reply["status"], "replied", "{reply}");
-    }
     match scenario {
         CapturedScenario::Success => assert_committed_haskell_value(&result.unwrap(), "True"),
         CapturedScenario::FailureAfterReplies => {
@@ -574,11 +590,56 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
                 failure.contains("intentional captured parent Haskell execution failure"),
                 "{failure}"
             );
-            assert!(campaign.actor.terminal().get().is_none(),
-                "the fixture fails a cell while its parent actor remains live");
+            assert!(
+                campaign.actor.terminal().get().is_none(),
+                "the fixture fails a cell while its parent actor remains live"
+            );
             eprintln!(
                 "[captured-engine] actual parent execution failed after both typed child replies"
             );
+            // Capturing a completed prefix retains it for children without
+            // publishing the failed cell's private names into its parent.
+            let policy = campaign.root_installation.policy.clone();
+            let public_names = tokio::time::timeout(
+                COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                policy.dispatch_boxed(preflight_invocation(
+                    "captured-parent-public-probe",
+                    "captured-parent-public-probe",
+                    "(x, getX)".into(),
+                )),
+            )
+            .await
+            .expect("earlier parent public names remain readable within the cell budget")
+            .expect("earlier parent public names remain installed");
+            assert_committed_haskell_value(&public_names, "(41, 42)");
+            for name in ["capturedValue", "capturedGetter"] {
+                let private_name = tokio::time::timeout(
+                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                    policy.dispatch_boxed(preflight_invocation(
+                        &format!("captured-parent-private-probe-{name}"),
+                        &format!("captured-parent-private-probe-{name}"),
+                        format!("{name} :: Int"),
+                    )),
+                )
+                .await
+                .expect("failed-cell private name probe settles within the cell budget")
+                .expect("a missing private name returns a compile rejection");
+                assert_preflight_rejection(&private_name);
+                assert!(
+                    private_name["items"].as_array().unwrap().iter().any(|item| {
+                        item["diagnostics"].as_array().is_some_and(|diagnostics| {
+                            diagnostics.iter().any(|diagnostic| {
+                                diagnostic["severity"] == "error"
+                                    && diagnostic["message"].as_str().is_some_and(|message| {
+                                        message.contains(name)
+                                            && message.to_ascii_lowercase().contains("not in scope")
+                                    })
+                            })
+                        })
+                    }),
+                    "failed cell leaked {name}, or its probe failed for an unrelated reason: {private_name}"
+                );
+            }
             transport.parent_failed.send_replace(true);
             let mut retained = std::collections::HashSet::new();
             for _ in 0..2 {

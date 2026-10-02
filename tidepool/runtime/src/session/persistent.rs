@@ -342,10 +342,43 @@ impl PersistentSession {
     ) -> Result<(), SessionError> {
         if !interface.is_checked_output()
             || interface.owner() != SessionModule::val(interface.owner().gen())
-            || !self.binding_index.retain_value_interface(interface)
+            || !self.binding_index.accepts_value_interface(&interface)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        if self
+            .binding_index
+            .is_module_live(&interface.owner().module_name())
+        {
+            if let Some(lib) = &self.lib {
+                // Ordinary startup compilation reads the session include tree.
+                // Publish the original checked bytes before committing retention.
+                let path = lib.root.join(interface.owner().relative_hi_path());
+                match std::fs::read(&path) {
+                    Ok(existing) if existing.as_slice() == interface.bytes_owned().as_ref() => {}
+                    Ok(_) => {
+                        return Err(SessionError::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "original checked interface conflicts with {}",
+                                path.display()
+                            ),
+                        )))
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        std::fs::create_dir_all(path.parent().expect("session interface parent"))?;
+                        tidepool_atomic_write::write_best_effort(&path, interface.bytes_owned())
+                            .map_err(|error| SessionError::Io(error.source))?;
+                    }
+                    Err(error) => return Err(SessionError::Io(error)),
+                }
+            }
+        }
+        let retained = self.binding_index.retain_value_interface(interface);
+        debug_assert!(
+            retained,
+            "interface retention was checked before publication"
+        );
         Ok(())
     }
 

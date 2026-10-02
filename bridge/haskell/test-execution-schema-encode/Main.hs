@@ -5,7 +5,7 @@ import Codec.CBOR.Encoding (encodeListLen, encodeString)
 import Codec.CBOR.Term (Term(..), decodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (bracket)
-import Control.Monad (unless)
+import Control.Monad (forM_, unless)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Text qualified as T
@@ -37,30 +37,33 @@ candidateManifestChecks = do
             <> encodeString "/tmp/Fixture.hi.packages" <> encodeString digest
             <> encodeString productPath
           manifest version items = toStrictByteString
-            (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString version
-              <> encodeListLen (fromIntegral (length items)) <> mconcat items)
+            (encodeListLen 6 <> encodeString "TPMCAN" <> encodeString version
+              <> encodeListLen 0 <> encodeListLen 0
+              <> encodeListLen (fromIntegral (length items)) <> mconcat items
+              <> encodeListLen 2 <> encodeListLen 0 <> encodeListLen 0)
       let validCandidate = candidate "/tmp/Fixture.hs" "/tmp/Fixture.tpmod"
-      BS.writeFile path (manifest "6" [validCandidate])
+      BS.writeFile path (manifest "8" [validCandidate])
       valid <- readModuleCandidates path
       assert (case valid of Right [_] -> True; _ -> False)
         "bounded module candidate manifest did not decode"
-      BS.writeFile path (manifest "5" [validCandidate])
-      old <- readModuleCandidates path
-      assert (case old of Left _ -> True; _ -> False)
-        "candidate manifest accepted the previous version"
-      BS.writeFile path (manifest "6" [candidate "/tmp/Fixture.hs" "relative.tpmod"])
+      forM_ ["6", "7"] $ \version -> do
+        BS.writeFile path (manifest version [validCandidate])
+        old <- readModuleCandidates path
+        assert (case old of Left _ -> True; _ -> False)
+          "candidate manifest accepted an unsupported version"
+      BS.writeFile path (manifest "8" [candidate "/tmp/Fixture.hs" "relative.tpmod"])
       relativeProduct <- readModuleCandidates path
       assert (case relativeProduct of Left _ -> True; _ -> False)
         "candidate manifest accepted a relative original product path"
-      BS.writeFile path (BS.snoc (manifest "6" [validCandidate]) 0)
+      BS.writeFile path (BS.snoc (manifest "8" [validCandidate]) 0)
       trailing <- readModuleCandidates path
       assert (case trailing of Left _ -> True; _ -> False)
         "candidate manifest accepted trailing bytes"
-      BS.writeFile path (manifest "6" [validCandidate, validCandidate])
+      BS.writeFile path (manifest "8" [validCandidate, validCandidate])
       duplicate <- readModuleCandidates path
       assert (case duplicate of Left _ -> True; _ -> False)
         "candidate manifest accepted duplicate owners"
-      BS.writeFile path (manifest "6" [candidate "relative.hs" "/tmp/Fixture.tpmod"])
+      BS.writeFile path (manifest "8" [candidate "relative.hs" "/tmp/Fixture.tpmod"])
       relative <- readModuleCandidates path
       assert (case relative of Left _ -> True; _ -> False)
         "candidate manifest accepted a relative source path")
