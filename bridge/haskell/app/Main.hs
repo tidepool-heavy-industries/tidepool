@@ -43,11 +43,11 @@ import qualified Data.Text.Encoding as TE
 
 import Tidepool.Binders
   ( extractBindersNamed
-  , extractStmtBinders, classifyBlock, exportItemName
+  , classifyWithFlags, classifyBlock, exportItemName, defaultParserDynFlags
   , analyzeCell, analyzeOrderedCell, cellInferenceSegments, renderCellCheckSource, CellSplitError(..), CellSourceSpan(..)
   , CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), BoundBinder(..),
     SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ExpressionLiftPlan(..), ExpressionPresentation(..), installCellDisplayDeclarations
-  , declarationSourceWithTemplate, renderDeclarationForTemplate
+  , declarationSourceWithTemplateFlags, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
   , StmtBinders(..), TurnOut(..), renderAskJson, renderVerdictsJson
@@ -930,8 +930,7 @@ reportRecoveryResiduals target failures =
 -- 'mkBoundBinders', no thin-iface write): it runs for effect and discards,
 -- so it reaches 'TBind' with empty binders and an empty bound-binder list,
 -- same shape a caller already handles for any other zero-binder bind.
-runTurnMode
-  :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
+runTurnMode :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
 runTurnMode compiler caches args path = do
   timing <- readTimingEnabled
   hPutStrLn stderr $ "Processing (turn): " ++ path
@@ -940,12 +939,19 @@ runTurnMode compiler caches args path = do
     turnSrc   <- readFile path
     let templates = requestTurnTemplates args
     mVerdict  <- traverse parseTurnVerdictArg (requestTurnVerdict args)
-    -- 'extractStmtBinders' emits no phases of its own. This mode times it as
-    -- the single @classify@ phase, emitted
+    parserFlags <- case mVerdict of
+      Nothing -> Just <$> defaultParserDynFlags
+      Just (StmtBinders { sbKind = KDecl }) -> Just <$> defaultParserDynFlags
+      Just _ -> pure Nothing
+    let requireParserFlags = maybe
+          (error "turn parser flags were not initialized") id parserFlags
+    -- The parse emits no phases of its own. This mode times it as the single
+    -- @classify@ phase, emitted
     -- only on the branch that actually classifies. With @--turn-verdict@
     -- supplied nothing is parsed, and an absent @classify@ row is the
     -- honest report rather than a phantom 0ms line.
-    sb        <- maybe (timePhase timing "classify" (extractStmtBinders turnSrc)) return mVerdict
+    sb        <- maybe (timePhase timing "classify"
+      (evaluate (classifyWithFlags requireParserFlags turnSrc))) return mVerdict
     exact <- traverse (\manifest -> readExactScope manifest >>= either fail pure) (requestSessionArtifacts args)
     let admittedItem = exact >>= scopeCheckedItem
     forM_ admittedItem $ \admission -> validateCheckedItemAdmission args admission turnSrc sb
@@ -964,7 +970,7 @@ runTurnMode compiler caches args path = do
           Just f  -> return f
           Nothing -> error "--turn: no --turn-template for kind decl"
         tmplSrc <- readFile tmplFile
-        declarationSource <- declarationSourceWithTemplate tmplSrc turnSrc
+        declarationSource <- declarationSourceWithTemplateFlags requireParserFlags tmplSrc turnSrc
           >>= either throwCellSplitError pure
         spliced <- either fail pure (renderDeclarationForTemplate tmplSrc declarationSource)
         (_spliced, modName, modulePath) <- writeSplicedModule outDir lastAttempt spliced
@@ -2357,7 +2363,7 @@ renderPinnedBinders binders pins
       ++ intercalate ", " [ checkedPinType pin | Just pin <- pins ] ++ ")" )
 
 -- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same
--- 'StmtBinders' shape 'extractStmtBinders' would have produced, so the rest of
+-- 'StmtBinders' shape 'classifyWithFlags' would have produced, so the rest of
 -- 'runTurnMode' never has to distinguish a supplied verdict from a parsed one.
 -- @kind@ goes through 'parseTurnKind', which fails loudly (caught by this
 -- mode's surrounding @try@, same as any other extraction failure) on

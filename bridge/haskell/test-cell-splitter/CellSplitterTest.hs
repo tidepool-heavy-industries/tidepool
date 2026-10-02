@@ -88,11 +88,22 @@ runAllTests = do
       noStandaloneDerivingLeavesCellUntouched flags
       danglingOperatorCells flags
       multilineLetPlacement flags
+  requestOwnedParserDefaults
   orderedInferenceSegments
   interfaceMeasurementDiagnostics
   multilineLetCompilation
   renderNameErrorTeachesGroupPaths
   ambiguousOccurrenceHintCompilation
+
+requestOwnedParserDefaults :: IO ()
+requestOwnedParserDefaults = do
+  flags <- defaultParserDynFlags
+  declaration <- declarationSourceWithTemplateFlags flags checkTemplate
+    "import Data.List\nanswer = sort []\n"
+  case declaration of
+    Right source -> assertEqual "request-owned parser defaults imports" 1
+      (length (prologueImports (declarationPrologue source)))
+    Left failure -> fail ("request-owned parser defaults: " ++ renderCellSplitError failure)
   getArgs >>= \case
     [] -> pure ()
     ["--metadata"] -> metadataCompilation
