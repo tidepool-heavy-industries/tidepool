@@ -7435,7 +7435,8 @@ where
             )
         })?;
         self.access.with_machine(context, move |session, context, _| {
-            let commit = session.publish_durable_public_bootstrap(bootstrap)?;
+            let commit = session.publish_durable_public_bootstrap(bootstrap)
+                .map_err(ResidentError::Session)?;
             match commit {
                 tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { detail } => {
                     match session.confirm_durable_public_scope(&durable, context.placement.lexical_scope) {
