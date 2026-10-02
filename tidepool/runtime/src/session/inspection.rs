@@ -1684,7 +1684,8 @@ mod tests {
     fn info_lookup_with_effect_row_imports_its_generated_qualified_names() {
         eval_harness::require_extract();
         let session = tempfile::tempdir().unwrap();
-        let effects_include = eval_harness::effects_include();
+        let mut effects_include = eval_harness::effects_include().to_vec();
+        effects_include.push(eval_harness::prelude_path());
         let include = effects_include
             .iter()
             .map(std::path::PathBuf::as_path)
