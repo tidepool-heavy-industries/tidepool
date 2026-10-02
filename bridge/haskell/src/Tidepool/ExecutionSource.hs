@@ -4,7 +4,7 @@
 -- never authorize a lexical import or replace a retained native interface.
 module Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
-  , ExecutionSourceRef(..), decodeExecutionSources, executionIdentityKey
+  , ExecutionSourceRef(..), decodeExecutionSources, decodeExecutionSourceGraph, decodeExecutionSourceReferences, executionIdentityKey
   , ExecutionSourceNode(..), ExecutionSourceFailure(..), executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure
   , ExecutionSourceRecipe(..), issueExecutionSourceRecipe
   , executionSourceProspectiveReferences
@@ -383,16 +383,26 @@ decodeExecutionSources = do
     array 2
     sha <- digestField
     bytes <- decodeBytes
-    unless (digest bytes == sha) (fail "original execution graph digest differs")
-    case deserialiseFromBytes (decodeGraph sha bytes) (BL.fromStrict bytes) of
-      Left reason -> fail (show reason)
-      Right (remaining, graph)
-        | BL.null remaining -> pure graph
-        | otherwise -> fail "original execution graph has trailing bytes"
-  references <- bounded 4096 (array 6 >> ExecutionSourceRef <$> identity <*> digestField)
+    either fail pure (decodeExecutionSourceGraph sha bytes)
+  references <- decodeExecutionSourceReferences
   unique "original execution graphs" (map executionGraphSha256 graphs)
-  unique "original execution references" (map (executionIdentityKey . executionRefIdentity) references)
   pure (graphs, references)
+
+-- Both candidate parcels and exact-scope graph files consume the same bytes.
+decodeExecutionSourceGraph :: String -> BS.ByteString -> Either String ExecutionSourceGraph
+decodeExecutionSourceGraph sha bytes
+  | digest bytes /= sha = Left "original execution graph digest differs"
+  | otherwise = case deserialiseFromBytes (decodeGraph sha bytes) (BL.fromStrict bytes) of
+      Left reason -> Left (show reason)
+      Right (remaining, graph)
+        | BL.null remaining -> Right graph
+        | otherwise -> Left "original execution graph has trailing bytes"
+
+decodeExecutionSourceReferences :: Decoder s [ExecutionSourceRef]
+decodeExecutionSourceReferences = do
+  references <- bounded 4096 (array 6 >> ExecutionSourceRef <$> identity <*> digestField)
+  unique "original execution references" (map (executionIdentityKey . executionRefIdentity) references)
+  pure references
 
 decodeGraph :: String -> BS.ByteString -> Decoder s ExecutionSourceGraph
 decodeGraph sha bytes = do

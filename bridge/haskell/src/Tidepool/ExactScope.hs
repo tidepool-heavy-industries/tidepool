@@ -15,7 +15,7 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import qualified Codec.CBOR.Encoding as E
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (IOException, try, throwIO)
-import Control.Monad (foldM, forM_, replicateM, unless, when)
+import Control.Monad (foldM, forM, forM_, replicateM, unless, when)
 import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
@@ -29,6 +29,7 @@ import Data.Word (Word64)
 import Numeric (showHex)
 import System.Directory (getFileSize, createDirectory, createDirectoryIfMissing, makeAbsolute)
 import System.FilePath (isAbsolute, takeDirectory, (</>))
+import System.IO (IOMode(ReadMode), withBinaryFile)
 import System.IO.Error (isAlreadyExistsError)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
@@ -37,7 +38,7 @@ import Tidepool.CheckedCell (CheckedSignature(..), CheckedSignatureName(..))
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
-  , ExecutionSourceRef(..), ExecutionSourceNode(..), decodeExecutionSources
+  , ExecutionSourceRef(..), ExecutionSourceNode(..), decodeExecutionSourceGraph, decodeExecutionSourceReferences
   , ExecutionSourceFailure(..), executionIdentityKey, executionSourceClosure, executionSourceOriginalNode
   , executionSourceOriginalClosure )
 import Tidepool.PackageWitness
@@ -248,22 +249,57 @@ scopeValueInterfaces scope =
     ++ maybe [] itemValueInterfaces (scopeCheckedItem scope)
     ++ maybe [] displayValueInterfaces (scopeCheckedDisplay scope)
 
+-- Scope v6 separates the bounded metadata envelope from the independently
+-- bounded original graph bytes. The request hash seals each path and digest.
 readExactScope :: FilePath -> IO (Either String ExactScope)
 readExactScope path = do
   captured <- try (do
     unless (isAbsolute path) (fail "exact scope path must be absolute")
-    size <- getFileSize path
-    when (size > 4 * 1024 * 1024) (fail "exact scope exceeds four MiB")
-    BS.readFile path)
-    :: IO (Either IOException BS.ByteString)
-  pure $ case captured of
-    Left failure -> Left (show failure)
-    Right bytes -> case deserialiseFromBytes decodeScope (BL.fromStrict bytes) of
-      Left failure -> Left (show failure)
-      Right (remaining, scope)
-        | BL.null remaining -> Right scope
-            { scopeManifestPath = path, scopeRequestSha256 = digest bytes }
-        | otherwise -> Left "exact scope has trailing bytes"
+    bytes <- readBoundedFile path (4 * 1024 * 1024)
+    (scope, descriptors) <- case deserialiseFromBytes decodeScope (BL.fromStrict bytes) of
+      Left failure -> fail (show failure)
+      Right (remaining, result)
+        | BL.null remaining -> pure result
+        | otherwise -> fail "exact scope has trailing bytes"
+    sizes <- forM descriptors $ \(_, graphPath) -> do
+      unless (takeDirectory graphPath == takeDirectory path)
+        (fail "original execution graph is outside its request directory")
+      getFileSize graphPath
+    when (sum sizes > 4 * 1024 * 1024)
+      (fail "original execution graphs exceed four MiB")
+    graphs <- forM (zip descriptors sizes) $ \((sha, graphPath), size) -> do
+      graphBytes <- readBoundedFile graphPath (fromIntegral size)
+      unless (toInteger (BS.length graphBytes) == size)
+        (fail "original execution graph size changed")
+      either fail pure (decodeExecutionSourceGraph sha graphBytes)
+    validateExecutionSources scope graphs
+    pure scope { scopeManifestPath = path, scopeRequestSha256 = digest bytes
+      , scopeExecutionGraphs = graphs }) :: IO (Either IOException ExactScope)
+  pure (either (Left . show) Right captured)
+
+-- A bounded read also closes the stat/read growth race without allocating an
+-- unbounded input. Graph sizes are summed before any graph is captured.
+readBoundedFile :: FilePath -> Int -> IO BS.ByteString
+readBoundedFile path limit = withBinaryFile path ReadMode $ \handle -> do
+  bytes <- BS.hGet handle (limit + 1)
+  when (BS.length bytes > limit) (fail "exact scope artifact exceeds its byte bound")
+  pure bytes
+
+validateExecutionSources :: ExactScope -> [ExecutionSourceGraph] -> IO ()
+validateExecutionSources scope graphs = do
+  forM_ graphs $ \graph -> unless (executionGraphProducer graph == scopeProducerSha256 scope)
+    (fail "original execution graph has another compiler producer")
+  forM_ (scopeExecutionOwners scope) $ \reference -> do
+    let original = executionRefIdentity reference
+        matchingProduct product' = originalUnit product' == executionUnit original
+          && originalModule product' == executionModule original
+          && originalVersion product' == executionVersion original
+          && originalIfaceSha256 product' == executionIfaceSha256 original
+          && originalProductSha256 product' == executionNativeSha256 original
+        matchingGraph graph = executionGraphSha256 graph == executionRefGraph reference
+          && any ((== original) . executionOwnerIdentity) (executionGraphOwners graph)
+    unless (any matchingProduct (scopeProducts scope) && any matchingGraph graphs)
+      (fail "original execution reference leaves its admitted native owner")
 
 -- Recheck the entire producer-owned closure in the consuming transaction;
 -- no source file is a substitute for an admitted original interface.
@@ -342,14 +378,14 @@ reserveCompilationDirectory parent transaction = attempt (0 :: Int)
             Left failure | isAlreadyExistsError failure -> attempt (ordinal + 1)
             Left failure -> throwIO failure
 
-decodeScope :: Decoder s ExactScope
+decodeScope :: Decoder s (ExactScope, [(String, FilePath)])
 decodeScope = do
   count <- decodeListLen
   magic <- string
   version <- string
   unless (magic == "TPEXACTSCOPE"
       && ((version == "2" && count == 7) || (version == "4" && count == 8)
-        || (version == "5" && count == 9)))
+        || (version == "6" && count == 9)))
     (fail "unsupported exact scope")
   semantic <- digestField
   producer <- digestField
@@ -400,21 +436,14 @@ decodeScope = do
           (exactUnit iface, exactModule iface) == (originalUnit originalProduct, originalModule originalProduct)
           && exactSha256 iface == originalIfaceSha256 originalProduct) interfaces) products)
     (fail "incomplete or conflicting exact owner closure")
-  (executionGraphs, executionOwners) <- if version == "5" then decodeExecutionSources else pure ([], [])
-  forM_ executionGraphs $ \graph -> unless (executionGraphProducer graph == producer)
-    (fail "original execution graph has another compiler producer")
-  forM_ executionOwners $ \reference -> do
-    let original = executionRefIdentity reference
-        matchingProduct product' = originalUnit product' == executionUnit original
-          && originalModule product' == executionModule original
-          && originalVersion product' == executionVersion original
-          && originalIfaceSha256 product' == executionIfaceSha256 original
-          && originalProductSha256 product' == executionNativeSha256 original
-        matchingGraph graph = executionGraphSha256 graph == executionRefGraph reference
-          && any ((== original) . executionOwnerIdentity) (executionGraphOwners graph)
-    unless (any matchingProduct products && any matchingGraph executionGraphs)
-      (fail "original execution reference leaves its admitted native owner")
-  nullPurpose <- if version == "5" then (== TypeNull) <$> peekTokenType else pure False
+  (descriptors, executionOwners) <- if version == "6" then do
+    array 2
+    graphs <- bounded 4096 (array 2 >> (,) <$> digestField <*> absolute)
+    references <- decodeExecutionSourceReferences
+    unique "original execution graphs" (map fst graphs)
+    pure (graphs, references)
+    else pure ([], [])
+  nullPurpose <- if version == "6" then (== TypeNull) <$> peekTokenType else pure False
   (checked, checkedItem, checkedDisplay, includes) <- if version == "2" || nullPurpose
     then do
       when nullPurpose decodeNull
@@ -526,8 +555,8 @@ decodeScope = do
         paths <- includePaths
         pure (Nothing,Nothing,Just admission,Just paths)
       _ -> fail "unsupported exact compile purpose"
-  pure (ExactScope "" "" producer semantic interfaces lexical products executionGraphs executionOwners
-    checked checkedItem checkedDisplay includes)
+  pure (ExactScope "" "" producer semantic interfaces lexical products [] executionOwners
+    checked checkedItem checkedDisplay includes, descriptors)
   where
     includePaths = bounded 4096 $ do
       path <- absolute
