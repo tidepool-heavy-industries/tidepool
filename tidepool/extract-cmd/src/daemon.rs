@@ -1836,17 +1836,89 @@ fn boot_epoch() -> Result<[u8; 32], FrontendError> {
     Ok(epoch)
 }
 
-pub(crate) fn direct_build_products_namespace() -> Result<std::path::PathBuf, FrontendError> {
-    Ok(std::path::PathBuf::from(format!("direct-{}", hex(&boot_epoch()?))).join("0"))
+#[derive(Clone, Copy)]
+enum BuildProductsTransport {
+    Direct,
+    Daemon,
 }
 
-pub(crate) fn place_build_products(
-    argv: &[OsString],
-    namespace: &Path,
-) -> Result<Vec<OsString>, FrontendError> {
-    let mut request = ExtractRequest::decode_worker_argv(argv)?;
-    request.place_build_products(namespace);
-    Ok(request.worker_argv())
+/// Mutable output ownership follows the process owner, across reaped rotations.
+/// Only the generated slot directories are reclaimed; logical roots and other
+/// slots remain intact. An ungraceful frontend/daemon death can leave orphans.
+pub(crate) struct BuildProductsNamespace {
+    path: std::path::PathBuf,
+    transport: BuildProductsTransport,
+    directories: std::collections::BTreeSet<std::path::PathBuf>,
+}
+
+impl BuildProductsNamespace {
+    fn new(path: std::path::PathBuf, transport: BuildProductsTransport) -> Self {
+        Self {
+            path,
+            transport,
+            directories: Default::default(),
+        }
+    }
+
+    pub(crate) fn direct() -> Result<Self, FrontendError> {
+        Ok(Self::new(
+            std::path::PathBuf::from(format!("direct-{}", hex(&boot_epoch()?))).join("0"),
+            BuildProductsTransport::Direct,
+        ))
+    }
+
+    pub(crate) fn place(
+        &mut self,
+        cwd: &Path,
+        argv: &[OsString],
+    ) -> Result<(Vec<OsString>, Vec<u8>), FrontendError> {
+        let mut request = ExtractRequest::decode_worker_argv(argv)?;
+        let mut diagnostics = Vec::new();
+        for (logical, physical) in request.place_build_products(&self.path) {
+            self.directories.insert(if physical.is_absolute() {
+                physical.clone()
+            } else {
+                cwd.join(&physical)
+            });
+            if matches!(self.transport, BuildProductsTransport::Direct) {
+                let line = format!(
+                    "tidepool-build-products logical_root={logical:?} physical_dir={physical:?}\n"
+                );
+                diagnostics.extend_from_slice(line.as_bytes());
+            }
+        }
+        Ok((request.worker_argv(), diagnostics))
+    }
+
+    /// Called only after the last owning child was reaped. Slot replacements
+    /// transfer this ownership instead of cleaning their warm products.
+    pub(crate) fn cleanup(&mut self) {
+        for directory in std::mem::take(&mut self.directories) {
+            match fs::remove_dir_all(&directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(path = %directory.display(), %error, "failed to remove compiler scratch products");
+                    continue;
+                }
+            }
+            if let Some(epoch_directory) = directory.parent() {
+                // Other live slots may still own siblings. Remove only an
+                // empty epoch directory, never the caller's logical root.
+                match fs::remove_dir(epoch_directory) {
+                    Ok(()) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+                        ) => {}
+                    Err(error) => {
+                        tracing::warn!(path = %epoch_directory.display(), %error, "failed to remove empty compiler scratch namespace")
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Owns only the socket inode created by this bind, under an advisory lock
@@ -2085,17 +2157,21 @@ pub(crate) fn write_response(
     stdout: &[u8],
     stderr: &[u8],
 ) -> Result<(), FrontendError> {
-    let total = stdout.len() as u64 + stderr.len() as u64;
+    check_response_size(stdout.len() as u64 + stderr.len() as u64)?;
+    let mut response = code.to_le_bytes().to_vec();
+    push_frame(&mut response, stdout);
+    push_frame(&mut response, stderr);
+    stream.write_all(&response).map_err(FrontendError::Io)
+}
+
+fn check_response_size(total: u64) -> Result<(), FrontendError> {
     if total > u64::from(MAX_RESPONSE_PAYLOAD_BYTES) {
         return Err(daemon_frontend_error(DaemonError::ResponseTooLarge {
             declared: total,
             remaining: u64::from(MAX_RESPONSE_PAYLOAD_BYTES),
         }));
     }
-    let mut response = code.to_le_bytes().to_vec();
-    push_frame(&mut response, stdout);
-    push_frame(&mut response, stderr);
-    stream.write_all(&response).map_err(FrontendError::Io)
+    Ok(())
 }
 
 fn write_rejected(stream: &mut impl Write, message: &str) -> Result<(), FrontendError> {
@@ -2223,12 +2299,12 @@ pub(crate) struct Worker {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: ChildStdout,
-    build_products_namespace: std::path::PathBuf,
+    build_products_namespace: BuildProductsNamespace,
 }
 
 impl Worker {
     pub(crate) fn spawn(prepared: &PreparedWorker) -> Result<Self, FrontendError> {
-        Self::spawn_in_namespace(prepared, direct_build_products_namespace()?)
+        Self::spawn_in_namespace(prepared, BuildProductsNamespace::direct()?)
     }
 
     fn spawn_in_slot(
@@ -2238,12 +2314,15 @@ impl Worker {
     ) -> Result<Self, FrontendError> {
         let namespace =
             std::path::PathBuf::from(format!("daemon-{}", hex(epoch))).join(slot.to_string());
-        Self::spawn_in_namespace(prepared, namespace)
+        Self::spawn_in_namespace(
+            prepared,
+            BuildProductsNamespace::new(namespace, BuildProductsTransport::Daemon),
+        )
     }
 
     fn spawn_in_namespace(
         prepared: &PreparedWorker,
-        build_products_namespace: std::path::PathBuf,
+        build_products_namespace: BuildProductsNamespace,
     ) -> Result<Self, FrontendError> {
         let mut command = prepared.command();
         command
@@ -2277,7 +2356,16 @@ impl Worker {
                 "cannot reuse compiler build products before worker is reaped".to_owned(),
             ));
         }
-        *self = Self::spawn_in_namespace(prepared, self.build_products_namespace.clone())?;
+        let mut replacement = Self::spawn_in_namespace(
+            prepared,
+            BuildProductsNamespace::new(
+                self.build_products_namespace.path.clone(),
+                self.build_products_namespace.transport,
+            ),
+        )?;
+        replacement.build_products_namespace.directories =
+            std::mem::take(&mut self.build_products_namespace.directories);
+        *self = replacement;
         Ok(())
     }
 
@@ -2303,7 +2391,8 @@ impl Worker {
         cwd: &Path,
         argv: &[OsString],
     ) -> Result<(i32, Vec<u8>, Vec<u8>), FrontendError> {
-        let worker_argv = place_build_products(argv, &self.build_products_namespace)?;
+        let (worker_argv, placement_diagnostics) =
+            self.build_products_namespace.place(cwd, argv)?;
         let bytes = encode_request(cwd, &worker_argv);
         let stdin = self
             .stdin
@@ -2314,7 +2403,17 @@ impl Worker {
             .map_err(FrontendError::Io)?;
         stdin.write_all(&bytes).map_err(FrontendError::Io)?;
         stdin.flush().map_err(FrontendError::Io)?;
-        decode_response(&mut self.stdout).map_err(daemon_frontend_error)
+        let (code, stdout, stderr) =
+            decode_response(&mut self.stdout).map_err(daemon_frontend_error)?;
+        if placement_diagnostics.is_empty() {
+            return Ok((code, stdout, stderr));
+        }
+        check_response_size(
+            stdout.len() as u64 + stderr.len() as u64 + placement_diagnostics.len() as u64,
+        )?;
+        let mut combined_stderr = placement_diagnostics;
+        combined_stderr.extend_from_slice(&stderr);
+        Ok((code, stdout, combined_stderr))
     }
 
     fn begin_transaction_while_connected(
@@ -2468,6 +2567,22 @@ impl Worker {
     }
 }
 
+impl Drop for Worker {
+    fn drop(&mut self) {
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            self.abort();
+        }
+        if matches!(self.child.try_wait(), Ok(Some(_))) {
+            self.build_products_namespace.cleanup();
+        } else {
+            tracing::warn!(
+                worker_pid = self.child.id(),
+                "retaining compiler scratch products because worker was not reaped"
+            );
+        }
+    }
+}
+
 /// A `PathBuf` from raw wire bytes — used only by the fake-daemon test
 /// harness (never on the hot path; every real caller builds `Path`/`PathBuf`
 /// from Rust-side values, never from decoded wire bytes).
@@ -2521,7 +2636,10 @@ mod tests {
         let (code, output, stderr) = worker.request(cwd, argv).unwrap();
         worker.end_transaction().unwrap();
         assert_eq!(code, 0);
-        assert!(stderr.is_empty());
+        assert!(String::from_utf8(stderr)
+            .unwrap()
+            .lines()
+            .all(crate::diagnostics::is_machine_stderr_line));
         String::from_utf8(output)
             .unwrap()
             .lines()
@@ -2609,13 +2727,60 @@ mod tests {
         let out_b = products_response(&mut second, dir.path(), &argv);
         assert_ne!(out_a[0], out_b[0]);
         assert_eq!(out_b[1], "");
-        let cli_namespace = direct_build_products_namespace().unwrap();
-        let cli = place_build_products(&argv, &cli_namespace).unwrap();
+        let mut cli_namespace = BuildProductsNamespace::direct().unwrap();
+        let (cli, diagnostic) = cli_namespace.place(dir.path(), &argv).unwrap();
         assert_ne!(cli, argv);
-        assert_ne!(cli_namespace, first.build_products_namespace);
-        assert_ne!(cli_namespace, second.build_products_namespace);
+        assert!(String::from_utf8(diagnostic)
+            .unwrap()
+            .starts_with("tidepool-build-products "));
+        assert_ne!(cli_namespace.path, first.build_products_namespace.path);
+        assert_ne!(cli_namespace.path, second.build_products_namespace.path);
         first.shutdown();
         second.shutdown();
+    }
+
+    #[test]
+    fn build_products_cleanup_reaps_owners_and_preserves_other_slots_and_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("products");
+        fs::create_dir(&root).unwrap();
+        let unrelated = root.join("caller-owned");
+        fs::write(&unrelated, "retain").unwrap();
+        let input = dir.path().join("Expr.hs");
+        fs::write(&input, "alpha").unwrap();
+        let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
+        let argv = products_request(&root, &input);
+        let mut first = Worker::spawn_in_slot(&prepared, &[0; 32], 0).unwrap();
+        let mut second = Worker::spawn_in_slot(&prepared, &[0; 32], 1).unwrap();
+        let out_a = products_response(&mut first, dir.path(), &argv);
+        let out_b = products_response(&mut second, dir.path(), &argv);
+        let pid_a = first.child.id();
+        drop(first); // Drop must kill/reap before removing owned scratch.
+        assert!(!Path::new(&out_a[0]).exists());
+        assert!(!Path::new(&format!("/proc/{pid_a}")).exists());
+        assert!(Path::new(&out_b[0]).join("Expr.hi").exists());
+        second.abort();
+        drop(second);
+        assert!(!Path::new(&out_b[0]).exists());
+        assert!(!Path::new(&out_a[0]).parent().unwrap().exists());
+        assert_eq!(fs::read_to_string(unrelated).unwrap(), "retain");
+        assert!(root.exists());
+
+        let mut direct = Worker::spawn(&prepared).unwrap();
+        // The same owner can receive relative roots and several logical roots.
+        let relative = products_request(Path::new("products"), &input);
+        let direct_out = products_response(&mut direct, dir.path(), &relative);
+        let other_root = dir.path().join("other-products");
+        let other_out = products_response(
+            &mut direct,
+            dir.path(),
+            &products_request(&other_root, &input),
+        );
+        direct.shutdown();
+        drop(direct);
+        assert!(!Path::new(&other_out[0]).exists());
+        assert!(!dir.path().join(&direct_out[0]).exists());
+        assert!(other_root.exists());
     }
 
     #[test]
@@ -3749,7 +3914,7 @@ tidepool-target phase=desugar module=Execute\n",
             child,
             stdin: Some(stdin),
             stdout,
-            build_products_namespace: direct_build_products_namespace().unwrap(),
+            build_products_namespace: BuildProductsNamespace::direct().unwrap(),
         };
         let (connection, client) = UnixStream::pair().unwrap();
         drop(client);
@@ -3804,7 +3969,7 @@ tidepool-target phase=desugar module=Execute\n",
             stdin: child.stdin.take(),
             stdout: child.stdout.take().unwrap(),
             child,
-            build_products_namespace: direct_build_products_namespace().unwrap(),
+            build_products_namespace: BuildProductsNamespace::direct().unwrap(),
         };
         let (connection, client) = UnixStream::pair().unwrap();
         let result =

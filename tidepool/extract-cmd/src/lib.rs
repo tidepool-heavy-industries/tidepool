@@ -584,6 +584,8 @@ impl ExtractCmd {
     /// Requests in one slot reuse validated interfaces; rotation reuses that
     /// placement only after the previous child is reaped. The logical root is
     /// retained in the artifact recipe, independently of physical placement.
+    /// Final process retirement removes its private scratch after reaping;
+    /// materialized caller artifacts and the logical root remain intact.
     pub fn build_products_dir(&mut self, dir: impl AsRef<OsStr>) -> &mut Self {
         self.request.build_products_dir(dir);
         self

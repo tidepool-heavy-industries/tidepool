@@ -44,6 +44,19 @@ fn compile(socket: Option<&Path>, input: &Path, out: &Path, products: &Path) -> 
     output
 }
 
+fn copy_products(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_products(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
 #[test]
 #[allow(
     clippy::disallowed_methods,
@@ -131,7 +144,10 @@ fn concurrent_same_module_products_match_direct_and_survive_rotation() {
     );
     for (i, input) in inputs.iter().enumerate() {
         let out = dir.path().join(format!("direct-{i}"));
-        compile(None, input, &out, &products);
+        let direct = compile(None, input, &out, &products);
+        assert!(String::from_utf8_lossy(&direct.stderr)
+            .lines()
+            .any(|line| line.starts_with("tidepool-build-products ")));
         assert_eq!(
             daemon_artifacts[i],
             fs::read(out.join("result.prepared.cbor")).unwrap()
@@ -149,6 +165,8 @@ fn concurrent_same_module_products_match_direct_and_survive_rotation() {
         daemon_artifacts[0],
         fs::read(dir.path().join("rotated/result.prepared.cbor")).unwrap()
     );
+    let products_snapshot = dir.path().join("products-before-stop");
+    copy_products(&products, &products_snapshot);
     let stop = Command::new(env!("CARGO_BIN_EXE_tidepool-extract"))
         .arg("--stop-daemon")
         .arg("--socket")
@@ -181,7 +199,12 @@ fn concurrent_same_module_products_match_direct_and_survive_rotation() {
         "rotation must retain its slot's directory"
     );
     for path in &physical {
-        assert!(Path::new(path).join("Expr.hi").is_file());
+        assert!(
+            !Path::new(path).exists(),
+            "retired daemon must reclaim its scratch"
+        );
+        let relative = Path::new(path).strip_prefix(&products).unwrap();
+        assert!(products_snapshot.join(relative).join("Expr.hi").is_file());
     }
     let prior = physical[..2]
         .iter()
@@ -191,23 +214,18 @@ fn concurrent_same_module_products_match_direct_and_survive_rotation() {
         placements[prior]["span"]["worker_pid"],
         placements[2]["span"]["worker_pid"]
     );
-    let direct_products: Vec<_> = fs::read_dir(&products)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("direct-")
-        })
-        .collect();
     assert_eq!(
-        direct_products.len(),
-        2,
-        "each direct invocation needs a fresh namespace"
+        fs::read_dir(&products).unwrap().count(),
+        0,
+        "all retired owners must reclaim their private namespaces"
     );
-    for path in direct_products {
-        assert!(path.join("0/Expr.hi").is_file());
+    // Certificates and prepared artifacts are materialized under each caller's
+    // outDir, and must remain usable after private compiler scratch is gone.
+    for (i, expected) in daemon_artifacts.iter().enumerate() {
+        assert_eq!(
+            expected,
+            &fs::read(dir.path().join(format!("daemon-{i}/result.prepared.cbor"))).unwrap()
+        );
     }
     for row in placements {
         assert_eq!(

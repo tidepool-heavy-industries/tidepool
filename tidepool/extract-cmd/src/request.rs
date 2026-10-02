@@ -509,7 +509,8 @@ impl ExtractRequest {
     /// Transport-owned placement of mutable GHC outputs. The caller's logical
     /// request remains the recipe and diagnostic identity; this clone is sent
     /// only to the worker that exclusively owns the namespace.
-    pub(crate) fn place_build_products(&mut self, namespace: &Path) {
+    pub(crate) fn place_build_products(&mut self, namespace: &Path) -> Vec<(PathBuf, PathBuf)> {
+        let mut placements = Vec::new();
         for field in &mut self.fields {
             if let Field::BuildProductsDir(root) = field {
                 let physical = Path::new(root).join(namespace);
@@ -518,9 +519,11 @@ impl ExtractRequest {
                     physical_build_products_dir = %physical.display(),
                     "compiler build products placed"
                 );
+                placements.push((PathBuf::from(&*root), physical.clone()));
                 *root = physical.into_os_string();
             }
         }
+        placements
     }
 
     pub(crate) fn module_candidates(&mut self, value: &Path) {

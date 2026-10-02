@@ -47,6 +47,17 @@ fn request(payload: &[u8]) -> Vec<u8> {
     .into_bytes()
 }
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--print-worker-request-flag") {
+        println!("--worker-request-v17");
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("--worker-request-v17") {
+        std::io::stdout()
+            .write_all(&request(args[2].as_bytes()))
+            .unwrap();
+        return;
+    }
     let mut stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut one = [0];
@@ -60,7 +71,8 @@ fn main() {
                 break;
             }
             assert_eq!(one, [1]);
-            let _cwd = frame(&mut stdin);
+            let cwd = String::from_utf8(frame(&mut stdin)).unwrap();
+            std::env::set_current_dir(cwd).unwrap();
             assert_eq!(u32(&mut stdin), 2);
             let _flag = frame(&mut stdin);
             let out = request(&frame(&mut stdin));

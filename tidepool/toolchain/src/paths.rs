@@ -154,7 +154,9 @@ pub fn eval_failure_log_path() -> PathBuf {
 /// can reuse GHC's validated interfaces. Daemon reboots and direct invocations
 /// start new namespaces, deliberately foregoing disk warmth across those
 /// boundaries so concurrent compilers never write the same module products.
-/// The immutable artifact cache remains shared independently.
+/// Final process retirement reclaims only its private scratch directories;
+/// ungraceful process death can leave orphans. The logical root and immutable
+/// artifact cache remain shared independently.
 pub fn build_products_dir(toolchain_fingerprint: &str) -> PathBuf {
     if let Some(d) = std::env::var_os("TIDEPOOL_BUILD_PRODUCTS_DIR") {
         return PathBuf::from(d);

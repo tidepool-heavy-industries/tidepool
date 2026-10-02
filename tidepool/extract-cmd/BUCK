@@ -91,6 +91,7 @@ rust_filegroup(
         "src/diagnostics_tests.rs": "tidepool/extract-cmd/src/diagnostics_tests.rs",
         "src/endpoint.rs": "tidepool/extract-cmd/src/endpoint.rs",
         "src/exec_check.rs": "tidepool/extract-cmd/src/exec_check.rs",
+        "src/fixtures/build_products_worker.rs": "tidepool/extract-cmd/src/fixtures/build_products_worker.rs",
         "src/frontend.rs": "tidepool/extract-cmd/src/frontend.rs",
         "src/lib.rs": "tidepool/extract-cmd/src/lib.rs",
         "src/process.rs": "tidepool/extract-cmd/src/process.rs",
