@@ -170,7 +170,9 @@ async fn private_three_item_cell_refusal_keeps_receipts_and_actor_live() {
     tokio::time::timeout(std::time::Duration::from_secs(240), async {
         let root = tempfile::tempdir().expect("session root");
         let session = tidepool_runtime::session::fresh_session_id();
-        let include = vec![eval_harness::prelude_path()];
+        let effects = tidepool_testing::TestEffectSurface::minimal(&[])
+            .expect("pure workbench compiler surface");
+        let include = effects.include_paths().to_vec();
         let library = SessionLib::open(
             session,
             root.path(),
@@ -185,14 +187,17 @@ async fn private_three_item_cell_refusal_keeps_receipts_and_actor_live() {
             Some(library),
         );
         let (forest, _deployments) = ResidentForest::new(
-            ActorWorkbenchSource::new("", include),
+            ActorWorkbenchSource::new(effects.preamble().to_owned(), include),
             session,
             machine,
             None,
             crate::Incarnation::FIRST,
         );
         let actor = forest
-            .new_workbench("private-publication-refusal".into(), crate::EffectiveRole::root())
+            .new_workbench(
+                "private-publication-refusal".into(),
+                crate::EffectiveRole::root().with_effect_keys(Vec::new()),
+            )
             .await
             .expect("root workbench");
         let context = forest
