@@ -4097,10 +4097,9 @@ where
                     if records
                         .get(&recipient)
                         .is_none_or(|record| record.terminal.is_some())
-                        || kernel.resolve(recipient).is_none_or(|actor| {
-                            actor.terminal().get().is_some()
-                                || actor.terminal().requested_shutdown().is_some()
-                        })
+                        || kernel
+                            .resolve(recipient)
+                            .is_none_or(|actor| actor.terminal().get().is_some())
                     {
                         ObservationShareResult::RecipientUnavailable
                     } else if !records.contains_key(&scope) {
@@ -6714,6 +6713,13 @@ where
                 terminal,
             });
         }
+        if matches!(boot, ResidentBoot::Workbench) {
+            let source = self.freeze_installed_source(context.actor)?;
+            self.installed_tools.publish_source(context.actor, source);
+            self.set_standing(context.actor, ResidentStanding::Workbench);
+            self.policy_installed = true;
+            return Ok(KernelStep::Continue(()));
+        }
         let public_owner = self.ready_public_owner(context)?;
         let bootstrap = self
             .environment
@@ -6725,13 +6731,7 @@ where
             ResidentBoot::Replacement(_) => {
                 unreachable!("replacement bootstrap parks before initialization")
             }
-            ResidentBoot::Workbench => {
-                let source = self.freeze_installed_source(context.actor)?;
-                self.installed_tools.publish_source(context.actor, source);
-                self.set_standing(context.actor, ResidentStanding::Workbench);
-                self.policy_installed = true;
-                return Ok(KernelStep::Continue(()));
-            }
+            ResidentBoot::Workbench => unreachable!("workbench returned before native bootstrap"),
             ResidentBoot::Prepared(outcome) => *outcome,
             ResidentBoot::Startup(entry) => {
                 self.environment
@@ -11626,10 +11626,9 @@ where
             return Err(refuse());
         }
         if !admission.owner.matches_context(&context)
-            || self
-                .directory
-                .resolve(actor)
-                .is_none_or(|actor| actor.terminal().get().is_some())
+            || self.directory.resolve(actor).is_none_or(|actor| {
+                actor.terminal().get().is_some() || actor.terminal().requested_shutdown().is_some()
+            })
         {
             return Err(refuse());
         }
