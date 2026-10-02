@@ -325,7 +325,14 @@ pub(super) fn admit_authored_artifact_closure(
             }
         }
         let inherited = context
-            .map(|context| context.lexical_graph().to_vec())
+            .map(|context| {
+                context
+                    .lexical_graph()
+                    .iter()
+                    .filter(|node| !node.owner.module.starts_with("Tidepool.Session."))
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
         source_lexical_imports = inherited_source_lexical_imports(
             selected_owner,
