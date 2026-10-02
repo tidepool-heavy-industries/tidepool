@@ -1323,6 +1323,7 @@ impl ModuleCandidateOffer {
                 &output.source,
                 &output.target,
                 &context,
+                program_request.program_source_lexical(),
             )?;
             let mut next = completed.append(native.clone())?;
             let display =
@@ -1346,6 +1347,7 @@ impl ModuleCandidateOffer {
                         &output.source,
                         &output.target,
                         &context,
+                        program_request.program_source_lexical(),
                     )?;
                     next = next.append_display(proof.clone())?;
                     Some(proof)
@@ -1653,7 +1655,8 @@ impl ModuleCandidateOffer {
             generation,
             source,
             target,
-            &context,
+            &context.0,
+            &context.1,
         )
     }
 
@@ -2121,7 +2124,8 @@ fn seal_turn_outputs_inner(
                         .request_sha256,
                     source,
                     prepared,
-                    checked_context.as_ref().expect("checked output context"),
+                    &checked_context.as_ref().expect("checked output context").0,
+                    &checked_context.as_ref().expect("checked output context").1,
                 )
             })
             .transpose()?,
@@ -2138,7 +2142,8 @@ fn seal_turn_outputs_inner(
                         .request_sha256,
                     source,
                     prepared,
-                    checked_context.as_ref().expect("checked output context"),
+                    &checked_context.as_ref().expect("checked output context").0,
+                    &checked_context.as_ref().expect("checked output context").1,
                 )
             })
             .transpose()?,
@@ -2154,7 +2159,13 @@ fn checked_output_context(
     products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     source_admission: &crate::declaration_context::ExactSourceAdmission,
     source: &str,
-) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
+) -> Result<
+    (
+        Arc<crate::declaration_join::ExactDeclarationContext>,
+        Vec<crate::declaration_join::ExactLexicalNode>,
+    ),
+    CompileError,
+> {
     let exact = offer.exact.as_ref().ok_or_else(|| {
         CompileError::ExtractFailed("checked output lacks current exact context".into())
     })?;
@@ -2167,11 +2178,12 @@ fn checked_output_context(
         .cloned()
         .collect::<Vec<_>>();
     let mut request = exact.clone();
-    request.admit_program_support(
+    let context = request.admit_program_support(
         exact.context.clone(),
         &support,
         std::slice::from_ref(source_admission),
-    )
+    )?;
+    Ok((context, request.program_source_lexical().to_vec()))
 }
 
 fn merge_package_closure(
