@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeOperators #-}
 {-# OPTIONS_GHC -Wno-simplifiable-class-constraints #-}
@@ -35,6 +36,7 @@ import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
 import Prelude
 
+import Tidepool.Inspection.Display (Display (..), displayRecord)
 import Tidepool.Effects.Core
   ( ContextBlock (..)
   , ContextDocument (..)
@@ -46,6 +48,13 @@ import Tidepool.Effects.Core
 
 -- | A transcript copy with no capability-bearing operations or constructor.
 newtype Context = Context ContextDocument
+
+-- | A bounded structural view of the editable transcript and safe native
+-- previews. References and provenance are data only; this view adds no access
+-- to the items they identify.
+instance Display Context where
+  displayTree (Context (ContextDocument contextBlocksValue)) =
+    displayRecord 0 "Context" [("blocks", displayTree contextBlocksValue)]
 
 data ContextBlockKind
   = AuthoredText ContextRole

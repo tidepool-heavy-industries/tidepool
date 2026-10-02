@@ -53,6 +53,13 @@ model for its next request with `setNextModel "executor"`. The argument is
 `Text`: the host resolves a configured alias first, then treats an unmatched
 value as a literal model identifier.
 
+The returned `Context` has a bounded structural display, so a direct
+`getContext` or `modifyContext` cell result shows authored blocks and safe
+native previews. `ContextWorkflow.inspectAndCurate` demonstrates reading
+completed-exchange provenance, turning those exchanges into notes with
+`toNotes`, and composing that conversion with the ordinary `editableTexts`
+traversal. The example module is checked with the model-turn fixtures.
+
 Keep curation in ordinary Haskell. For a compact semantic choice, `J.each`
 can examine packets while the author retains the exact original text and
 applies only selected original slices. The model's judgment is a selection;

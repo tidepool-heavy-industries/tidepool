@@ -14,7 +14,7 @@
 -- module's persistent bindings.
 module ContextWorkflow where
 
-import Control.Lens (over)
+import Control.Lens (over, traversed, (^..))
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -26,13 +26,14 @@ import Tidepool.Agent.Context
 import Tidepool.Agent.Assignment (assignment)
 import Tidepool.Agent.Reply (Response)
 import Tidepool.Effects.Core (ContextReadWrite, Jev)
+import Tidepool.Effects.Row (Subset)
 
 sharedFinding :: Text
 sharedFinding = "The cache key must include the selected transcript prefix."
 
 -- Used as the body of a synchronous compiled tool or synchronous notebook
 -- cell. New notes are ordinary editable user text with no inherited evidence.
-curateChild :: Eff (ContextReadWrite ': ActorEffects) ()
+curateChild :: Member ContextReadWrite effects => Eff effects ()
 curateChild = do
   modifyContext (over contextBlocks
     (<> [Text Nothing User ("Child finding: " <> sharedFinding) []]))
@@ -42,7 +43,13 @@ curateChild = do
 -- child applications are explicitly actor-owned and inherit the parent's
 -- committed transcript only after this invocation has settled.
 curateAndDelegate
-  :: Eff (ContextReadWrite ': ActorEffects) (Response Text, Response Text)
+  :: ( Member ContextReadWrite effects
+     , Member Forks effects
+     , Member Replies effects
+     , Member AgentInspection effects
+     , Subset CodingEffects effects
+     )
+  => Eff effects (Response Text, Response Text)
 curateAndDelegate = do
   modifyContext (over contextBlocks
     (<> [Text Nothing User ("Parent-curated assignment. " <> sharedFinding) []]))
@@ -55,6 +62,25 @@ curateAndDelegate = do
       (withLifetime ActorOwned
         (coding projectHead (assignment [label|review-tests|]
           ("Review the tests against: " <> sharedFinding))))
+
+-- Read the transcript as bounded structural data, convert all completed
+-- exchanges to provenance-preserving notes, and then edit authored text with
+-- the same optic used for an ordinary text value.
+inspectAndCurate
+  :: Member ContextReadWrite effects
+  => Eff effects Context
+inspectAndCurate = do
+  before <- getContext
+  let completed =
+        [ reference
+        | block <- before ^.. contextBlocks . traversed
+        , NativeProvenance reference <- [blockProvenance block]
+        , blockKind block == NativeEvidence CompletedExchange
+        ]
+  modifyContext
+    ( over editableTexts (<> " Reviewed by the parent.")
+        . toNotes completed
+    )
 
 -- Jev judges each packet containing the original slice once. The returned
 -- values come from the original rows, never from model-written replacements.
