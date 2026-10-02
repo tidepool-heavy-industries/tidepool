@@ -1127,7 +1127,7 @@ fn service_transaction(
         if !config.persistent {
             return Err(error);
         }
-        *worker = Worker::spawn(prepared)?;
+        worker.respawn(prepared)?;
         *served = 0;
         *followed_rotation = true;
         return Ok(ConnectionOutcome::Continue);
@@ -1173,7 +1173,7 @@ fn service_transaction(
             // by `PreparedWorker`, so replacing only this child does not
             // change the endpoint's producer.
             worker.shutdown();
-            *worker = Worker::spawn(prepared)?;
+            worker.respawn(prepared)?;
             *served = 0;
             *followed_rotation = true;
             return Ok(ConnectionOutcome::Continue);
@@ -1419,7 +1419,7 @@ fn serve_workers(
             let retire = &retire;
             let ready_tx = ready_tx.clone();
             slots.push(scope.spawn(move || -> Result<(), FrontendError> {
-                let mut worker = Worker::spawn(prepared)?;
+                let mut worker = Worker::spawn_in_slot(prepared, epoch, slot)?;
                 tracing::info!(
                     run_id,
                     daemon_pid = std::process::id(),
@@ -1836,6 +1836,19 @@ fn boot_epoch() -> Result<[u8; 32], FrontendError> {
     Ok(epoch)
 }
 
+pub(crate) fn direct_build_products_namespace() -> Result<std::path::PathBuf, FrontendError> {
+    Ok(std::path::PathBuf::from(format!("direct-{}", hex(&boot_epoch()?))).join("0"))
+}
+
+pub(crate) fn place_build_products(
+    argv: &[OsString],
+    namespace: &Path,
+) -> Result<Vec<OsString>, FrontendError> {
+    let mut request = ExtractRequest::decode_worker_argv(argv)?;
+    request.place_build_products(namespace);
+    Ok(request.worker_argv())
+}
+
 /// Owns only the socket inode created by this bind, under an advisory lock
 /// beside the path that one daemon holds from bind until retirement. A second
 /// daemon, starting or running, fails on the lock and never touches the path.
@@ -2210,10 +2223,28 @@ pub(crate) struct Worker {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: ChildStdout,
+    build_products_namespace: std::path::PathBuf,
 }
 
 impl Worker {
     pub(crate) fn spawn(prepared: &PreparedWorker) -> Result<Self, FrontendError> {
+        Self::spawn_in_namespace(prepared, direct_build_products_namespace()?)
+    }
+
+    fn spawn_in_slot(
+        prepared: &PreparedWorker,
+        epoch: &[u8; 32],
+        slot: usize,
+    ) -> Result<Self, FrontendError> {
+        let namespace =
+            std::path::PathBuf::from(format!("daemon-{}", hex(epoch))).join(slot.to_string());
+        Self::spawn_in_namespace(prepared, namespace)
+    }
+
+    fn spawn_in_namespace(
+        prepared: &PreparedWorker,
+        build_products_namespace: std::path::PathBuf,
+    ) -> Result<Self, FrontendError> {
         let mut command = prepared.command();
         command
             .arg("--worker-loop-v2")
@@ -2234,7 +2265,20 @@ impl Worker {
             child,
             stdin: Some(stdin),
             stdout,
+            build_products_namespace,
         })
+    }
+
+    /// A slot may retain its warm disk products only after its former child
+    /// has been reaped. Never start two writers in the same namespace.
+    fn respawn(&mut self, prepared: &PreparedWorker) -> Result<(), FrontendError> {
+        if self.child.try_wait().map_err(FrontendError::Io)?.is_none() {
+            return Err(FrontendError::Daemon(
+                "cannot reuse compiler build products before worker is reaped".to_owned(),
+            ));
+        }
+        *self = Self::spawn_in_namespace(prepared, self.build_products_namespace.clone())?;
+        Ok(())
     }
 
     pub(crate) fn begin_transaction(&mut self) -> Result<(), FrontendError> {
@@ -2259,7 +2303,8 @@ impl Worker {
         cwd: &Path,
         argv: &[OsString],
     ) -> Result<(i32, Vec<u8>, Vec<u8>), FrontendError> {
-        let bytes = encode_request(cwd, argv);
+        let worker_argv = place_build_products(argv, &self.build_products_namespace)?;
+        let bytes = encode_request(cwd, &worker_argv);
         let stdin = self
             .stdin
             .as_mut()
@@ -2292,7 +2337,9 @@ impl Worker {
         argv: &[OsString],
         deadline: Duration,
     ) -> Result<WorkerResponse, FrontendError> {
+        let request_span = tracing::Span::current();
         self.operation_while_connected(connection, deadline, WorkerOperation::Request, |worker| {
+            let _entered = request_span.enter();
             worker.request(cwd, argv)
         })
     }
@@ -2435,6 +2482,141 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::os::unix::ffi::OsStringExt;
+
+    fn build_products_fixture() -> &'static Path {
+        static FIXTURE: std::sync::OnceLock<(tempfile::TempDir, std::path::PathBuf)> =
+            std::sync::OnceLock::new();
+        &FIXTURE
+            .get_or_init(|| {
+                let dir = tempfile::tempdir().unwrap();
+                let source = dir.path().join("worker.rs");
+                fs::write(&source, include_str!("fixtures/build_products_worker.rs")).unwrap();
+                let binary = dir.path().join("worker");
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "compile one immutable test worker fixture"
+                )]
+                let status = std::process::Command::new("rustc")
+                    .arg(&source)
+                    .arg("--edition=2021")
+                    .arg("-o")
+                    .arg(&binary)
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+                (dir, binary)
+            })
+            .1
+    }
+
+    fn products_request(root: &Path, input: &Path) -> Vec<OsString> {
+        let mut request = ExtractRequest::default();
+        request.input(input);
+        request.build_products_dir(root);
+        request.worker_argv()
+    }
+
+    fn products_response(worker: &mut Worker, cwd: &Path, argv: &[OsString]) -> Vec<String> {
+        worker.begin_transaction().unwrap();
+        let (code, output, stderr) = worker.request(cwd, argv).unwrap();
+        worker.end_transaction().unwrap();
+        assert_eq!(code, 0);
+        assert!(stderr.is_empty());
+        String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn build_products_isolate_concurrent_slots_and_daemon_epochs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("products");
+        let a = dir.path().join("a/Expr.hs");
+        let b = dir.path().join("b/Expr.hs");
+        fs::create_dir_all(a.parent().unwrap()).unwrap();
+        fs::create_dir_all(b.parent().unwrap()).unwrap();
+        fs::write(&a, "alpha").unwrap();
+        fs::write(&b, "beta").unwrap();
+        let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
+        let mut first = Worker::spawn_in_slot(&prepared, &[0; 32], 0).unwrap();
+        let mut second = Worker::spawn_in_slot(&prepared, &[0; 32], 1).unwrap();
+        let argv_a = products_request(&root, &a);
+        let argv_b = products_request(&root, &b);
+        let original = argv_a.clone();
+        let (out_a, out_b) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| products_response(&mut first, dir.path(), &argv_a));
+            let b = scope.spawn(|| products_response(&mut second, dir.path(), &argv_b));
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert_eq!(out_a[2], "alpha");
+        assert_eq!(out_b[2], "beta");
+        assert_ne!(out_a[0], out_b[0]);
+        assert_eq!(argv_a, original, "logical request must remain unchanged");
+        let mut independent = Worker::spawn_in_slot(&prepared, &[1; 32], 0).unwrap();
+        let out = products_response(&mut independent, dir.path(), &argv_b);
+        assert_ne!(out[0], out_a[0]);
+        assert_ne!(out[0], out_b[0]);
+        assert_eq!(out[1], "", "independent daemon must start cold");
+        first.shutdown();
+        second.shutdown();
+        independent.shutdown();
+    }
+
+    #[test]
+    fn build_products_stay_warm_only_after_reaped_slot_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("Expr.hs");
+        fs::write(&input, "alpha").unwrap();
+        let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
+        let mut worker = Worker::spawn_in_slot(&prepared, &[0; 32], 0).unwrap();
+        let argv = products_request(&dir.path().join("products"), &input);
+        let first = products_response(&mut worker, dir.path(), &argv);
+        let second = products_response(&mut worker, dir.path(), &argv);
+        assert_eq!(first[0], second[0]);
+        assert_eq!(second[1], "alpha");
+        assert!(
+            worker.respawn(&prepared).is_err(),
+            "live worker must prohibit directory reuse"
+        );
+        worker.shutdown();
+        assert!(worker.child.try_wait().unwrap().is_some());
+        worker.respawn(&prepared).unwrap();
+        let rotated = products_response(&mut worker, dir.path(), &argv);
+        assert_eq!(first[0], rotated[0]);
+        assert_eq!(rotated[1], "alpha");
+        assert_ne!(first[3], rotated[3]);
+        worker.abort();
+        worker.respawn(&prepared).unwrap();
+        assert_eq!(
+            products_response(&mut worker, dir.path(), &argv)[1],
+            "alpha"
+        );
+        worker.shutdown();
+    }
+
+    #[test]
+    fn build_products_direct_invocations_have_private_namespaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("Expr.hs");
+        fs::write(&input, "alpha").unwrap();
+        let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
+        let argv = products_request(&dir.path().join("products"), &input);
+        let mut first = Worker::spawn(&prepared).unwrap();
+        let mut second = Worker::spawn(&prepared).unwrap();
+        let out_a = products_response(&mut first, dir.path(), &argv);
+        let out_b = products_response(&mut second, dir.path(), &argv);
+        assert_ne!(out_a[0], out_b[0]);
+        assert_eq!(out_b[1], "");
+        let cli_namespace = direct_build_products_namespace().unwrap();
+        let cli = place_build_products(&argv, &cli_namespace).unwrap();
+        assert_ne!(cli, argv);
+        assert_ne!(cli_namespace, first.build_products_namespace);
+        assert_ne!(cli_namespace, second.build_products_namespace);
+        first.shutdown();
+        second.shutdown();
+    }
 
     #[test]
     fn default_request_rotation_is_1024_with_existing_rss_ceiling() {
@@ -3567,6 +3749,7 @@ tidepool-target phase=desugar module=Execute\n",
             child,
             stdin: Some(stdin),
             stdout,
+            build_products_namespace: direct_build_products_namespace().unwrap(),
         };
         let (connection, client) = UnixStream::pair().unwrap();
         drop(client);
@@ -3574,7 +3757,7 @@ tidepool-target phase=desugar module=Execute\n",
         let result = worker.request_while_connected(
             &connection,
             Path::new("/tmp"),
-            &[OsString::from("request")],
+            &normalize_worker_argv(vec![OsString::from("request")]).unwrap(),
             DEFAULT_REQUEST_DEADLINE,
         );
         assert!(matches!(
@@ -3604,7 +3787,7 @@ tidepool-target phase=desugar module=Execute\n",
     #[test]
     fn independently_exited_worker_is_not_a_client_disconnect() {
         let cwd = Path::new("/tmp");
-        let argv = [OsString::from("request")];
+        let argv = normalize_worker_argv(vec![OsString::from("request")]).unwrap();
         let request_bytes = encode_request(cwd, &argv).len() + 1;
         #[allow(
             clippy::disallowed_methods,
@@ -3621,6 +3804,7 @@ tidepool-target phase=desugar module=Execute\n",
             stdin: child.stdin.take(),
             stdout: child.stdout.take().unwrap(),
             child,
+            build_products_namespace: direct_build_products_namespace().unwrap(),
         };
         let (connection, client) = UnixStream::pair().unwrap();
         let result =

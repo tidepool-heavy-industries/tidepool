@@ -1,0 +1,76 @@
+use std::io::{Read, Write};
+use std::path::PathBuf;
+
+fn u32(r: &mut impl Read) -> usize {
+    let mut b = [0; 4];
+    r.read_exact(&mut b).unwrap();
+    u32::from_le_bytes(b) as usize
+}
+fn frame(r: &mut impl Read) -> Vec<u8> {
+    let mut b = vec![0; u32(r)];
+    r.read_exact(&mut b).unwrap();
+    b
+}
+fn request(payload: &[u8]) -> Vec<u8> {
+    let text = std::str::from_utf8(payload).unwrap();
+    let bytes: Vec<_> = (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+        .collect();
+    let mut r = &bytes[8..];
+    let mut input = None;
+    let mut root = None;
+    for _ in 0..u32(&mut r) {
+        let mut tag = [0];
+        r.read_exact(&mut tag).unwrap();
+        let value = PathBuf::from(String::from_utf8(frame(&mut r)).unwrap());
+        match tag[0] {
+            1 => input = Some(value),
+            25 => root = Some(value),
+            other => panic!("unexpected fixture field {other}"),
+        }
+    }
+    let root = root.unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let product = root.join("Expr.hi");
+    let previous = std::fs::read_to_string(&product).unwrap_or_default();
+    let content = std::fs::read_to_string(input.unwrap()).unwrap();
+    std::fs::write(&product, &content).unwrap();
+    // Concurrent writers under a shared directory can overwrite this request.
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    let actual = std::fs::read_to_string(&product).unwrap();
+    format!(
+        "{}\n{previous}\n{actual}\n{}",
+        root.display(),
+        std::process::id()
+    )
+    .into_bytes()
+}
+fn main() {
+    let mut stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let mut one = [0];
+    while stdin.read_exact(&mut one).is_ok() {
+        assert_eq!(one, [1]);
+        stdout.write_all(&[1]).unwrap();
+        stdout.flush().unwrap();
+        loop {
+            stdin.read_exact(&mut one).unwrap();
+            if one == [0] {
+                break;
+            }
+            assert_eq!(one, [1]);
+            let _cwd = frame(&mut stdin);
+            assert_eq!(u32(&mut stdin), 2);
+            let _flag = frame(&mut stdin);
+            let out = request(&frame(&mut stdin));
+            stdout.write_all(&0i32.to_le_bytes()).unwrap();
+            stdout.write_all(&(out.len() as u32).to_le_bytes()).unwrap();
+            stdout.write_all(&out).unwrap();
+            stdout.write_all(&0u32.to_le_bytes()).unwrap();
+            stdout.flush().unwrap();
+        }
+        stdout.write_all(&[1]).unwrap();
+        stdout.flush().unwrap();
+    }
+}

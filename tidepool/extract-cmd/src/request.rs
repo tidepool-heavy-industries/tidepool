@@ -506,6 +506,23 @@ impl ExtractRequest {
             .push(Field::BuildProductsDir(value.as_ref().to_owned()));
     }
 
+    /// Transport-owned placement of mutable GHC outputs. The caller's logical
+    /// request remains the recipe and diagnostic identity; this clone is sent
+    /// only to the worker that exclusively owns the namespace.
+    pub(crate) fn place_build_products(&mut self, namespace: &Path) {
+        for field in &mut self.fields {
+            if let Field::BuildProductsDir(root) = field {
+                let physical = Path::new(root).join(namespace);
+                tracing::info!(
+                    logical_build_products_root = %Path::new(root).display(),
+                    physical_build_products_dir = %physical.display(),
+                    "compiler build products placed"
+                );
+                *root = physical.into_os_string();
+            }
+        }
+    }
+
     pub(crate) fn module_candidates(&mut self, value: &Path) {
         self.fields.push(Field::ModuleCandidates(value.to_owned()));
     }

@@ -2403,33 +2403,11 @@ fn compile_invocation_inner(
         None
     };
 
-    // Persistent build-products dir (module-granular GHC recompilation
-    // avoidance across spawns — see `crate::paths::build_products_dir`'s
-    // doc). It is on by default and keyed by the bound endpoint identity.
-    //
-    // `crate::paths::build_products_dir` is keyed by the same bound endpoint
-    // identity used for execution, so a changed frontend, worker, GHC
-    // selection, or daemon boot gets a FRESH directory — a stale dir from an
-    // older producer can never poison a compile; staleness is
-    // structurally impossible rather than mtime-validated. Known,
-    // accepted characteristic (not newly introduced by this default-on
-    // flip): the directory is SHARED across every concurrent spawn using the
-    // same endpoint identity, so two truly concurrent compiles of DIFFERENT
-    // source under the same module name (e.g. the turn lane's fixed
-    // `Expr`/eval lane's fixed `Input`) race on the same `.hi`/`.o` path;
-    // GHC's own interface content-hash check means the losing race forces a
-    // recompile rather than silently reusing mismatched output, so the
-    // failure mode is wasted work, not wrong output — see
-    // the resident compile daemon, where a single worker process (not
-    // many concurrent spawns) is the long-term answer.
-    //
-    // `$TIDEPOOL_BUILD_PRODUCTS_DIR` still overrides the LOCATION (an
-    // isolated dir for a test that needs a genuinely cold measurement,
-    // mirroring `compile_cache_dir`'s own override) — it is no longer also
-    // the enable switch. Applied via `crate::paths::apply_build_products_dir`
-    // — the same helper `session/turn.rs`'s `extract_cmd()` and
-    // `session/mod.rs`'s `validate_candidate` call for their OWN spawn sites,
-    // so this is on by default everywhere in this crate, not just here.
+    // Bind the logical build-products root before recipe construction. The
+    // process boundary privately places mutable GHC outputs by daemon epoch
+    // and worker slot; its placement does not alter the logical recipe or
+    // authorize additional source inputs. Reaped slot rotations retain disk
+    // warmth, while new daemons and direct invocations use fresh namespaces.
     let names = artifact_names(inv.targets, multi);
     let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let base_cmd = cmd;

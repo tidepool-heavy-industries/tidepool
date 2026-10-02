@@ -70,6 +70,8 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
             request.worker_argv()
         }
     };
+    let worker_args =
+        daemon::place_build_products(&worker_args, &daemon::direct_build_products_namespace()?)?;
     let worker = prepare_worker()?;
     let mut command = worker.command();
     command.args(worker_args);
