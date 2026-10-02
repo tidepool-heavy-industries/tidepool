@@ -1048,11 +1048,17 @@ exactToOrdinary = withTiming $ withScratch $ \work -> do
     unless (fmap renderType (crResultType afterExactLegacy) == Just "Int") $
       fail "legacy value request inherited the preceding exact graph"
     ordinaryQuote
-    refused <- try (compile CheckedEnvironment Set.empty GeneralCompile
+    (refused, refusalDiagnostics) <- captureDiagnostics $ try (compile CheckedEnvironment Set.empty GeneralCompile
       (Just scope {ssExactScope=Just hiddenPath}) (work </> "ExecutionSealedTarget.hs") [work] Nothing)
-      :: IO (Either SomeException CheckedEnvironmentResult)
-    unless (case refused of Left reason -> "unadmitted home implementation" `isInfixOf` show reason; _ -> False) $
-      fail "hidden original unexpectedly became a fresh lexical import"
+      :: IO (Either SomeException CheckedEnvironmentResult, String)
+    unless (case refused of
+      Left reason
+        | Just (OriginalSourceSelectionRejected
+            (ExecutionSourceUnavailable ("main", "ExecutionSealedQuoter"))) <- fromException reason ->
+          not ("tidepool-timing phase=ghc_load" `isInfixOf` refusalDiagnostics)
+      _ -> False) $
+      fail ("hidden original did not refuse its missing source-selection authority: "
+        ++ either show (const "unexpected success") refused)
     ordinaryQuote
     cancelling <- readFile "test-source-boot/fixtures/ExecutionCancellingQuoter.hs"
     let marker = work </> "cancel-marker"
