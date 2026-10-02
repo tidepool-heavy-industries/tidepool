@@ -4016,7 +4016,7 @@ mod checkpoint_scope_tests {
             .begin_durable_public_bootstrap(owner.clone(), public)
             .unwrap();
         let original = std::fs::read(root.path().join("declarations.json")).unwrap();
-        session.lib_mut().seed_scope(public, Generation(99));
+        session.lib_mut().tips.insert(public, Generation(99));
         assert!(matches!(
             session.publish_durable_public_bootstrap(seal),
             Err(SessionError::InvalidDurablePublicAdmission {

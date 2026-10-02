@@ -171,3 +171,27 @@ async fn unscoped_program_child_of_durable_actor_cannot_gain_provider_attachment
     drop(records);
     forest.shutdown().await;
 }
+
+#[tokio::test]
+async fn requested_retirement_refuses_provider_before_terminal_publication() {
+    let (forest, _root) = forest();
+    let actor = path_workbench(&forest, crate::ActorPersistencePolicy::Ephemeral).await;
+    let admission = forest
+        .authorize_provider_attachment(actor.identity())
+        .expect("live owner");
+    let requested = ActorTerminal {
+        kind: crate::ActorExitKind::Completed,
+        summary: "retirement during readiness".into(),
+    };
+    actor.terminal().request_shutdown(requested.clone());
+    assert!(
+        actor.terminal().get().is_none(),
+        "intent precedes terminal cleanup"
+    );
+    assert!(forest.validate_provider_attachment(&admission).is_err());
+    assert!(forest
+        .authorize_provider_attachment(actor.identity())
+        .is_err());
+    assert_eq!(actor.terminal().requested_shutdown(), Some(requested));
+    forest.shutdown().await;
+}

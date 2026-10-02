@@ -7420,14 +7420,14 @@ where
         context: crate::ActorSessionContext,
         owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
         bootstrap: Option<tidepool_runtime::session::DurablePublicBootstrap>,
-    ) -> Result<(), ResidentActorWorkbenchError> {
+    ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
         if !owner.matches_context(&context) {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "bootstrap publication requires its original public owner".into(),
             ));
         }
         let Some(bootstrap) = bootstrap else {
-            return Ok(());
+            return Ok(tidepool_runtime::session::PublicManifestCommit::Durable);
         };
         let durable = owner.durable().cloned().ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
@@ -7437,14 +7437,15 @@ where
         self.access.with_machine(context, move |session, context, _| {
             let commit = session.publish_durable_public_bootstrap(bootstrap)?;
             match commit {
-                tidepool_runtime::session::PublicManifestCommit::Durable => Ok(()),
-                tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { .. } => {
-                    session.confirm_durable_public_scope(&durable, context.placement.lexical_scope)?;
-                    Ok(())
+                tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { detail } => {
+                    match session.confirm_durable_public_scope(&durable, context.placement.lexical_scope) {
+                        Ok(()) => Ok(tidepool_runtime::session::PublicManifestCommit::Durable),
+                        Err(error) => Ok(tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed {
+                            detail: format!("{detail}; confirmation failed: {error}"),
+                        }),
+                    }
                 }
-                other => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                    "native bootstrap public surface was not published: {other:?}",
-                ))),
+                other => Ok(other),
             }
         }).await
     }

@@ -1176,6 +1176,12 @@ impl ChildExitObservations {
 
 /// All actor-local resident state. No field mirrors runnable/parked lifecycle;
 /// `standing` is the actual Haskell continuation currently owned by the actor.
+struct PreparedInteractivePublication {
+    owner: Arc<WorkbenchPublicOwner>,
+    bootstrap: Option<tidepool_runtime::session::DurablePublicBootstrap>,
+    installation: LocalResidentInstallation,
+}
+
 pub struct ResidentKernelBehavior<H, O> {
     replacement_transfer: Option<replacement::ReplacementTransfer>,
     retained_replacements: Vec<replacement::RetainedHandler>,
@@ -4091,9 +4097,10 @@ where
                     if records
                         .get(&recipient)
                         .is_none_or(|record| record.terminal.is_some())
-                        || kernel
-                            .resolve(recipient)
-                            .is_none_or(|actor| actor.terminal().get().is_some())
+                        || kernel.resolve(recipient).is_none_or(|actor| {
+                            actor.terminal().get().is_some()
+                                || actor.terminal().requested_shutdown().is_some()
+                        })
                     {
                         ObservationShareResult::RecipientUnavailable
                     } else if !records.contains_key(&scope) {
@@ -5648,6 +5655,7 @@ where
         context: &ActorSessionContext,
         ancestry: &crate::CallAncestry,
         mut outcome: ResidentOutcome,
+        mut prepared_installation: Option<PreparedInteractivePublication>,
     ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
         loop {
             match self
@@ -5691,6 +5699,10 @@ where
                             "resident actor receive loop advanced with an interactive request still outstanding"
                         );
                     }
+                    if let Some(prepared) = prepared_installation.take() {
+                        self.settle_interactive_publication(kernel, context, prepared)
+                            .await?;
+                    }
                     self.set_standing(context.actor, ResidentStanding::Receiving(receiver));
                     return Ok(KernelStep::Continue(()));
                 }
@@ -5715,6 +5727,10 @@ where
                         .await?;
                 }
                 ResidentActorBoundary::ToolAwait(awaiting) => {
+                    if let Some(prepared) = prepared_installation.take() {
+                        self.settle_interactive_publication(kernel, context, prepared)
+                            .await?;
+                    }
                     if !self.policy_installed {
                         let actor = kernel.resolve(context.actor).ok_or_else(|| {
                             ResidentActorWorkbenchError::ActorProtocol(
@@ -5761,15 +5777,15 @@ where
                             fork_gate,
                             runtime_observation: self.runtime_observation.clone(),
                         };
-                        self.publish_installation(installation);
-                        self.policy_installed = true;
+                        self.commit_interactive_installation(kernel, context, installation)?;
                     }
                     self.set_standing(context.actor, ResidentStanding::Tools(awaiting));
                     return Ok(KernelStep::Continue(()));
                 }
                 ResidentActorBoundary::AgentSession(session) => {
-                    if let InteractivePark::Cancelled(request) =
-                        self.park_interactive(kernel, context, session).await?
+                    if let InteractivePark::Cancelled(request) = self
+                        .park_interactive(kernel, context, session, prepared_installation.take())
+                        .await?
                     {
                         return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                             "request {request:?} was cancelled outside a mailbox handler"
@@ -5783,12 +5799,29 @@ where
                             "actor installed its Codex application more than once".into(),
                         ));
                     }
-                    self.install_interactive_policy(
-                        kernel,
-                        context,
-                        attachment.initial_user_message,
-                    )
-                    .await?;
+                    if prepared_installation.is_some() {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "actor prepared its Codex application more than once".into(),
+                        ));
+                    }
+                    let owner = self.ready_public_owner(context)?;
+                    let bootstrap = self
+                        .environment
+                        .runner
+                        .begin_public_bootstrap(context.clone(), Arc::clone(&owner))
+                        .await?;
+                    let installation = self
+                        .prepare_interactive_policy(
+                            kernel,
+                            context,
+                            attachment.initial_user_message,
+                        )
+                        .await?;
+                    prepared_installation = Some(PreparedInteractivePublication {
+                        owner,
+                        bootstrap,
+                        installation,
+                    });
                     outcome = self
                         .environment
                         .runner
@@ -5815,6 +5848,7 @@ where
         kernel: &KernelContext,
         context: &ActorSessionContext,
         session: crate::ResidentInteractiveSession,
+        prepared: Option<PreparedInteractivePublication>,
     ) -> Result<InteractivePark, ResidentActorWorkbenchError> {
         let (request, hole, input) = session.into_parts();
         let cancellation = self
@@ -5832,6 +5866,22 @@ where
             return Ok(InteractivePark::Cancelled(request.request));
         }
         let already_installed = self.policy_installed;
+        let (owner, bootstrap, prepared_installation) = match prepared {
+            Some(prepared) => (
+                prepared.owner,
+                prepared.bootstrap,
+                Some(prepared.installation),
+            ),
+            None => {
+                let owner = self.ready_public_owner(context)?;
+                let bootstrap = self
+                    .environment
+                    .runner
+                    .begin_public_bootstrap(context.clone(), Arc::clone(&owner))
+                    .await?;
+                (owner, bootstrap, None)
+            }
+        };
         let workbench = self.environment.runner.workbench(
             request.response.clone(),
             request.request,
@@ -5857,8 +5907,20 @@ where
         };
         let request_message =
             contract.message(request.request, request.initial_user_message.as_deref());
-        self.install_interactive_policy(kernel, context, Some(request_message.clone()))
+        let installation = match prepared_installation {
+            Some(installation) => Some(installation),
+            None if !self.policy_installed => Some(
+                self.prepare_interactive_policy(kernel, context, Some(request_message.clone()))
+                    .await?,
+            ),
+            None => None,
+        };
+        self.publish_application_surface(kernel, context, owner, bootstrap)
             .await?;
+        if let Some(installation) = installation {
+            self.commit_interactive_installation(kernel, context, installation)?;
+        }
+        self.check_application_readiness(kernel, context)?;
         self.outstanding_interactive = Some(OutstandingInteractive::new(
             &request,
             input_binding,
@@ -5940,7 +6002,13 @@ where
             })
     }
 
-    fn commit_interactive_installation(&mut self, installation: LocalResidentInstallation) {
+    fn commit_interactive_installation(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        installation: LocalResidentInstallation,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.check_application_readiness(kernel, context)?;
         self.publish_installation(installation);
         self.policy_installed = true;
         for notice in self.deferred_child_failures.drain(..) {
@@ -5949,31 +6017,110 @@ where
                 .try_send(LocalResidentDeployment::ChildExited { notice })
                 .ok();
         }
+        Ok(())
     }
 
-    async fn install_interactive_policy(
+    async fn settle_interactive_publication(
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
-        initial_user_message: Option<String>,
+        prepared: PreparedInteractivePublication,
     ) -> Result<(), ResidentActorWorkbenchError> {
-        if self.policy_installed {
-            return Ok(());
+        self.publish_application_surface(kernel, context, prepared.owner, prepared.bootstrap)
+            .await?;
+        self.commit_interactive_installation(kernel, context, prepared.installation)
+    }
+
+    fn check_application_readiness(
+        &self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        if let Some(terminal) = kernel.requested_shutdown() {
+            return Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(
+                terminal,
+            ));
         }
-        let owner = self.ready_public_owner(context)?;
-        let bootstrap = self
+        let records = self.environment.actors.lock();
+        let record = records.get(&context.actor).ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "application readiness lost its original actor".into(),
+            )
+        })?;
+        if record.terminal.is_some()
+            || record.descriptor.placement() != context.placement
+            || record
+                .public_owner
+                .ready()
+                .is_none_or(|owner| !owner.matches_context(context))
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "application readiness lost its live confirmed public placement".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn publish_application_surface(
+        &self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        owner: Arc<WorkbenchPublicOwner>,
+        bootstrap: Option<tidepool_runtime::session::DurablePublicBootstrap>,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.check_application_readiness(kernel, context)?;
+        if !self
+            .ready_public_owner(context)
+            .is_ok_and(|current| Arc::ptr_eq(&current, &owner))
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "bootstrap publication lost its original public owner".into(),
+            ));
+        }
+        let commit = self
             .environment
             .runner
-            .begin_public_bootstrap(context.clone(), Arc::clone(&owner))
+            .publish_public_bootstrap(context.clone(), Arc::clone(&owner), bootstrap)
             .await?;
-        let installation = self
-            .prepare_interactive_policy(kernel, context, initial_user_message)
-            .await?;
-        self.environment
-            .runner
-            .publish_public_bootstrap(context.clone(), owner, bootstrap)
-            .await?;
-        self.commit_interactive_installation(installation);
+        if let tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed {
+            detail,
+        } = commit
+        {
+            let durable = owner
+                .durable()
+                .expect("unconfirmed durable publication")
+                .clone();
+            if let Some(record) = self.environment.actors.lock().get_mut(&context.actor) {
+                if record.descriptor.placement() == context.placement
+                    && record
+                        .public_owner
+                        .ready()
+                        .is_some_and(|current| Arc::ptr_eq(current, &owner))
+                {
+                    record.public_owner = ActorPublicOwnerPlane::DurablePublishedUnconfirmed {
+                        owner: durable,
+                        detail: detail.clone(),
+                    };
+                }
+            }
+            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                "native bootstrap public surface remains durably unconfirmed: {detail}",
+            )));
+        }
+        if commit != tidepool_runtime::session::PublicManifestCommit::Durable {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                "native bootstrap public surface was not published: {commit:?}",
+            )));
+        }
+        self.check_application_readiness(kernel, context)?;
+        if !self
+            .ready_public_owner(context)
+            .is_ok_and(|current| Arc::ptr_eq(&current, &owner))
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "bootstrap publication lost its original public owner".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -6793,18 +6940,23 @@ where
                 }
             }
         };
-        self.environment
-            .runner
-            .publish_public_bootstrap(context.clone(), public_owner, bootstrap)
-            .await?;
-        if let Some(installation) = installation {
-            self.commit_interactive_installation(installation);
-        }
+        let prepared = if let Some(installation) = installation {
+            Some(PreparedInteractivePublication {
+                owner: public_owner,
+                bootstrap,
+                installation,
+            })
+        } else {
+            self.publish_application_surface(kernel, context, public_owner, bootstrap)
+                .await?;
+            None
+        };
         self.stabilize_program(
             kernel,
             context,
             &crate::CallAncestry::begin(context.actor),
             outcome,
+            prepared,
         )
         .await
     }
@@ -7006,7 +7158,7 @@ where
             .resume_live(context.clone(), receiver_continuation, next.value)
             .await?;
         let step = self
-            .stabilize_program(kernel, context, ancestry, program)
+            .stabilize_program(kernel, context, ancestry, program, None)
             .await?;
         Ok((reply, step))
     }
@@ -7048,7 +7200,9 @@ where
                 .await?;
             match boundary {
                 ResidentActorBoundary::AgentSession(session) => {
-                    let parked = self.park_interactive(kernel, context, session).await?;
+                    let parked = self
+                        .park_interactive(kernel, context, session, None)
+                        .await?;
                     if let InteractivePark::Cancelled(request) = parked {
                         self.environment
                             .requests
@@ -7075,7 +7229,7 @@ where
                                     .finish_cancellation_acknowledgement(request);
                                 self.publish_watch_notifications(notifications).await;
                                 return self
-                                    .stabilize_program(kernel, context, ancestry, outcome)
+                                    .stabilize_program(kernel, context, ancestry, outcome, None)
                                     .await;
                             }
                             Err(error) => {
@@ -9416,6 +9570,7 @@ where
                 &context,
                 &crate::CallAncestry::begin(context.actor),
                 outcome,
+                None,
             )
             .await
             .map_err(Self::failure)
@@ -10562,6 +10717,7 @@ where
                     &context,
                     &crate::CallAncestry::begin(context.actor),
                     outcome,
+                    None,
                 )
                 .await
                 .map_err(Self::failure)
