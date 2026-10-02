@@ -785,7 +785,7 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
             .run_with_sites("unsealedOriginalSiteGraph", code)
             .expect("generic graph execution can retain unsealed site observations"),
     );
-    let (_, hole) = fixture.deliver(&mut unsealed, reservation, 1);
+    let (submission, hole) = fixture.deliver(&mut unsealed, reservation, 1);
     let site = parked_site(&mut unsealed, &hole);
     let realm = unsealed.parked_realm(&hole).unwrap();
     let custody = unsealed.outstanding_custody();
@@ -804,9 +804,36 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
             .unwrap(),
         before
     );
-    assert!(unsealed.parked_holes().contains(&warm.cont_id()));
-    unsealed.close_realm(RealmId::ROOT);
-    assert!(unsealed.parked_holes().is_empty());
+    let mut owned_holes = [warm, submission, hole]
+        .into_iter()
+        .map(|hole| hole.cont_id().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        unsealed
+            .parked_holes()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>(),
+        owned_holes
+    );
+    assert_eq!(unsealed.close_realm(RealmId::ROOT), (0, 0));
+    for id in owned_holes.clone() {
+        assert!(matches!(
+            unsealed.abort(&id, "release fixture-owned request".into()),
+            Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                _
+            ))))
+        ));
+        assert!(owned_holes.remove(&id));
+        assert_eq!(
+            unsealed
+                .parked_holes()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<std::collections::BTreeSet<_>>(),
+            owned_holes
+        );
+    }
 
     let mut checked = fixture.fresh();
     refuse_changed_checked_sites(&mut checked, &fixture);
