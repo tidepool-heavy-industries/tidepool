@@ -42,19 +42,35 @@ readTimingEnabled = (== Just "1") <$> lookupEnv "TIDEPOOL_TIMING"
 
 -- | Run @act@ and, when @enabled@, write one
 -- @tidepool-timing phase=\<name\> ms=\<int\>@ line to stderr AFTER @act@
--- completes. Emits nothing when @enabled@ is 'False' — the only difference
--- between the two is that one stderr line.
+-- completes, plus a nested resource detail when enabled. Disabled calls
+-- retain wall timing internally and emit no diagnostic lines.
 timePhase :: MonadIO m => Bool -> String -> m a -> m a
 timePhase enabled name act = do
-  (r, ms) <- timeSection act
+  (r, ms) <- timeSection (timeDetailPhase enabled "compile" name act)
   liftIO (emitPhase enabled name ms)
   pure r
 
 -- | Measure a named child without putting it in the flat phase stream.
+-- Enabled measurements include monotonic boundaries for perf alignment,
+-- process CPU and RTS deltas. Reading counters never forces a collection;
+-- allocation therefore follows the RTS accounting boundary, not a heap census.
 timeDetailPhase :: MonadIO m => Bool -> String -> String -> m a -> m a
-timeDetailPhase enabled parent name act = do
-  (result, ms) <- timeSection act
-  liftIO (emitDetailPhase enabled parent name ms)
+timeDetailPhase False _ _ act = act
+timeDetailPhase True parent name act = do
+  wall0 <- liftIO getMonotonicTimeNSec
+  cpu0 <- liftIO getCPUTime
+  rts0 <- liftIO readRtsStats
+  result <- act
+  rts1 <- liftIO readRtsStats
+  cpu1 <- liftIO getCPUTime
+  wall1 <- liftIO getMonotonicTimeNSec
+  liftIO $ hPutStrLn stderr ("tidepool-timing-detail parent=" ++ parent
+    ++ " phase=" ++ name
+    ++ " ms=" ++ show ((delta wall0 wall1 + 500000) `div` 1000000)
+    ++ " start_ns=" ++ show wall0 ++ " end_ns=" ++ show wall1
+    ++ " wall_ns=" ++ show (delta wall0 wall1)
+    ++ " cpu_ns=" ++ show ((cpu1 - cpu0) `div` 1000)
+    ++ renderRtsDelta rts0 rts1)
   pure result
 
 -- | Time @act@ without emitting anything — for a phase whose wall clock is
@@ -207,17 +223,20 @@ renderInterfaceMeasurement request moduleName stage reuse wallNs cpuNs before af
     ++ " ms=" ++ show ((wallNs + 500000) `div` 1000000)
     ++ " wall_ns=" ++ show wallNs
     ++ " cpu_ns=" ++ show cpuNs
-    ++ case (before, after) of
-      (Just rts0, Just rts1) ->
-        " rts=enabled rts_scope=process_delta"
-          ++ " allocated_bytes=" ++ show (delta (RTS.allocated_bytes rts0) (RTS.allocated_bytes rts1))
-          ++ " gc_cpu_ns=" ++ show (delta (RTS.gc_cpu_ns rts0) (RTS.gc_cpu_ns rts1))
-          ++ " gc_elapsed_ns=" ++ show (delta (RTS.gc_elapsed_ns rts0) (RTS.gc_elapsed_ns rts1))
-          ++ " gcs=" ++ show (delta (RTS.gcs rts0) (RTS.gcs rts1))
-      _ ->
-        " rts=unavailable rts_scope=process_delta"
-          ++ " allocated_bytes=unavailable gc_cpu_ns=unavailable"
-          ++ " gc_elapsed_ns=unavailable gcs=unavailable"
+    ++ renderRtsDelta before after
+
+renderRtsDelta :: Maybe RTS.RTSStats -> Maybe RTS.RTSStats -> String
+renderRtsDelta before after = case (before, after) of
+  (Just rts0, Just rts1) ->
+    " rts=enabled rts_scope=process_delta"
+      ++ " allocated_bytes=" ++ show (delta (RTS.allocated_bytes rts0) (RTS.allocated_bytes rts1))
+      ++ " gc_cpu_ns=" ++ show (delta (RTS.gc_cpu_ns rts0) (RTS.gc_cpu_ns rts1))
+      ++ " gc_elapsed_ns=" ++ show (delta (RTS.gc_elapsed_ns rts0) (RTS.gc_elapsed_ns rts1))
+      ++ " gcs=" ++ show (delta (RTS.gcs rts0) (RTS.gcs rts1))
+  _ ->
+    " rts=unavailable rts_scope=process_delta"
+      ++ " allocated_bytes=unavailable gc_cpu_ns=unavailable"
+      ++ " gc_elapsed_ns=unavailable gcs=unavailable"
 
 renderStage :: InterfaceStage -> String
 renderStage CheckedEnvironmentInterface = "checked_environment"

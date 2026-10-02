@@ -300,9 +300,7 @@ async fn embedded_checkpoint_scope_setup_starts_its_haskell_actor() {
     let actor = campaign.actor.identity();
     let files = tempfile::tempdir().unwrap();
     let settings = embedded_launch_config(&files);
-    let mut service = EmbeddedService::prepare(campaign.session_root.path(), &settings)
-        .await
-        .unwrap();
+    let mut service = campaign.prepare_embedded_service(&settings).await.unwrap();
     let root = attach_actor(
         &service,
         campaign.session_root.path(),
@@ -387,9 +385,7 @@ async fn published_embedded_checkpoint_survives_capture_cell_failure() {
     let actor = campaign.actor.identity();
     let files = tempfile::tempdir().unwrap();
     let settings = embedded_launch_config(&files);
-    let mut service = EmbeddedService::prepare(campaign.session_root.path(), &settings)
-        .await
-        .unwrap();
+    let mut service = campaign.prepare_embedded_service(&settings).await.unwrap();
     let root = attach_actor(
         &service,
         campaign.session_root.path(),

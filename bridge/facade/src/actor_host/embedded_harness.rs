@@ -1190,7 +1190,7 @@ mod tests {
     use super::*;
     use crate::actor_host::embedded_projection::{EmbeddedProjection, LifecycleState};
     use crate::actor_host::embedded_service::{
-        attach_actor, drive_conversation_with_transport, submit_browser_command, EmbeddedService,
+        attach_actor, drive_conversation_with_transport, submit_browser_command,
     };
     use crate::actor_host::test_campaign::TestCampaign;
     use async_trait::async_trait;
@@ -1422,9 +1422,7 @@ mod tests {
             context_capacity_tokens: 200_000,
             concurrent_jobs: 1,
         };
-        let mut service = EmbeddedService::prepare(campaign.session_root.path(), &settings)
-            .await
-            .unwrap();
+        let mut service = campaign.prepare_embedded_service(&settings).await.unwrap();
         let identity = HostIdentity {
             run: super::super::runtime_namespace(campaign.session_root.path()),
             actor: AgentPath("/root".into()),
@@ -1707,9 +1705,7 @@ mod tests {
             rotated_secret,
         )
         .unwrap();
-        let mut restarted = EmbeddedService::prepare(campaign.session_root.path(), &settings)
-            .await
-            .unwrap();
+        let mut restarted = campaign.prepare_embedded_service(&settings).await.unwrap();
         let restarted_api = format!("http://{}/api", restarted.address);
         let restarted_origin = format!("https://{}", restarted.address);
         let stale = client

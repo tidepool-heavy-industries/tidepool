@@ -108,6 +108,9 @@ Diagnostics are opt-in:
 `TIDEPOOL_TEST_DROP_DC` and `TIDEPOOL_TEST_FORCE_VALIDATION_ONLY` are
 fault-injection controls for extractor tests, not debugging defaults.
 
+For a separate symbol-rich worker and bounded phase-aligned CPU/RSS captures,
+see [compiler profiling](../../docs/compiler-profiling.md).
+
 ## Worker lifetime
 
 The Rust frontend owns CLI parsing, Unix sockets, daemon configuration, and

@@ -11,6 +11,8 @@ const FAILED_START_HOSTED_JOIN_TIMEOUT: std::time::Duration = std::time::Duratio
 
 pub(super) struct ModelFreeSession {
     pub session_root: Arc<tempfile::TempDir>,
+    #[cfg(test)]
+    pub host_incarnation: Arc<HostIncarnationLease>,
     pub worktrees: WorktreeManager,
     pub bindings: Arc<Mutex<BindingTable>>,
     pub authority: ActorWorktreeAuthority,
@@ -76,7 +78,7 @@ impl ModelFreeSession {
             worktrees.clone(),
             authority.clone(),
             source_layers.as_ref(),
-            host_incarnation,
+            Arc::clone(&host_incarnation),
             super::JournalOpenMode::Create,
             None,
         )?;
@@ -210,6 +212,8 @@ impl ModelFreeSession {
         };
         Ok(Self {
             session_root,
+            #[cfg(test)]
+            host_incarnation,
             worktrees,
             bindings,
             authority,
