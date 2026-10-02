@@ -24,7 +24,7 @@ import GHC.Driver.Main (hscDesugar, batchMsg, hscTidy, hscCompileCoreExpr')
 import GHC.Driver.Pipeline (compileOne')
 import GHC.Driver.Hooks (hscCompileCoreExprHook)
 import GHC.Data.StringBuffer (stringToStringBuffer)
-import GHC.Driver.Backend (backendGeneratesCode)
+import GHC.Driver.Backend (backendGeneratesCode, backendWritesFiles)
 import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit)
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags, hsc_FC, hsc_targets, hsc_hooks))
 import GHC.Driver.Monad (reflectGhc, reifyGhc)
@@ -1166,6 +1166,40 @@ quasiQuoteRdrName :: HsUntypedSplice GhcPs -> [RdrName]
 quasiQuoteRdrName (HsQuasiQuote _ name _) = [name]
 quasiQuoteRdrName _ = []
 
+-- GHC enables dependency codegen from the QuasiQuotes extension alone. The
+-- harness enables that syntax for every input, including inputs without a
+-- quote. In a graph without other compile-time inputs, the parser can prove
+-- that none of those dependencies will execute. Keep the syntax and load
+-- profile; only suppress the executable backend that downsweep enabled.
+-- Both this proof and load parse the immutable downsweep buffers. Missing
+-- buffers, preprocessing, splices and plugins retain GHC's ordinary plan.
+elideUnusedQuasiQuoteCodegen :: Bool -> ModuleGraph -> Ghc ModuleGraph
+elideUnusedQuasiQuoteCodegen timing graph
+  | null quoteSummaries || null executable || any unsupported summaries = pure graph
+  | any (backendWritesFiles . backend . ms_hspp_opts) executable = pure graph
+  | any (isNothing . ms_hspp_buf) quoteSummaries = pure graph
+  | otherwise = do
+      parsed <- mapM parseModule quoteSummaries
+      if any (not . null . occurrences) parsed
+        then pure graph
+        else do
+          let narrowed = mapMG (\summary -> summary
+                { ms_hspp_opts = (ms_hspp_opts summary) { backend = noBackend } }) graph
+          current <- getSession
+          setSession current { hsc_mod_graph = narrowed }
+          liftIO (emitCount timing "quasiquote_codegen_elided_modules"
+            (toInteger (length executable)))
+          pure narrowed
+  where
+    summaries = [summary | ModuleNode _ summary <- mgModSummaries' graph]
+    executable = filter (backendGeneratesCode . backend . ms_hspp_opts) summaries
+    quoteSummaries = filter (xopt LangExt.QuasiQuotes . ms_hspp_opts) summaries
+    unsupported summary =
+      hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary)
+        || xopt LangExt.StaticPointers (ms_hspp_opts summary)
+    occurrences = everything (++) (mkQ [] quasiQuoteRdrName)
+      . unLoc . pm_parsed_source
+
 -- | Diagnostic only (TIDEPOOL_MEMO_TRACE): honestly report which
 -- quasiquoters, if any, a module's last fresh compile actually saw --
 -- distinguishing "none", "every occurrence is an allowlisted pure quoter",
@@ -1486,14 +1520,15 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
         keepSummary _ = True
     setSession previous {hsc_mod_graph = mkModuleGraph
       (filter keepSummary (mgModSummaries' (hsc_mod_graph previous)))}
-    modGraphRaw <- depanal (pvDownsweepExcludes variant) False
+    modGraphDownsweep <- depanal (pvDownsweepExcludes variant) False
     forM_ (pvExactScope variant) $ \scope -> do
       let exactNames = Set.fromList [mkModuleName (exactModule iface)
             | (iface, _, _) <- scopeInterfaces scope]
       when (any (\node -> case node of
           ModuleNode _ summary -> ms_mod_name summary `Set.member` exactNames
-          _ -> False) (mgModSummaries' modGraphRaw)) $
+          _ -> False) (mgModSummaries' modGraphDownsweep)) $
         liftIO $ ioError $ userError "fresh source collides with an admitted exact owner"
+    modGraphRaw <- elideUnusedQuasiQuoteCodegen timing modGraphDownsweep
     sourceSelection <- case pvExactScope variant of
       Nothing -> pure Nothing
       Just scope -> withSourceSelectionRefusal

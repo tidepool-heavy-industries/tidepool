@@ -2148,7 +2148,7 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       resultType = fmap renderType . crResultType
       loadedOwner = "tidepool-checked-loaded-source module=MetadataOwner"
       checkedOwner = "tidepool-checked module=MetadataOwner target=False"
-  forM_ ["MetadataOwner.hs", "MetadataTarget.hs", "MetadataLoadedFamily.hs"
+  forM_ ["MetadataOwner.hs", "MetadataTarget.hs", "MetadataExtensionOnlyTarget.hs", "MetadataLoadedFamily.hs"
     , "MetadataFamilyTarget.hs", "MetadataHiddenFamily.hs", "MetadataUntracked.hs"
     , "MetadataUntrackedTarget.hs", "MetadataQuoter.hs", "MetadataQuotedTarget.hs", "MetadataQuoteSupport.hs"] install
   writeExactMetadataScope scopePath []
@@ -2163,6 +2163,23 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
         && checkedOwner `notElem` lines diagnostics
         && "tidepool-checked module=MetadataTarget target=True" `elem` lines diagnostics) $
       fail "exact metadata repeated the loaded source frontend or changed its instance result"
+    (extensionOnly, extensionDiagnostics) <- captureDiagnostics
+      (checked "MetadataExtensionOnlyTarget.hs")
+    let executableOwner env = case lookupHpt (hsc_HPT env) (mkModuleName "MetadataOwner") of
+          Just hmi -> let linkable = hm_linkable hmi
+            in isJust (homeMod_bytecode linkable) || isJust (homeMod_object linkable)
+          Nothing -> False
+    unless (resultType extensionOnly == resultType exact
+        && counterValues "quasiquote_codegen_elided_modules" extensionDiagnostics == [1]
+        && not (executableOwner (crHscEnv extensionOnly))) $
+      fail "extension-only metadata unnecessarily provisioned an executable dependency"
+    (extensionNative, nativeDiagnostics) <- captureDiagnostics $
+      compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataExtensionOnlyTarget.hs") [work] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult extensionNative))
+        && counterValues "quasiquote_codegen_elided_modules" nativeDiagnostics == [1]
+        && not (executableOwner (prHscEnv (pprPipelineResult extensionNative)))) $
+      fail "extension-only native compilation changed its result or retained dependency execution"
     copyFile (fixture "MetadataOwnerWithoutInstance.hs") (work </> "MetadataOwner.hs")
     changed <- try (checked "MetadataTarget.hs") :: IO (Either SomeException CheckedEnvironmentResult)
     case changed of
@@ -2173,6 +2190,7 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
     unless (resultType recovered == Just "Int") $ fail "exact metadata did not recover after source refusal"
     (quoted, quoteDiagnostics) <- captureDiagnostics (checked "MetadataQuotedTarget.hs")
     unless (resultType quoted == Just "Int"
+        && null (counterValues "quasiquote_codegen_elided_modules" quoteDiagnostics)
         && "tidepool-checked-dependency-executable module=MetadataQuoter bytecode=True object=False" `elem` lines quoteDiagnostics
         && "tidepool-checked-loaded-source module=MetadataQuoter" `elem` lines quoteDiagnostics) $
       fail "exact metadata discarded the loaded quoter's executable linkable"
@@ -2237,7 +2255,7 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       [] -> fail "no exact compilation v2 receipt matched the untracked target source"
       _ -> fail ("multiple exact compilation receipts matched the untracked target: "
         ++ show (length receiptSafety))
-  putStrLn "exact loaded metadata: parity, source drift, quoter bytecode, hidden family and untracked input passed"
+  putStrLn "exact loaded metadata: parity, extension-only execution elision, source drift, quoter bytecode, hidden family and untracked input passed"
 
 -- Native candidates and exact owners bypass fresh preparation. Their defining
 -- interfaces must still supply typed site siblings without widening imports.
