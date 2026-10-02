@@ -111,8 +111,12 @@ emitDetailPhase True parent name ms =
 
 emitCount :: Bool -> String -> Integer -> IO ()
 emitCount False _ _ = pure ()
-emitCount True name count =
-  hPutStrLn stderr ("tidepool-count name=" ++ name ++ " count=" ++ show count)
+emitCount True name count = do
+  -- Position the count event on the phase clock; this is not a duration of
+  -- the counted work. Older lines without this field are request totals only.
+  countNs <- getMonotonicTimeNSec
+  hPutStrLn stderr ("tidepool-count name=" ++ name ++ " count=" ++ show count
+    ++ " count_ns=" ++ show countNs)
 
 elapsedMs :: Double -> Double -> Integer
 elapsedMs t0 t1 = round ((t1 - t0) * 1000)
@@ -228,15 +232,52 @@ renderInterfaceMeasurement request moduleName stage reuse wallNs cpuNs before af
 renderRtsDelta :: Maybe RTS.RTSStats -> Maybe RTS.RTSStats -> String
 renderRtsDelta before after = case (before, after) of
   (Just rts0, Just rts1) ->
-    " rts=enabled rts_scope=process_delta"
+    let collections = delta (RTS.gcs rts0) (RTS.gcs rts1)
+        majorCollections = delta (RTS.major_gcs rts0) (RTS.major_gcs rts1)
+    in " rts=enabled rts_scope=process_delta"
       ++ " allocated_bytes=" ++ show (delta (RTS.allocated_bytes rts0) (RTS.allocated_bytes rts1))
       ++ " gc_cpu_ns=" ++ show (delta (RTS.gc_cpu_ns rts0) (RTS.gc_cpu_ns rts1))
       ++ " gc_elapsed_ns=" ++ show (delta (RTS.gc_elapsed_ns rts0) (RTS.gc_elapsed_ns rts1))
-      ++ " gcs=" ++ show (delta (RTS.gcs rts0) (RTS.gcs rts1))
+      ++ " gcs=" ++ show collections
+      ++ " major_gcs=" ++ show majorCollections
+      ++ " minor_gcs=" ++ show (delta majorCollections collections)
+      ++ renderRtsSnapshot "before" before ++ renderRtsSnapshot "after" after
+      ++ renderRtsHighWater after
   _ ->
     " rts=unavailable rts_scope=process_delta"
       ++ " allocated_bytes=unavailable gc_cpu_ns=unavailable"
       ++ " gc_elapsed_ns=unavailable gcs=unavailable"
+      ++ " major_gcs=unavailable minor_gcs=unavailable"
+      ++ renderRtsSnapshot "before" before ++ renderRtsSnapshot "after" after
+      ++ renderRtsHighWater after
+
+-- These gauges describe the last completed GC, not the sampling instant.
+-- Equal epochs expose stale samples; epoch zero has no GC details. Minor
+-- collections count uncollected generations as live. No collection is forced.
+renderRtsSnapshot :: String -> Maybe RTS.RTSStats -> String
+renderRtsSnapshot suffix stats =
+  renderRtsValue ("last_gc_epoch_" ++ suffix) (RTS.gcs <$> stats)
+    ++ renderRtsValue ("last_gc_gen_" ++ suffix) (RTS.gcdetails_gen <$> details)
+    ++ renderRtsValue ("last_gc_live_bytes_" ++ suffix) (RTS.gcdetails_live_bytes <$> details)
+    ++ renderRtsValue ("last_gc_mem_in_use_bytes_" ++ suffix) (RTS.gcdetails_mem_in_use_bytes <$> details)
+  where
+    details = stats >>= \value ->
+      if RTS.gcs value == 0 then Nothing else Just (RTS.gc value)
+
+-- Process-lifetime maxima are not phase peaks or native RSS. The live maximum
+-- is sampled only at major (oldest-generation) collections, including -G1.
+renderRtsHighWater :: Maybe RTS.RTSStats -> String
+renderRtsHighWater stats =
+  renderRtsValue "process_highwater_major_gc_live_bytes" live
+    ++ renderRtsValue "process_highwater_rts_mem_in_use_bytes" capacity
+  where
+    live = stats >>= \value ->
+      if RTS.major_gcs value == 0 then Nothing else Just (RTS.max_live_bytes value)
+    capacity = stats >>= \value ->
+      if RTS.gcs value == 0 then Nothing else Just (RTS.max_mem_in_use_bytes value)
+
+renderRtsValue :: Show a => String -> Maybe a -> String
+renderRtsValue name value = " " ++ name ++ "=" ++ maybe "unavailable" show value
 
 renderStage :: InterfaceStage -> String
 renderStage CheckedEnvironmentInterface = "checked_environment"
