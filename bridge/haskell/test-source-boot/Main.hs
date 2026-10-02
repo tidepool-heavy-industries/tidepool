@@ -107,7 +107,7 @@ import Tidepool.GhcPipeline
   , renderType, generatedScaffoldRecipe, activationPreviewInputType
   , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
-  , readModuleCandidates, candidateExecutionSources, candidateOriginalIdentity)
+  , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports)
 import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
 import Tidepool.FatIface (readExactInterface)
@@ -1924,7 +1924,124 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
     Nothing (work </> "ExecutionReexportFacade.hs") [work] Nothing
   unless (Set.fromList (map candidateModule (pprAcceptedCandidates accepted)) == Set.fromList owners) $
     fail "real GHC admission did not accept the proven source-selected originals"
+  -- Keep the dependency as an exact original while offering its importer.
+  -- Root replacement remains forbidden even though its tuple is identical.
+  let crossoverScopePath = work </> "candidate-original-scope.cbor"
+      crossoverScope = emptySessionScope {ssRoot=work,ssExactScope=Just crossoverScopePath}
+      helperName = "MetadataQuoteSupport"
+      helperRows rows' = [row | row@(TList (_:TString name:_)) <- rows', name == helperName]
+      crossoverTerm lexical = case originalTerm of
+        TList fields -> TList [case (index,field) of
+          (4,TList rows') -> TList (helperRows rows')
+          (5,_) -> TList [TList [TList [TString "main",TString helperName],TList []] | lexical]
+          (6,TList rows') -> TList (helperRows rows')
+          (7,TList [graphs,TList refs]) -> TList [graphs,TList (helperRows refs)]
+          (8,_) -> TList [TString "cell-check2",TString (T.replicate 64 "0")
+            ,TString (T.replicate 64 "0"),TString (T.replicate 64 "0")
+            ,TList [],TList [],TList [],TList [],TList [TString (T.pack work)]]
+          _ -> field | (index,field) <- zip [0::Int ..] fields]
+        _ -> originalTerm
+      crossover = runPipelineSessionSelected (PreparedProducts (Just candidatePath)) Set.empty
+        CertifyHomeProductsCompile (Just crossoverScope)
+        (work </> "ExecutionReexportFacade.hs") [work] Nothing
+      requireImporter result = unless
+        (map candidateModule (pprAcceptedCandidates result) == ["MetadataQuoter"]
+          && "MetadataQuoteSupport" `notElem` preparedNames result) $
+        fail "exact dependency reuse rejected its importer or replaced the protected original"
+  writeTerm crossoverScopePath (crossoverTerm True)
+  crossoverAccepted <- crossover
+  requireImporter crossoverAccepted
+  let helperSource = work </> "MetadataQuoteSupport.hs"
+  bracket (BS.readFile helperSource <* removeFile helperSource) (BS.writeFile helperSource) $ \_ -> do
+    sourceFreeOriginal <- crossover
+    requireImporter sourceFreeOriginal
+  let sharedGraphParcel = case filteredParcel of
+        TList [_,references] -> TList [TList [],references]
+        other -> other
+  writeTerm candidatePath (envelope sharedGraphParcel)
+  readModuleCandidates candidatePath >>= \case
+    Left _ -> pure ()
+    Right _ -> fail "candidate manifest borrowed an unavailable original graph"
+  sharedCandidates <- readModuleCandidatesWithGraphs (scopeExecutionGraphs originalScope) candidatePath
+    >>= either fail pure
+  unless (length sharedCandidates == 2) $ fail "combined exact graph inventory lost candidate recipes"
+  sharedGraphAccepted <- crossover
+  requireImporter sharedGraphAccepted
+  writeTerm candidatePath (envelope filteredParcel)
+  -- Exact-produced evidence keeps its authenticated home edge in the graph,
+  -- outside the ordinary import rows. Preserve the real GHC source/body pair.
+  let exactRows = [case row of
+        TList fields@(_:TString "MetadataQuoter":_) -> TList [case (index,field) of
+          (9,TList imports) -> TList [edge | edge@(TList (_:TString name:_)) <- imports, name /= helperName]
+          _ -> field | (index,field) <- zip [0::Int ..] fields]
+        other -> other | row <- compactRows]
+  exactParcel <- case filteredParcel of
+    TList [TList [TList [_,TBytes graphBytes]],TList refs] -> do
+      graph <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict graphBytes))
+      let removeOriginal node = case node of
+            TList fields@(_:TString "MetadataQuoter":_) -> TList [case (index,field) of
+              (4,TList imports) -> TList [edge | edge@(TList (_:TString name:_)) <- imports, name /= helperName]
+              _ -> field | (index,field) <- zip [0::Int ..] fields]
+            other -> other
+          exactGraph = case graph of
+            TList fields -> TList [case (index,field) of
+              (7,TList evidence) -> TList [if column == 4 then case value of
+                TList modules -> TList (map removeOriginal modules)
+                other -> other else value | (column,value) <- zip [0::Int ..] evidence]
+              (9,_) -> TList [TList [TString "main",TString "MetadataQuoter"
+                ,TList [TList [TString "main",TString helperName]]]]
+              _ -> field | (index,field) <- zip [0::Int ..] fields]
+            other -> other
+          exactBytes = toStrictByteString (encodeTerm exactGraph)
+          exactSha = TString (T.pack (digest exactBytes))
+          references = [TList [if index == 5 then exactSha else field
+            | (index,field) <- zip [0::Int ..] fields] | TList fields <- refs]
+      pure (TList [TList [TList [exactSha,TBytes exactBytes]],TList references])
+    _ -> fail "candidate fixture lacks one authenticated graph"
+  writeTerm candidatePath (TList [TString "TPMCAN",TString "8",symbols,globals,TList exactRows,exactParcel])
+  graphOriginalAccepted <- crossover
+  requireImporter graphOriginalAccepted
+  writeTerm candidatePath (envelope filteredParcel)
+  let reservedScope = case crossoverTerm True of
+        TList fields -> TList [case (index,field) of
+          (8,TList auth) -> TList [if column == 6 then TList [TString "MetadataQuoter"] else entry
+            | (column,entry) <- zip [0::Int ..] auth]
+          _ -> field | (index,field) <- zip [0::Int ..] fields]
+        other -> other
+  writeTerm crossoverScopePath reservedScope
+  reserved <- crossover
+  unless (null (pprAcceptedCandidates reserved) && "MetadataQuoter" `elem` preparedNames reserved) $
+    fail "reserved source owner was admitted as a cached replacement root"
+  -- Actual source selection, rather than inventory membership, authorizes
+  -- the same dependency when it was initially hidden from lexical imports.
+  writeTerm crossoverScopePath (crossoverTerm False)
+  crossoverSelected <- crossover
+  requireImporter crossoverSelected
+  let unsealedScope = case crossoverTerm False of
+        TList fields -> TList [if index == 8 then TNull else field
+          | (index,field) <- zip [0::Int ..] fields]
+        other -> other
+  writeTerm crossoverScopePath unsealedScope
+  hidden <- try crossover :: IO (Either SomeException PreparedPipelineResult)
+  unless (case hidden of
+      Left reason -> "OriginalSourceSelectionRejected" `isInfixOf` show reason
+      Right _ -> False) $
+    fail "hidden inventory original became visible without current source-selection authority"
+  writeTerm crossoverScopePath (crossoverTerm False)
+  -- Without the importer's authenticated recipe, raw path normalization is
+  -- forbidden and source compilation remains the safe fallback.
+  writeTerm candidatePath (envelope (TList [TList [],TList []]))
+  unproven <- crossover
+  unless (null (pprAcceptedCandidates unproven) && "MetadataQuoter" `elem` preparedNames unproven) $
+    fail "exact dependency without a recipe bypassed current compilation"
+  writeTerm candidatePath (envelope filteredParcel)
   copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" (work </> "MetadataQuoteSupport.hs")
+  differentOriginal <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing (work </> "MetadataQuoteSupport.hs") [work] Nothing
+  writeExecutionScope crossoverScopePath work differentOriginal [T.unpack helperName]
+  mismatched <- crossover
+  unless (null (pprAcceptedCandidates mismatched) && "MetadataQuoter" `elem` preparedNames mismatched) $
+    fail "cached importer admitted a different current exact dependency tuple"
   changed <- runPipelineSessionSelected (PreparedProducts (Just candidatePath)) Set.empty CertifyHomeProductsCompile
     Nothing (work </> "ExecutionReexportFacade.hs") [work] Nothing
   unless (null (pprAcceptedCandidates changed)) $
@@ -1949,6 +2066,11 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   let helperScopePath = work </> "helper-only-original.cbor"
   writeExecutionScope helperScopePath work helperOriginal ["MetadataQuoteSupport"]
   helperScope <- readExactScope helperScopePath >>= either fail pure
+  -- The helper's independent receipt has a different graph digest but the
+  -- same exact tuple; fresh parent edges retain their own graph provenance.
+  copyFile helperScopePath crossoverScopePath
+  independentlyAuthenticated <- crossover
+  requireImporter independentlyAuthenticated
   helperReference <- case scopeExecutionOwners helperScope of
     [value] -> pure value
     _ -> fail "helper-only source cycle has another native owner"
@@ -2042,7 +2164,9 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   -- target sees only the thin reexport facade, not the hidden defining owner.
   let admittedPath = work </> "promoted-scope.cbor"
       admittedTerm = case originalTerm of
-        TList fields -> TList [if index == 7 then filteredParcel else field | (index,field) <- zip [0::Int ..] fields]
+        TList fields -> TList [case (index,field,filteredParcel) of
+          (7,TList [graphDescriptors,_],TList [_,references]) -> TList [graphDescriptors,references]
+          _ -> field | (index,field) <- zip [0::Int ..] fields]
         _ -> originalTerm
   writeTerm admittedPath admittedTerm
   result <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile
@@ -2068,7 +2192,7 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
     readModuleCandidates candidatePath >>= \case
       Left _ -> pure ()
       Right _ -> fail ("candidate execution manifest accepted " ++ label)
-  putStrLn "candidate execution sources: actual native/source admission, source drift refusal, accepted-only promotion, no lexical widening, thin reexport execution and identity/digest/duplicate/producer refusals passed"
+  putStrLn "candidate execution sources: actual native/source and matching exact dependency admission, protected roots, selected-source authority, missing/mismatched proof and source drift refusals, accepted-only promotion, no lexical widening, thin reexport execution and identity/digest/duplicate/producer refusals passed"
   where
     readTerm path = do
       bytes <- BS.readFile path

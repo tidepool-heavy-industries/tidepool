@@ -2,7 +2,7 @@
 -- Boot declarations are source inputs, not executable products. A boot SCC
 -- receives fresh GHC load validation before its original prepared bodies reuse.
 module Tidepool.HomeProducts
-  ( hydrateCandidateHomeProducts ) where
+  ( hydrateCandidateHomeProducts, hydrateCandidateHomeProductsWithOriginals ) where
 
 import Control.Exception
   ( SomeException, SomeAsyncException, displayException, fromException, throwIO, try )
@@ -36,6 +36,7 @@ import GHC.Utils.Outputable (ppr, renderWithContext, defaultSDocContext)
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact, freshExactState, hydrateExactScope )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
+import Tidepool.FamilyConsistency (validateEnvironmentFamilies)
 import Tidepool.RetainedUnfoldings (scopeRetainedHscEnv, scopeRetainedModuleGraph)
 import Tidepool.Timing (emitCount, readTimingEnabled, timeDetailPhase)
 
@@ -49,7 +50,18 @@ hydrateCandidateHomeProducts
   :: HscEnv -> ModuleGraph -> [(ExactIfaceArtifact, ModIface)]
   -> [ModSummary] -> [ModSummary]
   -> Ghc (Either String HscEnv)
-hydrateCandidateHomeProducts initial loadGraph interfaces summaries boots = reifyGhc $ \session -> do
+hydrateCandidateHomeProducts initial loadGraph interfaces =
+  hydrateCandidateHomeProductsWithOriginals initial loadGraph interfaces [] (\_ -> pure . Right)
+
+-- Original HMIs contribute implementation Names; only the selected lexical
+-- graph contributes instances and families during current interface checks.
+hydrateCandidateHomeProductsWithOriginals
+  :: HscEnv -> ModuleGraph -> [(ExactIfaceArtifact, ModIface)]
+  -> [(ExactIfaceArtifact, ModIface)]
+  -> (ModuleGraph -> HscEnv -> IO (Either String HscEnv))
+  -> [ModSummary] -> [ModSummary] -> Ghc (Either String HscEnv)
+hydrateCandidateHomeProductsWithOriginals initial loadGraph interfaces originals installLexical
+    summaries boots = reifyGhc $ \session -> do
   result <- try (reflectGhc hydrate session)
   case result of
     Left failure | Just (_ :: SomeAsyncException) <- fromException failure -> throwIO failure
@@ -124,7 +136,10 @@ hydrateCandidateHomeProducts initial loadGraph interfaces summaries boots = reif
             liftIO (ioError (userError "cached home boot input read untracked dependent files"))
         setSession current
         pure current
-      hydrated <- liftIO (hydrateExactScope validationBase interfaces)
+      combined <- liftIO (hydrateExactScope validationBase (originals ++ interfaces))
+      hydrated <- liftIO (installLexical selectedGraph combined)
+        >>= either (liftIO . ioError . userError) pure
+      liftIO (validateEnvironmentFamilies hydrated)
       setSession (if null boots then hydrated else validationBase)
       forM_ ordered $ \summary -> do
         iface <- maybe
