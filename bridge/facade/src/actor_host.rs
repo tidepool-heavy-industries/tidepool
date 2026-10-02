@@ -5159,8 +5159,31 @@ async fn run_interactive_applications(
                                 break Some("embedded backend has no launch settings".into());
                             };
                             let actor = installation.actor.identity();
+                            let selected_parent = if actor != root_identity && installation.checkpoint.is_none() && installation.context_parent.is_none() && installation.checkpoint_attachment.is_none() {
+                                let identities = embedded_conversations.iter().map(|(actor, conversation)| (*actor, conversation.identity().clone())).collect();
+                                match embedded_context::selected_provider_parent(
+                                    &embedded_run, installation.creator.or(installation.supervisor_parent), &(host_graph)(), &identities,
+                                ) {
+                                    Ok(parent) => Some(parent),
+                                    Err(error) => {
+                                        if let Some(gate) = installation.fork_gate.as_ref() {
+                                            gate.mark_failed().ok();
+                                        }
+                                        tracing::warn!(?actor, %error, "selected provider ancestry refused");
+                                        if let Err(failure) = apply_application_failure(installation.actor.clone(), ExternalApplicationFailure {
+                                            class: ExternalApplicationFailureClass::ToolHostStartup,
+                                            detail: error,
+                                        }).await {
+                                            tracing::warn!(?actor, %failure, "selected child startup failure was not delivered");
+                                        }
+                                        continue;
+                                    },
+                                }
+                            } else { None };
                             let path = if actor == root_identity {
                                 harness::model::AgentPath("/root".into())
+                            } else if let Some(parent) = &selected_parent {
+                                parent.child_path(actor)
                             } else {
                                 let Some(captured) = installation.checkpoint_attachment.as_ref()
                                     .and_then(|attachment| attachment.downcast::<embedded_harness::EmbeddedHostedCheckpoint>()) else {
@@ -5236,34 +5259,13 @@ async fn run_interactive_applications(
                                 ) {
                                     break Some(error);
                                 }
-                            } else if installation.checkpoint.is_none() && installation.context_parent.is_some() {
+                            } else if installation.checkpoint_attachment.is_none() && installation.context_parent.is_some() {
                                 break Some(format!(
                                     "embedded child actor {actor:?} requires a hosted checkpoint"
                                 ));
                             }
                             let initial_input = installation.initial_user_message.clone();
                             if !is_root {
-                                let selected_parent = if installation.checkpoint.is_none() {
-                                    let identities = embedded_conversations.iter().map(|(actor, conversation)| (*actor, conversation.identity().clone())).collect();
-                                    match embedded_context::selected_provider_parent(
-                                        &embedded_run, installation.creator.or(installation.supervisor_parent), &(host_graph)(), &identities,
-                                    ) {
-                                        Ok(parent) => Some(parent),
-                                        Err(error) => {
-                                            if let Some(gate) = installation.fork_gate.as_ref() {
-                                                gate.mark_failed().ok();
-                                            }
-                                            tracing::warn!(?actor, %error, "selected provider ancestry refused");
-                                            if let Err(failure) = apply_application_failure(local_actor.clone(), ExternalApplicationFailure {
-                                                class: ExternalApplicationFailureClass::ToolHostStartup,
-                                                detail: error,
-                                            }).await {
-                                                tracing::warn!(?actor, %failure, "selected child startup failure was not delivered");
-                                            }
-                                            continue;
-                                        },
-                                    }
-                                } else { None };
                                 let queue_admission = match local_actor.admit_transaction() {
                                     Ok(admission) => admission,
                                     Err(error) => {

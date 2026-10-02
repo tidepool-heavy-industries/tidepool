@@ -320,13 +320,6 @@ pub(super) async fn attach_checkpoint_actor(
     initial_input: Option<String>,
 ) -> Result<EmbeddedActor, String> {
     let actor = installation.actor.identity();
-    let lease = installation
-        .checkpoint
-        .as_ref()
-        .ok_or("embedded child requires a checkpoint")?;
-    if installation.context_parent != Some(lease.issuer) {
-        return Err("embedded child context parent does not match checkpoint issuer".into());
-    }
     let gate = installation
         .fork_gate
         .as_ref()
@@ -337,10 +330,12 @@ pub(super) async fn attach_checkpoint_actor(
     if gate.publication().map_err(|error| error.to_string())?
         == exomonad_actor::ForkGroupPublication::Deferred
     {
-        lease
-            .wait_published()
-            .await
-            .map_err(|refusal| format!("checkpoint publication refused: {refusal:?}"))?;
+        if let Some(lease) = &installation.checkpoint {
+            lease
+                .wait_published()
+                .await
+                .map_err(|refusal| format!("checkpoint publication refused: {refusal:?}"))?;
+        }
     }
     let captured = installation
         .checkpoint_attachment
@@ -357,14 +352,7 @@ pub(super) async fn attach_checkpoint_actor(
     };
     let policy = Arc::new(EmbeddedPolicyInstallation::from_installation(&installation));
     let embedded = runtime
-        .attach_checkpoint(
-            identity,
-            installation.actor.clone(),
-            policy,
-            lease,
-            gate,
-            captured,
-        )
+        .attach_checkpoint(identity, &installation, policy, captured)
         .map_err(|error| error.to_string())?;
     if let Some(input) = initial_input.filter(|_| runtime.admit_initial_input(actor)) {
         embedded

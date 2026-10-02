@@ -9,9 +9,9 @@ use std::{
 use parking_lot::Mutex as ParkingMutex;
 
 use exomonad_actor::{
-    ActorAdmissionLease, ActorExitKind, ActorRef, ActorTerminal, CheckpointLease,
-    HostedCheckpointAttachment, HostedCheckpointCapture, HostedCheckpointCaptureError,
-    LocalActorRef, ResidentToolError, WorkbenchCancellationOutcome,
+    ActorAdmissionLease, ActorExitKind, ActorRef, ActorTerminal, HostedCheckpointAttachment,
+    HostedCheckpointCapture, HostedCheckpointCaptureError, LocalActorRef,
+    LocalResidentInstallation, ResidentToolError, WorkbenchCancellationOutcome,
 };
 use exomonad_tool::{ToolArguments, ToolInvocationContext};
 use harness::{
@@ -202,29 +202,49 @@ impl EmbeddedHarnessRuntime {
     pub(super) fn attach_checkpoint(
         &self,
         identity: HostIdentity,
-        actor: LocalActorRef,
-        installation: Arc<EmbeddedPolicyInstallation>,
-        lease: &CheckpointLease,
-        gate: &exomonad_actor::ForkGroupGate,
+        installation: &LocalResidentInstallation,
+        policy: Arc<EmbeddedPolicyInstallation>,
         captured: Arc<EmbeddedHostedCheckpoint>,
     ) -> Result<EmbeddedConversation, EmbeddedError> {
-        if identity.run != self.run {
-            return Err(EmbeddedError::Binding(
-                "embedded checkpoint child belongs to another run".into(),
-            ));
-        }
-        if captured.issuer != lease.issuer {
-            return Err(EmbeddedError::Binding(
-                "embedded checkpoint issuer mismatch".into(),
-            ));
-        }
-        let checkpoint = match gate
-            .publication()
-            .map_err(|error| EmbeddedError::Binding(error.to_string()))?
+        if identity.run != self.run
+            || identity.actor != captured.child_path(installation.actor.identity())
+            || identity.incarnation != installation.actor.identity().incarnation.0.to_string()
         {
+            return Err(EmbeddedError::Binding(
+                "embedded checkpoint child belongs to another admitted run/actor".into(),
+            ));
+        }
+        let gate = installation.fork_gate.as_ref().ok_or_else(|| {
+            EmbeddedError::Binding("embedded checkpoint child has no admitted fork gate".into())
+        })?;
+        let publication = gate
+            .publication()
+            .map_err(|error| EmbeddedError::Binding(error.to_string()))?;
+        if let Some(lease) = &installation.checkpoint {
+            if captured.issuer != lease.issuer || installation.context_parent != Some(lease.issuer)
+            {
+                return Err(EmbeddedError::Binding(
+                    "embedded checkpoint issuer mismatch".into(),
+                ));
+            }
+        } else {
+            if publication != exomonad_actor::ForkGroupPublication::Deferred {
+                return Err(EmbeddedError::Binding(
+                    "inherited hosted context requires deferred publication".into(),
+                ));
+            }
+            captured.validate_inherited_origin(
+                &self.run,
+                installation.creator,
+                installation.context_parent,
+                installation.fork_boundary.as_ref(),
+            )?;
+        }
+        let checkpoint = match publication {
             exomonad_actor::ForkGroupPublication::Deferred => captured.cuts.deferred(),
             exomonad_actor::ForkGroupPublication::Captured => captured.cuts.before_call(),
         };
+        let actor = installation.actor.clone();
         let parent = checkpoint.origin().clone();
         let actor_identity = actor.identity();
         self.prepare_application(actor_identity, &identity)?;
@@ -234,7 +254,7 @@ impl EmbeddedHarnessRuntime {
             EmbeddedHostActor::new(
                 identity,
                 actor,
-                installation,
+                policy,
                 self.store.clone(),
                 wakes,
                 round_control.clone(),
@@ -646,6 +666,27 @@ pub(super) struct EmbeddedHostedCheckpoint {
 }
 
 impl EmbeddedHostedCheckpoint {
+    fn validate_inherited_origin(
+        &self,
+        run: &str,
+        creator: Option<ActorRef>,
+        context_parent: Option<ActorRef>,
+        boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
+    ) -> Result<(), EmbeddedError> {
+        let operation = self.cuts.deferred().operation().ok_or_else(|| {
+            EmbeddedError::Binding("inherited hosted context has no captured operation".into())
+        })?;
+        validate_inherited_operation(
+            self.issuer,
+            self.cuts.deferred().origin(),
+            operation,
+            run,
+            creator,
+            context_parent,
+            boundary,
+        )
+    }
+
     pub(super) fn child_path(&self, actor: ActorRef) -> AgentPath {
         AgentPath(format!(
             "{}/a{}_i{}",
@@ -653,6 +694,54 @@ impl EmbeddedHostedCheckpoint {
             actor.id.0,
             actor.incarnation.0
         ))
+    }
+}
+
+fn validate_inherited_operation(
+    issuer: ActorRef,
+    parent: &AgentPath,
+    operation: &OperationId,
+    run: &str,
+    creator: Option<ActorRef>,
+    context_parent: Option<ActorRef>,
+    boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
+) -> Result<(), EmbeddedError> {
+    let refused = || {
+        EmbeddedError::Binding(
+            "inherited hosted context does not match its admitted issuer/operation".into(),
+        )
+    };
+    if creator != Some(issuer) || context_parent != Some(issuer) {
+        return Err(refused());
+    }
+    let original = boundary
+        .and_then(tidepool_runtime::session::WorkbenchForkBoundary::hosted)
+        .filter(|operation| operation.is_complete())
+        .ok_or_else(refused)?;
+    match (&operation.origin, &original.origin) {
+        (
+            ConversationIdentity::Embedded {
+                run: source_run,
+                actor,
+                incarnation,
+            },
+            exomonad_tool::ConversationOrigin::Embedded {
+                run: boundary_run,
+                actor: boundary_actor,
+                incarnation: boundary_incarnation,
+            },
+        ) if source_run == run
+            && boundary_run == run
+            && actor == parent
+            && boundary_actor == &parent.0
+            && incarnation == &issuer.incarnation.0.to_string()
+            && boundary_incarnation == incarnation
+            && original.request_id == operation.request.0
+            && original.call_id == operation.call.0 =>
+        {
+            Ok(())
+        }
+        _ => Err(refused()),
     }
 }
 
@@ -1137,6 +1226,90 @@ mod tests {
                 .unwrap()
                 .contains("explicit fresh-launch")
         );
+    }
+
+    #[test]
+    fn inherited_hosted_operation_requires_exact_admitted_parent_and_call() {
+        let issuer = ActorRef::first(exomonad_actor::ActorId(1));
+        let other = ActorRef::first(exomonad_actor::ActorId(2));
+        let parent = AgentPath("/root".into());
+        let operation = OperationId {
+            origin: ConversationIdentity::Embedded {
+                run: "run".into(),
+                actor: parent.clone(),
+                incarnation: "1".into(),
+            },
+            request: harness::model::RequestId("request".into()),
+            call: harness::model::CallId("call".into()),
+        };
+        let original = exomonad_tool::OriginalOperation {
+            origin: exomonad_tool::ConversationOrigin::Embedded {
+                run: "run".into(),
+                actor: parent.0.clone(),
+                incarnation: "1".into(),
+            },
+            request_id: "request".into(),
+            call_id: "call".into(),
+        };
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::Hosted(original.clone());
+        let check = |run, creator, context_parent, boundary| {
+            validate_inherited_operation(
+                issuer,
+                &parent,
+                &operation,
+                run,
+                creator,
+                context_parent,
+                boundary,
+            )
+        };
+        assert!(check("run", Some(issuer), Some(issuer), Some(&boundary)).is_ok());
+        assert!(check("other-run", Some(issuer), Some(issuer), Some(&boundary)).is_err());
+        assert!(check("run", Some(other), Some(issuer), Some(&boundary)).is_err());
+        assert!(check("run", Some(issuer), Some(other), Some(&boundary)).is_err());
+        assert!(check("run", None, Some(issuer), Some(&boundary)).is_err());
+        assert!(check("run", Some(issuer), Some(issuer), None).is_err());
+        for foreign in [
+            exomonad_tool::OriginalOperation {
+                request_id: "other-request".into(),
+                ..original.clone()
+            },
+            exomonad_tool::OriginalOperation {
+                call_id: "other-call".into(),
+                ..original.clone()
+            },
+            exomonad_tool::OriginalOperation {
+                origin: exomonad_tool::ConversationOrigin::Embedded {
+                    run: "run".into(),
+                    actor: "/other".into(),
+                    incarnation: "1".into(),
+                },
+                ..original.clone()
+            },
+            exomonad_tool::OriginalOperation {
+                origin: exomonad_tool::ConversationOrigin::Embedded {
+                    run: "run".into(),
+                    actor: "/root".into(),
+                    incarnation: "2".into(),
+                },
+                ..original.clone()
+            },
+            exomonad_tool::OriginalOperation {
+                origin: exomonad_tool::ConversationOrigin::External {
+                    thread_id: "thread".into(),
+                },
+                ..original
+            },
+        ] {
+            let boundary = tidepool_runtime::session::WorkbenchForkBoundary::Hosted(foreign);
+            assert!(check("run", Some(issuer), Some(issuer), Some(&boundary)).is_err());
+        }
+        let route = tidepool_runtime::session::WorkbenchForkBoundary::Route {
+            actor_id: 1,
+            incarnation: 1,
+            watch_id: 1,
+        };
+        assert!(check("run", Some(issuer), Some(issuer), Some(&route)).is_err());
     }
 
     #[derive(Clone)]
