@@ -4724,8 +4724,8 @@ async fn run_interactive_applications(
                     service
                         .runtime
                         .store()
-                        .embedded_agent_head(identity)
-                        .map(|head| head.map(|request| request.0))
+                        .embedded_round_frontier(identity)
+                        .map(|frontier| frontier.pending_head.or(frontier.settled_head).map(|request| request.0))
                 },
                 |actor| !embedded_live.contains(&actor),
             )
@@ -4752,7 +4752,7 @@ async fn run_interactive_applications(
                             &(host_graph)(),
                             &states,
                             |actor| embedded_conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
-                            |identity| service.runtime.store().embedded_agent_head(identity).map(|head| head.map(|request| request.0)),
+                            |identity| service.runtime.store().embedded_round_frontier(identity).map(|frontier| frontier.pending_head.or(frontier.settled_head).map(|request| request.0)),
                             |actor| !embedded_live.contains(&actor),
                         ) {
                             break Some(format!("embedded actor history projection failed: {error}"));
@@ -4797,7 +4797,7 @@ async fn run_interactive_applications(
                         &(host_graph)(),
                         &(*embedded_lifecycle_rx.borrow()).clone(),
                         |actor| embedded_conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
-                        |identity| service.runtime.store().embedded_agent_head(identity).map(|head| head.map(|request| request.0)),
+                        |identity| service.runtime.store().embedded_round_frontier(identity).map(|frontier| frontier.pending_head.or(frontier.settled_head).map(|request| request.0)),
                         |actor| !embedded_live.contains(&actor),
                     ) {
                         break Some(format!("embedded actor history projection failed: {error}"));
@@ -5396,7 +5396,7 @@ async fn run_interactive_applications(
                                 &(host_graph)(),
                                 &lifecycle_states,
                                 |actor| embedded_conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
-                                |identity| service.runtime.store().embedded_agent_head(identity).map(|head| head.map(|request| request.0)),
+                                |identity| service.runtime.store().embedded_round_frontier(identity).map(|frontier| frontier.pending_head.or(frontier.settled_head).map(|request| request.0)),
                                 |actor| !embedded_live.contains(&actor),
                             ) {
                                 break Some(format!("embedded actor history projection failed: {error}"));

@@ -28,6 +28,16 @@ about a file the crate does not compile.
 
 # Choose the surface
 
+When tools are asynchronous, submission acknowledges admission, not completion.
+Results arrive later under their original call IDs. When the engine-provided
+`yield` tool is available, use it to wait for an owned tool result or new user or
+worker input. Its optional `until` is a maximum elapsed duration in seconds;
+omit it or use `null` to wait for the first event. A timeout leaves pending work
+running. Ready tool outputs precede the yield result; `ready_results` identifies
+their exact operations. A wake or timeout alone proves no result. Read the
+outputs before reporting completion; do not resubmit admitted work or poll for
+its results.
+
 Use Haskell `Cmd` to compose commands with waiting, evidence, judgments and
 follow-up actions. Start from the project's compiled workflow examples and
 specialize them for repeated work. Direct `bash` is available for a one-off

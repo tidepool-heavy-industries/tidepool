@@ -21,6 +21,7 @@ tokio = { workspace = true, features = ["process", "sync", "time", "macros", "rt
 rustix = { version = "1", features = ["process", "event", "fs", "pipe", "thread", "mount", "stdio", "termios", "runtime"] }
 libc.workspace = true
 parking_lot.workspace = true
+reqwest.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]

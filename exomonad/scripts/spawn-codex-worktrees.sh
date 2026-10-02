@@ -15,7 +15,7 @@ Options:
                    inside tmux, otherwise tidepool-codex)
   --window NAME    new tmux window name (default: codex-<timestamp>)
   --astra          use gpt-6-astra
-  --sol            use gpt-6-sol (default)
+  --sol            use gpt-6.1-sol (default)
   --luna           use gpt-6-luna for clearly bounded mechanical work
   --model MODEL    use an explicit Codex model
   --effort LEVEL   model reasoning effort (defaults: Astra/Sol low, Luna medium)
@@ -45,7 +45,7 @@ repo_root=$(cd -- "$script_dir/../.." && pwd -P)
 
 session=""
 window="codex-$(date +%Y%m%d-%H%M%S)"
-model="gpt-6-sol"
+model="gpt-6.1-sol"
 effort="low"
 effort_explicit=false
 attach=false
@@ -77,7 +77,7 @@ while (($#)); do
       shift
       ;;
     --sol)
-      model="gpt-6-sol"
+      model="gpt-6.1-sol"
       if ! $effort_explicit; then
         effort="low"
       fi

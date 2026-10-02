@@ -20,7 +20,29 @@ use super::{
     embedded_policy::EmbeddedPolicyInstallation,
     embedded_projection::LifecyclePublisher,
 };
-use crate::exomonad::EmbeddedLaunchConfig;
+use crate::exomonad::{EmbeddedBrowserAuth, EmbeddedLaunchConfig};
+
+struct TailscaleBrowserAuth(exomonad_node::network::TailscalePeerVerifier);
+
+#[async_trait::async_trait]
+impl harness::server::BrowserPeerAuthenticator for TailscaleBrowserAuth {
+    async fn authenticate(
+        &self,
+        peer: std::net::SocketAddr,
+    ) -> Result<(), harness::server::PeerAuthError> {
+        self.0
+            .authorize_peer(peer)
+            .await
+            .map_err(|error| match error {
+                exomonad_node::network::TailscalePeerError::Denied => {
+                    harness::server::PeerAuthError::Denied
+                }
+                exomonad_node::network::TailscalePeerError::Unavailable => {
+                    harness::server::PeerAuthError::Unavailable
+                }
+            })
+    }
+}
 
 pub(super) struct EmbeddedService {
     _owner: Arc<super::HostIncarnationLease>,
@@ -96,27 +118,55 @@ impl EmbeddedService {
             .store()
             .recover_embedded_command_claims(&super::runtime_namespace(run_root))
             .map_err(|error| error.to_string())?;
-        let secret = std::fs::read_to_string(&settings.session_secret_file)
-            .map_err(|error| error.to_string())?;
-        let secret = SessionSecret::new(secret.trim_end_matches(['\r', '\n']).to_owned())
-            .map_err(str::to_owned)?;
         let server_config = ServerConfig::new(settings.asset_root.clone())
             .with_history_store(runtime.store())
-            .with_browser_session(secret, std::time::Duration::from_secs(8 * 60 * 60))
-            .map_err(str::to_owned)?
             .with_public_origin_scheme(settings.public_origin_scheme.as_str())
             .map_err(str::to_owned)?;
+        let server_config = match &settings.public_origin {
+            Some(origin) => server_config.with_public_origin(origin.clone()).map_err(str::to_owned)?,
+            None => server_config,
+        };
+        let server_config = match &settings.browser_auth {
+            EmbeddedBrowserAuth::Secret => {
+                let path = settings.session_secret_file.as_deref().ok_or_else(|| {
+                    "embedded secret authentication requires session_secret_file".to_owned()
+                })?;
+                let secret = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+                let secret = SessionSecret::new(secret.trim_end_matches(['\r', '\n']).to_owned())
+                    .map_err(str::to_owned)?;
+                server_config
+                    .with_browser_session(secret, std::time::Duration::from_secs(8 * 60 * 60))
+                    .map_err(str::to_owned)?
+            }
+            EmbeddedBrowserAuth::Tailscale {
+                allowed_user_ids,
+                localapi_socket,
+            } => {
+                let verifier = exomonad_node::network::TailscalePeerVerifier::new(
+                    localapi_socket.clone(),
+                    allowed_user_ids.clone(),
+                )
+                .map_err(|error| error.to_string())?;
+                server_config
+                    .with_browser_peer_auth(Arc::new(TailscaleBrowserAuth(verifier)))
+                    .map_err(str::to_owned)?
+            }
+        };
         let listener = TcpListener::bind(settings.listen)
             .await
             .map_err(|error| error.to_string())?;
         let address = listener.local_addr().map_err(|error| error.to_string())?;
         let (router, control, commands) = harness::server::server_with_config(server_config);
+        runtime.configure_output_observer(control.clone())?;
         let server_owner = Arc::clone(&owner);
         let server = tokio::spawn(async move {
             let _server_owner = server_owner;
-            axum::serve(listener, router)
-                .await
-                .map_err(|error| error.to_string())
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .map_err(|error| error.to_string())
         });
         Ok(Self {
             _owner: owner,
@@ -473,6 +523,10 @@ where
             NonZeroU64::new(settings.context_capacity_tokens).ok_or("zero context capacity")?,
         )
         .map_err(|error| error.to_string())?;
+    let engine = match runtime.output_observer() {
+        Some(observer) => engine.with_output_observer(observer),
+        None => engine,
+    };
     let store = runtime.store();
     let mut recovering = true;
     loop {
@@ -481,33 +535,34 @@ where
         }
         // Wakes are hints. A prior Engine round may have returned while a
         // forwarded hint remained in its receiver; the Store is authoritative.
-        let first = match store
+        let frontier = store
+            .embedded_round_frontier(conversation.identity())
+            .map_err(|error| error.to_string())?;
+        let first = store
             .unread(&actor.0)
             .map_err(|error| error.to_string())?
             .first()
-        {
-            Some(envelope) => harness::mailbox::DurableMailboxWake {
+            .map(|envelope| harness::mailbox::DurableMailboxWake {
                 envelope_id: envelope.id,
-            },
-            None => tokio::select! {
+            });
+        if first.is_none() && frontier.pending_head.is_none() {
+            tokio::select! {
                 biased;
                 changed = cancellation.changed() => {
                     if changed.is_err() || *cancellation.borrow() { return Ok(()); }
-                    continue;
                 }
-                wake = incoming.recv() => match wake { Some(_) => continue, None => return Ok(()) },
-            },
-        };
-        let head = store
-            .agent(&actor)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("missing embedded agent {}", actor.0))?
-            .head_request;
+                wake = incoming.recv() => if wake.is_none() { return Ok(()); },
+            }
+            continue;
+        }
+        let head = frontier.settled_head;
         let (forward, forwarded) = mpsc::unbounded_channel();
-        forward
-            .send(first)
-            .map_err(|_| "embedded Engine wake receiver closed")?;
-        let recovering_this_round = recovering;
+        if let Some(first) = first {
+            forward
+                .send(first)
+                .map_err(|_| "embedded Engine wake receiver closed")?;
+        }
+        let recovering_this_round = recovering || frontier.pending_head.is_some();
         let mut lifetime_stopped = false;
         let result = {
             let round = round_control
@@ -561,10 +616,21 @@ where
             }
         };
         // A clean rejection already committed its exact failed head in Engine.
-        let advanced = if rejected {
+        let advanced = if rejected || durable_head == head {
             Ok(true)
+        } else if let Some(durable_head) = &durable_head {
+            store.settle_embedded_round(
+                conversation.identity(),
+                head.as_ref(),
+                durable_head,
+                if interrupted {
+                    harness::store::EmbeddedRoundOutcome::Cancelled
+                } else {
+                    harness::store::EmbeddedRoundOutcome::Completed
+                },
+            )
         } else {
-            store.advance_agent_head(&actor, head.as_ref(), durable_head.as_ref())
+            Ok(false)
         };
         if let Some(error) = cleanup_failure {
             if !matches!(&advanced, Ok(true)) {
@@ -683,3 +749,7 @@ mod shutdown_tests {
         assert!(!error.cleanup_failed());
     }
 }
+
+#[cfg(test)]
+#[path = "embedded_restart_driver_tests.rs"]
+mod restart_tests;

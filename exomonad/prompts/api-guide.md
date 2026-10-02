@@ -82,7 +82,7 @@ the project source and `atRef` an explicit commit. Live-source admission checkpo
 eligible edits without checks; inspect omission receipts before using that source.
 
 `withModel "luna"` selects a workspace alias; `withModel (Literal "provider-model")`
-selects an explicit model (`luna`: cheap tier; `executor`: Sol tier). `withEffort Medium` sets effort. `previewBranch` shows resolved policy.
+selects an explicit model (`luna`: cheap tier; `executor`: `gpt-6.1-sol`). `withEffort Medium` sets effort. `previewBranch` shows resolved policy.
 `withContext (selected render)` selects fresh context; `fromCheckpoint` uses an
 exact retained capture. Immediate admission refuses unresolved `inherited`
 context before allocation; use `unfoldDeferred` with explicit `ActorOwned` for

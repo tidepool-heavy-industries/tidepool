@@ -45,6 +45,7 @@ pub(super) struct EmbeddedHarnessRuntime {
     run: String,
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,
+    output_observer: OnceLock<harness::server::ServerControl>,
     recovery: OnceLock<Arc<super::embedded_recovery::EmbeddedApplicationRecovery>>,
 }
 
@@ -55,12 +56,27 @@ impl EmbeddedHarnessRuntime {
             .map_err(|error| EmbeddedError::Binding(error.to_string()))?;
         Ok(Self {
             run: super::runtime_namespace(run_root),
+            output_observer: OnceLock::new(),
             recovery: OnceLock::new(),
             store: Arc::new(Store::open(harness_root.join("store.sqlite"))?),
             scheduler: Arc::new(
                 JobScheduler::new(concurrent_jobs)
                     .map_err(|error| EmbeddedError::Binding(error.to_string()))?,
             ),
+        })
+    }
+
+    pub(super) fn configure_output_observer(
+        &self,
+        control: harness::server::ServerControl,
+    ) -> Result<(), String> {
+        self.output_observer
+            .set(control)
+            .map_err(|_| "embedded output observer was already configured".into())
+    }
+    pub(super) fn output_observer(&self) -> Option<Arc<dyn harness::engine::ModelOutputObserver>> {
+        self.output_observer.get().map(|control| {
+            Arc::new(control.clone()) as Arc<dyn harness::engine::ModelOutputObserver>
         })
     }
 
@@ -967,8 +983,10 @@ mod tests {
         let settings = crate::exomonad::EmbeddedLaunchConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
             public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
+            public_origin: None,
             asset_root: assets,
-            session_secret_file: secret_file,
+            browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
+            session_secret_file: Some(secret_file),
             codex_auth_file: auth_file,
             context_capacity_tokens: 200_000,
             concurrent_jobs: 1,
@@ -1253,7 +1271,11 @@ mod tests {
         service.shutdown().await.unwrap();
         drop(service);
         let rotated_secret = "rotated-embedded-browser-test-secret-32-bytes";
-        std::fs::write(&settings.session_secret_file, rotated_secret).unwrap();
+        std::fs::write(
+            settings.session_secret_file.as_ref().unwrap(),
+            rotated_secret,
+        )
+        .unwrap();
         let mut restarted = EmbeddedService::prepare(campaign.session_root.path(), &settings)
             .await
             .unwrap();

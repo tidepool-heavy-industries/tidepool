@@ -345,13 +345,69 @@ pub struct EmbeddedLaunchConfig {
     pub(crate) listen: std::net::SocketAddr,
     #[serde(default)]
     pub(crate) public_origin_scheme: EmbeddedPublicOriginScheme,
+    pub(crate) public_origin: Option<String>,
     #[serde(default = "default_embedded_asset_root")]
     pub(crate) asset_root: PathBuf,
-    pub(crate) session_secret_file: PathBuf,
+    #[serde(default)]
+    pub(crate) browser_auth: EmbeddedBrowserAuth,
+    pub(crate) session_secret_file: Option<PathBuf>,
     pub(crate) codex_auth_file: PathBuf,
     pub(crate) context_capacity_tokens: u64,
     #[serde(default = "default_embedded_concurrent_jobs")]
     pub(crate) concurrent_jobs: usize,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase", deny_unknown_fields)]
+pub(crate) enum EmbeddedBrowserAuth {
+    #[default]
+    Secret,
+    Tailscale {
+        allowed_user_ids: Vec<std::num::NonZeroU64>,
+        #[serde(default = "default_tailscale_localapi_socket")]
+        localapi_socket: PathBuf,
+    },
+}
+
+fn default_tailscale_localapi_socket() -> PathBuf {
+    PathBuf::from("/var/run/tailscale/tailscaled.sock")
+}
+
+impl EmbeddedBrowserAuth {
+    fn validate(&self, secret_file: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+        match self {
+            Self::Secret => {
+                let path = secret_file.ok_or_else(|| {
+                    runtime_error("embedded secret authentication requires session_secret_file")
+                })?;
+                if !path.is_absolute() {
+                    return Err(runtime_error(
+                        "embedded session_secret_file must be absolute",
+                    ));
+                }
+                let secret = std::fs::read_to_string(path)?;
+                harness::server::SessionSecret::new(
+                    secret.trim_end_matches(['\r', '\n']).to_owned(),
+                )
+                .map_err(runtime_error)?;
+            }
+            Self::Tailscale {
+                allowed_user_ids,
+                localapi_socket,
+            } => {
+                if secret_file.is_some() {
+                    return Err(runtime_error(
+                        "embedded Tailscale authentication does not use session_secret_file",
+                    ));
+                }
+                exomonad_node::network::TailscalePeerVerifier::new(
+                    localapi_socket.clone(),
+                    allowed_user_ids.clone(),
+                )?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -383,6 +439,24 @@ fn default_embedded_concurrent_jobs() -> usize {
 
 impl EmbeddedLaunchConfig {
     pub(crate) fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if matches!(self.browser_auth, EmbeddedBrowserAuth::Tailscale { .. })
+            && !exomonad_node::network::tailnet_address_is_local(self.listen.ip())?
+        {
+            return Err(runtime_error(
+                "embedded Tailscale authentication requires a listener assigned to tailscale0",
+            ));
+        }
+        if matches!(self.browser_auth, EmbeddedBrowserAuth::Tailscale { .. })
+            && self.public_origin.is_none()
+        {
+            return Err(runtime_error(
+                "embedded Tailscale authentication requires an exact public_origin",
+            ));
+        }
+        if let Some(origin) = &self.public_origin {
+            harness::server::ServerConfig::new(self.asset_root.clone())
+                .with_public_origin(origin.clone()).map_err(runtime_error)?;
+        }
         if !self.listen.ip().is_loopback()
             && !exomonad_node::network::tailnet_address_is_local(self.listen.ip())?
         {
@@ -400,11 +474,7 @@ impl EmbeddedLaunchConfig {
                 "embedded browser asset_root is required unless EXOMONAD_EMBEDDED_ASSET_ROOT is set",
             ));
         }
-        for path in [
-            &self.asset_root,
-            &self.session_secret_file,
-            &self.codex_auth_file,
-        ] {
+        for path in [&self.asset_root, &self.codex_auth_file] {
             if !path.is_absolute() {
                 return Err(runtime_error(format!(
                     "embedded path must be absolute: {}",
@@ -424,9 +494,8 @@ impl EmbeddedLaunchConfig {
                 self.codex_auth_file.display()
             )));
         }
-        let secret = std::fs::read_to_string(&self.session_secret_file)?;
-        harness::server::SessionSecret::new(secret.trim_end_matches(['\r', '\n']).to_owned())
-            .map_err(runtime_error)?;
+        self.browser_auth
+            .validate(self.session_secret_file.as_deref())?;
         Ok(())
     }
 }
@@ -2700,9 +2769,52 @@ mod tests {
     }
 
     #[test]
+    fn embedded_browser_auth_requires_explicit_valid_authority() {
+        let secret: EmbeddedBrowserAuth = toml::from_str("mode = 'secret'").unwrap();
+        assert!(secret.validate(None).is_err());
+        let tailnet: EmbeddedBrowserAuth =
+            toml::from_str("mode = 'tailscale'\nallowed_user_ids = [123]\n").unwrap();
+        assert!(tailnet.validate(None).is_ok());
+        assert!(tailnet.validate(Some(Path::new("/unused/secret"))).is_err());
+        for source in [
+            "mode = 'tailscale'\nallowed_user_ids = []\n",
+            "mode = 'tailscale'\nallowed_user_ids = [123, 123]\n",
+            "mode = 'tailscale'\nallowed_user_ids = [123]\nlocalapi_socket = 'relative.sock'\n",
+        ] {
+            let auth: EmbeddedBrowserAuth = toml::from_str(source).unwrap();
+            assert!(auth.validate(None).is_err());
+        }
+        for source in [
+            "mode = 'tailscale'\nallowed_user_ids = [0]\n",
+            "mode = 'tailscale'\nallowed_user_ids = [123]\nlogin_name = 'ignored-policy'\n",
+            "mode = 'guess-from-host'\n",
+        ] {
+            assert!(toml::from_str::<EmbeddedBrowserAuth>(source).is_err());
+        }
+    }
+
+    #[test]
+    fn embedded_tailscale_auth_rejects_loopback_listener_before_files() {
+        let config: EmbeddedLaunchConfig = toml::from_str(
+            "listen = '127.0.0.1:8080'\nasset_root = '/tmp/assets'\ncodex_auth_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n[browser_auth]\nmode = 'tailscale'\nallowed_user_ids = [123]\n",
+        ).unwrap();
+        assert!(config.session_secret_file.is_none());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("tailscale0"));
+    }
+
+    #[test]
     fn embedded_origin_scheme_preserves_https_and_accepts_explicit_http() {
         let config = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncodex_auth_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n";
         let existing: EmbeddedLaunchConfig = toml::from_str(config).unwrap();
+        assert!(matches!(existing.browser_auth, EmbeddedBrowserAuth::Secret));
+        assert_eq!(
+            existing.session_secret_file,
+            Some(PathBuf::from("/tmp/secret"))
+        );
         assert_eq!(
             existing.public_origin_scheme,
             EmbeddedPublicOriginScheme::Https
@@ -2828,7 +2940,7 @@ mod tests {
         assert_eq!(
             config.defaults,
             ExomonadAgentDefaults {
-                model: "gpt-6-sol".into(),
+                model: "gpt-6.1-sol".into(),
                 effort: ExomonadEffort::Medium,
             }
         );
@@ -2918,7 +3030,7 @@ mod tests {
             std::fs::read_to_string(workspace.path().join(".exomonad/config.toml")).unwrap();
         for expected in [
             "luna = \"gpt-6-luna\"",
-            "executor = \"gpt-6-sol\"",
+            "executor = \"gpt-6.1-sol\"",
             "planner = \"gpt-6-astra\"",
             "task = \"prompts/task.md\"",
             "review = \"prompts/review.md\"",

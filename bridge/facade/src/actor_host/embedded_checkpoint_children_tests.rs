@@ -225,8 +225,10 @@ fn embedded_launch_config(files: &tempfile::TempDir) -> crate::exomonad::Embedde
     crate::exomonad::EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
+        public_origin: None,
         asset_root: assets,
-        session_secret_file: secret_file,
+        browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
+        session_secret_file: Some(secret_file),
         codex_auth_file: auth_file,
         context_capacity_tokens: 200_000,
         concurrent_jobs: 3,
