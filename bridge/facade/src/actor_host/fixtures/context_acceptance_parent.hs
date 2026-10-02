@@ -3,7 +3,7 @@ do
   if any (ContextText.isInfixOf "context-own-call-sentinel") (toListOf C.visibleTexts current)
     then error "getContext included its own call" >> pure ()
     else pure ()
-  C.putContext (over C.editableTexts (ContextText.replace "parent-original" "parent-curated") current)
+  C.putContext (over C.contextBlocks (<> [C.Text Nothing C.User "parent-curated" []]) current)
   C.setNextModel "parent-curated-model"
   let Right firstLabel = labelFromText "first"
   let Right secondLabel = labelFromText "second"

@@ -382,8 +382,13 @@ async fn start_with_spec(
     let fixture = RunningBrowserHost::start_configured(&settings, &transport, |config| {
         let authored = config.workspace.join(".exomonad");
         std::fs::create_dir_all(&authored).unwrap();
+        let initial_model = if spec.is_some() {
+            "gpt-6.1-sol"
+        } else {
+            "test-model"
+        };
         let mut configuration =
-            "[defaults]\nmodel='test-model'\n[models]\nexecutor='gpt-6.1-sol'\n".to_owned();
+            format!("[defaults]\nmodel='{initial_model}'\n[models]\nexecutor='gpt-6.1-sol'\n");
         if let Some(spec) = spec {
             let package = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../exomonad/examples/workspace")
@@ -459,7 +464,7 @@ async fn start_with_spec(
 }
 
 fn has_user_text(request: &ResponsesRequest, expected: &str) -> bool {
-    // Edited text is projected with an attribution line before its authored body.
+    // Match the authored line in flat or structured provider message bodies.
     let has_line = |text: &Value| {
         text.as_str()
             .is_some_and(|text| text.lines().any(|line| line == expected))
@@ -594,7 +599,7 @@ async fn resident_sync_native_trim_preserves_reasoning_and_deferred_child_bindin
 }
 
 #[tokio::test]
-async fn resident_sync_context_commits_before_deferred_children_and_child_model_switch() {
+async fn resident_sync_notes_commit_before_deferred_children_and_child_model_switch() {
     let (_files, mut fixture, mut rounds) = start().await;
     let root_identity = fixture.campaign.actor.identity();
     let setup = next_round(&mut rounds).await;
@@ -629,14 +634,14 @@ async fn resident_sync_context_commits_before_deferred_children_and_child_model_
             assert_portable_exchange(&round.request, &raw, "context-parent", "haskell_sync");
             assert_eq!(round.request.model, "parent-curated-model");
             assert!(has_user_text(&round.request, "parent-curated"));
-            assert!(!has_user_text(&round.request, "parent-original"));
+            assert!(has_user_text(&round.request, "parent-original"));
             root_committed = true;
             round.finish();
         } else if child_sessions.insert(round.request.session_id.clone()) {
             assert!(child_sessions.len() <= 2, "launched an unexpected child");
             assert_eq!(round.request.model, "child-preparation-model");
             assert!(has_user_text(&round.request, "parent-curated"));
-            assert!(!has_user_text(&round.request, "parent-original"));
+            assert!(has_user_text(&round.request, "parent-original"));
             let raw = raw_request_items(&fixture, &round.request);
             successful_output_items(&raw, "context-parent");
             assert!(raw.contains(&reasoning_item("context-parent")));
@@ -652,7 +657,8 @@ async fn resident_sync_context_commits_before_deferred_children_and_child_model_
             assert_portable_exchange(&round.request, &raw, "context-child", "haskell_sync");
             assert_eq!(round.request.model, "gpt-6.1-sol");
             assert!(has_user_text(&round.request, "child-curated"));
-            assert!(!has_user_text(&round.request, "parent-curated"));
+            assert!(has_user_text(&round.request, "parent-curated"));
+            assert!(has_user_text(&round.request, "parent-original"));
             assert_eq!(
                 output["items"].as_array().unwrap().last().unwrap()["output"],
                 "43"
@@ -695,14 +701,14 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
         tool["name"] == "curate" && tool["type"] == "function" && tool["strict"] == true
     }));
     let session = first.request.session_id.clone();
+    assert_eq!(first.request.model, "gpt-6.1-sol");
     assert_eq!(first.request.pinned_effort, harness::model::Effort::Low);
     first.function_with_reasoning("compiled-context", "curate", json!({"proceed": true}));
     let successor = next_round(&mut rounds).await;
     assert!(successor.is_root());
     let raw = raw_request_items(&fixture, &successor.request);
     let output = successful_output_items(&raw, "compiled-context");
-    assert!(raw.contains(&reasoning_item("compiled-context")));
-    assert_portable_exchange(&successor.request, &raw, "compiled-context", "curate");
+    assert_native_exchange_preserved(&successor.request, &raw, "compiled-context");
     assert_eq!(output["total"], 1, "{output}");
     assert_eq!(output["nextIndex"], 1, "{output}");
     assert_eq!(
