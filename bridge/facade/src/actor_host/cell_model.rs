@@ -229,15 +229,13 @@ pub(super) fn fixture_factory(
     model: impl Into<String>,
     effort: Effort,
 ) -> Arc<dyn CellModelFactory> {
-    Arc::new(
-        EmbeddedCellModelFactory::<FixtureAuth, _>::new(
-            Arc::new(Store::memory().expect("fixture model store")),
-            Arc::new(JobScheduler::new(1).expect("fixture model scheduler")),
-            model.into(),
-            effort,
-            Arc::new(|| FixtureModelTransport),
-        ),
-    )
+    Arc::new(EmbeddedCellModelFactory::<FixtureAuth, _>::new(
+        Arc::new(Store::memory().expect("fixture model store")),
+        Arc::new(JobScheduler::new(1).expect("fixture model scheduler")),
+        model.into(),
+        effort,
+        Arc::new(|| FixtureModelTransport),
+    ))
 }
 
 #[cfg(test)]

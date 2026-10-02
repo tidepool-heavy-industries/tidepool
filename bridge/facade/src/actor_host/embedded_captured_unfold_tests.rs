@@ -414,10 +414,8 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         context_capacity_tokens: 200_000,
         concurrent_jobs: 3,
     };
-    let model_factory = super::cell_model::fixture_factory(
-        "test-model",
-        harness::model::Effort::Low,
-    );
+    let model_factory =
+        super::cell_model::fixture_factory("test-model", harness::model::Effort::Low);
     let conversation: exomonad_actor::ConversationReader =
         Arc::new(|_actor, _count| Box::pin(async { Ok(Vec::new()) }));
     let mut campaign = test_campaign::TestCampaign::start_with_model_factory(
