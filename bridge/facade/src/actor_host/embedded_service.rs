@@ -574,6 +574,7 @@ where
     };
     let store = runtime.store();
     let mut recovering = true;
+    let mut awaiting_input = false;
     loop {
         if *cancellation.borrow() {
             return Ok(());
@@ -590,7 +591,7 @@ where
             .map(|envelope| harness::mailbox::DurableMailboxWake {
                 envelope_id: envelope.id,
             });
-        if first.is_none() && frontier.pending_head.is_none() {
+        if first.is_none() && (awaiting_input || frontier.pending_head.is_none()) {
             tokio::select! {
                 biased;
                 changed = cancellation.changed() => {
@@ -655,6 +656,20 @@ where
             Err(harness::engine::EngineError::RequestRejected { head_request, .. }) => {
                 (Some(head_request), false, true, None)
             }
+            Err(harness::engine::EngineError::InterruptedModelRound {
+                head_request,
+                cause,
+            }) => {
+                // Engine has confirmed cleanup and retained this pending head.
+                // A stream failure alone never authorizes another provider
+                // request. Durable explicit input triggers existing recovery,
+                // which reconciles retained claims without dispatching them.
+                tracing::warn!(?actor, ?head_request, %cause, "embedded provider round interrupted; awaiting explicit input");
+                recovering = true;
+                awaiting_input = true;
+                lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
+                continue;
+            }
             Err(error) => {
                 let (head, cleanup) = cancelled_round(error, head.clone())?;
                 (head, true, false, cleanup)
@@ -704,6 +719,7 @@ where
         // Cleanup may retain a settled tool output on an ancestor claim.
         // Reconcile the branch lineage before the next explicit-input request.
         recovering = rejected;
+        awaiting_input = false;
     }
 }
 
