@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import json
+import shutil
 import sys
 import unittest
 
@@ -11,6 +12,81 @@ spec.loader.exec_module(profile)
 
 
 class ProfileCompilerTests(unittest.TestCase):
+    def make_cgroup_tree(self, directory, worker_path="/parent/worker"):
+        proc_root = Path(directory) / "proc"
+        cgroup_root = Path(directory) / "sys" / "fs" / "cgroup"
+        worker = cgroup_root / worker_path.lstrip("/")
+        worker.mkdir(parents=True)
+        (proc_root / "self").mkdir(parents=True)
+        (proc_root / "123").mkdir()
+        (proc_root / "self" / "mountinfo").write_text(
+            f"29 20 0:30 / {cgroup_root} rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n")
+        (proc_root / "123" / "cgroup").write_text(f"0::{worker_path}\n")
+        (cgroup_root / "cpu.stat").write_text("usage_usec 10\nuser_usec 7\nsystem_usec 3\n")
+        (cgroup_root / "memory.events").write_text("low 0\nhigh 1\nmax 2\n")
+        (cgroup_root / "memory.current").write_text("4096\n")
+        (cgroup_root / "memory.max").write_text("max\n")
+        (cgroup_root / "memory.high").write_text("8192\n")
+        (cgroup_root / "memory.pressure").write_text("some avg10=0.00 avg60=0.10 avg300=0.20 total=100\n")
+        (cgroup_root / "cpu.pressure").write_text("some avg10=1.00 avg60=1.00 avg300=1.00 total=200\n")
+        (cgroup_root / "io.pressure").write_text("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
+        (worker / "cpu.stat").write_text("usage_usec 5\n")
+        return proc_root, cgroup_root, worker
+
+    def test_cgroup_context_reports_ancestor_deltas_and_shared_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc_root, cgroup_root, worker = self.make_cgroup_tree(directory)
+            start = profile.capture_cgroup_context(123, proc_root)
+            self.assertEqual(start["status"], "ok")
+            self.assertEqual(start["worker_path"], "/parent/worker")
+            (cgroup_root / "cpu.stat").write_text("usage_usec 25\nuser_usec 15\nsystem_usec 10\n")
+            (cgroup_root / "memory.events").write_text("low 1\nhigh 3\nmax 2\n")
+            (cgroup_root / "memory.current").write_text("6144\n")
+            (cgroup_root / "memory.pressure").write_text("some avg10=0.50 avg60=0.10 avg300=0.20 total=150\n")
+            end = profile.capture_cgroup_context(123, proc_root)
+            compared = profile.compare_cgroup_context(start, end)
+            self.assertEqual(compared["status"], "ok")
+            self.assertEqual(compared["deltas"]["."]["cpu.stat"]["counters"]["usage_usec"]["value"], 15)
+            self.assertEqual(compared["deltas"]["."]["memory.events"]["counters"]["high"]["value"], 2)
+            self.assertEqual(compared["deltas"]["."]["memory.current"]["end"]["value"], 6144)
+            self.assertEqual(compared["deltas"]["."]["memory.pressure"]["counters"]["some"]["total"]["value"], 50)
+            self.assertIn("shared", compared["scope"])
+            self.assertEqual(start["ancestors"][0]["path"], "parent/worker")
+
+    def test_cgroup_context_marks_unreadable_and_missing_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc_root, _, worker = self.make_cgroup_tree(directory)
+            (worker / "memory.events").mkdir()
+            snapshot = profile.capture_cgroup_context(123, proc_root)
+            files = snapshot["ancestors"][0]["files"]
+            self.assertEqual(files["memory.events"]["status"], "unreadable")
+            self.assertEqual(files["memory.high"]["status"], "missing")
+
+    def test_cgroup_directory_disappearance_is_explicit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc_root, _, worker = self.make_cgroup_tree(directory)
+            start = profile.capture_cgroup_context(123, proc_root)
+            shutil.rmtree(worker)
+            end = profile.capture_cgroup_context(123, proc_root)
+            compared = profile.compare_cgroup_context(start, end)
+            self.assertEqual(end["ancestors"][0]["directory_status"], "missing")
+            self.assertEqual(compared["deltas"]["parent/worker"]["cpu.stat"]["end_directory_status"], "missing")
+
+    def test_cgroup_counter_reset_and_migration_are_explicit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc_root, cgroup_root, _ = self.make_cgroup_tree(directory)
+            start = profile.capture_cgroup_context(123, proc_root)
+            (cgroup_root / "cpu.stat").write_text("usage_usec 2\n")
+            end = profile.capture_cgroup_context(123, proc_root)
+            delta = profile.compare_cgroup_context(start, end)
+            self.assertEqual(delta["deltas"]["."]["cpu.stat"]["counters"]["usage_usec"],
+                             {"status": "reset", "start": 10, "end": 2})
+            (proc_root / "123" / "cgroup").write_text("0::/parent/other\n")
+            moved = profile.capture_cgroup_context(123, proc_root)
+            comparison = profile.compare_cgroup_context(start, moved)
+            self.assertEqual(comparison["status"], "migrated")
+            self.assertEqual(comparison["deltas"], {})
+
     def test_perf_headers_select_one_leaf_per_event(self):
         rows, lost = profile.parse_samples([
             "2188542/2188542 277584.749911562: ",

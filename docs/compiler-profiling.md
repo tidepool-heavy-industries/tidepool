@@ -53,6 +53,11 @@ same-user PID and fences PID reuse by process start ticks. It waits for perf's
 explicit enable acknowledgement before launching the command, records UTC and
 `CLOCK_MONOTONIC` anchors, and samples RSS from `/proc` every 50 ms. Recording
 uses userspace `cpu-clock` at 199 Hz, no inherited tasks and no call graph.
+Perf uses eight ring-buffer pages per CPU by default. `--mmap-pages` selects
+a power of two between one and 1024. Smaller buffers reduce locked-memory
+demand for parallel captures; report lost samples rather than assuming that
+the smaller buffer is sufficient. An mmap allocation failure is a capture
+failure, not evidence that the compiler request failed.
 Pass no command to capture externally submitted work for a bounded duration.
 The script owns and terminates its request command on timeout or capture failure;
 it never terminates the selected worker or changes OS settings.
@@ -87,6 +92,19 @@ labels remain distinct from observed compiler request IDs. `samples.txt`, `repor
 `rss.jsonl` and the selected log suffix retain the underlying evidence. Timing
 log replacement or truncation is reported, rather than silently accepted.
 
+`capture.json` also records the selected worker's unified cgroup path and
+bounded start/end snapshots for up to 16 ancestors. The snapshots read
+`cpu.stat`, `memory.events`, current/max/high memory values, and CPU, memory,
+and IO pressure when those files are available. Cumulative CPU, event and
+pressure `total` counters include deltas; memory values and PSI averages remain
+start/end gauges. A counter decrease is reported as a reset. Missing,
+unreadable, oversized or disappeared cgroup data is retained as an explicit
+status. If the worker's unified path changes, deltas are omitted. Parent
+cgroups are shared context and their counters cannot be attributed to this
+worker or request; start/end snapshots can also miss brief pressure spikes.
+Offline reanalysis retains these original snapshots and does not resample the
+cgroup.
+
 `phase_leaf_groups` reports up to eight leaf symbols and DSOs for each qualified
 invocation and phase, plus unknown, unparsed and remaining sample counts.
 Repeated spans of the same group use the union of their intervals so a CPU
@@ -119,7 +137,13 @@ its resource deltas still cover its complete span.
 Existing `tidepool-timing-detail` diagnostics now include monotonic start/end,
 process CPU, allocation and GC deltas. Nested phases overlap; never add children
 to their parent. Flat phases measured through `timePhase` have a corresponding
-resource detail. Manually accumulated flat phases have no inferred resource
+resource detail. GHC setup and dependency loading have explicit resource spans;
+their existing flat timings differ slightly because sampling adds overhead.
+Per-module `typecheck` spans include parsing, classification, transformation,
+typechecking and family validation. `checked_typecheck` spans cover that work
+only when a checked candidate needs fresh typechecking; reused candidates do
+not emit a synthetic span. Planning between setup and loading remains outside
+those spans. Other manually accumulated flat phases have no inferred resource
 span. An action that throws before completion has no completed span; missing
 phases are unmeasured, not zero. `allocated_bytes` follows RTS accounting and
 can lag until GC; these counters do not force collection. `major_gcs` and

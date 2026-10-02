@@ -14,6 +14,7 @@ import select
 import shutil
 import shlex
 import signal
+import stat
 import subprocess
 import time
 
@@ -24,6 +25,12 @@ PHASE_LIMIT = 8192
 PHASE_GROUP_LIMIT = 256
 HOT_LEAF_LIMIT = 8
 RECOVERY_SCAN_LIMIT = 64 * 1024 * 1024
+CGROUP_FILE_LIMIT = 16 * 1024
+CGROUP_MEMBERSHIP_LIMIT = 16 * 1024
+CGROUP_MOUNTINFO_LIMIT = 1024 * 1024
+CGROUP_ANCESTOR_LIMIT = 16
+CGROUP_FILES = ("cpu.stat", "memory.events", "memory.current", "memory.max", "memory.high",
+                "memory.pressure", "cpu.pressure", "io.pressure")
 IDENTITY_FIELDS = ("compile_request", "worker_pid", "run_id", "daemon_epoch", "admission_id",
                    "request_ordinal", "served", "transaction", "transport", "daemon_pid", "worker")
 NUMERIC_IDENTITY_FIELDS = {"worker_pid", "admission_id", "request_ordinal", "served", "daemon_pid", "worker"}
@@ -43,6 +50,184 @@ def proc_identity(pid):
     # with field 3. Field 22 is the process start tick, which fences PID reuse.
     stat = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
     return int(stat[19])
+
+
+def _unescape_mount_field(value):
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), value)
+
+
+def _parse_cgroup_file(name, data):
+    text = data.decode("ascii", errors="strict").strip()
+    if name in {"memory.current", "memory.max", "memory.high"}:
+        return {"value": int(text) if text.isdecimal() else text}
+    values = {}
+    for line in text.splitlines():
+        fields = line.split()
+        if name.endswith(".pressure"):
+            if len(fields) < 2 or fields[0] not in {"some", "full"}:
+                continue
+            values[fields[0]] = {key: float(value) if key.startswith("avg") else int(value)
+                                 for key, value in (field.split("=", 1) for field in fields[1:] if "=" in field)}
+        elif len(fields) == 2 and fields[1].isdecimal():
+            values[fields[0]] = int(fields[1])
+    return values
+
+
+def _cgroup_mount(proc_root):
+    mountinfo = proc_root / "self" / "mountinfo"
+    try:
+        with mountinfo.open("rb") as stream:
+            data = stream.read(CGROUP_MOUNTINFO_LIMIT + 1)
+        if len(data) > CGROUP_MOUNTINFO_LIMIT:
+            return None, {"status": "too_large", "error": "mountinfo exceeds one MiB"}
+        lines = data.decode("utf-8", errors="strict").splitlines()
+    except (OSError, UnicodeError) as error:
+        return None, {"status": "unreadable", "error": str(error)[:256]}
+    mounts = []
+    for line in lines:
+        fields = line.split()
+        try:
+            separator = fields.index("-")
+        except ValueError:
+            continue
+        if len(fields) > separator + 1 and fields[separator + 1] == "cgroup2" and len(fields) >= 6:
+            mounts.append((_unescape_mount_field(fields[3]), _unescape_mount_field(fields[4])))
+    if not mounts:
+        return None, {"status": "missing", "error": "no cgroup2 mount in mountinfo"}
+    # A cgroup namespace can expose a subtree. Prefer the mount with the
+    # narrowest root that contains this worker's unified path.
+    return mounts, None
+
+
+def capture_cgroup_context(pid, proc_root=Path("/proc"), ancestor_limit=CGROUP_ANCESTOR_LIMIT):
+    """Read bounded cgroup v2 context for one process without changing it."""
+    try:
+        with (proc_root / str(pid) / "cgroup").open("rb") as stream:
+            data = stream.read(CGROUP_MEMBERSHIP_LIMIT + 1)
+        if len(data) > CGROUP_MEMBERSHIP_LIMIT:
+            return {"status": "too_large", "error": "worker cgroup membership exceeds 16 KiB",
+                    "worker_path": None, "ancestors": []}
+        memberships = data.decode("utf-8", errors="strict").splitlines()
+    except (OSError, UnicodeError) as error:
+        return {"status": "unreadable", "error": str(error)[:256], "worker_path": None, "ancestors": []}
+    worker_path = next((line[3:] for line in memberships if line.startswith("0::")), None)
+    if worker_path is None or not worker_path.startswith("/") or ".." in Path(worker_path).parts:
+        return {"status": "missing", "error": "no valid unified cgroup membership", "worker_path": worker_path,
+                "ancestors": []}
+    mounts, error = _cgroup_mount(proc_root)
+    if error:
+        return {**error, "worker_path": worker_path, "ancestors": []}
+    candidates = []
+    for mount_root, mountpoint in mounts:
+        root = Path(mount_root)
+        worker = Path(worker_path)
+        try:
+            relative = worker.relative_to(root)
+        except ValueError:
+            continue
+        candidates.append((len(root.parts), root, Path(mountpoint), relative))
+    if not candidates:
+        return {"status": "unreadable", "error": "unified cgroup path is outside visible cgroup2 mounts",
+                "worker_path": worker_path, "ancestors": []}
+    _, mount_root, mountpoint, relative = max(candidates, key=lambda item: item[0])
+    leaf = mountpoint / relative
+    paths = []
+    current = leaf
+    while True:
+        paths.append(current)
+        if current == mountpoint:
+            break
+        parent = current.parent
+        if parent == current or mountpoint not in parent.parents and parent != mountpoint:
+            return {"status": "unreadable", "error": "invalid cgroup mount ancestry", "worker_path": worker_path,
+                    "ancestors": []}
+        current = parent
+    truncated = len(paths) > ancestor_limit
+    paths = paths[:ancestor_limit]
+    ancestors = []
+    for path in paths:
+        files = {}
+        try:
+            mode = path.stat().st_mode
+            directory_status = "ok" if stat.S_ISDIR(mode) else "unreadable"
+        except FileNotFoundError:
+            directory_status = "missing"
+        except OSError:
+            directory_status = "unreadable"
+        for name in CGROUP_FILES:
+            if directory_status != "ok":
+                files[name] = {"status": directory_status}
+                continue
+            try:
+                with (path / name).open("rb") as stream:
+                    data = stream.read(CGROUP_FILE_LIMIT + 1)
+                if len(data) > CGROUP_FILE_LIMIT:
+                    files[name] = {"status": "too_large", "limit_bytes": CGROUP_FILE_LIMIT}
+                else:
+                    files[name] = {"status": "ok", "values": _parse_cgroup_file(name, data)}
+            except FileNotFoundError:
+                files[name] = {"status": "missing"}
+            except (OSError, UnicodeError, ValueError) as error:
+                files[name] = {"status": "unreadable", "error": str(error)[:256]}
+        ancestors.append({"path": str(path.relative_to(mountpoint)) or ".",
+                          "directory_status": directory_status, "files": files})
+    return {"status": "ok", "worker_path": worker_path, "mount_root": str(mount_root),
+            "ancestor_limit": ancestor_limit, "ancestors_truncated": truncated, "ancestors": ancestors}
+
+
+def compare_cgroup_context(start, end):
+    start_path, end_path = start.get("worker_path"), end.get("worker_path")
+    if start_path is not None and end_path is not None and start_path != end_path:
+        return {"status": "migrated", "start_path": start_path, "end_path": end_path,
+                "reason": "worker unified cgroup path changed during capture; counter deltas omitted", "deltas": {}}
+    if start.get("status") != "ok" or end.get("status") != "ok":
+        return {"status": "unavailable", "reason": "start or end cgroup snapshot unavailable", "deltas": {}}
+    deltas = {}
+    for before, after in zip(start["ancestors"], end["ancestors"]):
+        if before["path"] != after["path"]:
+            continue
+        path, file_deltas = before["path"], {}
+        for name in CGROUP_FILES:
+            left, right = before["files"][name], after["files"][name]
+            if (before.get("directory_status") != "ok" or after.get("directory_status") != "ok" or
+                    left["status"] != "ok" or right["status"] != "ok"):
+                file_deltas[name] = {"status": "unavailable", "start_status": left["status"],
+                                     "end_status": right["status"],
+                                     "start_directory_status": before.get("directory_status"),
+                                     "end_directory_status": after.get("directory_status")}
+                continue
+            if name in {"memory.current", "memory.max", "memory.high"}:
+                file_deltas[name] = {"status": "gauge", "start": left["values"], "end": right["values"]}
+                continue
+            left_values = left["values"]
+            right_values = right["values"]
+            counters = {}
+            for key in left_values.keys() | right_values.keys():
+                start_value = left_values.get(key)
+                end_value = right_values.get(key)
+                if start_value is None or end_value is None:
+                    counters[key] = {"status": "counter_missing", "start": start_value, "end": end_value}
+                    continue
+                if isinstance(start_value, dict):
+                    nested = {}
+                    for nested_key, nested_start in start_value.items():
+                        nested_end = right_values.get(key, {}).get(nested_key)
+                        if nested_key == "total" and isinstance(nested_end, int):
+                            nested[nested_key] = _counter_delta(nested_start, nested_end)
+                    if nested:
+                        counters[key] = nested
+                elif isinstance(end_value, int):
+                    counters[key] = _counter_delta(start_value, end_value)
+            file_deltas[name] = {"status": "ok", "counters": counters}
+        deltas[path] = file_deltas
+    return {"status": "ok", "deltas": deltas,
+            "scope": "ancestor counters are shared cgroup context and cannot be attributed to this worker or request"}
+
+
+def _counter_delta(start, end):
+    if end < start:
+        return {"status": "reset", "start": start, "end": end}
+    return {"status": "ok", "value": end - start}
 
 
 def digest(path):
@@ -498,6 +683,8 @@ def main():
     parser.add_argument("--perf", default="perf")
     parser.add_argument("--duration", type=float, default=30, help="maximum seconds; command timeout when present")
     parser.add_argument("--frequency", type=int, default=199)
+    parser.add_argument("--mmap-pages", type=int, default=8,
+                        help="perf ring-buffer pages per CPU (power of two, 1..1024)")
     parser.add_argument("--rss-interval", type=float, default=0.05)
     parser.add_argument("--timing-log", type=Path, help="existing worker/daemon log; captures only new bytes")
     parser.add_argument("--worker-build-identity", type=Path, help="frozen build identity JSON with worker_sha256 and source provenance")
@@ -511,6 +698,8 @@ def main():
         parser.error("capture requires --pid (or use --reanalyze for offline recovery)")
     if not (0 < args.duration <= 300 and 0.01 <= args.rss_interval <= 10 and 0 < args.frequency <= 1000):
         parser.error("duration must be <=300s, frequency <=1000Hz, and RSS interval between 10ms and 10s; duration and frequency positive")
+    if not (1 <= args.mmap_pages <= 1024 and args.mmap_pages & (args.mmap_pages - 1) == 0):
+        parser.error("mmap-pages must be a power of two between 1 and 1024")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     proc = Path(f"/proc/{args.pid}")
     if proc.stat().st_uid != os.getuid():
@@ -529,6 +718,7 @@ def main():
         "worker_sha256": digest(proc / "exe"), "request_ids": args.request_id,
         "command": command, "duration_limit_seconds": args.duration,
         "frequency_hz": args.frequency, "event": "cpu-clock:u",
+        "perf_mmap_pages_per_cpu": args.mmap_pages,
         "clock": "CLOCK_MONOTONIC", "call_graph": "none; leaf samples only",
         "rss_interval_seconds": args.rss_interval, "derived_file_limit_bytes": DERIVED_LIMIT,
         "timing_log_limit_bytes": TIMING_LIMIT, "phase_limit": PHASE_LIMIT,
@@ -540,6 +730,7 @@ def main():
         "measurement_scope": "selected process only; no inherited tasks; userspace CPU samples",
         "phase_coverage": "only completed instrumented spans; missing phases are unmeasured, not zero",
         "rts_allocation_scope": "process counter deltas; allocation counters can lag until an RTS GC accounting boundary",
+        "cgroup_limitations": "ancestor counters are shared contextual measurements, not worker/request attribution; snapshots can miss short pressure spikes",
     }
     if args.worker_build_identity:
         bounded_copy(args.worker_build_identity, out / "worker-build-identity.json")
@@ -548,6 +739,7 @@ def main():
             parser.error("build identity does not match the selected worker bytes")
         metadata["worker_build_identity"] = build_identity
     bounded_copy(proc / "maps", out / "worker.maps")
+    metadata["cgroup_start"] = {"anchor": anchor(), "snapshot": capture_cgroup_context(args.pid)}
     retained_size = sum(path.stat().st_size for path in args.retain_file)
     if retained_size > 8 * 1024 * 1024:
         parser.error("retained input set exceeds eight MiB")
@@ -558,6 +750,7 @@ def main():
     control_read, control_write = os.pipe()
     ack_read, ack_write = os.pipe()
     perf_args = [perf, "record", "--clockid", "mono", "-e", "cpu-clock:u", "-F", str(args.frequency),
+                 "-m", str(args.mmap_pages),
                  "--no-inherit", "--no-buildid-cache", "--buildid-all", "--max-size", "64M",
                  "--delay=-1", "--control", f"fd:{control_read},{ack_write}",
                  "-p", str(args.pid), "-o", str(out / "cpu.perf.data")]
@@ -617,6 +810,9 @@ def main():
         metadata["perf_exit"] = recorder.returncode if recorder else None
         metadata["perf_recording_ok"] = metadata["perf_exit"] == 0 or (metadata.get("perf_stop_requested", False) and metadata["perf_exit"] == -signal.SIGINT)
         metadata["end"] = anchor()
+        metadata["cgroup_end"] = {"anchor": anchor(), "snapshot": capture_cgroup_context(args.pid)}
+        metadata["cgroup_accounting"] = compare_cgroup_context(metadata["cgroup_start"]["snapshot"],
+                                                                 metadata["cgroup_end"]["snapshot"])
         metadata["command_output_truncated"] = [item for name in ("command.stdout", "command.stderr")
                                                 if (out / name).exists()
                                                 if (item := cap_output(out / name))]

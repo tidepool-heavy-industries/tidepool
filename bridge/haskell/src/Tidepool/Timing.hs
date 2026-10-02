@@ -6,6 +6,9 @@ module Tidepool.Timing
   ( readTimingEnabled
   , timePhase
   , timeDetailPhase
+  , ResourceTimingStart
+  , beginResourceTiming
+  , endResourceTiming
   , timeSection
   , emitPhase
   , emitDetailPhase
@@ -57,10 +60,27 @@ timePhase enabled name act = do
 timeDetailPhase :: MonadIO m => Bool -> String -> String -> m a -> m a
 timeDetailPhase False _ _ act = act
 timeDetailPhase True parent name act = do
+  start <- beginResourceTiming True
+  result <- act
+  endResourceTiming start parent name
+  pure result
+
+-- A token brackets existing wall timers whose setup spans several statements.
+-- Keep its constructor private so all resource spans use the same clock and
+-- counter ordering. Nothing performs no counter reads when timing is disabled.
+data ResourceTimingStart = ResourceTimingStart Word64 Integer (Maybe RTS.RTSStats)
+
+beginResourceTiming :: MonadIO m => Bool -> m (Maybe ResourceTimingStart)
+beginResourceTiming False = pure Nothing
+beginResourceTiming True = do
   wall0 <- liftIO getMonotonicTimeNSec
   cpu0 <- liftIO getCPUTime
   rts0 <- liftIO readRtsStats
-  result <- act
+  pure (Just (ResourceTimingStart wall0 cpu0 rts0))
+
+endResourceTiming :: MonadIO m => Maybe ResourceTimingStart -> String -> String -> m ()
+endResourceTiming Nothing _ _ = pure ()
+endResourceTiming (Just (ResourceTimingStart wall0 cpu0 rts0)) parent name = do
   rts1 <- liftIO readRtsStats
   cpu1 <- liftIO getCPUTime
   wall1 <- liftIO getMonotonicTimeNSec
@@ -71,7 +91,6 @@ timeDetailPhase True parent name act = do
     ++ " wall_ns=" ++ show (delta wall0 wall1)
     ++ " cpu_ns=" ++ show ((cpu1 - cpu0) `div` 1000)
     ++ renderRtsDelta rts0 rts1)
-  pure result
 
 -- | Time @act@ without emitting anything — for a phase whose wall clock is
 -- the SUM of several non-contiguous sub-steps (e.g. once per module in a
