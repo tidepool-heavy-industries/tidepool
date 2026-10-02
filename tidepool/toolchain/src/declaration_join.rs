@@ -330,6 +330,42 @@ fn source_lexical_surface_inner(
 }
 
 impl CertifiedAuthoredDeclaration {
+    #[cfg(test)]
+    pub(crate) fn test_certificate(
+        owner: ExactModuleIdentity,
+        roots: Vec<ExactModuleIdentity>,
+        source_lexical_imports: Vec<ExactLexicalNode>,
+    ) -> Self {
+        let product = CertifiedRecoveryProduct::from_certification(
+            tidepool_repr::execution_schema::CachedHomeOwner {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                module_version: tidepool_repr::execution_schema::ModuleVersion([1; 32]),
+                skinny_iface_sha256: [2; 32],
+                product_sha256: [3; 32],
+            },
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        Self {
+            product,
+            artifacts: crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+            lexical_exports: Vec::new(),
+            introduced_exports: Vec::new(),
+            instances: InstanceInventory::default(),
+            family_closure: Vec::new(),
+            source_sha256: [4; 32],
+            toolchain_identity_sha256: [0; 32],
+            original_imports: vec![ExactInterfaceOwner {
+                owner,
+                requirements: roots,
+            }],
+            source_lexical_imports,
+        }
+    }
+
     /// Preserve strict shared-source traversal while excluding only certified
     /// session implementation anchors from lexical selection.
     pub fn shared_source_lexical_surface(

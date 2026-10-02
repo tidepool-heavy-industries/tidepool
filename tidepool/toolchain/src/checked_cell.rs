@@ -3014,6 +3014,185 @@ mod tests {
     }
 
     #[test]
+    fn planned_prefix_revalidation_uses_publication_context_not_unrelated_value_rows() {
+        use super::*;
+        use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
+
+        let module = |name: &str| ExactModuleIdentity {
+            unit: "main".into(),
+            module: name.into(),
+        };
+        let authored = module("Authored");
+        let selected = module("CheckedHomeValue");
+        let unrelated = module("UnrelatedHomeValue");
+        let certificate = Arc::new(
+            crate::declaration_join::CertifiedAuthoredDeclaration::test_certificate(
+                authored.clone(),
+                vec![selected.clone()],
+                vec![ExactLexicalNode {
+                    owner: selected.clone(),
+                    imports: Vec::new(),
+                }],
+            ),
+        );
+
+        let publication_context = Arc::new(
+            crate::declaration_join::ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap(),
+        );
+        let enriched_context = Arc::new(
+            crate::declaration_join::ExactDeclarationContext::new(
+                &[],
+                &[],
+                vec![
+                    ExactLexicalNode {
+                        owner: selected.clone(),
+                        imports: Vec::new(),
+                    },
+                    ExactLexicalNode {
+                        owner: unrelated.clone(),
+                        imports: Vec::new(),
+                    },
+                ],
+            )
+            .unwrap(),
+        );
+        assert!(enriched_context
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner == unrelated));
+
+        let expected_publication = publication_context
+            .as_ref()
+            .clone()
+            .extend(
+                std::slice::from_ref(&certificate),
+                &[],
+                vec![
+                    ExactLexicalNode {
+                        owner: authored.clone(),
+                        imports: vec![selected.clone()],
+                    },
+                    ExactLexicalNode {
+                        owner: selected,
+                        imports: Vec::new(),
+                    },
+                ],
+            )
+            .unwrap();
+        assert!(!expected_publication
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner == unrelated));
+        let incorrectly_promoted_publication = publication_context
+            .as_ref()
+            .clone()
+            .extend(
+                std::slice::from_ref(&certificate),
+                &[],
+                vec![
+                    ExactLexicalNode {
+                        owner: authored.clone(),
+                        imports: vec![selected.clone()],
+                    },
+                    ExactLexicalNode {
+                        owner: selected.clone(),
+                        imports: Vec::new(),
+                    },
+                    ExactLexicalNode {
+                        owner: unrelated,
+                        imports: Vec::new(),
+                    },
+                ],
+            )
+            .unwrap();
+        assert!(prefix_context_differs_only_by_unrelated_owner(
+            &expected_publication,
+            &incorrectly_promoted_publication
+        ));
+
+        let producer = b"checked-prefix revalidation fixture";
+        let cell = Arc::new(ExactCheckedCell {
+            specification: CheckedCellSpecification {
+                admission_digest: [4; 32],
+                cell_source: "module Authored where".into(),
+                template_source: String::new(),
+                turn_templates: Vec::new(),
+                injected_modules: Vec::new(),
+                reserved_declaration_modules: vec!["Authored".into()],
+            },
+            producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                producer,
+            )
+            .sha256(),
+            context: enriched_context.semantic_sha256(),
+            declaration_context: enriched_context,
+            publication_context,
+            receipt_digest: [9; 32],
+            checked_source: "module Authored where".into(),
+            evidence: Vec::new(),
+            observations: Vec::new(),
+            items: vec![CheckedItem {
+                kind: CheckedItemKind::Declaration,
+                source: "module Authored where".into(),
+                binders: Vec::new(),
+                pins: Vec::new(),
+                expression: None,
+                signatures: Vec::new(),
+            }],
+            include: Vec::new(),
+            planned_declaration: Some(PlannedCheckedDeclaration {
+                source: "module Authored where".into(),
+                interface_fingerprint: "fixture".into(),
+                certificate,
+                receipt_digest: [10; 32],
+            }),
+            planned_declarations: Default::default(),
+            value_inputs: CheckedValueInputs::capture(Vec::new()).unwrap(),
+        });
+        let item = ExactCheckedItem {
+            cell: Arc::clone(&cell),
+            index: 0,
+        };
+        let mut completed = CheckedPrefixSequence::new();
+        completed.push(CompletedCheckedItem::Declaration(item));
+        let prefix = ExactCompiledPrefix {
+            cell,
+            completed,
+            displays: CheckedPrefixSequence::new(),
+        };
+
+        prefix
+            .revalidate_context(producer, &expected_publication.semantic_sha256())
+            .expect("same certificate revalidates the declaration publication surface");
+        assert!(prefix
+            .revalidate_context(
+                producer,
+                &incorrectly_promoted_publication.semantic_sha256()
+            )
+            .is_err());
+    }
+
+    fn prefix_context_differs_only_by_unrelated_owner(
+        expected: &crate::declaration_join::ExactDeclarationContext,
+        promoted: &crate::declaration_join::ExactDeclarationContext,
+    ) -> bool {
+        let expected = expected
+            .lexical_graph()
+            .iter()
+            .map(|node| (node.owner.clone(), node.imports.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let promoted = promoted
+            .lexical_graph()
+            .iter()
+            .map(|node| (node.owner.clone(), node.imports.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        promoted.len() == expected.len() + 1
+            && expected
+                .iter()
+                .all(|(owner, imports)| promoted.get(owner) == Some(imports))
+    }
+
+    #[test]
     fn canonical_input_witness_preserves_shape_and_original_interface_seals() {
         use super::*;
         let con = |name: &str| {
