@@ -3011,7 +3011,17 @@ impl PreparedEngine {
                         && target.package_interfaces.interface_digest(unit, module)
                             == Some(*interface_digest)
                 })
-                .ok_or_else(|| PreparedRuntimeError::MissingCertifiedOwner(owner.clone()))?;
+                .ok_or_else(|| {
+                    tracing::warn!(
+                        ?binder,
+                        ?interface_digest,
+                        target_has_definition = target_exports.contains_key(binder),
+                        target_certificate_matches = matches_target,
+                        target_interface_digest = ?target.package_interfaces.interface_digest(unit, module),
+                        "certified package import has no live export or admitted target definition"
+                    );
+                    PreparedRuntimeError::MissingCertifiedOwner(owner.clone())
+                })?;
             if target_packages
                 .insert(binder.clone(), (value, *interface_digest))
                 .is_some_and(|previous| previous != (value, *interface_digest))
@@ -3388,6 +3398,12 @@ impl PreparedEngine {
                             }
                             let import = if let Some(export) = self.code_exports.get(binder) {
                                 if !matches_protected_package_interface(export, interface_digest) {
+                                    tracing::warn!(
+                                        ?binder,
+                                        requested_interface_digest = ?interface_digest,
+                                        export_interface_digest = ?export.interface_digest,
+                                        "certified package import differs from its live export interface"
+                                    );
                                     return Err(PreparedRuntimeError::MissingCertifiedOwner(
                                         owner.clone(),
                                     ));
