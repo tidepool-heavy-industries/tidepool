@@ -2766,6 +2766,11 @@ pub fn compile_cell_program_admitted(
             .map(|interface| (interface.module(), interface.bytes_owned().clone()))
             .collect(),
         planned.compiler_specification(),
+        &admission
+            .interfaces()
+            .iter()
+            .filter_map(|interface| interface.checked_artifact().cloned())
+            .collect::<Vec<_>>(),
     )?;
     if let Some(root) = offer.checked_value_root() {
         command.session_root(root);
@@ -2883,6 +2888,11 @@ fn check_cell_impl(
                 .iter()
                 .map(|interface| (interface.module(), interface.bytes_owned().clone()))
                 .collect(),
+            &admission
+                .interfaces()
+                .iter()
+                .filter_map(|interface| interface.checked_artifact().cloned())
+                .collect::<Vec<_>>(),
         )?
     } else {
         select_module_candidate_offer(
@@ -5669,6 +5679,7 @@ mod tests {
             admission.view().exact_declaration_context().cloned(),
             specification,
             Vec::new(),
+            &[],
         )?;
         cmd.session_root(offer.checked_value_root().unwrap())
             .session_artifacts(offer.exact_scope_path().unwrap());

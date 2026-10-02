@@ -142,6 +142,7 @@ impl Drop for RuntimeLexicalScopeLease {
 pub struct AdmittedValueInterface {
     module: tidepool_repr::SessionModule,
     bytes: Arc<[u8]>,
+    checked_artifact: Option<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>>,
 }
 
 /// The original native import ledger remains fixed for the whole cell.
@@ -997,6 +998,7 @@ fn settle_checked_snapshot(
                     AdmittedValueInterface {
                         module,
                         bytes: bytes.clone(),
+                        checked_artifact: Some(interface.clone()),
                     },
                     digest,
                 );
@@ -1112,6 +1114,11 @@ fn checked_snapshot(
 }
 
 impl AdmittedValueInterface {
+    pub fn checked_artifact(
+        &self,
+    ) -> Option<&Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
+        self.checked_artifact.as_ref()
+    }
     pub fn module(&self) -> tidepool_repr::SessionModule {
         self.module
     }
@@ -1973,6 +1980,7 @@ impl PersistentSession {
                 Ok(AdmittedValueInterface {
                     module: *module,
                     bytes,
+                    checked_artifact: self.retained_checked_value_artifact(*module).cloned(),
                 })
             })
             .collect::<Result<Vec<_>, SessionError>>()?;
@@ -2447,10 +2455,12 @@ mod tests {
     #[test]
     fn initial_interface_inventory_refuses_missing_extra_duplicate_and_changed_bytes() {
         let first = AdmittedValueInterface {
+            checked_artifact: None,
             module: tidepool_repr::SessionModule::val(Generation(1)),
             bytes: Arc::from([1, 2, 3]),
         };
         let second = AdmittedValueInterface {
+            checked_artifact: None,
             module: tidepool_repr::SessionModule::val(Generation(2)),
             bytes: Arc::from([4, 5, 6]),
         };
@@ -2754,6 +2764,7 @@ mod tests {
                     interfaces = Some(Arc::new(CheckedInterfaceDelta {
                         previous: interfaces,
                         interface: AdmittedValueInterface {
+                            checked_artifact: None,
                             module: tidepool_repr::SessionModule::val(Generation(generation)),
                             bytes: bytes.clone(),
                         },
@@ -2798,6 +2809,7 @@ mod tests {
             interfaces = Some(Arc::new(CheckedInterfaceDelta {
                 previous: interfaces,
                 interface: AdmittedValueInterface {
+                    checked_artifact: None,
                     module: tidepool_repr::SessionModule::val(Generation(generation)),
                     bytes: bytes.clone(),
                 },
@@ -3370,6 +3382,7 @@ mod tests {
             for count in [1, 10, 100] {
                 let baseline = (0..baseline_count)
                     .map(|index| AdmittedValueInterface {
+                        checked_artifact: None,
                         module: tidepool_repr::SessionModule::val(Generation(index + 1)),
                         bytes: Arc::from(vec![index as u8; BYTES]),
                     })
@@ -3385,6 +3398,7 @@ mod tests {
                     assert!(index.insert(module.gen.0, digest).is_none());
                     snapshot = snapshot.append(
                         AdmittedValueInterface {
+                            checked_artifact: None,
                             module,
                             bytes: bytes.clone(),
                         },

@@ -386,6 +386,13 @@ impl PersistentSession {
         self.binding_index.value_interface(module)
     }
 
+    pub(super) fn retained_checked_value_artifact(
+        &self,
+        module: SessionModule,
+    ) -> Option<&Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
+        self.binding_index.checked_value_artifact(module)
+    }
+
     pub(super) fn mark_legacy_value_interface(&mut self, module: SessionModule) {
         self.binding_index.mark_legacy_interface(module);
     }

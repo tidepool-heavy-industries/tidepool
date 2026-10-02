@@ -383,6 +383,49 @@ fn checked_offer_context(
     }
 }
 
+fn checked_value_context(
+    context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+    values: &[(tidepool_repr::SessionModule, Arc<[u8]>)],
+    retained: &[Arc<crate::checked_cell::CheckedValueArtifact>],
+) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
+    let selected = values
+        .iter()
+        .map(|(owner, bytes)| (owner.module_name(), bytes))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    for artifact in retained {
+        let owner = artifact.owner();
+        let module = owner.module_name();
+        if !artifact.is_checked_output()
+            || !seen.insert(module.clone())
+            || selected
+                .get(&module)
+                .is_none_or(|bytes| bytes.as_ref() != artifact.bytes_owned().as_ref())
+        {
+            return Err(CompileError::ExtractFailed(
+                "retained value certificate differs from selected interface bytes".into(),
+            ));
+        }
+        let certificate = artifact.certified_interface().ok_or_else(|| {
+            CompileError::ExtractFailed("retained value certificate is absent".into())
+        })?;
+        if certificate.interface().unit() != "main"
+            || certificate.interface().module() != owner.module_name()
+            || certificate.interface().interface_bytes() != artifact.bytes_owned().as_ref()
+        {
+            return Err(CompileError::ExtractFailed(
+                "retained value certificate has another original owner".into(),
+            ));
+        }
+    }
+    let context = checked_offer_context(context)?;
+    Ok(Arc::new(
+        (*context)
+            .clone()
+            .extend_retained_value_artifacts(retained)?,
+    ))
+}
+
 fn empty_exact_context(context: &crate::declaration_join::ExactDeclarationContext) -> bool {
     context.recovery_products().is_empty()
         && context.joined_interfaces().is_empty()
@@ -620,6 +663,7 @@ impl ModuleCandidateOffer {
         context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
         specification: crate::checked_cell::CheckedCellSpecification,
         checked_values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
+        retained_interfaces: &[Arc<crate::checked_cell::CheckedValueArtifact>],
     ) -> Result<Self, CompileError> {
         let expected = specification
             .injected_modules
@@ -639,11 +683,11 @@ impl ModuleCandidateOffer {
         let Value::Array(fields) = &mut authorization else {
             unreachable!("closed cell authorization")
         };
+        let context = checked_value_context(context, &checked_values, retained_interfaces)?;
         let checked_values = crate::checked_cell::CheckedValueInputs::capture(checked_values)?;
         fields.push(checked_values.baseline_authorization());
         let authorization =
             checked_search_authorization(CheckedPurpose::Cell, authorization, include)?;
-        let context = checked_offer_context(context)?;
         Ok(Self {
             selected: immutable_candidates_in_context(
                 &context,
@@ -688,6 +732,7 @@ impl ModuleCandidateOffer {
         specification: crate::checked_cell::CheckedCellSpecification,
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         planned: crate::checked_cell::CheckedPlannedCellSpecification,
+        retained_interfaces: &[Arc<crate::checked_cell::CheckedValueArtifact>],
     ) -> Result<Self, CompileError> {
         let producer = endpoint.identity().producer_bytes();
         let expected = specification
@@ -706,6 +751,7 @@ impl ModuleCandidateOffer {
         }
         let extension = planned.authorization(&specification, producer, include, scratch)?;
         let mut authorization = specification.manifest_value()?;
+        let context = checked_value_context(context, &values, retained_interfaces)?;
         let inputs = crate::checked_cell::CheckedValueInputs::capture(values)?;
         let Value::Array(fields) = &mut authorization else {
             unreachable!("closed authorization")
@@ -719,7 +765,6 @@ impl ModuleCandidateOffer {
                 .map(|path| Value::Text(path.to_string_lossy().into_owned()))
                 .collect(),
         ));
-        let context = checked_offer_context(context)?;
         Ok(Self {
             selected: immutable_candidates_in_context(
                 &context,
@@ -1018,6 +1063,7 @@ impl ModuleCandidateOffer {
             })?,
             BTreeMap::new(),
             None,
+            None,
         )
     }
 
@@ -1210,6 +1256,7 @@ impl ModuleCandidateOffer {
             values.clone(),
             declarations,
             Some(planned),
+            Some(context),
         )?;
         let mut prefix = if cell.item_count() == 0 {
             None
@@ -1408,42 +1455,16 @@ impl ModuleCandidateOffer {
         }
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation));
         let path = root.join(owner.relative_hi_path());
-        let requirements = crate::checked_cell::decode(&crate::checked_cell::read(
-            path.with_extension("hi.requirements"),
-            4 << 20,
-        )?)?;
-        let Value::Array(requirements) = requirements else {
-            return Err(CompileError::ExtractFailed(
-                "value interface requirements are not rows".into(),
-            ));
-        };
-        let requirements = requirements
-            .iter()
-            .map(|value| {
-                let fields = crate::checked_cell::row(value, 2)?;
-                Ok(crate::declaration_join::ExactModuleIdentity {
-                    unit: crate::checked_cell::string(&fields[0])?.to_owned(),
-                    module: crate::checked_cell::string(&fields[1])?.to_owned(),
-                })
-            })
-            .collect::<Result<Vec<_>, CompileError>>()?;
-        let identity = crate::declaration_join::ExactModuleIdentity {
-            unit: "main".into(),
-            module: owner.module_name(),
-        };
-        let interface = Arc::new(
-            crate::recovery_artifacts::CertifiedValueInterface::from_checked_compilation(
-                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                    &self.producer,
-                )
-                .sha256(),
-                identity.clone(),
-                crate::checked_cell::read(&path, 32 << 20)?,
-                crate::checked_cell::read(path.with_extension("hi.packages"), 4 << 20)?,
-                requirements.clone(),
+        let bytes = crate::checked_cell::read(&path, 32 << 20)?;
+        let interface = crate::checked_cell::certify_value_interface(
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                &self.producer,
             )
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?,
-        );
+            .sha256(),
+            owner,
+            &path,
+            &bytes,
+        )?;
         Ok(Arc::new(
             (*context)
                 .clone()

@@ -139,6 +139,7 @@ pub struct ExactCheckedCell {
     producer: [u8; 32],
     context: [u8; 32],
     declaration_context: Arc<crate::declaration_context::ExactDeclarationContext>,
+    program_context: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
     receipt_digest: [u8; 32],
     checked_source: String,
     evidence: Vec<(String, crate::cache::DependencyEvidence)>,
@@ -420,6 +421,8 @@ pub struct CheckedValueArtifact {
     path: std::path::PathBuf,
     digest: String,
     authority: Option<([u8; 32], [u8; 32])>,
+    certified_interface: Option<Arc<crate::recovery_artifacts::CertifiedValueInterface>>,
+    artifact_view: Option<crate::artifact_inventory::ArtifactView>,
 }
 
 /// The exact checked interface bytes named by one compiler authorization.
@@ -485,6 +488,8 @@ impl CheckedValueInputs {
                 bytes,
                 path,
                 authority: None,
+                certified_interface: None,
+                artifact_view: None,
             }));
         }
         Ok(Arc::new(Self {
@@ -579,6 +584,18 @@ impl CheckedValueInputs {
         let path = self.root().join(owner.relative_hi_path());
         let bytes: Arc<[u8]> = read(&path, 32 * 1024 * 1024)?.into();
         let digest = hash(&bytes);
+        let certificate = certify_value_interface(cell.producer, owner, &path, &bytes)?;
+        let context = cell
+            .program_context
+            .as_ref()
+            .unwrap_or(&cell.declaration_context);
+        let context = (**context).clone().extend_with_value_interfaces(
+            std::slice::from_ref(&certificate),
+            context.lexical_graph().to_vec(),
+        )?;
+        let artifact_view = context
+            .artifact_view()
+            .select_roots(vec![certificate.artifact_id()])?;
         self.output_files_hashed.fetch_add(1, Ordering::Relaxed);
         self.output_bytes_hashed
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -589,6 +606,8 @@ impl CheckedValueInputs {
             bytes,
             path,
             authority: Some((cell.producer, cell.receipt_digest)),
+            certified_interface: Some(certificate),
+            artifact_view: Some(artifact_view),
         }))
     }
 }
@@ -604,6 +623,20 @@ impl CheckedValueArtifact {
         self.authority.is_some()
     }
 
+    pub fn certified_interface(
+        &self,
+    ) -> Option<&Arc<crate::recovery_artifacts::CertifiedValueInterface>> {
+        self.certified_interface.as_ref()
+    }
+
+    pub(crate) fn artifact_view(
+        &self,
+    ) -> Result<&crate::artifact_inventory::ArtifactView, CompileError> {
+        self.artifact_view
+            .as_ref()
+            .ok_or_else(|| failure("value interface has no original artifact closure"))
+    }
+
     fn authorization(&self) -> Value {
         array([
             text("main"),
@@ -612,6 +645,38 @@ impl CheckedValueArtifact {
             text(&self.digest),
         ])
     }
+}
+
+pub(crate) fn certify_value_interface(
+    producer: [u8; 32],
+    owner: tidepool_repr::SessionModule,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<Arc<crate::recovery_artifacts::CertifiedValueInterface>, CompileError> {
+    let requirements = decode(&read(path.with_extension("hi.requirements"), 4 << 20)?)?;
+    let requirements = list(&requirements, 16384)?
+        .iter()
+        .map(|value| {
+            let fields = row(value, 2)?;
+            Ok(crate::declaration_join::ExactModuleIdentity {
+                unit: string(&fields[0])?.to_owned(),
+                module: string(&fields[1])?.to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    Ok(Arc::new(
+        crate::recovery_artifacts::CertifiedValueInterface::from_checked_compilation(
+            producer,
+            crate::declaration_join::ExactModuleIdentity {
+                unit: "main".into(),
+                module: owner.module_name(),
+            },
+            bytes.to_vec(),
+            read(path.with_extension("hi.packages"), 4 << 20)?,
+            requirements,
+        )
+        .map_err(failure)?,
+    ))
 }
 
 #[derive(Debug)]
@@ -2164,6 +2229,7 @@ pub(crate) fn admit_checked_cell(
     value_inputs: Arc<CheckedValueInputs>,
     planned_declarations: BTreeMap<usize, PlannedCheckedDeclaration>,
     program: Option<&CheckedPlannedCellSpecification>,
+    program_context: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
 ) -> Result<Arc<ExactCheckedCell>, CompileError> {
     let receipt = read(root.join("checked-cell.cbor"), 8 * 1024 * 1024)?;
     let value = decode(&receipt)?;
@@ -2379,6 +2445,7 @@ pub(crate) fn admit_checked_cell(
         .sha256(),
         context,
         declaration_context,
+        program_context,
         receipt_digest: Sha256::digest(&receipt).into(),
         evidence,
         checked_source,

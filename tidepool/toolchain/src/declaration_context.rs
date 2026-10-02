@@ -1466,6 +1466,21 @@ impl ExactDeclarationContext {
         Ok(self)
     }
 
+    pub(crate) fn extend_retained_value_artifacts(
+        mut self,
+        values: &[Arc<crate::checked_cell::CheckedValueArtifact>],
+    ) -> Result<Self, CompileError> {
+        for value in values {
+            let interface = value
+                .certified_interface()
+                .ok_or_else(|| failure("retained value lacks same-compiler certification"))?;
+            self.admit_producer(interface.interface().toolchain_identity_sha256())?;
+            self.inventory = self.inventory.merge(value.artifact_view()?)?;
+        }
+        self.normalize()?;
+        Ok(self)
+    }
+
     pub(crate) fn extend_program_value_interface(
         self,
         value: Arc<CertifiedValueInterface>,
