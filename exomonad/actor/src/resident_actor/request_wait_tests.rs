@@ -107,6 +107,7 @@ fn deferred_child(
 #[tokio::test]
 async fn own_deferred_readiness_is_refused_without_waiting_or_cancelling_work() {
     let fixture = Fixture::with_watch(true, true);
+    let lease = TransientWatchLease::new(&fixture.registry, fixture.owner, fixture.watch);
     let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
         "thread".into(),
         "request".into(),
@@ -138,6 +139,14 @@ async fn own_deferred_readiness_is_refused_without_waiting_or_cancelling_work() 
         fixture.registry.observe_watch(fixture.owner, fixture.watch),
         Ok(WatchObservation::Pending(_))
     ));
+    drop(lease);
+    assert!(!fixture.registry.retains_watch(fixture.owner, fixture.watch));
+    assert!(matches!(
+        fixture
+            .registry
+            .observe_response(fixture.owner, fixture.request),
+        Ok(crate::request::ResponseObservation::Pending(_))
+    ));
 }
 
 #[tokio::test]
@@ -166,7 +175,12 @@ async fn unrelated_publication_and_committed_children_remain_awaitable() {
         );
         if committed {
             fixture.groups.request_commit(group, fixture.owner).unwrap();
-            fixture.groups.mark_ready(group, fixture.target).unwrap();
+            fixture
+                .groups
+                .gate(group, fixture.target)
+                .unwrap()
+                .mark_ready()
+                .unwrap();
             fixture
                 .groups
                 .publish_groups(&[group], fixture.owner)
