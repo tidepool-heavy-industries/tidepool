@@ -1758,11 +1758,10 @@ where
                             detail: "hosted work admission is sealed".into(),
                         }))
                         .ok();
+                } else {
+                    start_tool(&myself, state, invocation, None, reply);
                     return Ok(());
                 }
-
-                start_tool(&myself, state, invocation, None, reply);
-                return Ok(());
             }
             KernelMessage::ToolWithHostedCheckpoint {
                 invocation,
@@ -1776,10 +1775,10 @@ where
                             detail: "hosted work admission is sealed".into(),
                         }))
                         .ok();
+                } else {
+                    start_tool(&myself, state, invocation, Some(capture), reply);
                     return Ok(());
                 }
-                start_tool(&myself, state, invocation, Some(capture), reply);
-                return Ok(());
             }
             settlement @ (KernelMessage::ReconcileWorkbenchBoundary { .. }
             | KernelMessage::ToolCompleted { .. }) => {
@@ -1817,11 +1816,10 @@ where
                         state.mailbox_admission.hosted_cell().complete(&control);
                     }
                     reply.send(rejection).ok();
+                } else {
+                    start_workbench(&myself, state, invocation, control, reply);
                     return Ok(());
                 }
-
-                start_workbench(&myself, state, invocation, control, reply);
-                return Ok(());
             }
             KernelMessage::ActorStepCompleted { step, .. } => {
                 tracing::warn!(actor = %state.context.identity, ?step, "stale actor completion ignored");
@@ -3922,7 +3920,21 @@ mod tests {
                 reply: captured_tx.into(),
             })
             .unwrap();
-        // The seal acknowledges both preceding deliveries while initialization
+        let workbench_control = crate::WorkbenchExecutionControl::untracked();
+        let mut workbench_rx = send_workbench_request(
+            &actor,
+            WorkbenchRequest::from_cell_input("pure ()"),
+            Some(Arc::clone(&workbench_control)),
+        );
+        let (following_tx, mut following_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Tool {
+                invocation: tool_invocation("following"),
+                reply: following_tx.into(),
+            })
+            .unwrap();
+        // The seal acknowledges all preceding deliveries while initialization
         // remains exclusive. Their admission is rechecked when it finishes.
         actor.seal_hosted_work().await.unwrap();
         assert!(matches!(
@@ -3931,6 +3943,14 @@ mod tests {
         ));
         assert!(matches!(
             captured_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            workbench_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            following_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
         probe.first.1.notify_one();
@@ -3943,6 +3963,21 @@ mod tests {
                     if detail == "hosted work admission is sealed"
             ));
         }
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), workbench_rx).await.unwrap().unwrap(),
+            Err(KernelInvocationFailure::Rejected { detail, .. })
+                if detail == "hosted work admission is sealed"
+        ));
+        assert!(matches!(
+            workbench_control.terminal_reply(),
+            Some(Err(KernelInvocationFailure::Rejected { detail, .. }))
+                if detail == "hosted work admission is sealed"
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), following_rx).await.unwrap().unwrap(),
+            Err(KernelInvocationFailure::Rejected { detail, .. })
+                if detail == "hosted work admission is sealed"
+        ));
         assert_eq!(&*fixture.calls.lock(), &["kernel-first", "kernel-last"]);
         actor
             .shutdown(ActorTerminal {
