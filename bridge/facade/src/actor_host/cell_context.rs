@@ -33,7 +33,9 @@ enum DraftLifecycle {
         principal: PrincipalId,
     },
     Finished(CellExit),
-    Cancelled,
+    Cancelled {
+        execution: Option<WorkbenchExecutionId>,
+    },
 }
 
 impl EmbeddedContextBinding {
@@ -56,15 +58,19 @@ impl EmbeddedContextBinding {
         }
     }
 
-    pub(super) fn completion(&self) -> (bool, ContextDisposition) {
+    pub(super) fn completion(&self) -> (Option<CellExit>, ContextDisposition) {
         let state = self.state.lock();
-        let eligible = matches!(&state.lifecycle, DraftLifecycle::Finished(exit) if exit.permits_context_commit());
+        let exit = match &state.lifecycle {
+            DraftLifecycle::Finished(exit) => Some(exit.clone()),
+            _ => None,
+        };
+        let eligible = exit.as_ref().is_some_and(CellExit::permits_context_commit);
         let disposition = if eligible && state.changed {
             ContextDisposition::Draft(state.draft.clone())
         } else {
             ContextDisposition::Unedited
         };
-        (eligible, disposition)
+        (exit, disposition)
     }
 }
 
@@ -132,17 +138,123 @@ impl HostedContextBinding for EmbeddedContextBinding {
 
     fn cancel(&self) {
         let mut state = self.state.lock();
-        // A completed invocation's receipt must survive cancellation racing the waiter.
-        if !matches!(state.lifecycle, DraftLifecycle::Finished(_)) {
-            state.lifecycle = DraftLifecycle::Cancelled;
-        }
+        // Close draft authority immediately while retaining the admitted
+        // execution that may still report its exact cleanup outcome.
+        let execution = match &state.lifecycle {
+            DraftLifecycle::Waiting => None,
+            DraftLifecycle::Active { execution, .. } => Some(execution.clone()),
+            DraftLifecycle::Finished(_) | DraftLifecycle::Cancelled { .. } => return,
+        };
+        state.lifecycle = DraftLifecycle::Cancelled { execution };
     }
 
     fn finish(&self, exit: CellExit) {
         let mut state = self.state.lock();
-        if matches!(&state.lifecycle, DraftLifecycle::Active { execution, .. } if execution == &exit.execution)
-        {
+        let admitted = match &state.lifecycle {
+            DraftLifecycle::Active { execution, .. }
+            | DraftLifecycle::Cancelled {
+                execution: Some(execution),
+            } => execution == &exit.execution,
+            _ => false,
+        };
+        if admitted {
             state.lifecycle = DraftLifecycle::Finished(exit);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exomonad_actor::CellExitCause;
+    use exomonad_tool::{ConversationOrigin, OriginalOperation, ToolInvocationOrigin};
+
+    fn binding() -> EmbeddedContextBinding {
+        EmbeddedContextBinding {
+            invocation: ToolInvocationContext {
+                origin: ToolInvocationOrigin::Model(OriginalOperation {
+                    origin: ConversationOrigin::External {
+                        thread_id: "thread".into(),
+                    },
+                    request_id: "request".into(),
+                    call_id: "call".into(),
+                }),
+                call_id: "call".into(),
+                namespace: None,
+            },
+            model: Arc::new(|model| Ok(model.into())),
+            state: Arc::new(Mutex::new(DraftState {
+                lifecycle: DraftLifecycle::Waiting,
+                draft: ContextDraft {
+                    document: harness::context::ContextDocument { blocks: Vec::new() },
+                    next_model: Some("staged-model".into()),
+                },
+                changed: true,
+            })),
+        }
+    }
+
+    fn prepare_result(
+        binding: &EmbeddedContextBinding,
+        request: ContextReq,
+        principal: PrincipalId,
+    ) -> Result<Response, EffectError> {
+        let DeferredEffect::Blocking(work) =
+            binding.prepare(request, principal, DataConTable::new())
+        else {
+            panic!("context service must retain its blocking request owner");
+        };
+        work.into_inner().unwrap()()
+    }
+
+    #[test]
+    fn cancelled_context_grant_retains_only_its_matching_terminal_receipt() {
+        let binding = binding();
+        let execution = WorkbenchExecutionId::from_digest([3; 16]);
+        let principal = PrincipalId::new(1, 1);
+        binding
+            .admit(&execution, &binding.invocation, principal)
+            .unwrap();
+        binding.cancel();
+        assert!(prepare_result(&binding, ContextReq::GetContextWith, principal).is_err());
+        let exit = CellExit {
+            execution,
+            cause: CellExitCause::Cancelled,
+            cleanup_confirmed: true,
+        };
+        binding.finish(CellExit {
+            execution: WorkbenchExecutionId::from_digest([4; 16]),
+            ..exit.clone()
+        });
+        assert!(binding.completion().0.is_none());
+        binding.finish(exit.clone());
+        let (retained, disposition) = binding.completion();
+        assert_eq!(retained, Some(exit));
+        assert!(matches!(disposition, ContextDisposition::Unedited));
+        assert!(prepare_result(
+            &binding,
+            ContextReq::SetNextModelWith("late".into()),
+            principal
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn cancellation_after_full_return_preserves_the_committable_owner_receipt() {
+        let binding = binding();
+        let execution = WorkbenchExecutionId::from_digest([5; 16]);
+        binding
+            .admit(&execution, &binding.invocation, PrincipalId::new(1, 1))
+            .unwrap();
+        let exit = CellExit {
+            execution,
+            cause: CellExitCause::FullReturn,
+            cleanup_confirmed: true,
+        };
+        binding.finish(exit.clone());
+        binding.cancel();
+        let (retained, disposition) = binding.completion();
+        assert_eq!(retained, Some(exit));
+        assert!(matches!(disposition, ContextDisposition::Draft(_)));
     }
 }

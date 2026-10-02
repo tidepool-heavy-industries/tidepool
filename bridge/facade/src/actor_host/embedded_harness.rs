@@ -1,8 +1,8 @@
 use std::{
     path::Path,
     sync::{
-        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
     },
 };
 
@@ -26,9 +26,9 @@ use harness::{
         ProviderCompletion, ProviderError, ToolFailure,
     },
     store::Store,
-    turn::JobScheduler,
+    turn::{JobOutput, JobScheduler},
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 
 use super::cell_context::{EmbeddedContextBinding, ModelResolver};
@@ -830,20 +830,76 @@ impl Provider for EmbeddedDispatcher {
         let authority = binding
             .as_ref()
             .map(|binding| binding.clone() as Arc<dyn exomonad_actor::HostedContextBinding>);
+        let cancellation = context.cancel.clone();
+        let operation = context.operation.clone();
         let result = self
             .dispatch(name, arguments, context, authority)
             .await
             .map_err(ProviderError::into_tool_failure);
+        let (exit, disposition) = match binding.as_ref() {
+            Some(binding) => binding.completion(),
+            None => (None, harness::provider::ContextDisposition::Unedited),
+        };
+        // A signalled cancellation asks the same exact native owner to
+        // arbitrate its retained terminal. The ordinary result waiter and
+        // the scheduler's cancellation waiter may observe that reply in
+        // either order; both must project the same typed cancellation.
+        // Dispatch has already released the native reply, so this cannot
+        // depend on completion of the provider future or Store publication.
+        let output = if exit
+            .as_ref()
+            .is_some_and(|exit| exit.cause == exomonad_actor::CellExitCause::Cancelled)
+        {
+            if exit
+                .as_ref()
+                .expect("cancelled cell exit")
+                .cleanup_confirmed
+            {
+                JobOutput::CancelledWithReceipt(result)
+            } else {
+                JobOutput::CancellationUnconfirmed("native cell cleanup unconfirmed".into())
+            }
+        } else if cancellation.is_cancelled() {
+            let terminal = match operation.as_ref().map(|operation| self.context(operation)) {
+                Some(Ok(invocation)) => self.snapshot.cancel(invocation).await,
+                Some(Err(error)) => {
+                    return ProviderCompletion {
+                        output: JobOutput::CancellationUnconfirmed(error.to_string()),
+                        full_success: false,
+                        context: harness::provider::ContextDisposition::Unedited,
+                    };
+                }
+                None => {
+                    return ProviderCompletion {
+                        output: JobOutput::CancellationUnconfirmed(
+                            "native cancellation requires an exact operation".into(),
+                        ),
+                        full_success: false,
+                        context: harness::provider::ContextDisposition::Unedited,
+                    };
+                }
+            };
+            native_terminal_output(result, terminal)
+        } else {
+            JobOutput::Completed(result)
+        };
         match binding {
-            Some(binding) => {
-                let (full_success, context) = binding.completion();
+            Some(_) => {
+                let full_success = exit
+                    .as_ref()
+                    .is_some_and(exomonad_actor::CellExit::permits_context_commit)
+                    && matches!(&output, JobOutput::Completed(Ok(_)));
                 ProviderCompletion {
-                    result,
+                    output,
                     full_success,
-                    context,
+                    context: disposition,
                 }
             }
-            None => ProviderCompletion::unedited(result),
+            None => ProviderCompletion {
+                full_success: matches!(&output, JobOutput::Completed(Ok(_))),
+                output,
+                context: harness::provider::ContextDisposition::Unedited,
+            },
         }
     }
 
@@ -909,6 +965,24 @@ fn workbench_reply_receipt(
         .map_err(ProviderError::into_tool_failure)
 }
 
+fn native_terminal_output(
+    result: Result<Value, ToolFailure>,
+    terminal: Result<WorkbenchCancellationOutcome, ResidentToolError>,
+) -> JobOutput {
+    match terminal {
+        Ok(WorkbenchCancellationOutcome::Cancelled { reply, .. }) => {
+            JobOutput::CancelledWithReceipt(workbench_reply_receipt(reply))
+        }
+        Ok(
+            WorkbenchCancellationOutcome::Expired { .. }
+            | WorkbenchCancellationOutcome::PublicationSettled { .. }
+            | WorkbenchCancellationOutcome::NotSleeping { .. },
+        ) => JobOutput::Completed(result),
+        Ok(outcome) => JobOutput::CancellationUnconfirmed(format!("{outcome:?}")),
+        Err(error) => JobOutput::CancellationUnconfirmed(error.to_string()),
+    }
+}
+
 #[cfg(test)]
 #[path = "embedded_cancel_receipt_tests.rs"]
 mod cancellation_receipt_tests;
@@ -916,6 +990,46 @@ mod cancellation_receipt_tests;
 #[cfg(test)]
 mod round_control_tests {
     use super::*;
+
+    #[test]
+    fn native_cancelled_owner_projects_a_cancelled_error_receipt() {
+        let output = native_terminal_output(
+            Err("ordinary waiter error".into()),
+            Ok(WorkbenchCancellationOutcome::Cancelled {
+                execution: tidepool_runtime::session::WorkbenchExecutionId::from_digest([6; 16]),
+                reply: Err(exomonad_actor::KernelInvocationFailure::Failed {
+                    actor: ActorRef::first(exomonad_actor::ActorId(1)),
+                    detail: "native abort with retained prefix".into(),
+                }),
+            }),
+        );
+        assert!(matches!(output, JobOutput::CancelledWithReceipt(Err(_))));
+    }
+
+    #[test]
+    fn native_completed_owner_preserves_the_original_waiter_result() {
+        let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([7; 16]);
+        let reply = Ok(tidepool_runtime::session::WorkbenchResponse {
+            status: tidepool_runtime::session::WorkbenchRunStatus::Completed,
+            summary: None,
+            items: Vec::new(),
+            next_index: 1,
+            total: 1,
+        });
+        for terminal in [
+            WorkbenchCancellationOutcome::Expired {
+                execution: execution.clone(),
+                reply: reply.clone(),
+            },
+            WorkbenchCancellationOutcome::PublicationSettled { execution, reply },
+        ] {
+            let result = Ok(json!({"exact": "native return"}));
+            assert_eq!(
+                native_terminal_output(result.clone(), Ok(terminal)),
+                JobOutput::Completed(result)
+            );
+        }
+    }
 
     #[test]
     fn embedded_tool_failure_preserves_classification_and_original_error_text() {
@@ -985,7 +1099,7 @@ mod tests {
     use super::*;
     use crate::actor_host::embedded_projection::{EmbeddedProjection, LifecycleState};
     use crate::actor_host::embedded_service::{
-        EmbeddedService, attach_actor, drive_conversation_with_transport, submit_browser_command,
+        attach_actor, drive_conversation_with_transport, submit_browser_command, EmbeddedService,
     };
     use crate::actor_host::test_campaign::TestCampaign;
     use async_trait::async_trait;
@@ -1141,27 +1255,23 @@ mod tests {
             incarnation: "wrong-incarnation".into(),
             ..identity.clone()
         };
-        assert!(
-            service
-                .runtime
-                .attach(wrong, campaign.actor.clone(), installation.clone(), None)
-                .is_err()
-        );
+        assert!(service
+            .runtime
+            .attach(wrong, campaign.actor.clone(), installation.clone(), None)
+            .is_err());
         let wrong_run = HostIdentity {
             run: "another-run".into(),
             ..identity.clone()
         };
-        assert!(
-            service
-                .runtime
-                .attach(
-                    wrong_run,
-                    campaign.actor.clone(),
-                    installation.clone(),
-                    None
-                )
-                .is_err()
-        );
+        assert!(service
+            .runtime
+            .attach(
+                wrong_run,
+                campaign.actor.clone(),
+                installation.clone(),
+                None
+            )
+            .is_err());
 
         let transport = ParkUntilInput {
             entered: Arc::new(tokio::sync::Notify::new()),
