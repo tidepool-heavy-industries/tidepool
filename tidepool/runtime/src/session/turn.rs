@@ -3502,8 +3502,12 @@ pub fn assemble_checked_activation_module(
     input_type: &str,
     budget: usize,
 ) -> String {
-    let source = assemble_bind_module(
+    let preamble = super::insert_preamble_imports(
         preamble,
+        "qualified Tidepool.Inspection as TidepoolInspection",
+    );
+    let source = assemble_bind_module(
+        &preamble,
         "",
         "__result",
         effect_stack,
