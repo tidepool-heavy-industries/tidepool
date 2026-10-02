@@ -235,6 +235,14 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         Box::pin(async move { client.complete(boundary).await })
     }
 
+    fn abort_boxed(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> ResidentToolFuture {
+        let client = self.client.clone();
+        Box::pin(async move { client.abort(boundary).await })
+    }
+
     fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
         self.dispatch_with_checkpoint_boxed(invocation, None)
     }

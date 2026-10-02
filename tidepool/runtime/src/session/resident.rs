@@ -2274,6 +2274,14 @@ where
         }
     }
 
+    /// Observe the interpreters installed on this exact machine. The caller
+    /// holds the session checkout; this does not dispatch an effect or grant
+    /// authority over any handler-owned resource.
+    #[must_use]
+    pub fn handlers(&self) -> &H {
+        &self.handlers
+    }
+
     /// Build a resident session with no live machine yet. Construction cannot
     /// fail or compile a seed program. The machine comes up on the first real
     /// turn ([`Self::run_with_sites`]/[`Self::run_bind_with_sites`]/
