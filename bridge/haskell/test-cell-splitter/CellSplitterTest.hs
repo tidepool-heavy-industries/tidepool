@@ -44,6 +44,8 @@ import Tidepool.DependencyEvidence
 import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..), SessionScope(..)
   , mkThinSessionIface, writeSessionIface, injectSessionIface, renderSessionModule )
+import Tidepool.PreparedStg (PreparedModule(..))
+import UnreachableCompileTimeTest (unreachableCompileTimeCompilation)
 import Tidepool.Timing
   ( InterfaceStage(..), InterfaceReuse(..), measureModuleInterface )
 import System.Directory
@@ -62,6 +64,7 @@ main = getArgs >>= \case
   ["--program-originals"] -> programOriginalImportsCompilation >> putStrLn "program original imports: 1 passed"
   ["--function-value-iface"] -> functionValueInterfaceCompilation >> putStrLn "function value interface: 1 passed"
   ["--session-fixities"] -> sessionFixitiesCompilation >> putStrLn "session fixities: 1 passed"
+  ["--unreachable-compile-time"] -> unreachableCompileTimeCompilation >> putStrLn "unreachable compile-time: 1 passed"
   _ -> runAllTests
 
 runAllTests :: IO ()
@@ -1006,13 +1009,10 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
           fail ("unchanged validation-only module was recompiled: " ++ name)
       when ("tidepool-memo-miss module=WarmChain" `isInfixOf` warmLog) $
         fail "unchanged validation-only chain was recompiled"
-      -- Since 3b5e38e76 ("fix: pair prepared home code with its compiler
-      -- interfaces"), 'compileReachable' reruns 'compileFront' after the
-      -- reachability pass so a module's prepared body sees the exact
-      -- interfaces its own dependencies just registered, rather than the
-      -- ones 'load'' saw. The evicted target is therefore front-compiled
-      -- twice per warm cycle (once for the reachability walk, once for the
-      -- real recompile) while core2core/prepare still run once.
+      -- The reachable target is checked against the exact prepared interfaces
+      -- its dependencies registered. Its reachability and executable passes
+      -- therefore each compile the front, while optimization and preparation
+      -- run once.
       assertContains "warm compile prepares only its evicted target"
         "front_compiles=2 core_compiles=1 prepared_compiles=1" warmLog
       executableCold <- compile PreparedStg mempty GeneralCompile Nothing memoTarget [] Nothing
@@ -1116,8 +1116,8 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
 -- the final source consumer, so it must prepare successfully without creating
 -- a registration interface solely for itself.
 --
--- The ordinary request also has an unused import. Its body must be completed
--- for the later every-module session request.
+-- The ordinary request retains validation facts for its unused import. The
+-- later every-module session request prepares that body when it needs it.
 preparedSessionLeafCompilation :: IO ()
 preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
   let scopeRoot = root </> "session"
@@ -1148,11 +1148,14 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
   (withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
-      (_, ordinaryOutput) <- captureStderr root "prepared-session-ordinary" $
+      (ordinaryPrepared, ordinaryOutput) <- captureStderr root "prepared-session-ordinary" $
         runRequest $ \compiler ->
           compiler PreparedStg mempty GeneralCompile Nothing ordinary [root] Nothing
-      assertContains "resident memo completes the unreachable import"
-        "tidepool-count name=memo_completion_modules count=1" ordinaryOutput
+      unless (all ((/= "SessionUnreachable") . moduleNameString . moduleName . pmModule)
+          (pprModules ordinaryPrepared)) $
+        fail "ordinary request prepared its unreachable import"
+      when ("memo_completion" `isInfixOf` ordinaryOutput) $
+        fail "ordinary request performed speculative memo completion"
       (prepared, output) <- captureStderr root "prepared-session-leaf" $
         runRequest $ \compiler ->
           compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing
@@ -1168,8 +1171,11 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
         fail ("session tier recompiled a module the ordinary request memoized: " ++ output)
       when ("tidepool-memo-miss module=SessionConsumer" `isInfixOf` output) $
         fail ("session tier recompiled a consumer the ordinary request memoized: " ++ output)
-      when ("tidepool-memo-miss module=SessionUnreachable" `isInfixOf` output) $
-        fail ("session tier recompiled the completed unreachable module: " ++ output)
+      assertContains "session tier prepares the previously validation-only import"
+        "tidepool-memo-miss module=SessionUnreachable reason=executable-body-not-prepared" output
+      unless (any ((== "SessionUnreachable") . moduleNameString . moduleName . pmModule)
+          (pprModules prepared)) $
+        fail "session tier omitted its required original body"
       previousDrop <- lookupEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE"
       forcedLog <- (do
           setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE" "SessionUnused"

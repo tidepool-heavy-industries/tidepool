@@ -15,6 +15,7 @@ extra-source-files:
   test-prepared-stg/ModuleProductB.hs
   test-cell-splitter/fixtures/declaration-join/*/*.hs
   test-cell-splitter/fixtures/session-fixities/*.hs
+  test-cell-splitter/fixtures/unreachable-compile-time/*.hs
   test-source-boot/fixtures/*.hs
   test-source-boot/fixtures/*.hs-boot
   test-planned-declaration/fixtures/*.hs
@@ -124,10 +125,13 @@ test-suite cell-splitter-test
   type:             exitcode-stdio-1.0
   main-is:          CellSplitterTest.hs
   hs-source-dirs:   test-cell-splitter
+  other-modules:    UnreachableCompileTimeTest
   build-depends:
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,
     directory,
+    bytestring,
+    containers,
     filepath,
     text,
     assignment-internal,

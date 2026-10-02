@@ -121,8 +121,7 @@ import Language.Haskell.Syntax.Specificity (Specificity (SpecifiedSpec))
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import Control.Applicative ((<|>))
 import Control.Exception
-  ( finally, bracket, try, throwIO, IOException, SomeException, SomeAsyncException
-  , fromException, displayException )
+  ( finally, bracket, try, throwIO, IOException )
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes)
 import Data.List (find, isPrefixOf, isInfixOf, nub, nubBy, sort, sortOn, intercalate)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
@@ -154,7 +153,7 @@ import Tidepool.Session
   , isSessionScopeActive, injectSessionScope, registerSessionInterfaceLocation, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule )
 import Tidepool.Timing
-  ( readTimingEnabled, timeSection, timePhase, emitPhase, emitDetailPhase, emitCount
+  ( readTimingEnabled, timeSection, timePhase, emitPhase, emitCount
   , monotonicTime, elapsedMs
   , emitCompileSummary, emitModuleTiming, emitModuleInterfaceTiming
   , InterfaceStage(..), InterfaceReuse(..), measureModuleInterface
@@ -1321,14 +1320,6 @@ exactInterfaceTyCons env (Just scope) = concat <$> forM originals
       [ entry | entry@(artifact, _, _) <- scopeInterfaces scope
       , (exactUnit artifact, exactModule artifact, exactSha256 artifact) `Set.member` paired ]
 
--- | Whether this observation still lacks an executable body for the memo.
-observationLacksBody :: ModuleObservation -> Bool
-observationLacksBody (CachedObservation _ entry) = case gmePayload entry of
-  ValidationOnly _ -> True
-  ExecutableProduct _ -> False
-observationLacksBody (FreshObservation _) = True
-observationLacksBody (HydratedObservation _ _ _) = False
-
 payloadFacts :: MemoPayload -> ModuleFacts
 payloadFacts (ValidationOnly facts) = facts
 payloadFacts (ExecutableProduct moduleProduct) = productFacts moduleProduct
@@ -2140,13 +2131,10 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
               -- safe even though the cached entry was core2core'd in whatever
               -- EARLIER cycle populated it: a module OUTSIDE the reachable
               -- closure contributes nothing to the wire regardless of whether its
-              -- Core was ever optimized (see the un-memoized comment below this
-              -- tier has always carried), so reusing a MORE-optimized cached
-              -- version for a module this cycle finds non-reachable would still
-              -- be safe. Without a memo a NON-reachable module is never
-              -- core2core'd. With a resident memo it is completed below (body
-              -- and interface stored, output unchanged), because the session
-              -- tier needs a body for every module.
+              -- Core was ever optimized, so a valid cached executable can stay
+              -- in the memo even when this request does not reach it. Other
+              -- unreachable modules retain validation facts without preparing
+              -- new bodies.
               observations' <- forM summaries $ \modSum -> do
                 cpBeforeModule plan modSum
                 cached <- lookupValidMemo modSum
@@ -2196,7 +2184,6 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                   reachableMods = case forceValidationOnly of
                     Just m  -> Set.delete (mkModuleName m) reachableMods0
                     Nothing -> reachableMods0
-              completionRef <- liftIO (newIORef (0 :: Int, 0 :: Integer))
               let rememberExecutable modSum output prepared mInterface moduleFacts = do
                     moduleProduct <- requireProduct moduleFacts output prepared mInterface
                     case mMemoRef of
@@ -2270,52 +2257,21 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                       compileReachable interfaceUse modSum moduleFacts
                     FreshObservation _ -> compileReachable interfaceUse modSum moduleFacts
                     HydratedObservation _ _ _ -> compileReachable interfaceUse modSum moduleFacts
-                  -- Not reachable, resident memo active: complete the entry with
-                  -- a body and its interface anyway, and return nothing to this
-                  -- request's output. The session tier ('OptimizeEveryModule')
-                  -- needs a body for every module it visits, so a
-                  -- validation-only entry left here is a guaranteed later
-                  -- session miss that recompiles on the critical path. Paying
-                  -- once here, typically in the daemon pre-warm, moves that cost
-                  -- off it. A one-shot compile has no later request and keeps
-                  -- the validation-only path below. This request never needed
-                  -- the body, so a failure to complete it cannot fail the
-                  -- request: the entry stays validation-only instead.
-                  else if isJust mMemoRef &&
-                    (not depsExecutable || observationLacksBody observation ||
-                      case observation of
-                        CachedObservation _ entry ->
-                          not (interfaceReady interfaceUse modSum entry)
-                        FreshObservation _ -> True
-                        HydratedObservation _ _ _ -> True) then do
-                    (attempt, ms) <- timeSection $ reifyGhc $ \session ->
-                      try (reflectGhc (compileReachable interfaceUse modSum moduleFacts) session)
-                        :: IO (Either SomeException [(ModuleOutput, Maybe PreparedModule)])
-                    case attempt of
-                      Right _ -> liftIO (modifyIORef' completionRef (\(n, total) -> (n + 1, total + ms)))
-                      Left exception
-                        | Just (_ :: SomeAsyncException) <- fromException exception -> liftIO (throwIO exception)
-                        | otherwise -> do
-                            memoMiss modSum ("completion-failed:" ++ takeWhile (/= '\n') (displayException exception))
-                            validationOnly modSum moduleFacts
-                    pure []
+                  -- Keep an existing executable only while its dependencies
+                  -- and required interface still match. An unreachable source
+                  -- needs validation facts, so preparing a new body here would
+                  -- run compiler actions without contributing to this request.
                   else case observation of
-                    CachedObservation _ entry -> do
-                      recordExecutableValidity modSum True
-                      forM_ (payloadProduct (gmePayload entry))
-                        (rememberPreparedSiblings . productPrepared)
-                      when (needsPreparedInterface interfaceUse) $
-                        forM_ (cachedInterface modSum entry) (installPreparedInterface (ms_mod_name modSum))
-                      pure []
-                    -- Without a memo, only dependency and type facts are needed.
-                    FreshObservation _ -> validationOnly modSum moduleFacts >> pure []
-                    HydratedObservation _ _ _ -> validationOnly modSum moduleFacts >> pure []
-              (completed, completedMs) <- liftIO (readIORef completionRef)
-              -- Nested under lowering (which already counts this work), so
-              -- flat-sum readers do not double count it.
-              when (completed > 0) $ liftIO $ do
-                emitCount timing "memo_completion_modules" (toInteger completed)
-                emitDetailPhase timing "lowering" "memo_completion" completedMs
+                    CachedObservation _ entry
+                      | depsExecutable
+                      , Just moduleProduct <- payloadProduct (gmePayload entry)
+                      , interfaceReady interfaceUse modSum entry -> do
+                        recordExecutableValidity modSum True
+                        rememberPreparedSiblings (productPrepared moduleProduct)
+                        when (needsPreparedInterface interfaceUse) $
+                          forM_ (cachedInterface modSum entry) (installPreparedInterface (ms_mod_name modSum))
+                        pure []
+                    _ -> validationOnly modSum moduleFacts >> pure []
               pure (observations', map fst rs, [p | (_, Just p) <- rs], Just reachableMods)
           totalTcMs   <- liftIO (readIORef tcMsRef)
           totalLoweringMs <- liftIO (readIORef loweringMsRef)
