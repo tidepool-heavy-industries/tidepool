@@ -1042,12 +1042,6 @@ impl ModuleCandidateOffer {
             CompileError::ExtractFailed("ordinary compile offer cannot admit a checked cell".into())
         })?;
         let planned = self.admit_planned_declaration(root, exact, specification)?;
-        let owner = planned
-            .as_ref()
-            .map(|planned| crate::declaration_join::ExactModuleIdentity {
-                unit: planned.certificate.product().owner().unit.clone(),
-                module: planned.certificate.product().owner().module.clone(),
-            });
         crate::checked_cell::admit_checked_cell(
             root,
             &self.producer,
@@ -1055,7 +1049,10 @@ impl ModuleCandidateOffer {
             exact.context.clone(),
             &exact.request_sha256,
             specification,
-            exact.validate_outputs_with_planned(root, owner.as_ref())?,
+            exact.validate_outputs_with_planned(
+                root,
+                planned.as_ref().map(|planned| &planned.certificate),
+            )?,
             &self.include,
             planned,
             self.checked_values.clone().ok_or_else(|| {
@@ -1140,9 +1137,27 @@ impl ModuleCandidateOffer {
                     .iter()
                     .map(|node| (node.owner.clone(), node.imports.clone()))
                     .collect::<BTreeMap<_, _>>();
+                // The certificate retains complete interface requirements.
+                // Fresh source owners join the lexical graph; captured value
+                // and hidden type owners remain exact hydration dependencies.
+                let selected = lexical
+                    .keys()
+                    .cloned()
+                    .chain(
+                        original
+                            .certificate
+                            .original_home_imports()
+                            .map(|(owner, _)| owner.clone()),
+                    )
+                    .collect::<BTreeSet<_>>();
                 for (owner, imports) in original.certificate.original_home_imports() {
+                    let imports = imports
+                        .iter()
+                        .filter(|owner| selected.contains(owner))
+                        .cloned()
+                        .collect::<Vec<_>>();
                     if lexical
-                        .insert(owner.clone(), imports.to_vec())
+                        .insert(owner.clone(), imports.clone())
                         .is_some_and(|old| old != imports)
                     {
                         return Err(CompileError::ExtractFailed(

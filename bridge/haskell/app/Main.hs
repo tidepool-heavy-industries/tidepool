@@ -1652,10 +1652,12 @@ addProgramValue root generation binders@(firstBinder:_) state = do
       admission = maybe (error "compiled cell lost admission") id (scopeCheckedCell exact)
       selection = CompletedValueImport "main" (bbModule firstBinder) path digest
         [(bbName binder,bbVarId binder) | binder <- binders, not ("__tidepoolMetadata" `isPrefixOf` bbName binder)]
+  lexicalRequirements <- programLexicalRequirements exact requirements
+  let
       extended = exact { scopeCheckedCell = Just admission
             { checkedValueInterfaces = checkedValueInterfaces admission ++ [artifact] }
         , scopeInterfaces = scopeInterfaces exact ++ [(artifact,path ++ ".packages",shaHex packages)]
-        , scopeLexical = scopeLexical exact ++ [(("main",bbModule firstBinder),requirements)] }
+        , scopeLexical = scopeLexical exact ++ [(("main",bbModule firstBinder),lexicalRequirements)] }
       retained = foldr (\binder -> Map.insert
           (SymbolIdentity "main" (T.pack (bbModule binder)) "value" (T.pack (bbName binder)) Nothing) generation)
         (programRetained state) binders
@@ -1720,6 +1722,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       productPath = directory </> "original.product.cbor"
   BS.writeFile productPath originalBytes
   requirements <- programInterfaceRequirements prepared unit reserved
+  lexicalRequirements <- programLexicalRequirements supportScope requirements
   let interfacePath = directory </> "original.hi"
       packagesPath = directory </> "original.hi.packages"
       interface = ExactIfaceArtifact unit reserved interfacePath (shaHex interfaceBytes) requirements
@@ -1736,7 +1739,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       extended = supportScope
         { scopeProducts = scopeProducts supportScope ++ [originalProduct]
         , scopeInterfaces = scopeInterfaces supportScope ++ [(interface, packagesPath, shaHex packageBytes)]
-        , scopeLexical = scopeLexical supportScope ++ [((unit,reserved), requirements)] }
+        , scopeLexical = scopeLexical supportScope ++ [((unit,reserved), lexicalRequirements)] }
       text = encodeString . T.pack
       receipt = encodeListLen 8 <> text "TPEXACTDECL" <> text "1"
         <> text (scopeRequestSha256 exact) <> text reserved <> text (plannedSource original)
@@ -1972,6 +1975,17 @@ retainFreshExecutionSources includes prepared certified target scope
         Nothing -> pure (Map.insert key root selected)
         Just previous | previous == root -> pure selected
         _ -> throwIO (ExecutionSourceConflicting key)
+
+-- Interface requirements retain every exact hydration owner. Only selected
+-- lexical owners contribute edges to the instance/family traversal graph.
+programLexicalRequirements :: ExactScope -> [(String,String)] -> IO [(String,String)]
+programLexicalRequirements scope requirements = do
+  let interfaces = Set.fromList [(exactUnit artifact,exactModule artifact)
+        | (artifact,_,_) <- scopeInterfaces scope]
+      lexical = Set.fromList (map fst (scopeLexical scope))
+  unless (all (`Set.member` interfaces) requirements)
+    (fail "program interface requirement leaves admitted exact owner closure")
+  pure (filter (`Set.member` lexical) requirements)
 
 programInterfaceRequirements :: PreparedPipelineResult -> String -> String -> IO [(String, String)]
 programInterfaceRequirements prepared unit owner = do

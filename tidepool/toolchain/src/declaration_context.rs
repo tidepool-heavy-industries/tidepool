@@ -935,9 +935,34 @@ impl ExactCompilationRequest {
     pub(crate) fn validate_outputs_with_planned(
         &self,
         root: &Path,
-        planned: Option<&ExactModuleIdentity>,
+        planned: Option<&CertifiedAuthoredDeclaration>,
     ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
-        self.validate_outputs_selected(root, planned, &self.context)
+        let Some(planned) = planned else {
+            return self.validate_outputs_selected(root, None, &self.context);
+        };
+        if planned.toolchain_identity_sha256() != self.producer_sha256 {
+            return Err(failure("planned source support has another producer"));
+        }
+        // The worker checks the remaining cell against these same-request
+        // fresh originals. Retained hidden dependencies are not selected roots.
+        let view = planned.artifact_view();
+        let entries = view.entries_for_owners(
+            planned
+                .original_home_imports()
+                .map(|(owner, _)| owner.clone()),
+        );
+        let support =
+            view.select_roots(entries.values().map(|entry| entry.descriptor.id).collect())?;
+        let mut request = self.clone();
+        request.program_support = Some(match &self.program_support {
+            Some(previous) => previous.merge(&support)?,
+            None => support,
+        });
+        let owner = identity(
+            &planned.product().owner().unit,
+            &planned.product().owner().module,
+        );
+        request.validate_outputs_selected(root, Some(&owner), &self.context)
     }
 
     pub(crate) fn validate_outputs_in_context(
