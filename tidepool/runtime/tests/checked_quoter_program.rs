@@ -176,9 +176,31 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             .iter()
             .find(|product| product.owner().module == "Tidepool.QQ.Bash")
             .unwrap();
-        // Equality includes the exact five-tuple, source witness, serialized
-        // interface/native bytes, and original graph; recovery must not reissue it.
-        assert_eq!(original, recovered_original);
+        // Recovery preserves durable authority, but does not reissue the fresh
+        // source witness used to admit declarations in the original transaction.
+        assert!(original.source_sha256().is_some());
+        assert!(recovered_original.source_sha256().is_none());
+        assert_eq!(original.owner(), recovered_original.owner());
+        assert!(original.interface_bytes() == recovered_original.interface_bytes());
+        assert!(original.product_bytes() == recovered_original.product_bytes());
+        let recovered_durable = tempfile::tempdir().unwrap();
+        let recovered_references =
+            tidepool_toolchain::recovery_artifacts::materialize_certified_products(
+                recovered_durable.path(),
+                program.parsed_plan().producer_sha256(),
+                &recovered_products,
+            )
+            .unwrap();
+        let recovered_reference = recovered_references
+            .iter()
+            .find(|reference| reference.module == "Tidepool.QQ.Bash")
+            .unwrap();
+        assert_eq!(reference, recovered_reference);
+        let graph = &reference.execution_source.as_ref().unwrap().path;
+        assert!(
+            std::fs::read(durable.path().join(graph)).unwrap()
+                == std::fs::read(recovered_durable.path().join(graph)).unwrap()
+        );
         assert!(session
             .begin_cell_program(admission, program.clone())
             .unwrap()
