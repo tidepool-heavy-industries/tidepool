@@ -1218,12 +1218,44 @@ fn tool_declarations_from_wire(
                     .ok_or_else(|| drive_failure(format!("declaration {i} has no kind")))?,
             )
             .map_err(|error| drive_failure(format!("declaration {i} has invalid kind: {error}")))?;
+            let schedule = item
+                .get("schedule")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| {
+                    drive_failure(format!("declaration {i} has invalid schedule: {error}"))
+                })?
+                .unwrap_or_default();
+            let implementation = item
+                .get("implementation")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| {
+                    drive_failure(format!(
+                        "declaration {i} has invalid implementation: {error}"
+                    ))
+                })?
+                .unwrap_or_default();
+            let effect_keys = item
+                .get("effectKeys")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| {
+                    drive_failure(format!("declaration {i} has invalid effectKeys: {error}"))
+                })?
+                .unwrap_or_default();
             Ok(ToolDeclaration {
                 name,
                 description,
                 input_schema,
                 output_schema,
                 kind,
+                schedule,
+                implementation,
+                effect_keys,
             })
         })
         .collect()
@@ -1477,7 +1509,10 @@ mod tests {
     use std::time::Duration;
 
     use exomonad_agent::backend::mock::{MockBackend, MockFailure, MockStep};
-    use exomonad_agent::seam::{CycleSpec, ThreadSpec, ToolCall, ToolReply, TurnEvent, TurnId};
+    use exomonad_agent::seam::{
+        CycleSpec, ThreadSpec, ToolCall, ToolImplementation, ToolReply, ToolScheduling, TurnEvent,
+        TurnId,
+    };
     use exomonad_worktree::create::WorktreeHandle;
     use exomonad_worktree::id::{BranchName, GitOid, WorktreeId};
     use exomonad_worktree::registry::{WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus};
@@ -2388,10 +2423,59 @@ mod tests {
             serde_json::json!({ "type": "object", "properties": { "q": { "type": "string" } } }),
             "the schema crosses verbatim — nothing here rewrites it"
         );
+        assert_eq!(decls[0].schedule, ToolScheduling::Async);
+        assert_eq!(decls[0].implementation, ToolImplementation::ResidentHandler);
+        assert!(decls[0].effect_keys.is_empty());
         // Zero tools is an empty array, not an error.
         assert!(tool_declarations_from_wire(&serde_json::json!([]))
             .expect("an empty array is zero tools")
             .is_empty());
+    }
+
+    #[test]
+    fn handler_tool_declarations_from_wire_preserves_invocation_metadata() {
+        let mut wire = one_declaration();
+        wire[0]["schedule"] = serde_json::json!("before_next_inference");
+        wire[0]["implementation"] = serde_json::json!("haskell_cell");
+        wire[0]["effectKeys"] = serde_json::json!(["ContextReadWrite", "Jev"]);
+
+        let declarations =
+            tool_declarations_from_wire(&wire).expect("well-formed invocation metadata");
+        assert_eq!(
+            declarations[0].schedule,
+            ToolScheduling::BeforeNextInference
+        );
+        assert_eq!(
+            declarations[0].implementation,
+            ToolImplementation::HaskellCell
+        );
+        assert_eq!(
+            declarations[0]
+                .effect_keys
+                .iter()
+                .map(|key| key.haskell_name())
+                .collect::<Vec<_>>(),
+            ["ContextReadWrite", "Jev"]
+        );
+    }
+
+    #[test]
+    fn handler_tool_declarations_from_wire_rejects_unknown_invocation_metadata() {
+        for (field, value) in [
+            ("schedule", serde_json::json!("later")),
+            ("implementation", serde_json::json!("unregistered")),
+            ("effectKeys", serde_json::json!(["UnregisteredEffect"])),
+        ] {
+            let mut wire = one_declaration();
+            wire[0][field] = value;
+            let error = tool_declarations_from_wire(&wire)
+                .expect_err("unknown invocation metadata must not be ignored");
+            let error = format!("{error:?}");
+            assert!(
+                error.contains(field),
+                "the refusal should identify {field}: {error}"
+            );
+        }
     }
 
     /// A malformed declaration fails at `StageAllocating` — and the claim that

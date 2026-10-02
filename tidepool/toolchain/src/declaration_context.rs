@@ -497,6 +497,7 @@ pub(crate) struct ExactCompilationRequest {
     pub(crate) groups: Arc<[PendingCertifiedGroup]>,
     // Only current-program source-selected support can add these roots.
     program_support: Option<ArtifactView>,
+    program_source_lexical: Vec<ExactLexicalNode>,
     source_selected_support: BTreeSet<ExactModuleIdentity>,
     source_search_include: Option<Arc<[PathBuf]>>,
     checked_value_imports: crate::checked_cell::CheckedValueImportAuthority,
@@ -946,6 +947,7 @@ impl ExactCompilationRequest {
             artifacts: materialized.artifacts,
             groups: groups.into(),
             program_support: self.program_support.clone(),
+            program_source_lexical: self.program_source_lexical.clone(),
             source_selected_support: self.source_selected_support.clone(),
             source_search_include: self.source_search_include.clone(),
             checked_value_imports: self.checked_value_imports.clone(),
@@ -1041,6 +1043,43 @@ impl ExactCompilationRequest {
         if fresh.is_empty() && selected_originals.is_empty() {
             return Ok(context);
         }
+        let mut inherited = context
+            .lexical_graph()
+            .iter()
+            .filter(|node| !node.owner.module.starts_with("Tidepool.Session."))
+            .map(|node| (node.owner.clone(), node.imports.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for node in &self.program_source_lexical {
+            if inherited
+                .insert(node.owner.clone(), node.imports.clone())
+                .is_some_and(|previous| previous != node.imports)
+            {
+                return Err(failure("program support changed its selected source graph"));
+            }
+        }
+        let roots = fresh
+            .iter()
+            .map(|product| identity(&product.owner().unit, &product.owner().module))
+            // This helper is selected by executable scaffolding. Its native
+            // custody does not introduce an authored import into later cells.
+            .filter(|owner| owner.unit != "main" || owner.module != "Tidepool.Internal.Resume")
+            .collect::<Vec<_>>();
+        let implementations = context
+            .artifact_view()
+            .descriptors()
+            .into_iter()
+            .map(|descriptor| (descriptor.owner, descriptor.kind))
+            .collect();
+        self.program_source_lexical = crate::declaration_join::source_lexical_surface(
+            &roots,
+            &imports,
+            &inherited
+                .into_iter()
+                .map(|(owner, imports)| ExactLexicalNode { owner, imports })
+                .collect::<Vec<_>>(),
+            &implementations,
+        )?
+        .lexical;
         let entries = context.artifact_view().entries_for_owners(
             fresh
                 .iter()
@@ -1070,6 +1109,10 @@ impl ExactCompilationRequest {
         self.source_selected_support
             .extend(selected_originals.into_keys());
         Ok(context)
+    }
+
+    pub(crate) fn program_source_lexical(&self) -> &[ExactLexicalNode] {
+        &self.program_source_lexical
     }
 
     pub(crate) fn admit_source(
@@ -1448,7 +1491,9 @@ impl ExactCompilationRequest {
                 {
                     return Err(failure(format!(
                         "exact import witness leaves selected lexical graph: source {}:{}, import {unit}:{name}, qualifier {qualifier}, boot {boot}, selected {}",
-                        owner.0, owner.1, selected.contains(&(unit, name)),
+                        owner.0,
+                        owner.1,
+                        selected.contains(&(unit, name)),
                     )));
                 }
                 resolved.insert(identity(unit, name));
@@ -1796,15 +1841,95 @@ impl ExactDeclarationContext {
         mut self,
         values: &[Arc<crate::checked_cell::CheckedValueArtifact>],
     ) -> Result<Self, CompileError> {
+        let mut lexical = self
+            .lexical
+            .iter()
+            .map(|node| (node.owner.clone(), node.imports.clone()))
+            .collect::<BTreeMap<_, _>>();
         for value in values {
             let interface = value
                 .certified_interface()
                 .ok_or_else(|| failure("retained value lacks same-compiler certification"))?;
             self.admit_producer(interface.interface().toolchain_identity_sha256())?;
             self.inventory = self.inventory.merge(value.artifact_view()?)?;
+            for node in value.source_lexical() {
+                if lexical
+                    .insert(node.owner.clone(), node.imports.clone())
+                    .is_some_and(|previous| previous != node.imports)
+                {
+                    return Err(failure(
+                        "retained value changes its source-selected lexical graph",
+                    ));
+                }
+            }
         }
+        self.lexical = lexical
+            .into_iter()
+            .map(|(owner, imports)| ExactLexicalNode { owner, imports })
+            .collect();
         self.normalize()?;
         Ok(self)
+    }
+
+    pub(crate) fn retain_value_source_surface(
+        &self,
+        value: &ArtifactView,
+        support: &[ExactLexicalNode],
+    ) -> Result<(ArtifactView, Vec<ExactLexicalNode>), CompileError> {
+        let retained = value
+            .descriptors()
+            .into_iter()
+            .map(|descriptor| descriptor.owner)
+            .collect::<BTreeSet<_>>();
+        let mut selected = BTreeMap::new();
+        for node in self.lexical.iter().chain(support) {
+            if node.owner.module.starts_with("Tidepool.Session.") {
+                continue;
+            }
+            if selected
+                .insert(node.owner.clone(), node.imports.clone())
+                .is_some_and(|previous| previous != node.imports)
+            {
+                return Err(failure(
+                    "value source surface has conflicting selected edges",
+                ));
+            }
+        }
+        let roots = selected
+            .keys()
+            .filter(|owner| retained.contains(*owner))
+            .cloned()
+            .collect::<Vec<_>>();
+        let implementations = self
+            .artifact_view()
+            .descriptors()
+            .into_iter()
+            .map(|descriptor| (descriptor.owner, descriptor.kind))
+            .collect();
+        let lexical = crate::declaration_join::source_lexical_surface(
+            &roots,
+            &selected,
+            &[],
+            &implementations,
+        )?
+        .lexical;
+        let entries = self
+            .artifact_view()
+            .entries_for_owners(lexical.iter().map(|node| node.owner.clone()));
+        if entries.len() != lexical.len() {
+            return Err(failure(
+                "retained source surface lacks its exact artifact owner",
+            ));
+        }
+        let view = self.artifact_view().select_roots(
+            value
+                .root_entries()
+                .iter()
+                .map(|entry| entry.descriptor.id)
+                .chain(entries.values().map(|entry| entry.descriptor.id))
+                .collect(),
+        )?;
+        Ok((view, lexical))
     }
 
     /// Reuse only the initial value interfaces selected by the sealed checked
@@ -2446,6 +2571,7 @@ impl ExactDeclarationContext {
             artifacts: materialized.artifacts,
             groups: groups.into(),
             program_support: None,
+            program_source_lexical: Vec::new(),
             source_selected_support: BTreeSet::new(),
             source_search_include: None,
             checked_value_imports: Default::default(),
@@ -3021,6 +3147,7 @@ mod tests {
             artifacts: vec![],
             groups: Arc::from([]),
             program_support: None,
+            program_source_lexical: Vec::new(),
             source_selected_support: BTreeSet::new(),
             source_search_include: None,
             checked_value_imports: Default::default(),
@@ -3299,6 +3426,15 @@ mod tests {
         ));
         assert!(effective.lexical_graph().is_empty());
         assert!(context.lexical_graph().is_empty());
+        assert!(request.program_source_lexical().is_empty());
+        assert!(effective
+            .retain_value_source_surface(
+                request.program_support.as_ref().unwrap(),
+                request.program_source_lexical(),
+            )
+            .unwrap()
+            .1
+            .is_empty());
         assert_eq!(
             request
                 .program_support
@@ -3843,6 +3979,148 @@ mod tests {
         let receipt = import_receipt(directory.path(), &request, "Hidden");
         assert!(request.validate_receipt(&receipt, None, &context).is_err());
         assert!(context.lexical_graph().is_empty());
+        let (retained, lexical) = context
+            .retain_value_source_surface(request.program_support.as_ref().unwrap(), &[])
+            .unwrap();
+        assert_eq!(retained.descriptors().len(), 2);
+        assert!(lexical.is_empty());
+    }
+
+    #[test]
+    fn retained_value_source_surface_preserves_selected_support_and_refuses_hidden_owners() {
+        let directory = tempfile::tempdir().unwrap();
+        let baseline = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_checked_original_products(
+                    [2; 32],
+                    &[support_product("Hidden")],
+                    &BTreeMap::new(),
+                )
+                .unwrap(),
+        );
+        let mut request = program_request(directory.path(), baseline.clone());
+        let context = request
+            .admit_program_support(
+                baseline,
+                &[
+                    support_product("InstanceOwner"),
+                    support_product("InstanceRelay"),
+                ],
+                &[support_admission(directory.path())],
+            )
+            .unwrap();
+        assert!(context.lexical_graph().is_empty());
+        let owner = identity("fixture", "InstanceRelay");
+        let entries = context
+            .artifact_view()
+            .entries_for_owners(std::iter::once(owner.clone()));
+        let value = context
+            .artifact_view()
+            .select_roots(vec![entries[&owner].descriptor.id])
+            .unwrap();
+        let (view, lexical) = context
+            .retain_value_source_surface(&value, request.program_source_lexical())
+            .unwrap();
+        assert_eq!(view.descriptors().len(), 2);
+        let later = (*context)
+            .clone()
+            .extend_checked_original_products(
+                [2; 32],
+                &[support_product("LaterSupport")],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        let mut later_support = request.program_source_lexical().to_vec();
+        later_support.push(ExactLexicalNode {
+            owner: identity("fixture", "LaterSupport"),
+            imports: vec![],
+        });
+        let (earlier_view, earlier_lexical) = later
+            .retain_value_source_surface(&value, &later_support)
+            .unwrap();
+        assert_eq!(earlier_view.descriptors().len(), 2);
+        assert_eq!(earlier_lexical, lexical);
+        assert_eq!(
+            lexical,
+            vec![
+                ExactLexicalNode {
+                    owner: identity("fixture", "InstanceOwner"),
+                    imports: vec![]
+                },
+                ExactLexicalNode {
+                    owner,
+                    imports: vec![identity("fixture", "InstanceOwner")]
+                },
+            ]
+        );
+        let mut following = (*context).clone();
+        following.lexical = lexical.clone();
+        following.normalize().unwrap();
+        let following = Arc::new(following);
+        let next = program_request(directory.path(), following.clone());
+        assert!(next
+            .validate_receipt(
+                &import_receipt(directory.path(), &next, "InstanceRelay"),
+                None,
+                &following
+            )
+            .is_ok());
+        assert!(next
+            .validate_receipt(
+                &import_receipt(directory.path(), &next, "Hidden"),
+                None,
+                &following
+            )
+            .is_err());
+        // A subsequent output keeps the already selected source surface even
+        // when that request has no new source-selected supporting products.
+        assert_eq!(
+            following
+                .retain_value_source_surface(&value, &[])
+                .unwrap()
+                .1,
+            lexical
+        );
+        let conflict = [ExactLexicalNode {
+            owner: identity("fixture", "InstanceRelay"),
+            imports: vec![],
+        }];
+        assert!(following
+            .retain_value_source_surface(&value, &conflict)
+            .is_err());
+        let incomplete = [ExactLexicalNode {
+            owner: identity("fixture", "InstanceRelay"),
+            imports: vec![identity("fixture", "Hidden")],
+        }];
+        assert!(context
+            .retain_value_source_surface(&value, &incomplete)
+            .is_err());
+        let receipt = import_receipt(directory.path(), &next, "InstanceRelay");
+        let mut replacement: Value =
+            ciborium::de::from_reader(std::fs::read(&receipt).unwrap().as_slice()).unwrap();
+        let fields = replacement.as_array_mut().unwrap();
+        let replacement_source = "module InstanceRelay where\nreplaced = 99 :: Int\n";
+        std::fs::write(fields[6].as_text().unwrap(), replacement_source).unwrap();
+        fields[5] = text(sha256(replacement_source.as_bytes()));
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(fields[7].as_text().unwrap()).unwrap();
+        evidence.sources[0].sha256 = sha256(replacement_source.as_bytes());
+        evidence.modules[0].module = "InstanceRelay".into();
+        fields[7] = text(serde_json::to_string(&evidence).unwrap());
+        let module = fields[8].as_array_mut().unwrap()[0].as_array_mut().unwrap();
+        module[1] = text("InstanceRelay");
+        module[3] = Value::Array(vec![]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&replacement, &mut bytes).unwrap();
+        std::fs::write(&receipt, bytes).unwrap();
+        let refused = next
+            .validate_receipt(&receipt, None, &following)
+            .err()
+            .unwrap();
+        assert!(refused
+            .to_string()
+            .contains("fresh module replaced an admitted exact owner"));
     }
 
     #[test]
@@ -3936,6 +4214,44 @@ mod tests {
         assert!(request
             .admit_program_support(context, &[altered], &[])
             .is_err());
+    }
+
+    #[test]
+    fn retained_value_source_surface_does_not_promote_compiler_scaffold_support() {
+        let directory = tempfile::tempdir().unwrap();
+        let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let mut request = program_request(directory.path(), baseline.clone());
+        let mut admission = support_admission(directory.path());
+        admission.evidence.modules.truncate(1);
+        let source = &mut admission.evidence.modules[0];
+        source.unit = "main".into();
+        source.module = "Tidepool.Internal.Resume".into();
+        source.imports.clear();
+        let context = request
+            .admit_program_support(
+                baseline,
+                &[support_product_in_unit("main", "Tidepool.Internal.Resume")],
+                &[admission],
+            )
+            .unwrap();
+        assert!(request.program_source_lexical().is_empty());
+        let native = request.program_support.as_ref().unwrap();
+        assert_eq!(native.descriptors().len(), 1);
+        assert!(context
+            .retain_value_source_surface(native, request.program_source_lexical())
+            .unwrap()
+            .1
+            .is_empty());
+        let next = program_request(directory.path(), context.clone());
+        let receipt = import_receipt_owner(
+            directory.path(),
+            &next,
+            "main",
+            "Tidepool.Internal.Resume",
+            "none",
+            false,
+        );
+        assert!(next.validate_receipt(&receipt, None, &context).is_err());
     }
 
     #[test]
@@ -4170,6 +4486,7 @@ mod tests {
             artifacts: vec![],
             groups: Arc::from([]),
             program_support: None,
+            program_source_lexical: Vec::new(),
             source_selected_support: BTreeSet::new(),
             source_search_include: None,
             checked_value_imports: Default::default(),
@@ -4239,6 +4556,7 @@ mod tests {
             artifacts,
             groups: Arc::from([]),
             program_support: None,
+            program_source_lexical: Vec::new(),
             source_selected_support: BTreeSet::new(),
             source_search_include: None,
             checked_value_imports: Default::default(),

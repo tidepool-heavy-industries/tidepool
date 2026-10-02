@@ -1127,7 +1127,7 @@ fn service_transaction(
         if !config.persistent {
             return Err(error);
         }
-        *worker = Worker::spawn(prepared)?;
+        worker.respawn(prepared)?;
         *served = 0;
         *followed_rotation = true;
         return Ok(ConnectionOutcome::Continue);
@@ -1173,7 +1173,7 @@ fn service_transaction(
             // by `PreparedWorker`, so replacing only this child does not
             // change the endpoint's producer.
             worker.shutdown();
-            *worker = Worker::spawn(prepared)?;
+            worker.respawn(prepared)?;
             *served = 0;
             *followed_rotation = true;
             return Ok(ConnectionOutcome::Continue);
@@ -1419,7 +1419,7 @@ fn serve_workers(
             let retire = &retire;
             let ready_tx = ready_tx.clone();
             slots.push(scope.spawn(move || -> Result<(), FrontendError> {
-                let mut worker = Worker::spawn(prepared)?;
+                let mut worker = Worker::spawn_in_slot(prepared, epoch, slot)?;
                 tracing::info!(
                     run_id,
                     daemon_pid = std::process::id(),
@@ -1836,6 +1836,91 @@ fn boot_epoch() -> Result<[u8; 32], FrontendError> {
     Ok(epoch)
 }
 
+#[derive(Clone, Copy)]
+enum BuildProductsTransport {
+    Direct,
+    Daemon,
+}
+
+/// Mutable output ownership follows the process owner, across reaped rotations.
+/// Only the generated slot directories are reclaimed; logical roots and other
+/// slots remain intact. An ungraceful frontend/daemon death can leave orphans.
+pub(crate) struct BuildProductsNamespace {
+    path: std::path::PathBuf,
+    transport: BuildProductsTransport,
+    directories: std::collections::BTreeSet<std::path::PathBuf>,
+}
+
+impl BuildProductsNamespace {
+    fn new(path: std::path::PathBuf, transport: BuildProductsTransport) -> Self {
+        Self {
+            path,
+            transport,
+            directories: Default::default(),
+        }
+    }
+
+    pub(crate) fn direct() -> Result<Self, FrontendError> {
+        Ok(Self::new(
+            std::path::PathBuf::from(format!("direct-{}", hex(&boot_epoch()?))).join("0"),
+            BuildProductsTransport::Direct,
+        ))
+    }
+
+    pub(crate) fn place(
+        &mut self,
+        cwd: &Path,
+        argv: &[OsString],
+    ) -> Result<(Vec<OsString>, Vec<u8>), FrontendError> {
+        let mut request = ExtractRequest::decode_worker_argv(argv)?;
+        let mut diagnostics = Vec::new();
+        for (logical, physical) in request.place_build_products(&self.path) {
+            self.directories.insert(if physical.is_absolute() {
+                physical.clone()
+            } else {
+                cwd.join(&physical)
+            });
+            if matches!(self.transport, BuildProductsTransport::Direct) {
+                let line = format!(
+                    "tidepool-build-products logical_root={logical:?} physical_dir={physical:?}\n"
+                );
+                diagnostics.extend_from_slice(line.as_bytes());
+            }
+        }
+        Ok((request.worker_argv(), diagnostics))
+    }
+
+    /// Called only after the last owning child was reaped. Slot replacements
+    /// transfer this ownership instead of cleaning their warm products.
+    pub(crate) fn cleanup(&mut self) {
+        for directory in std::mem::take(&mut self.directories) {
+            match fs::remove_dir_all(&directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(path = %directory.display(), %error, "failed to remove compiler scratch products");
+                    continue;
+                }
+            }
+            if let Some(epoch_directory) = directory.parent() {
+                // Other live slots may still own siblings. Remove only an
+                // empty epoch directory, never the caller's logical root.
+                match fs::remove_dir(epoch_directory) {
+                    Ok(()) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+                        ) => {}
+                    Err(error) => {
+                        tracing::warn!(path = %epoch_directory.display(), %error, "failed to remove empty compiler scratch namespace")
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Owns only the socket inode created by this bind, under an advisory lock
 /// beside the path that one daemon holds from bind until retirement. A second
 /// daemon, starting or running, fails on the lock and never touches the path.
@@ -2072,17 +2157,21 @@ pub(crate) fn write_response(
     stdout: &[u8],
     stderr: &[u8],
 ) -> Result<(), FrontendError> {
-    let total = stdout.len() as u64 + stderr.len() as u64;
+    check_response_size(stdout.len() as u64 + stderr.len() as u64)?;
+    let mut response = code.to_le_bytes().to_vec();
+    push_frame(&mut response, stdout);
+    push_frame(&mut response, stderr);
+    stream.write_all(&response).map_err(FrontendError::Io)
+}
+
+fn check_response_size(total: u64) -> Result<(), FrontendError> {
     if total > u64::from(MAX_RESPONSE_PAYLOAD_BYTES) {
         return Err(daemon_frontend_error(DaemonError::ResponseTooLarge {
             declared: total,
             remaining: u64::from(MAX_RESPONSE_PAYLOAD_BYTES),
         }));
     }
-    let mut response = code.to_le_bytes().to_vec();
-    push_frame(&mut response, stdout);
-    push_frame(&mut response, stderr);
-    stream.write_all(&response).map_err(FrontendError::Io)
+    Ok(())
 }
 
 fn write_rejected(stream: &mut impl Write, message: &str) -> Result<(), FrontendError> {
@@ -2210,10 +2299,31 @@ pub(crate) struct Worker {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: ChildStdout,
+    build_products_namespace: BuildProductsNamespace,
 }
 
 impl Worker {
     pub(crate) fn spawn(prepared: &PreparedWorker) -> Result<Self, FrontendError> {
+        Self::spawn_in_namespace(prepared, BuildProductsNamespace::direct()?)
+    }
+
+    fn spawn_in_slot(
+        prepared: &PreparedWorker,
+        epoch: &[u8; 32],
+        slot: usize,
+    ) -> Result<Self, FrontendError> {
+        let namespace =
+            std::path::PathBuf::from(format!("daemon-{}", hex(epoch))).join(slot.to_string());
+        Self::spawn_in_namespace(
+            prepared,
+            BuildProductsNamespace::new(namespace, BuildProductsTransport::Daemon),
+        )
+    }
+
+    fn spawn_in_namespace(
+        prepared: &PreparedWorker,
+        build_products_namespace: BuildProductsNamespace,
+    ) -> Result<Self, FrontendError> {
         let mut command = prepared.command();
         command
             .arg("--worker-loop-v2")
@@ -2234,7 +2344,29 @@ impl Worker {
             child,
             stdin: Some(stdin),
             stdout,
+            build_products_namespace,
         })
+    }
+
+    /// A slot may retain its warm disk products only after its former child
+    /// has been reaped. Never start two writers in the same namespace.
+    fn respawn(&mut self, prepared: &PreparedWorker) -> Result<(), FrontendError> {
+        if self.child.try_wait().map_err(FrontendError::Io)?.is_none() {
+            return Err(FrontendError::Daemon(
+                "cannot reuse compiler build products before worker is reaped".to_owned(),
+            ));
+        }
+        let mut replacement = Self::spawn_in_namespace(
+            prepared,
+            BuildProductsNamespace::new(
+                self.build_products_namespace.path.clone(),
+                self.build_products_namespace.transport,
+            ),
+        )?;
+        replacement.build_products_namespace.directories =
+            std::mem::take(&mut self.build_products_namespace.directories);
+        *self = replacement;
+        Ok(())
     }
 
     pub(crate) fn begin_transaction(&mut self) -> Result<(), FrontendError> {
@@ -2259,7 +2391,9 @@ impl Worker {
         cwd: &Path,
         argv: &[OsString],
     ) -> Result<(i32, Vec<u8>, Vec<u8>), FrontendError> {
-        let bytes = encode_request(cwd, argv);
+        let (worker_argv, placement_diagnostics) =
+            self.build_products_namespace.place(cwd, argv)?;
+        let bytes = encode_request(cwd, &worker_argv);
         let stdin = self
             .stdin
             .as_mut()
@@ -2269,7 +2403,17 @@ impl Worker {
             .map_err(FrontendError::Io)?;
         stdin.write_all(&bytes).map_err(FrontendError::Io)?;
         stdin.flush().map_err(FrontendError::Io)?;
-        decode_response(&mut self.stdout).map_err(daemon_frontend_error)
+        let (code, stdout, stderr) =
+            decode_response(&mut self.stdout).map_err(daemon_frontend_error)?;
+        if placement_diagnostics.is_empty() {
+            return Ok((code, stdout, stderr));
+        }
+        check_response_size(
+            stdout.len() as u64 + stderr.len() as u64 + placement_diagnostics.len() as u64,
+        )?;
+        let mut combined_stderr = placement_diagnostics;
+        combined_stderr.extend_from_slice(&stderr);
+        Ok((code, stdout, combined_stderr))
     }
 
     fn begin_transaction_while_connected(
@@ -2292,7 +2436,9 @@ impl Worker {
         argv: &[OsString],
         deadline: Duration,
     ) -> Result<WorkerResponse, FrontendError> {
+        let request_span = tracing::Span::current();
         self.operation_while_connected(connection, deadline, WorkerOperation::Request, |worker| {
+            let _entered = request_span.enter();
             worker.request(cwd, argv)
         })
     }
@@ -2421,6 +2567,22 @@ impl Worker {
     }
 }
 
+impl Drop for Worker {
+    fn drop(&mut self) {
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            self.abort();
+        }
+        if matches!(self.child.try_wait(), Ok(Some(_))) {
+            self.build_products_namespace.cleanup();
+        } else {
+            tracing::warn!(
+                worker_pid = self.child.id(),
+                "retaining compiler scratch products because worker was not reaped"
+            );
+        }
+    }
+}
+
 /// A `PathBuf` from raw wire bytes — used only by the fake-daemon test
 /// harness (never on the hot path; every real caller builds `Path`/`PathBuf`
 /// from Rust-side values, never from decoded wire bytes).
@@ -2435,6 +2597,191 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::os::unix::ffi::OsStringExt;
+
+    fn build_products_fixture() -> &'static Path {
+        static FIXTURE: std::sync::OnceLock<(tempfile::TempDir, std::path::PathBuf)> =
+            std::sync::OnceLock::new();
+        &FIXTURE
+            .get_or_init(|| {
+                let dir = tempfile::tempdir().unwrap();
+                let source = dir.path().join("worker.rs");
+                fs::write(&source, include_str!("fixtures/build_products_worker.rs")).unwrap();
+                let binary = dir.path().join("worker");
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "compile one immutable test worker fixture"
+                )]
+                let status = std::process::Command::new("rustc")
+                    .arg(&source)
+                    .arg("--edition=2021")
+                    .arg("-o")
+                    .arg(&binary)
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+                (dir, binary)
+            })
+            .1
+    }
+
+    fn products_request(root: &Path, input: &Path) -> Vec<OsString> {
+        let mut request = ExtractRequest::default();
+        request.input(input);
+        request.build_products_dir(root);
+        request.worker_argv()
+    }
+
+    fn products_response(worker: &mut Worker, cwd: &Path, argv: &[OsString]) -> Vec<String> {
+        worker.begin_transaction().unwrap();
+        let (code, output, stderr) = worker.request(cwd, argv).unwrap();
+        worker.end_transaction().unwrap();
+        assert_eq!(code, 0);
+        assert!(String::from_utf8(stderr)
+            .unwrap()
+            .lines()
+            .all(crate::diagnostics::is_machine_stderr_line));
+        String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn build_products_isolate_concurrent_slots_and_daemon_epochs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("products");
+        let a = dir.path().join("a/Expr.hs");
+        let b = dir.path().join("b/Expr.hs");
+        fs::create_dir_all(a.parent().unwrap()).unwrap();
+        fs::create_dir_all(b.parent().unwrap()).unwrap();
+        fs::write(&a, "alpha").unwrap();
+        fs::write(&b, "beta").unwrap();
+        let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
+        let mut first = Worker::spawn_in_slot(&prepared, &[0; 32], 0).unwrap();
+        let mut second = Worker::spawn_in_slot(&prepared, &[0; 32], 1).unwrap();
+        let argv_a = products_request(&root, &a);
+        let argv_b = products_request(&root, &b);
+        let original = argv_a.clone();
+        let (out_a, out_b) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| products_response(&mut first, dir.path(), &argv_a));
+            let b = scope.spawn(|| products_response(&mut second, dir.path(), &argv_b));
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert_eq!(out_a[2], "alpha");
+        assert_eq!(out_b[2], "beta");
+        assert_ne!(out_a[0], out_b[0]);
+        assert_eq!(argv_a, original, "logical request must remain unchanged");
+        let mut independent = Worker::spawn_in_slot(&prepared, &[1; 32], 0).unwrap();
+        let out = products_response(&mut independent, dir.path(), &argv_b);
+        assert_ne!(out[0], out_a[0]);
+        assert_ne!(out[0], out_b[0]);
+        assert_eq!(out[1], "", "independent daemon must start cold");
+        first.shutdown();
+        second.shutdown();
+        independent.shutdown();
+    }
+
+    #[test]
+    fn build_products_stay_warm_only_after_reaped_slot_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("Expr.hs");
+        fs::write(&input, "alpha").unwrap();
+        let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
+        let mut worker = Worker::spawn_in_slot(&prepared, &[0; 32], 0).unwrap();
+        let argv = products_request(&dir.path().join("products"), &input);
+        let first = products_response(&mut worker, dir.path(), &argv);
+        let second = products_response(&mut worker, dir.path(), &argv);
+        assert_eq!(first[0], second[0]);
+        assert_eq!(second[1], "alpha");
+        assert!(
+            worker.respawn(&prepared).is_err(),
+            "live worker must prohibit directory reuse"
+        );
+        worker.shutdown();
+        assert!(worker.child.try_wait().unwrap().is_some());
+        worker.respawn(&prepared).unwrap();
+        let rotated = products_response(&mut worker, dir.path(), &argv);
+        assert_eq!(first[0], rotated[0]);
+        assert_eq!(rotated[1], "alpha");
+        assert_ne!(first[3], rotated[3]);
+        worker.abort();
+        worker.respawn(&prepared).unwrap();
+        assert_eq!(
+            products_response(&mut worker, dir.path(), &argv)[1],
+            "alpha"
+        );
+        worker.shutdown();
+    }
+
+    #[test]
+    fn build_products_direct_invocations_have_private_namespaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("Expr.hs");
+        fs::write(&input, "alpha").unwrap();
+        let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
+        let argv = products_request(&dir.path().join("products"), &input);
+        let mut first = Worker::spawn(&prepared).unwrap();
+        let mut second = Worker::spawn(&prepared).unwrap();
+        let out_a = products_response(&mut first, dir.path(), &argv);
+        let out_b = products_response(&mut second, dir.path(), &argv);
+        assert_ne!(out_a[0], out_b[0]);
+        assert_eq!(out_b[1], "");
+        let mut cli_namespace = BuildProductsNamespace::direct().unwrap();
+        let (cli, diagnostic) = cli_namespace.place(dir.path(), &argv).unwrap();
+        assert_ne!(cli, argv);
+        assert!(String::from_utf8(diagnostic)
+            .unwrap()
+            .starts_with("tidepool-build-products "));
+        assert_ne!(cli_namespace.path, first.build_products_namespace.path);
+        assert_ne!(cli_namespace.path, second.build_products_namespace.path);
+        first.shutdown();
+        second.shutdown();
+    }
+
+    #[test]
+    fn build_products_cleanup_reaps_owners_and_preserves_other_slots_and_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("products");
+        fs::create_dir(&root).unwrap();
+        let unrelated = root.join("caller-owned");
+        fs::write(&unrelated, "retain").unwrap();
+        let input = dir.path().join("Expr.hs");
+        fs::write(&input, "alpha").unwrap();
+        let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
+        let argv = products_request(&root, &input);
+        let mut first = Worker::spawn_in_slot(&prepared, &[0; 32], 0).unwrap();
+        let mut second = Worker::spawn_in_slot(&prepared, &[0; 32], 1).unwrap();
+        let out_a = products_response(&mut first, dir.path(), &argv);
+        let out_b = products_response(&mut second, dir.path(), &argv);
+        let pid_a = first.child.id();
+        drop(first); // Drop must kill/reap before removing owned scratch.
+        assert!(!Path::new(&out_a[0]).exists());
+        assert!(!Path::new(&format!("/proc/{pid_a}")).exists());
+        assert!(Path::new(&out_b[0]).join("Expr.hi").exists());
+        second.abort();
+        drop(second);
+        assert!(!Path::new(&out_b[0]).exists());
+        assert!(!Path::new(&out_a[0]).parent().unwrap().exists());
+        assert_eq!(fs::read_to_string(unrelated).unwrap(), "retain");
+        assert!(root.exists());
+
+        let mut direct = Worker::spawn(&prepared).unwrap();
+        // The same owner can receive relative roots and several logical roots.
+        let relative = products_request(Path::new("products"), &input);
+        let direct_out = products_response(&mut direct, dir.path(), &relative);
+        let other_root = dir.path().join("other-products");
+        let other_out = products_response(
+            &mut direct,
+            dir.path(),
+            &products_request(&other_root, &input),
+        );
+        direct.shutdown();
+        drop(direct);
+        assert!(!Path::new(&other_out[0]).exists());
+        assert!(!dir.path().join(&direct_out[0]).exists());
+        assert!(other_root.exists());
+    }
 
     #[test]
     fn default_request_rotation_is_1024_with_existing_rss_ceiling() {
@@ -3567,6 +3914,7 @@ tidepool-target phase=desugar module=Execute\n",
             child,
             stdin: Some(stdin),
             stdout,
+            build_products_namespace: BuildProductsNamespace::direct().unwrap(),
         };
         let (connection, client) = UnixStream::pair().unwrap();
         drop(client);
@@ -3574,7 +3922,7 @@ tidepool-target phase=desugar module=Execute\n",
         let result = worker.request_while_connected(
             &connection,
             Path::new("/tmp"),
-            &[OsString::from("request")],
+            &normalize_worker_argv(vec![OsString::from("request")]).unwrap(),
             DEFAULT_REQUEST_DEADLINE,
         );
         assert!(matches!(
@@ -3604,7 +3952,7 @@ tidepool-target phase=desugar module=Execute\n",
     #[test]
     fn independently_exited_worker_is_not_a_client_disconnect() {
         let cwd = Path::new("/tmp");
-        let argv = [OsString::from("request")];
+        let argv = normalize_worker_argv(vec![OsString::from("request")]).unwrap();
         let request_bytes = encode_request(cwd, &argv).len() + 1;
         #[allow(
             clippy::disallowed_methods,
@@ -3621,6 +3969,7 @@ tidepool-target phase=desugar module=Execute\n",
             stdin: child.stdin.take(),
             stdout: child.stdout.take().unwrap(),
             child,
+            build_products_namespace: BuildProductsNamespace::direct().unwrap(),
         };
         let (connection, client) = UnixStream::pair().unwrap();
         let result =

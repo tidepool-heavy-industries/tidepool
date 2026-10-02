@@ -284,6 +284,19 @@ fn emit_type_decl(e: &Effect, t: &TypeDef, out: &mut String) {
                         out.push_str(&render_variant(v.ctor, &types));
                     }
                     VariantFields::Named(fields) => {
+                        if fields.len() == 1 && fields[0].doc.is_empty() {
+                            let field = &fields[0];
+                            let inline = format!(
+                                "    {} {{ {}: {} }},\n",
+                                v.ctor,
+                                field.rust_name,
+                                rust_type(e, &field.ty)
+                            );
+                            if inline.trim_end().len() <= 100 {
+                                out.push_str(&inline);
+                                continue;
+                            }
+                        }
                         out.push_str(&format!("    {} {{\n", v.ctor));
                         for field in fields {
                             for line in field.doc {

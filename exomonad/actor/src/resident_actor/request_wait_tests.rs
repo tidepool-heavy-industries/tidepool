@@ -12,6 +12,7 @@ struct Fixture {
     watch: WatchId,
     control: Arc<crate::WorkbenchExecutionControl>,
     retirement: RetainedActorExit,
+    groups: crate::ForkGroupRegistry,
 }
 
 impl Fixture {
@@ -54,6 +55,7 @@ impl Fixture {
             watch,
             control,
             retirement: RetainedActorExit::new(),
+            groups: crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default()),
         }
     }
 
@@ -73,10 +75,242 @@ impl Fixture {
                 self.watch,
                 &self.control,
                 &self.retirement,
+                &self.groups,
+                None,
             ),
         )
         .await
         .expect("watch selector must observe the retained transition")
+    }
+}
+
+fn deferred_child(
+    groups: &crate::ForkGroupRegistry,
+    owner: ActorRef,
+    target: ActorRef,
+    boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+) -> crate::ForkGroupId {
+    let (group, paths) = groups
+        .begin_at_boundary(
+            owner,
+            crate::ActorPath::parse("root/deferred").unwrap(),
+            vec![crate::ActorPathSegment::new("child").unwrap()],
+            None,
+            boundary,
+        )
+        .unwrap();
+    groups.claim(group, owner, &paths[0].allocated).unwrap();
+    groups.attach_child(group, owner, target).unwrap();
+    group
+}
+
+#[tokio::test]
+async fn own_deferred_readiness_is_refused_without_waiting_or_cancelling_work() {
+    let fixture = Fixture::with_watch(true, true);
+    let lease = TransientWatchLease::new(&fixture.registry, fixture.owner, fixture.watch);
+    let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+        "thread".into(),
+        "request".into(),
+        "call".into(),
+    );
+    deferred_child(
+        &fixture.groups,
+        fixture.owner,
+        fixture.target,
+        boundary.clone(),
+    );
+    assert_eq!(
+        guard_deferred_target(
+            &fixture.groups,
+            fixture.owner,
+            Some(&boundary),
+            fixture.target
+        ),
+        Err(DeferredWaitRefusal {
+            target: fixture.target
+        })
+    );
+    assert!(matches!(wait_watch_event(
+        &fixture.registry, fixture.owner, fixture.watch, &fixture.control,
+        &fixture.retirement, &fixture.groups, Some(&boundary),
+    ).await, WatchWaitEvent::Refused(DeferredWaitRefusal { target }) if target == fixture.target));
+    assert!(!fixture.control.cancellation_requested());
+    assert!(matches!(
+        fixture.registry.observe_watch(fixture.owner, fixture.watch),
+        Ok(WatchObservation::Pending(_))
+    ));
+    drop(lease);
+    assert!(!fixture.registry.retains_watch(fixture.owner, fixture.watch));
+    assert!(matches!(
+        fixture
+            .registry
+            .observe_response(fixture.owner, fixture.request),
+        Ok(crate::request::ResponseObservation::Pending(_))
+    ));
+}
+
+#[tokio::test]
+async fn deferred_refusal_preserves_cancellation_and_retirement_priority() {
+    for retired in [false, true] {
+        let fixture = Fixture::new();
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "thread".into(),
+            "request".into(),
+            "call".into(),
+        );
+        deferred_child(
+            &fixture.groups,
+            fixture.owner,
+            fixture.target,
+            boundary.clone(),
+        );
+        fixture.control.request_cancellation();
+        if retired {
+            fixture.retirement.request_shutdown(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "retirement before deferred refusal".into(),
+            });
+        }
+        let event = wait_watch_event(
+            &fixture.registry,
+            fixture.owner,
+            fixture.watch,
+            &fixture.control,
+            &fixture.retirement,
+            &fixture.groups,
+            Some(&boundary),
+        )
+        .await;
+        assert!(if retired {
+            matches!(event, WatchWaitEvent::Retired(_))
+        } else {
+            matches!(event, WatchWaitEvent::Cancelled)
+        });
+        assert!(fixture.control.cancellation_requested());
+    }
+}
+
+#[tokio::test]
+async fn unrelated_publication_and_committed_children_remain_awaitable() {
+    for committed in [false, true] {
+        let fixture = Fixture::new();
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "thread".into(),
+            "request".into(),
+            "call".into(),
+        );
+        let child_boundary = if committed {
+            boundary.clone()
+        } else {
+            tidepool_runtime::session::WorkbenchForkBoundary::external(
+                "thread".into(),
+                "request".into(),
+                "other-call".into(),
+            )
+        };
+        let group = deferred_child(
+            &fixture.groups,
+            fixture.owner,
+            fixture.target,
+            child_boundary,
+        );
+        if committed {
+            fixture.groups.request_commit(group, fixture.owner).unwrap();
+            fixture
+                .groups
+                .gate(group, fixture.target)
+                .unwrap()
+                .mark_ready()
+                .unwrap();
+            fixture
+                .groups
+                .publish_groups(&[group], fixture.owner)
+                .unwrap();
+        }
+        assert_eq!(
+            guard_deferred_target(
+                &fixture.groups,
+                fixture.owner,
+                Some(&boundary),
+                fixture.target
+            ),
+            Ok(())
+        );
+        let mut waiting = Box::pin(wait_watch_event(
+            &fixture.registry,
+            fixture.owner,
+            fixture.watch,
+            &fixture.control,
+            &fixture.retirement,
+            &fixture.groups,
+            Some(&boundary),
+        ));
+        assert!(matches!(futures_util::poll!(&mut waiting), Poll::Pending));
+        fixture.complete();
+        assert!(matches!(
+            waiting.await,
+            WatchWaitEvent::Resume(Ok(WatchObservation::Ready(_)))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn any_of_can_complete_elsewhere_but_all_of_retains_own_publication_dependency() {
+    for any_of in [false, true] {
+        let fixture = Fixture::new();
+        let unrelated = ActorRef::first(ActorId(43));
+        let request = fixture.registry.reserve(fixture.owner, unrelated);
+        fixture
+            .registry
+            .mark_queued(fixture.owner, unrelated, request)
+            .unwrap();
+        fixture.registry.present(unrelated, request).unwrap();
+        let requirement = crate::request::WatchRequirement::Response {
+            allow_failure: false,
+        };
+        let dependencies = if any_of {
+            vec![vec![(fixture.request, requirement), (request, requirement)]]
+        } else {
+            vec![
+                vec![(fixture.request, requirement)],
+                vec![(request, requirement)],
+            ]
+        };
+        let watch = fixture
+            .registry
+            .register_transient_watch(fixture.owner, dependencies)
+            .unwrap();
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "thread".into(),
+            "request".into(),
+            "call".into(),
+        );
+        deferred_child(
+            &fixture.groups,
+            fixture.owner,
+            fixture.target,
+            boundary.clone(),
+        );
+        let mut waiting = Box::pin(wait_watch_event(
+            &fixture.registry,
+            fixture.owner,
+            watch,
+            &fixture.control,
+            &fixture.retirement,
+            &fixture.groups,
+            Some(&boundary),
+        ));
+        if any_of {
+            assert!(matches!(futures_util::poll!(&mut waiting), Poll::Pending));
+            fixture.registry.begin_reply(unrelated, request).unwrap();
+            fixture.registry.finish_reply(request, None);
+            assert!(matches!(
+                waiting.await,
+                WatchWaitEvent::Resume(Ok(WatchObservation::Ready(_)))
+            ));
+        } else {
+            assert!(matches!(waiting.await, WatchWaitEvent::Refused(_)));
+        }
     }
 }
 
@@ -97,12 +331,12 @@ async fn settlement_before_or_after_subscription_claims_the_original_control() {
             WatchWaitEvent::Resume(Ok(WatchObservation::Ready(values))) if values.is_empty()
         ));
         assert!(
-            !fixture.control.request_cancellation(),
-            "ready won this execution's boundary"
-        );
-        assert!(
             !fixture.control.claim_expiry(),
             "the original control is claimed only once"
+        );
+        assert!(
+            fixture.control.request_cancellation(),
+            "readiness does not settle the still-active invocation"
         );
         assert!(fixture.registry.retains_watch(fixture.owner, fixture.watch));
     }
@@ -188,6 +422,8 @@ async fn retirement_preserves_the_owner_terminal_without_claiming_or_acknowledgi
         fixture.watch,
         &fixture.control,
         &retirement,
+        &fixture.groups,
+        None,
     ));
     assert!(matches!(futures_util::poll!(&mut wait), Poll::Pending));
     let terminal = ActorTerminal {
@@ -239,6 +475,8 @@ async fn stale_watch_and_replacement_incarnation_remain_typed_refusals() {
         fixture.watch,
         &replacement_control,
         &fixture.retirement,
+        &fixture.groups,
+        None,
     )
     .await;
     assert!(matches!(
@@ -311,12 +549,15 @@ async fn direct_readiness_wakes_without_a_named_watch_notice_and_preserves_typed
     let control = crate::WorkbenchExecutionControl::untracked();
     control.arm_sleep();
     let retirement = RetainedActorExit::new();
+    let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
     let mut waiting = Box::pin(wait_watch_event(
         &registry,
         owner,
         watch,
         &control,
         &retirement,
+        &groups,
+        None,
     ));
     assert!(matches!(futures_util::poll!(&mut waiting), Poll::Pending));
     let (_, notices) = registry.abandon_response(owner, request).unwrap();

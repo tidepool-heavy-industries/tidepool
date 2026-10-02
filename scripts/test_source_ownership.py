@@ -8,6 +8,7 @@ The named Cargo unit-test target owns these module and embedded fixture bytes.
 TEST_ONLY_SOURCES = {
     'tidepool-extract-cmd': frozenset({
         'tidepool/extract-cmd/src/diagnostics_tests.rs',
+        'tidepool/extract-cmd/src/fixtures/build_products_worker.rs',
     }),
     'tidepool-codegen': frozenset({
         'tidepool/codegen/src/prepared_program/machine/literal_manifest_tests.rs',

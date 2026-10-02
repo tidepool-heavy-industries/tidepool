@@ -516,7 +516,7 @@ pub struct PublicVisibilitySnapshot {
     pub machine_incarnation: Option<SessionId>,
     pub bindings: Vec<(String, SessionVarId)>,
     pub source_instances: Vec<SourceLeaseKey>,
-    pub source_selection: tidepool_codegen::binding_table::BindingScopeWitness,
+    pub source_selection: tidepool_codegen::binding_table::BindingScopeSnapshot,
 }
 
 /// Immutable v2 manifest baseline captured under the owning session checkout.

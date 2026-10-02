@@ -12,6 +12,7 @@ pub mod agent_tools;
 pub mod ask_user;
 pub mod bound_worktree;
 pub mod commands;
+pub mod context_read_write;
 pub mod exec;
 pub mod finalize;
 pub mod fork;
@@ -47,6 +48,7 @@ pub use agent_tools::*;
 pub use ask_user::*;
 pub use bound_worktree::*;
 pub use commands::*;
+pub use context_read_write::*;
 pub use exec::*;
 pub use finalize::*;
 pub use fork::*;
@@ -103,6 +105,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         reflect_decl(),
         source_decl(),
         model_call_decl(),
+        context_read_write_decl(),
         bound_worktree_decl(),
         worktree_registry_decl(),
         worktree_allocation_decl(),
@@ -126,6 +129,7 @@ pub(crate) const CURATED_EFFECTS: &[&str] = &[
     "AgentTools",
     "AgentSession",
     "ModelCall",
+    "ContextReadWrite",
     "BoundWorktree",
     "WorktreeRegistry",
     "WorktreeAllocation",
@@ -322,6 +326,26 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "ModelResumeWith",
             "ModelAnnotateWith",
             "ModelCloseWith",
+        ],
+    ),
+    (
+        "ContextReadWrite",
+        &[
+            "ContextReference",
+            "ContextRole",
+            "ContextNativeKind",
+            "ContextTextSelector",
+            "ContextVisibleText",
+            "ContextBlock",
+            "ContextDocument",
+            "GetContextWith",
+            "PutContextWith",
+            "SetNextModelWith",
+            "SetNextEffortWith",
+            "getContext",
+            "putContext",
+            "setNextModel",
+            "setNextEffort",
         ],
     ),
     (

@@ -1595,6 +1595,48 @@ impl RequestRegistry {
         state.requests.get(&request).map(|record| record.target)
     }
 
+    /// Pending alternatives for each unsatisfied readiness group. A group is
+    /// any-of; the watch needs every group. Settled groups cannot block a wait.
+    pub(crate) fn pending_watch_target_groups(
+        &self,
+        owner: ActorRef,
+        watch: WatchId,
+    ) -> Result<Vec<Vec<ActorRef>>, ReplyError> {
+        let state = self.state.lock();
+        let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
+        if record.owner != owner {
+            return Err(identity_error(record.owner, owner));
+        }
+        if record.state != WatchState::Pending {
+            return Ok(Vec::new());
+        }
+        Ok((0..record.group_count)
+            .filter_map(|group| {
+                let dependencies = record
+                    .dependencies
+                    .iter()
+                    .filter(|dependency| dependency.group == group)
+                    .collect::<Vec<_>>();
+                if dependencies.iter().any(|dependency| {
+                    watch_dependency_ready(&state.requests, &record.progress, dependency)
+                }) {
+                    return None;
+                }
+                Some(
+                    dependencies
+                        .iter()
+                        .filter_map(|dependency| {
+                            state
+                                .requests
+                                .get(&dependency.request)
+                                .map(|request| request.target)
+                        })
+                        .collect(),
+                )
+            })
+            .collect())
+    }
+
     pub(crate) fn observe_response(
         &self,
         _owner: ActorRef,
@@ -2339,6 +2381,28 @@ fn first_pending_dependency(state: &RequestStateTable, watch: &WatchRecord) -> O
     })
 }
 
+fn watch_dependency_ready(
+    requests: &HashMap<RequestId, RequestRecord>,
+    progress: &HashMap<(RequestId, u64), ProgressCapture>,
+    dependency: &WatchDependency,
+) -> bool {
+    if let WatchRequirement::ProgressAfter(after) = dependency.requirement {
+        return progress.contains_key(&(dependency.request, after));
+    }
+    requests
+        .get(&dependency.request)
+        .is_some_and(|record| match record.owner_state {
+            OwnerState::Ready => true,
+            OwnerState::Unavailable(_) | OwnerState::Abandoned => {
+                dependency.requirement
+                    == (WatchRequirement::Response {
+                        allow_failure: true,
+                    })
+            }
+            _ => false,
+        })
+}
+
 fn request_has_pending_watcher(state: &RequestStateTable, request: RequestId) -> bool {
     state.watches.values().any(|watch| {
         watch.state == WatchState::Pending
@@ -2729,22 +2793,7 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
                         if dependency.group != group {
                             return false;
                         }
-                        if let WatchRequirement::ProgressAfter(after) = dependency.requirement {
-                            return watch.progress.contains_key(&(dependency.request, after));
-                        }
-                        state
-                            .requests
-                            .get(&dependency.request)
-                            .is_some_and(|record| match record.owner_state {
-                                OwnerState::Ready => true,
-                                OwnerState::Unavailable(_) | OwnerState::Abandoned => {
-                                    dependency.requirement
-                                        == (WatchRequirement::Response {
-                                            allow_failure: true,
-                                        })
-                                }
-                                _ => false,
-                            })
+                        watch_dependency_ready(&state.requests, &watch.progress, dependency)
                     })
                 })
                 .then_some(WatchState::Ready)

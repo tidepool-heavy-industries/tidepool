@@ -7,6 +7,8 @@ use crate::{OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchAdvance, Work
 
 #[cfg(test)]
 mod model_tests;
+#[cfg(test)]
+mod prefix_tests;
 
 /// Source and tool owners admitted once for this hosted execution. Compiler
 /// recipe observations are added by the workbench's original snapshot owner.
@@ -18,6 +20,13 @@ pub(crate) struct WorkbenchCompilationAuthority {
 }
 
 impl WorkbenchCompilationAuthority {
+    #[cfg(test)]
+    pub(crate) fn for_test(context: ActorSessionContext) -> Arc<Self> {
+        Self::admit(context, crate::CheckpointSourceLayer::default(), None, None)
+            .expect("test actor has an unowned source baseline")
+            .1
+    }
+
     pub(super) fn admit(
         context: ActorSessionContext,
         source: crate::CheckpointSourceLayer,
@@ -54,6 +63,7 @@ impl WorkbenchCompilationAuthority {
         frame(&actor.id.0.to_le_bytes());
         frame(&actor.incarnation.0.to_le_bytes());
         frame(&source.semantic_digest());
+        frame(context.haskell_effects_alias.as_bytes());
         match &installed_tools {
             Some(lease) => {
                 frame(b"issued-tool-lease");
@@ -180,7 +190,7 @@ impl ExecutionResourceOwners {
 }
 
 impl WorkbenchPublicOwner {
-    pub(super) fn issue(
+    pub(crate) fn issue(
         context: &ActorSessionContext,
         descriptor: &ActorDescriptor,
         durable: Option<tidepool_runtime::session::RecoveryPublicOwner>,
@@ -251,6 +261,9 @@ struct OwnedExecution<H, O> {
 
 impl<H, O> Drop for OwnedExecution<H, O> {
     fn drop(&mut self) {
+        if let Some(binding) = &self.state.effects.context_binding {
+            binding.cancel();
+        }
         if let Some(model) = &self.state.effects.model {
             model.cancel();
         }
@@ -503,7 +516,7 @@ async fn settle_execution_finalization<H, O>(
     owned: &mut OwnedExecution<H, O>,
     environment: ResidentEnvironment<H, O>,
     finalization: WorkbenchFinalization,
-) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>
+) -> WorkbenchFinalizationResult
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
@@ -519,10 +532,13 @@ where
                 KernelInvocationFailure::CleanupUnconfirmed { actor, detail } => (actor, detail),
                 other => (owned.state.effects.context.actor, other.to_string()),
             };
-            if let Err(error) = finalized {
+            if let Err(error) = finalized.result {
                 detail.push_str(&format!("; workbench finalization: {error}"));
             }
-            Err(KernelInvocationFailure::CleanupUnconfirmed { actor, detail })
+            WorkbenchFinalizationResult {
+                result: Err(KernelInvocationFailure::CleanupUnconfirmed { actor, detail }),
+                cleanup_confirmed: false,
+            }
         }
     }
 }
@@ -664,6 +680,7 @@ where
             installed_tools,
             admitted_source,
             capture,
+            context_binding,
             control,
             invocation,
             ..
@@ -766,6 +783,7 @@ where
                     public_visibility: None,
                     control,
                     model,
+                    context_binding,
                     installed_tools,
                     admitted_source,
                     reservation_owner,
@@ -1231,8 +1249,8 @@ where
                     .expect("same after-tool invocation");
                 owned.state.effects.after_tool_active = false;
                 owned.state.cursor.running = None;
-                // A failed cleanup is an execution failure: it cannot publish the
-                // private writes or call the original result an acknowledged timeout.
+                // Failed cleanup remains an execution failure. Earlier completed
+                // machine items may survive; this result is never an acknowledged timeout.
                 if let Err(error) = &binding {
                     if matches!(
                         &answer,
@@ -1459,6 +1477,7 @@ where
                                             ordinal: pending.ordinal,
                                             effect: pending.effect,
                                             started: pending.started,
+                                            success_disposition: pending.success_disposition,
                                         };
                                         Ok(WorkbenchAdvance::Park(
                                             behavior.resume_owned_effect_task(
@@ -1511,6 +1530,7 @@ where
                                     ordinal: pending.ordinal,
                                     effect: pending.effect,
                                     started: pending.started,
+                                    success_disposition: pending.success_disposition,
                                 };
                                 Ok(WorkbenchAdvance::Park(behavior.resume_owned_effect_task(
                                     owned,
@@ -1546,6 +1566,7 @@ where
                             ordinal: pending.ordinal,
                             effect: pending.effect,
                             started: pending.started,
+                            success_disposition: pending.success_disposition,
                         };
                         Ok(WorkbenchAdvance::Park(behavior.resume_owned_effect_task(
                             owned,
@@ -1727,6 +1748,7 @@ where
             .unwrap_or_else(crate::WorkbenchExecutionControl::untracked);
         let invocation = owned.state.effects.invocation_work.clone();
         let model = owned.state.effects.model.clone();
+        let boundary = owned.state.effects.publication.boundary().cloned();
         let observed_child = pending.wait.observe_after_resume();
         Self::owned_step_task(
             owned,
@@ -1740,6 +1762,7 @@ where
                     commands_permitted,
                     invocation,
                     model,
+                    boundary,
                 ))
             },
             move |behavior, _kernel, mut owned, result| {
@@ -1757,7 +1780,7 @@ where
                     pending.ordinal,
                     &pending.effect,
                     pending.started.elapsed(),
-                    result.disposition,
+                    scoped_operation_disposition(pending.success_disposition, result.disposition),
                 );
                 if let Some(job) = result.started_job {
                     owned
@@ -1809,6 +1832,10 @@ where
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> Result<WorkbenchAdvance<Self>, KernelInvocationFailure> {
         owned.state.effects.invocation_work.close();
+        // Completed machine items belong to the continuing lexical session
+        // even when a later item fails. Publish their fixed private intent,
+        // retaining the original whole-cell result for context and child gates.
+        // The same publication decision still vetoes admitted cancellation.
         if owned.private.is_some() && private_publication_required(&result) {
             return Ok(WorkbenchAdvance::Park(Self::publish_owned_execution_task(
                 owned,
@@ -2051,17 +2078,23 @@ where
 fn private_publication_required(
     result: &Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
 ) -> bool {
+    let completed_prefix = |receipts: &[WorkbenchItemReceipt]| {
+        receipts
+            .iter()
+            .any(|receipt| receipt.status == WorkbenchItemStatus::Committed)
+    };
     let response = match result {
         Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
         | Ok(KernelStep::Stop {
             output: response, ..
         }) => response,
-        Err(_) => return false,
+        Err(failure) => return completed_prefix(&failure.receipts),
     };
-    !matches!(
-        response.status,
-        WorkbenchRunStatus::Rejected | WorkbenchRunStatus::RequestCancelled
-    )
+    match response.status {
+        WorkbenchRunStatus::Rejected => completed_prefix(&response.items),
+        WorkbenchRunStatus::RequestCancelled => false,
+        _ => true,
+    }
 }
 
 fn private_publication_bindings(
@@ -2116,7 +2149,10 @@ fn private_publication_failure(
             source,
         },
         Err(failure) => WorkbenchExecutionFailure {
-            source,
+            source: ResidentActorWorkbenchError::PrefixPublication {
+                original: Box::new(failure.source),
+                publication: Box::new(source),
+            },
             publication: Some(publication),
             ..failure
         },
@@ -2140,6 +2176,7 @@ async fn await_effect<H, O>(
     commands_permitted: bool,
     invocation: Arc<InvocationWork>,
     model: Option<Arc<dyn crate::CellModelBinding>>,
+    boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
 ) -> commands::CommandResolution
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -2191,7 +2228,7 @@ where
                 .await
         }
         OwnedWorkbenchWait::Watch(poll) => {
-            request_wait::await_watch(environment, kernel, context, control, poll).await
+            request_wait::await_watch(environment, kernel, context, control, poll, boundary).await
         }
         OwnedWorkbenchWait::Sleep {
             continuation,
@@ -2423,6 +2460,25 @@ mod authority_tests {
             haskell_effects_alias: String::new(),
             source_layer: Arc::from([PathBuf::from("original-root")]),
         }
+    }
+
+    #[test]
+    fn effect_profile_is_part_of_exact_compilation_authority() {
+        let source = crate::CheckpointSourceLayer::default();
+        let mut async_context = context();
+        async_context.haskell_effects_alias = "'[Replies]".into();
+        async_context.source_layer = Arc::from([]);
+        let mut sync_context = async_context.clone();
+        sync_context.haskell_effects_alias = "'[ContextReadWrite, Replies]".into();
+        let (_, asynchronous) =
+            WorkbenchCompilationAuthority::admit(async_context, source.clone(), None, None)
+                .unwrap();
+        let (_, synchronous) =
+            WorkbenchCompilationAuthority::admit(sync_context, source, None, None).unwrap();
+        assert_ne!(
+            asynchronous.authority_digest(),
+            synchronous.authority_digest()
+        );
     }
 
     #[test]

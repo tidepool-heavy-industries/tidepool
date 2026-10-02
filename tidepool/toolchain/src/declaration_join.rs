@@ -187,6 +187,21 @@ fn original_source_lexical_surface(
         crate::artifact_inventory::ArtifactKind,
     >,
 ) -> Result<OriginalSourceLexicalSurface, CompileError> {
+    let roots = imports.get(original).ok_or_else(|| {
+        contract("authored declaration lacks exact original source import evidence")
+    })?;
+    source_lexical_surface(roots, imports, inherited, implementations)
+}
+
+pub(crate) fn source_lexical_surface(
+    roots: &[ExactModuleIdentity],
+    imports: &std::collections::BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+    inherited: &[ExactLexicalNode],
+    implementations: &std::collections::BTreeMap<
+        ExactModuleIdentity,
+        crate::artifact_inventory::ArtifactKind,
+    >,
+) -> Result<OriginalSourceLexicalSurface, CompileError> {
     use std::collections::{BTreeMap, BTreeSet};
     let shared_edges = |edges: &[ExactModuleIdentity]| {
         edges
@@ -227,10 +242,7 @@ fn original_source_lexical_surface(
             })
             .collect::<Result<Vec<_>, _>>()
     };
-    let original_edges = imports.get(original).ok_or_else(|| {
-        contract("authored declaration lacks exact original source import evidence")
-    })?;
-    let roots = shared_edges(original_edges)?;
+    let roots = shared_edges(roots)?;
     let mut lexical = BTreeMap::new();
     for node in inherited {
         if node.owner.module.starts_with("Tidepool.Session.")

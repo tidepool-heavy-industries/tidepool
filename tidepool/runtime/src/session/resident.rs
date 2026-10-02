@@ -2385,6 +2385,14 @@ where
         }
     }
 
+    /// Observe the interpreters installed on this exact machine. The caller
+    /// holds the session checkout; this does not dispatch an effect or grant
+    /// authority over any handler-owned resource.
+    #[must_use]
+    pub fn handlers(&self) -> &H {
+        &self.handlers
+    }
+
     /// Build a resident session with no live machine yet. Construction cannot
     /// fail or compile a seed program. The machine comes up on the first real
     /// turn ([`Self::run_with_sites`]/[`Self::run_bind_with_sites`]/
@@ -2851,6 +2859,27 @@ where
         rejected: &super::RejectedDeclarationPublication,
     ) -> Result<super::DeclarationPublicationRejection, SessionError> {
         self.state.revalidate_declaration_rejection(rejected)
+    }
+
+    /// Snapshot a host-owned binding write for the existing public-manifest
+    /// publisher. `None` selects an ephemeral surface; it never bypasses an
+    /// initialized durable owner. Staging and publication retain their usual
+    /// exact public/private visibility checks.
+    pub fn snapshot_host_binding_publication(
+        &mut self,
+        owner: Option<super::RecoveryPublicOwner>,
+        public_scope: ScopeId,
+        private_scope: ScopeId,
+        writes: Vec<SessionVarId>,
+    ) -> Result<super::PublicManifestBase, SessionError> {
+        self.settle_dropped_custody();
+        self.state.snapshot_publication_target(
+            owner,
+            public_scope,
+            private_scope,
+            writes,
+            Vec::new(),
+        )
     }
 
     pub fn publish_staged_public_manifest(

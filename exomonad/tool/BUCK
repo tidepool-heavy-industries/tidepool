@@ -7,6 +7,7 @@ rust_filegroup(
     name = "exomonad_tool_sources",
     mapped_srcs = {
         "Cargo.toml": "exomonad/tool/Cargo.toml",
+        "src/effects.rs": "exomonad/tool/src/effects.rs",
         "src/lib.rs": "exomonad/tool/src/lib.rs",
         "src/surface.rs": "exomonad/tool/src/surface.rs",
     },

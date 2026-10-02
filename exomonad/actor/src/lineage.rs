@@ -789,9 +789,11 @@ impl ForkGroupRegistry {
                     .send_replace(CheckpointPhase::ReleasedAfterPublication);
                 Some(lease.scope)
             }
-            CheckpointPhase::Failed
-            | CheckpointPhase::Released
-            | CheckpointPhase::ReleasedAfterPublication => None,
+            // Failed settlement returns the original captured scope for
+            // immediate cleanup, but that cleanup can fail. Transfer it to
+            // the same retryable release record used by published captures.
+            CheckpointPhase::Failed => Some(lease.scope),
+            CheckpointPhase::Released | CheckpointPhase::ReleasedAfterPublication => None,
         };
         state.released_checkpoints.insert(
             token.to_owned(),
@@ -1503,13 +1505,25 @@ impl ForkGroupRegistry {
         Ok(group.children)
     }
 
-    pub(crate) fn is_pending_child(&self, actor: ActorRef) -> bool {
-        self.state.lock().groups.values().any(|group| {
-            matches!(
-                *group.phase.borrow(),
-                ForkGroupPhase::Staging | ForkGroupPhase::Ready
-            ) && group.children.contains(&actor)
-        })
+    pub(crate) fn pending_children_at_boundary(
+        &self,
+        owner: ActorRef,
+        boundary: &WorkbenchForkBoundary,
+    ) -> HashSet<ActorRef> {
+        self.state
+            .lock()
+            .groups
+            .values()
+            .filter(|group| {
+                group.owner == owner
+                    && group.completion_boundary.as_ref() == Some(boundary)
+                    && matches!(
+                        *group.phase.borrow(),
+                        ForkGroupPhase::Staging | ForkGroupPhase::Ready
+                    )
+            })
+            .flat_map(|group| group.children.iter().copied())
+            .collect()
     }
 
     pub(crate) fn ready_groups_at_boundary(
@@ -1694,6 +1708,14 @@ impl ForkGroupRegistry {
 
     pub fn abort_unpublished(&self, owner: ActorRef) -> Vec<ActorRef> {
         self.abort_pending(owner, true, None, ForkGroupBoundary::Any)
+    }
+
+    pub(crate) fn abort_unpublished_at_boundary(
+        &self,
+        owner: ActorRef,
+        boundary: &WorkbenchForkBoundary,
+    ) -> Vec<ActorRef> {
+        self.abort_pending(owner, true, None, ForkGroupBoundary::At(boundary))
     }
 
     pub(crate) fn abort_incomplete_at_boundary(
@@ -2465,6 +2487,62 @@ mod tests {
     }
 
     #[test]
+    fn failed_checkpoint_release_retains_scope_until_retry_is_confirmed() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let issuer = ActorRef::first(ActorId(1));
+        let boundary =
+            WorkbenchForkBoundary::external("thread".into(), "call".into(), "call".into());
+        let token = groups.capture_checkpoint(
+            "failed capture".into(),
+            issuer,
+            crate::EffectiveRole::root(),
+            None,
+            None,
+            crate::CheckpointSourceLayer::default(),
+            SessionId(7),
+            ScopeId(3),
+            boundary,
+        );
+
+        // Failed settlement starts retirement of the original captured scope.
+        assert_eq!(
+            groups.settle_checkpoint(&token, SessionId(7), false),
+            Ok(Some(ScopeId(3)))
+        );
+        assert_eq!(
+            groups.failed_checkpoint_scopes(issuer),
+            vec![(SessionId(7), ScopeId(3))]
+        );
+
+        // Model a failed first retirement by withholding confirmation.
+        // Releasing the token transfers the same obligation into the retryable
+        // released-checkpoint record.
+        assert_eq!(
+            groups.release_checkpoint(&token, SessionId(7)),
+            Ok(Some(ScopeId(3)))
+        );
+        assert!(groups.failed_checkpoint_scopes(issuer).is_empty());
+        assert_eq!(
+            groups.pending_release_scopes(SessionId(7)),
+            vec![(token.clone(), ScopeId(3))]
+        );
+        assert!(groups.retains_session(SessionId(7)));
+
+        // An unconfirmed retry returns the original scope again. Confirmation
+        // is the only operation that consumes the pending retirement.
+        assert_eq!(
+            groups.release_checkpoint(&token, SessionId(7)),
+            Ok(Some(ScopeId(3)))
+        );
+        groups
+            .confirm_checkpoint_release(&token, SessionId(7), ScopeId(3))
+            .unwrap();
+        assert!(groups.pending_release_scopes(SessionId(7)).is_empty());
+        assert!(!groups.retains_session(SessionId(7)));
+        assert_eq!(groups.release_checkpoint(&token, SessionId(7)), Ok(None));
+    }
+
+    #[test]
     fn delegated_checkpoint_charges_issuer_width_and_recursive_descendants() {
         let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
         let issuer = ActorRef::first(ActorId(1));
@@ -3006,6 +3084,46 @@ mod tests {
         assert_eq!(
             groups.abort_incomplete_at_boundary(other_owner, &hosted_pending),
             vec![children[7]]
+        );
+    }
+
+    #[test]
+    fn output_abort_discards_ready_children_only_at_exact_boundary() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let owner = ActorRef::first(ActorId(1));
+        let make = |call: &str, actor: u64| {
+            let boundary =
+                WorkbenchForkBoundary::external("thread".into(), "turn".into(), call.into());
+            let (group, reservations) = groups
+                .begin_at_boundary(
+                    owner,
+                    ActorPath::parse(&format!("root/{call}")).unwrap(),
+                    vec![segment("child")],
+                    None,
+                    boundary.clone(),
+                )
+                .unwrap();
+            let child = ActorRef::first(ActorId(actor));
+            groups
+                .claim(group, owner, &reservations[0].allocated)
+                .unwrap();
+            groups.attach_child(group, owner, child).unwrap();
+            groups.request_commit(group, owner).unwrap();
+            groups.mark_ready(group, child).unwrap();
+            (boundary, group, child)
+        };
+        let (first, _, first_child) = make("first", 2);
+        let (second, second_group, second_child) = make("second", 3);
+        assert_eq!(
+            groups.abort_unpublished_at_boundary(owner, &first),
+            vec![first_child]
+        );
+        assert!(groups
+            .abort_unpublished_at_boundary(owner, &first)
+            .is_empty());
+        assert_eq!(
+            groups.ready_groups_at_boundary(owner, &second),
+            vec![(second_group, vec![second_child])]
         );
     }
 

@@ -362,6 +362,30 @@ pub fn effects_shim_module_source(row_effects: &[EffectDecl], row: &crate::RowAr
     out
 }
 
+/// The invocation's concrete effect list, independent of the interpreter's
+/// installed handler roster. Imports name nominal owners directly so the shim
+/// never depends on a facade that imports `Tidepool.Effects` itself.
+///
+/// `effect_stack` is trusted compilation policy, not authored cell text. It
+/// must name a closed list using this vocabulary, rather than an alias declared
+/// only in the requesting module.
+pub fn selected_effects_shim_module_source(effect_stack: &str) -> String {
+    format!(
+        "{}\n\
+         module Tidepool.Effects (module Tidepool.Effects.Authored, M) where\n\
+         import Tidepool.Effects.Authored\n\
+         import qualified Tidepool.Effects.Authored as Exomonad\n\
+         import qualified Tidepool.Effects.Core\n\
+         import Tidepool.Agent.Reply (Replies)\n\
+         import qualified Tidepool.Agent.Reply as Exomonad\n\
+         import Tidepool.Agent.Watch (Watches)\n\
+         import qualified Tidepool.Agent.Watch as Exomonad\n\
+         import Control.Monad.Freer (Eff)\n\
+         type M = Eff {effect_stack}\n",
+        tidepool_runtime::session::generated_support_pragmas(),
+    )
+}
+
 /// Does eval source splice a tidepool quasi-quoter? Exact token match:
 /// GHC's quote-open syntax is literally `[fmt|`/`[j|` — no whitespace is
 /// permitted between bracket, quoter name, and bar — so substring search

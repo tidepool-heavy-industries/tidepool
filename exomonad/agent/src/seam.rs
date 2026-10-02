@@ -8,7 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use exomonad_tool::{ToolDeclaration, ToolKind};
+pub use exomonad_tool::{
+    ToolDeclaration, ToolEffectKey, ToolImplementation, ToolKind, ToolScheduling,
+};
 
 /// Tidepool's identity for one agent. Minted by the registry, never by a
 /// backend — a backend thread id may be reassigned or absent (an ephemeral

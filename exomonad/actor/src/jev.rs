@@ -26,6 +26,12 @@ pub enum JevCallFailure {
 
 /// Answers `Jev` requests for every actor of a forest.
 pub trait JevBackend: Send + Sync {
+    /// Whether this instance has a configured judgment service. Transient
+    /// request failures do not change installation support.
+    fn is_installed(&self) -> bool {
+        true
+    }
+
     fn ask(&self, request: String) -> BoxFuture<'_, Result<String, JevCallFailure>>;
 }
 
@@ -41,6 +47,10 @@ pub fn unconfigured_jev() -> JevBackendHandle {
 }
 
 impl JevBackend for UnconfiguredJev {
+    fn is_installed(&self) -> bool {
+        false
+    }
+
     fn ask(&self, _request: String) -> BoxFuture<'_, Result<String, JevCallFailure>> {
         Box::pin(async { Err(JevCallFailure::Unconfigured) })
     }

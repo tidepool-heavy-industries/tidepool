@@ -9,12 +9,9 @@ Cells enable the usual extensions, including `TypeApplications`, `DataKinds`,
 ## Choose the workflow
 
 Use pure functions for deterministic transforms, Haskell `do` for effects and
-dependent waits, Jev for bounded judgment, record actors for ongoing sources or
-stateful joins, and model actors for open-ended investigation. Jev judges
+waits, Jev for judgment, record actors for ongoing sources or stateful joins,
+and model actors for investigation. Jev judges
 supplied evidence; it never grants resource authority.
-
-Try uncertain workflows in small cells. Retain complete evidence, project typed
-views and page `cellDisplay.more` without replaying effects.
 
 Where the actor admits `ModelCall`, `Tidepool.Model` provides
 `invokeModel turn input` with `textTurn` or `typedTurn @Reply` and supplied
@@ -27,7 +24,7 @@ service returns a typed boundary failure.
 
 Scaffold, admit ready parallel work and integrate checked results. Recursive
 owners use `Project.Work` policy and `Exomonad.Contrib.Routing`; see
-`RECURSIVE-WORK.md`. These primitives also support custom typed compositions.
+`RECURSIVE-WORK.md`.
 
 ```haskell
 let task = "Remove the stale path and report the focused check." :: Text
@@ -38,8 +35,8 @@ let task = "Remove the stale path and report the focused check." :: Text
 ready
 ```
 
-`spawnWatched` composes immediate `unfold` and a named settlement watch. The
-explicit `ActorOwned` branch survives this cell. Default `InvocationOwned` branches
+`spawnWatched` combines immediate `unfold` and a named settlement watch.
+Explicit `ActorOwned` branches survive the cell. Default `InvocationOwned` branches
 must settle within its creating invocation; returning handles does not extend it.
 A wave composes independent children with `<$>` and `<*>`. Capture an exact
 checkpoint to reuse your current reasoning:
@@ -54,28 +51,20 @@ Right captured <- checkpoint "feature-scaffold"
   <*> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (coding currentCheckout (assignment [label|consumer|] consumerTask))))
   <*> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (researching currentCheckout (assignment [label|contract-review|] reviewTask))))
 ```
-A later wave from the same actor uses `subgroup "wave-2"`: it nests under
-your own path, so you pass only the new segment, never your full path.
+For another wave, `subgroup "wave-2"` nests under your path; pass only the
+new segment.
 
-Immediate children can be awaited in their admission cell with
-`waitFor ((,) <$> awaitSettled parser <*> awaitSettled consumer)`, preserving the
-continuation. For work spanning model turns, use explicit `ActorOwned` branches
-as above and let settlement notices or a named watch wake you. `unfoldDeferred`
-requires persistent lifetime and returns before children can start; never await
-its children in that invocation. It records the real enclosing result, without
-fabricating a completed transcript. Read
-the full value with `pollResponse` only when the notice's preview is not
-enough. A `watch` joins several responses into one wake:
+Await immediate children with `waitFor`; use explicit `ActorOwned` branches for
+work spanning model turns. `unfoldDeferred` starts children after the enclosing
+call returns with its real result; never await them inside that invocation. See
+`doc unfold` for settlement watches and child status.
 
 ```haskell
 settled <- watch "wave-1-settled" (awaitAnySettled [parser, consumer, review])
 ```
 
-`awaitSettled` preserves unavailable outcomes as values; `awaitResponse` fails
-the watch on an unavailable dependency. `pollResponse` distinguishes pending,
-cancellation pending, ready, and unavailable. Progress uses `childWithProgress`
-and `pollProgress`; snapshots are not replies. Record actors (`R.*`) collect
-and route events without model inference. `R.start` creates persistent services.
+Record actors (`R.*`) collect and route events without model inference;
+`R.start` creates persistent services.
 
 `currentCheckout` seeds the executing actor's checkout; `projectHead` selects
 the project source and `atRef` an explicit commit. Live-source admission checkpoints
@@ -89,6 +78,20 @@ context before allocation; use `unfoldDeferred` with explicit `ActorOwned` for
 the enclosing call's completed context. Use `[label|orbit-motif|]`
 for compile-checked static assignment labels; use `labelFromText` for dynamic
 labels and handle its `Either`.
+
+With `import qualified Tidepool.Agent.Context as C`, only a synchronous
+profile can declare `ContextReadWrite`; async remains the default.
+`editableTexts` traverses authored text and eligible visible message/result
+bodies, not display previews; tool source/input and function
+arguments stay pinned. `C.trimText reason retained` prefixes exact retained
+text with an ordinary `[Trimmed: reason]` marker. Context, model and effort
+commit together on whole-cell success. Same-model continuation forwards opaque
+reasoning unchanged; incompatible cross-model history fails explicitly.
+Restoring a saved context cannot remove current required native groups. For
+curation then delegation, `unfoldDeferred` starts actor-owned children after
+commit; they inherit context and Haskell bindings and cannot be awaited inside
+their creating cell. See `doc workbench` and the compiled
+`bridge/haskell/examples/model-turns/ContextWorkflow.hs`.
 
 The activation supplies typed `sessionInput`, its reply declaration, and the
 roster of siblings admitted with you; use `inspectFull sessionInput` only for
@@ -107,14 +110,12 @@ publish, release, write stdin, or mutate its worktree.
 
 ## Review and integrate
 
-A reply identifies a candidate. Recover its exact commit through
-`responseWorktree`; inspect `git show`/`git diff` from your repository view.
-Seed review at that revision (`atRef`) with the contract, owned paths and
-implementer reference for repairs. Refuse out-of-ownership diffs before merging.
-Reviewers running checks need coding authority. Integrate with `tryMerge` for
-a managed target or Git in your checkout; verify the resulting revision before
-delivery. Load `exomonad-review` for the compiled review/repair recipe and
-`exomonad-unfold` for submission evidence.
+A reply identifies a candidate. Inspect its exact commit through
+`responseWorktree` and Git. Repair from that revision with the contract and
+owned paths; reviewers running checks need coding authority. Refuse
+out-of-ownership diffs. Merge with `tryMerge` or Git, then verify the resulting
+revision. Load `exomonad-review` for the compiled recipe and `exomonad-unfold`
+for submission evidence.
 
 ## Core signatures
 

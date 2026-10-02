@@ -110,6 +110,9 @@ impl ModelFreeSession {
                 &config.workspace,
             )?)
             .with_child_session_factory(child_session_factory)
+            .with_handler_effect_support(
+                tidepool_mcp::InstalledEffectSupport::installed_effect_support,
+            )
             .with_image_registry(image_registry);
         // No child bootstrap program: every launch stays on its launching
         // session, matching the run host.

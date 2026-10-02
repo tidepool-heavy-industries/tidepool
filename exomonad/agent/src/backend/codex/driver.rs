@@ -861,6 +861,9 @@ mod tests {
                     input_schema: serde_json::json!({"type":"string"}),
                     output_schema: None,
                     kind: exomonad_tool::ToolKind::Raw,
+                    schedule: exomonad_tool::ToolScheduling::default(),
+                    implementation: exomonad_tool::ToolImplementation::default(),
+                    effect_keys: Vec::new(),
                 }],
             })
             .unwrap_err();
@@ -992,6 +995,9 @@ mod tests {
                 input_schema: serde_json::json!({"type": "object"}),
                 output_schema: None,
                 kind: exomonad_tool::ToolKind::Call,
+                schedule: exomonad_tool::ToolScheduling::default(),
+                implementation: exomonad_tool::ToolImplementation::default(),
+                effect_keys: Vec::new(),
             }],
         });
         let value = serde_json::to_value(&params).unwrap();

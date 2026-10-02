@@ -73,6 +73,16 @@ pub struct BindingScopeWitness {
     dependency_revision: Option<u64>,
 }
 
+/// Exact scoped binding and source-selection semantics for admission and
+/// publication. Cache revisions do not participate in this proof.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BindingScopeSnapshot {
+    inherited: Option<BindingTipId>,
+    dependencies: Vec<SessionVarId>,
+    observation_dependencies: Vec<(SessionVarId, Vec<SessionVarId>)>,
+    selection: SourceSelectionView,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("binding identity {id:?} already belongs to another immutable entry")]
 pub struct BindingIdentityError {
@@ -111,7 +121,7 @@ pub struct PreparedSourceOwnerOrigin {
     domain: crate::prepared_program::SourceInstanceDomain,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct SourceDomainRecord {
     selected: HashTrieSetSync<SourceLeaseKey>,
     authored: HashTrieMapSync<
@@ -129,7 +139,7 @@ impl SourceDomainRecord {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct SourceSelectionView {
     current: crate::prepared_program::SourceInstanceDomain,
     domains: HashTrieMapSync<crate::prepared_program::SourceInstanceDomain, SourceDomainRecord>,
@@ -727,6 +737,61 @@ impl BindingTable {
                     )
                 })
                 .collect(),
+        })
+    }
+
+    /// Recompute the relevant observation closure and retain exact source
+    /// domain choices. Unrelated observation mutations invalidate caches but
+    /// cannot change this immutable semantic snapshot.
+    pub fn scope_snapshot(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+    ) -> Result<BindingScopeSnapshot, BindingPromotionError> {
+        // The existing selection owner validates every selected lease and
+        // authored domain before its metadata can authorize publication.
+        self.source_domain_selection_in(tree, scope)?;
+        let mut dependencies: Vec<_> = self
+            .scope_dependency_ids_slow(tree, scope)
+            .into_iter()
+            .collect();
+        dependencies.sort_by_key(|id| id.raw());
+        // Own mutable observations can transitively reference foreign
+        // observations. Retain the exact edges as well as the root union:
+        // a changed per-write closure can hide inside an unchanged union.
+        // Inherited/promoted custody is already frozen and does not follow
+        // later edits to the original observation graph.
+        let owners = if self.tips.contains_key(&scope) {
+            vec![scope]
+        } else {
+            tree.lookup_chain(scope)
+        };
+        let own = owners
+            .iter()
+            .flat_map(|owner| self.owned.get(owner).into_iter().flat_map(HashSet::iter))
+            .copied();
+        let mut observation_dependencies: Vec<_> = self
+            .dependency_closure(own)
+            .into_iter()
+            .filter_map(|id| {
+                self.observations.get(&id).map(|observation| {
+                    let mut edges = observation.dependencies.clone();
+                    edges.sort_by_key(|id| id.raw());
+                    edges.dedup();
+                    (id, edges)
+                })
+            })
+            .collect();
+        observation_dependencies.sort_by_key(|(id, _)| id.raw());
+        Ok(BindingScopeSnapshot {
+            inherited: self.tip_id(scope),
+            dependencies,
+            observation_dependencies,
+            selection: self
+                .source_selection
+                .get(&scope)
+                .cloned()
+                .unwrap_or_else(|| SourceSelectionView::for_scope(scope)),
         })
     }
 

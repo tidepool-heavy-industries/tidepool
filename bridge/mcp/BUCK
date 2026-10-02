@@ -24,6 +24,7 @@ rust_filegroup(
         "src/generated/ask_user.rs": "bridge/mcp/src/generated/ask_user.rs",
         "src/generated/bound_worktree.rs": "bridge/mcp/src/generated/bound_worktree.rs",
         "src/generated/commands.rs": "bridge/mcp/src/generated/commands.rs",
+        "src/generated/context_read_write.rs": "bridge/mcp/src/generated/context_read_write.rs",
         "src/generated/exec.rs": "bridge/mcp/src/generated/exec.rs",
         "src/generated/finalize.rs": "bridge/mcp/src/generated/finalize.rs",
         "src/generated/fork.rs": "bridge/mcp/src/generated/fork.rs",
@@ -64,6 +65,7 @@ tidepool_rust_library(
     srcs_filegroup = ":tidepool_mcp_sources",
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
+        "//exomonad/tool:exomonad_tool",
         "//third-party/rust:blake3",
         "//third-party/rust:frunk",
         "//third-party/rust:parking_lot",

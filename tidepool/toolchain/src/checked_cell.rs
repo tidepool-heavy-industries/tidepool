@@ -472,7 +472,7 @@ impl CheckedPlannedCellSpecification {
                 _ => {
                     return Err(planned_input_rejection(
                         "ordered item has another reserved slot",
-                    ))
+                    ));
                 }
             };
             encoded.push(Value::Array(fields));
@@ -634,6 +634,7 @@ pub struct CheckedValueArtifact {
     authority: Option<([u8; 32], [u8; 32])>,
     certified_interface: Option<Arc<crate::recovery_artifacts::CertifiedValueInterface>>,
     artifact_view: Option<crate::artifact_inventory::ArtifactView>,
+    source_lexical: Vec<crate::declaration_join::ExactLexicalNode>,
 }
 
 /// The exact checked interface bytes named by one compiler authorization.
@@ -701,6 +702,7 @@ impl CheckedValueInputs {
                 authority: None,
                 certified_interface: None,
                 artifact_view: None,
+                source_lexical: Vec::new(),
             }));
         }
         Ok(Arc::new(Self {
@@ -791,6 +793,7 @@ impl CheckedValueInputs {
         generation: u64,
         cell: &ExactCheckedCell,
         context: &Arc<crate::declaration_context::ExactDeclarationContext>,
+        source_lexical: &[crate::declaration_join::ExactLexicalNode],
     ) -> Result<Arc<CheckedValueArtifact>, CompileError> {
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation));
         let path = self.root().join(owner.relative_hi_path());
@@ -801,9 +804,11 @@ impl CheckedValueInputs {
             std::slice::from_ref(&certificate),
             context.lexical_graph().to_vec(),
         )?;
-        let artifact_view = context
+        let value_view = context
             .artifact_view()
             .select_roots(vec![certificate.artifact_id()])?;
+        let (artifact_view, source_lexical) =
+            context.retain_value_source_surface(&value_view, source_lexical)?;
         self.output_files_hashed.fetch_add(1, Ordering::Relaxed);
         self.output_bytes_hashed
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -816,6 +821,7 @@ impl CheckedValueInputs {
             authority: Some((cell.producer, cell.receipt_digest)),
             certified_interface: Some(certificate),
             artifact_view: Some(artifact_view),
+            source_lexical,
         }))
     }
 }
@@ -843,6 +849,10 @@ impl CheckedValueArtifact {
         self.artifact_view
             .as_ref()
             .ok_or_else(|| failure("value interface has no original artifact closure"))
+    }
+
+    pub(crate) fn source_lexical(&self) -> &[crate::declaration_join::ExactLexicalNode] {
+        &self.source_lexical
     }
 
     fn authorization(&self) -> Value {
@@ -1451,6 +1461,7 @@ impl CheckedDisplayOffer {
         source: &str,
         target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
         artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
+        source_lexical: &[crate::declaration_join::ExactLexicalNode],
     ) -> Result<Arc<ExactCompiledDisplay>, CompileError> {
         let receipt = decode(&read(root.join("checked-display.cbor"), 4 * 1024 * 1024)?)?;
         let fields = row(&receipt, 8)?;
@@ -1507,6 +1518,7 @@ impl CheckedDisplayOffer {
             self.generation,
             &self.capture.item.cell,
             artifact_context,
+            source_lexical,
         )?;
         Ok(Arc::new(ExactCompiledDisplay {
             capture: self.capture.clone(),
@@ -2204,6 +2216,7 @@ pub(crate) fn seal_checked_fold(
     source: &str,
     target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
     artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
+    source_lexical: &[crate::declaration_join::ExactLexicalNode],
 ) -> Result<Arc<ExactCompiledItem>, CompileError> {
     cell.revalidate(producer, &context)?;
     if cell.items.len() != 1
@@ -2227,7 +2240,14 @@ pub(crate) fn seal_checked_fold(
         is_program: false,
         settled_values: CheckedSettledValues::default(),
     }
-    .seal(root, request, source, target, artifact_context)
+    .seal(
+        root,
+        request,
+        source,
+        target,
+        artifact_context,
+        source_lexical,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -2372,14 +2392,22 @@ impl CheckedItemOffer {
         source: &str,
         target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
         artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
+        source_lexical: &[crate::declaration_join::ExactLexicalNode],
     ) -> Result<Arc<ExactCompiledItem>, CompileError> {
         if self.purpose != CheckedItemPurpose::Authored {
             return Err(failure(
                 "host activation input cannot issue authored execution authority",
             ));
         }
-        self.seal_recipe(root, request, source, target, artifact_context)
-            .map(|(compiled, _)| compiled)
+        self.seal_recipe(
+            root,
+            request,
+            source,
+            target,
+            artifact_context,
+            source_lexical,
+        )
+        .map(|(compiled, _)| compiled)
     }
 
     pub(crate) fn seal_activation_input(
@@ -2389,6 +2417,7 @@ impl CheckedItemOffer {
         source: &str,
         target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
         artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
+        source_lexical: &[crate::declaration_join::ExactLexicalNode],
     ) -> Result<Arc<ExactCompiledActivationInput>, CompileError> {
         if self.purpose != CheckedItemPurpose::HostActivationInput {
             return Err(failure(
@@ -2396,8 +2425,14 @@ impl CheckedItemOffer {
             ));
         }
         self.validate_activation_input()?;
-        let (compiled, witness) =
-            self.seal_recipe(root, request, source, target, artifact_context)?;
+        let (compiled, witness) = self.seal_recipe(
+            root,
+            request,
+            source,
+            target,
+            artifact_context,
+            source_lexical,
+        )?;
         Ok(Arc::new(ExactCompiledActivationInput {
             compiled,
             input_type_witness: witness
@@ -2412,6 +2447,7 @@ impl CheckedItemOffer {
         source: &str,
         target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
         artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
+        source_lexical: &[crate::declaration_join::ExactLexicalNode],
     ) -> Result<(Arc<ExactCompiledItem>, Option<CanonicalInputTypeWitness>), CompileError> {
         let (file, magic, profile) = match self.purpose {
             CheckedItemPurpose::Authored => (
@@ -2501,6 +2537,7 @@ impl CheckedItemOffer {
                 self.generation,
                 &self.item.cell,
                 artifact_context,
+                source_lexical,
             )?)
         } else {
             None
@@ -3184,8 +3221,17 @@ mod tests {
             .unwrap(),
         );
         let empty = tempfile::tempdir().unwrap();
+        let artifact_context = offer.item.cell.declaration_context.clone();
+        let source_lexical = artifact_context.lexical_graph();
         assert!(offer
-            .seal(empty.path(), "request", "source", &prepared)
+            .seal(
+                empty.path(),
+                "request",
+                "source",
+                &prepared,
+                &artifact_context,
+                source_lexical,
+            )
             .unwrap_err()
             .to_string()
             .contains("cannot issue authored execution authority"));
@@ -3194,7 +3240,14 @@ mod tests {
             ..offer
         };
         assert!(authored
-            .seal_activation_input(empty.path(), "request", "source", &prepared)
+            .seal_activation_input(
+                empty.path(),
+                "request",
+                "source",
+                &prepared,
+                &artifact_context,
+                source_lexical,
+            )
             .unwrap_err()
             .to_string()
             .contains("cannot issue host activation authority"));

@@ -467,6 +467,7 @@ def source_inputs(package, target, features=(), test_target=False):
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.cbor": "//bridge/haskell:declaration_inventory_v3_cbor_fixture",
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.json": "//bridge/haskell:declaration_inventory_v3_json_fixture",
         "bridge/haskell/actors/Tidepool/Actors/Role.hs": "//bridge/haskell:actor_role_source",
+        "bridge/haskell/examples/model-turns/ContextWorkflow.hs": "//bridge/haskell:context_workflow_example",
         "exomonad/prompts/base.md": "//exomonad/prompts:base_prompt",
         "exomonad/prompts/api-guide.md": "//exomonad/prompts:api_guide_prompt",
         "exomonad/prompts/root.md": "//exomonad/prompts:root_prompt",

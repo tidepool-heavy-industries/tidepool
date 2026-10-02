@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use exomonad_tool::{CustomToolDeclaration, HostedTool, ToolArguments, ToolInvocation};
+use exomonad_tool::{HostedTool, ToolArguments, ToolImplementation, ToolInvocation};
 use tidepool_runtime::session::WorkbenchRequest;
 
 use crate::prompt_catalog::PromptId;
@@ -33,10 +33,8 @@ impl ResidentInteractivePolicy {
     }
 
     /// `tools` is the caller's custom set. A caller that reprojects an
-    /// already-built policy's own `tools()` (native-process re-registration
-    /// filters this policy's list down to its non-Haskell tools, then wraps
-    /// it again) hands back a list that already carries the reserved
-    /// declarations below; dropping them here keeps this constructor
+    /// already-built policy's own `tools()` hands back the reserved declarations
+    /// below; dropping them here keeps this constructor
     /// idempotent instead of requiring every caller to know and repeat the
     /// exact reserved-name set.
     pub fn local_with_tools(actor: crate::LocalActorRef, tools: Vec<HostedTool>) -> Self {
@@ -55,15 +53,13 @@ impl ResidentInteractivePolicy {
         let custom = tools.into_iter().filter(|tool| {
             !matches!(
                 tool.name(),
-                HASKELL_TOOL
-                    | crate::status_tool::STATUS_TOOL
+                crate::status_tool::STATUS_TOOL
                     | crate::reload_spec_tool::RELOAD_SPEC_TOOL
                     | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
             )
         });
         Self {
-            tools: std::iter::once(haskell_tool_declaration())
-                .chain(std::iter::once(crate::status_tool::declaration()))
+            tools: std::iter::once(crate::status_tool::declaration())
                 .chain(std::iter::once(crate::reload_spec_tool::declaration()))
                 .chain(std::iter::once(crate::reload_helpers_tool::declaration()))
                 .chain(custom)
@@ -78,7 +74,6 @@ impl ResidentInteractivePolicy {
     fn with_client(client: ResidentToolClient) -> Self {
         Self {
             tools: vec![
-                haskell_tool_declaration(),
                 crate::status_tool::declaration(),
                 crate::reload_spec_tool::declaration(),
                 crate::reload_helpers_tool::declaration(),
@@ -96,7 +91,6 @@ pub(crate) fn project_tools(
 ) -> Result<Vec<HostedTool>, ResidentToolError> {
     use exomonad_tool::ToolKind;
     let mut names = std::collections::HashSet::from([
-        HASKELL_TOOL.to_string(),
         crate::status_tool::STATUS_TOOL.to_string(),
         crate::reload_spec_tool::RELOAD_SPEC_TOOL.to_string(),
         crate::reload_helpers_tool::RELOAD_HELPERS_TOOL.to_string(),
@@ -130,11 +124,43 @@ pub(crate) fn project_tools(
         .collect()
 }
 
-fn haskell_tool_declaration() -> HostedTool {
-    HostedTool::Custom(CustomToolDeclaration {
-        name: HASKELL_TOOL.into(),
-        description: PromptId::HaskellToolDescription.body().into(),
-    })
+fn request_for_tool(
+    declaration: &HostedTool,
+    arguments: ToolArguments,
+) -> Result<WorkbenchRequest, ResidentToolError> {
+    match declaration.implementation() {
+        ToolImplementation::ResidentHandler => {
+            let arguments = match arguments {
+                ToolArguments::Raw(text) => serde_json::Value::String(text),
+                ToolArguments::Structured(value) => value,
+            };
+            Ok(WorkbenchRequest::for_tool(
+                declaration.name().into(),
+                arguments,
+            ))
+        }
+        ToolImplementation::HaskellCell => {
+            let ToolArguments::Raw(source) = arguments else {
+                return Err(ResidentToolError::InvalidInvocation(
+                    "native Haskell cell requires raw source input".into(),
+                ));
+            };
+            Ok(WorkbenchRequest::from_cell_input(&source))
+        }
+    }
+}
+
+// Builtins are served by their owning actor routes and are absent from the
+// compiled AgentSpec. Only exact owned declarations use that admission path.
+fn selected_contract(declaration: &HostedTool) -> Option<HostedTool> {
+    if declaration == &crate::status_tool::declaration()
+        || declaration == &crate::reload_spec_tool::declaration()
+        || declaration == &crate::reload_helpers_tool::declaration()
+    {
+        None
+    } else {
+        Some(declaration.clone())
+    }
 }
 
 fn haskell_tool_instructions() -> &'static str {
@@ -209,6 +235,14 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         Box::pin(async move { client.complete(boundary).await })
     }
 
+    fn abort_boxed(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> ResidentToolFuture {
+        let client = self.client.clone();
+        Box::pin(async move { client.abort(boundary).await })
+    }
+
     fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
         self.dispatch_with_checkpoint_boxed(invocation, None)
     }
@@ -217,6 +251,15 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         &self,
         invocation: ToolInvocation,
         capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
+    ) -> ResidentToolFuture {
+        self.dispatch_with_context_boxed(invocation, capture, None)
+    }
+
+    fn dispatch_with_context_boxed(
+        &self,
+        invocation: ToolInvocation,
+        capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+        context: Option<Arc<dyn crate::HostedContextBinding>>,
     ) -> ResidentToolFuture {
         let client = self.client.clone();
         let tools = self.tools.clone();
@@ -237,32 +280,15 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                     invocation.name
                 )));
             }
-            if invocation.name != HASKELL_TOOL {
-                let arguments = match invocation.arguments {
-                    ToolArguments::Raw(text) => serde_json::Value::String(text),
-                    ToolArguments::Structured(value) => value,
-                };
-                return client
-                    .dispatch_workbench_issued_with_capture(
-                        WorkbenchRequest::for_tool(invocation.name, arguments),
-                        invocation.context,
-                        installed_tools,
-                        capture,
-                    )
-                    .await;
-            }
-            let ToolArguments::Raw(source) = invocation.arguments else {
-                return Err(crate::ResidentToolError::InvalidInvocation(
-                    "actor Haskell tool received structured arguments".into(),
-                ));
-            };
-            let request = WorkbenchRequest::from_cell_input(&source);
+            let request = request_for_tool(declaration, invocation.arguments)?;
             client
-                .dispatch_workbench_issued_with_capture(
+                .dispatch_workbench_issued_with_context(
                     request,
                     invocation.context,
                     installed_tools,
                     capture,
+                    context,
+                    selected_contract(declaration),
                 )
                 .await
         })
@@ -290,6 +316,9 @@ mod tests {
 
     fn raw(name: &str) -> exomonad_tool::ToolDeclaration {
         exomonad_tool::ToolDeclaration {
+            schedule: Default::default(),
+            implementation: Default::default(),
+            effect_keys: Vec::new(),
             name: name.into(),
             description: "literal input".into(),
             input_schema: serde_json::json!({"type":"string"}),
@@ -302,7 +331,6 @@ mod tests {
     fn project_tools_checks_names_and_supported_input_before_publication() {
         for name in [
             "",
-            "haskell",
             "status",
             "reload_agent_spec",
             "reload_helpers",
@@ -339,11 +367,45 @@ mod tests {
     }
 
     #[test]
+    fn builtin_dispatch_uses_owned_admission_without_a_spec_leaf() {
+        for builtin in [
+            crate::status_tool::declaration(),
+            crate::reload_spec_tool::declaration(),
+            crate::reload_helpers_tool::declaration(),
+        ] {
+            let request =
+                request_for_tool(&builtin, ToolArguments::Structured(serde_json::json!({})))
+                    .unwrap();
+            assert_eq!(request.tool_call().unwrap().name, builtin.name());
+            assert!(selected_contract(&builtin).is_none());
+            let mut altered = builtin.clone();
+            let HostedTool::Function(tool) = &mut altered else {
+                unreachable!()
+            };
+            tool.schedule = exomonad_tool::ToolScheduling::BeforeNextInference;
+            assert!(selected_contract(&altered).is_some());
+        }
+        let authored = HostedTool::try_from(raw("authored")).unwrap();
+        assert_eq!(selected_contract(&authored), Some(authored.clone()));
+    }
+
+    #[test]
+    fn native_dispatch_is_selected_by_implementation_not_name() {
+        let mut source = raw("arbitrary_name");
+        source.implementation = ToolImplementation::HaskellCell;
+        let native = HostedTool::try_from(source).unwrap();
+        let request = request_for_tool(&native, ToolArguments::Raw("pure ()".into())).unwrap();
+        assert_eq!(request.cell_source(), Some("pure ()"));
+        assert!(request.tool_call().is_none());
+        let handler = HostedTool::try_from(raw("haskell")).unwrap();
+        let request = request_for_tool(&handler, ToolArguments::Raw("literal".into())).unwrap();
+        assert_eq!(request.tool_call().unwrap().name, "haskell");
+        assert!(request.cell_source().is_none());
+        assert!(project_tools(vec![raw("haskell")]).is_ok());
+    }
+
+    #[test]
     fn hosted_tool_surfaces_use_the_catalog_verbatim() {
-        assert_eq!(
-            haskell_tool_declaration().description(),
-            PromptId::HaskellToolDescription.body()
-        );
         assert_eq!(
             haskell_tool_instructions(),
             PromptId::HaskellToolInstructions.body()

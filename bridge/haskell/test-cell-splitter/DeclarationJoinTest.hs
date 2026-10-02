@@ -14,6 +14,8 @@ import Tidepool.OriginalProductRoots
   , projectedOriginalGlobalDemand, candidateOriginalGlobalDemand )
 import qualified Tidepool.ExecutionSchema as Execution
 import Tidepool.ModuleCandidates
+import Tidepool.ExactScope
+  ( ExactOriginalGroup(..), originalGroupFromProjected, originalGroupFromCandidate )
 import GHC
 import GHC.Builtin.Types (doubleTy)
 import GHC.Core.InstEnv (instEnvElts, is_dfun_name, is_tys)
@@ -438,24 +440,46 @@ originalProductRootsProofWith projectedDemand = do
         [global caller, global newlyReached]
   unless (first == Right [package] && second == Right (sort [package, unused]))
     (fail "recovery-induced source global did not extend exact package roots")
+  let dictionary = identity "main" "Tidepool.Aeson.FromJSON" "dictionary"
+      envelope = Execution.ProgramEnvelope 14 (fromString "ghc-9.12-prepared-stg") (fromString "ghc-9.12.2") 8
+        (Execution.TargetDescriptor Execution.X86_64 Execution.LittleEndian 64 64 (fromString "sysv64") [])
+      projected ordinal binders globals = Execution.ProjectedGroup ordinal binders
+        (Execution.ProjectedGroupBody envelope [] globals [] [] [] [] [] [] Nothing)
+      dictionaryGlobals = [global package, (global unused)
+        { Execution.globalRequiredEvaluated = True, Execution.globalRequiredGeneration = Just 4 }]
+      freshOutlines =
+        [originalGroupFromProjected (projected 137 [source] [global dictionary])
+        ,originalGroupFromProjected (projected 138 [dictionary] dictionaryGlobals)]
+      cachedOutlines =
+        [originalGroupFromCandidate (CandidateGroup 137 [source] [imported dictionary Nothing])
+        ,originalGroupFromCandidate (CandidateGroup 138 [dictionary]
+          [imported package Nothing, (imported unused (Just 4)) {candidateGlobalEvaluated = True}])]
+      exactRoots outlines = requiredOriginalPackageGlobalsWithRetained [] []
+        [("main", "Tidepool.Aeson.FromJSON",
+          [(originalOrdinal group, originalBinders group, originalGlobals group) | group <- outlines])]
+        Set.empty [global source]
+  unless (exactRoots freshOutlines == Right [package])
+    (fail "fresh exact outline dropped unevaluated dictionary/package imports or reopened retained code")
+  unless (exactRoots cachedOutlines == Right [package])
+    (fail "cached exact outline dropped unevaluated dictionary/package imports or reopened retained code")
   let agent occurrence = identity "main" "Tidepool.Actors.Internal.Agent" occurrence
       effect occurrence = identity "main" "Tidepool.Effects.Core" occurrence
       textShow = identity "text-2.1.2-2594" "Data.Text.Show" "$w$cshowsPrec"
       request = agent "request"
       requestSited = agent "requestSited"
       requestConfigured = agent "requestConfiguredSited"
-      dictionary = effect "$fShowWorktreeError"
+      effectDictionary = effect "$fShowWorktreeError"
       showListMethod = effect "$fShowWorktreeError_$cshowList"
       showsPrecWorker = effect "$w$cshowsPrec104"
-      dictionaryGlobal = (global dictionary) { Execution.globalRequiredEvaluated = False }
-      dictionaryCandidate = (imported dictionary Nothing) { candidateGlobalEvaluated = False }
+      dictionaryGlobal = (global effectDictionary) { Execution.globalRequiredEvaluated = False }
+      dictionaryCandidate = (imported effectDictionary Nothing) { candidateGlobalEvaluated = False }
       originalRows demand =
         [ ("main", "Tidepool.Actors.Internal.Agent",
             [(295,[request],[projectedOriginalGlobalDemand (global requestSited)])
             ,(292,[requestSited],[projectedOriginalGlobalDemand (global requestConfigured)])
             ,(288,[requestConfigured],[demand])])
         , ("main", "Tidepool.Effects.Core",
-            [(1380,[dictionary],[projectedOriginalGlobalDemand (global showListMethod)])
+            [(1380,[effectDictionary],[projectedOriginalGlobalDemand (global showListMethod)])
             ,(1378,[showListMethod],[projectedOriginalGlobalDemand (global showsPrecWorker)])
             ,(1376,[showsPrecWorker],[projectedOriginalGlobalDemand (global textShow)])]) ]
       originalRoots demand = requiredOriginalPackageGlobalsWithExact [] []
@@ -471,4 +495,4 @@ originalProductRootsProofWith projectedDemand = do
           (originalRows (projectedOriginalGlobalDemand dictionaryGlobal))
           (Set.singleton textShow) [global request] == Right [])
     (fail "original package recovery crossed an exact retained generation boundary")
-  putStrLn "original-product-roots: PASS (demanded parser, whole group, unrelated omission, exact unit, retained boundary, duplicate refusal, failed home owner, recovery-induced source root, unevaluated dictionary package worker)"
+  putStrLn "original-product-roots: PASS (demanded parser, whole group, unrelated omission, exact unit, retained boundary, duplicate refusal, failed home owner, recovery-induced source root, fresh/cached exact outlines, unevaluated dictionary package worker)"

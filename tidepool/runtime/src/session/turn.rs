@@ -2924,7 +2924,9 @@ pub fn compile_cell_program_admitted(
     }
     offer.apply_to(&mut command)?;
     crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
-    let run = endpoint.execute(&command).map_err(map_notfound)?;
+    let run = endpoint.execute(&command).map_err(|error| {
+        offer.retain_execution_failure(scratch.path(), &command, map_notfound(error))
+    })?;
     let report =
         crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
             .map_err(|error| offer.retain_failure(scratch.path(), &run.output.stderr, error))?;
@@ -3049,7 +3051,9 @@ fn check_cell_impl(
     }
     offer.apply_to(&mut cmd)?;
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
-    let run = endpoint.execute(&cmd).map_err(map_notfound)?;
+    let run = endpoint
+        .execute(&cmd)
+        .map_err(|error| offer.retain_execution_failure(temp.path(), &cmd, map_notfound(error)))?;
     let output = &run.output;
     timing::log_interface_counts(&output.stderr);
     let report =
@@ -3805,7 +3809,9 @@ fn run_turn_with_pin(
     let run = if ordinary_admitted {
         TurnCompilerOutput::Admitted(offer.execute_admitted_turn(endpoint, cmd)?)
     } else {
-        TurnCompilerOutput::Direct(endpoint.execute(&cmd).map_err(map_notfound)?)
+        TurnCompilerOutput::Direct(endpoint.execute(&cmd).map_err(|error| {
+            offer.retain_execution_failure(temp.path(), &cmd, map_notfound(error))
+        })?)
     };
     let (output, elapsed, output_dir) = match &run {
         TurnCompilerOutput::Admitted(run) => {

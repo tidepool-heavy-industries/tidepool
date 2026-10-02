@@ -334,6 +334,7 @@ pub struct ActorWorkbenchSource {
     /// spec discovery; rule one is `AgentSpec.hs` in the run graph.
     spec: Option<Arc<str>>,
     workspace_modules: Arc<[String]>,
+    installed_effect_support: Arc<[exomonad_tool::ToolEffectKey]>,
 }
 
 /// One prepared import environment for evaluation and inspection. Name
@@ -360,6 +361,19 @@ impl ActorWorkbenchSource {
         }
     }
 
+    fn prepare_effectful(
+        &self,
+        scope: &crate::ActorCompileView,
+        effects: &str,
+    ) -> Result<WorkbenchCompilation, ResidentActorWorkbenchError> {
+        let mut prepared = self.prepare(scope);
+        let shim = tidepool_mcp::ensure_selected_effects_shim(effects).map_err(|error| {
+            ResidentActorWorkbenchError::ActorProtocol(format!("selected effect profile: {error}"))
+        })?;
+        prepared.include.insert(0, shim);
+        Ok(prepared)
+    }
+
     #[must_use]
     pub fn new(preamble: impl Into<Arc<str>>, base_include: Vec<PathBuf>) -> Self {
         Self {
@@ -372,7 +386,29 @@ impl ActorWorkbenchSource {
             ]),
             spec: None,
             workspace_modules: Arc::from([]),
+            installed_effect_support: Arc::from([]),
         }
+    }
+
+    /// Capture support from the actual assembled interpreter instances and
+    /// installed host services, before admitting source-authored tools.
+    #[must_use]
+    pub fn with_installed_effect_support(
+        mut self,
+        keys: impl IntoIterator<Item = exomonad_tool::ToolEffectKey>,
+    ) -> Self {
+        let mut installed = Vec::new();
+        for key in keys {
+            if !installed.contains(&key) {
+                installed.push(key);
+            }
+        }
+        self.installed_effect_support = installed.into();
+        self
+    }
+
+    pub(crate) fn installed_effect_support(&self) -> &[exomonad_tool::ToolEffectKey] {
+        &self.installed_effect_support
     }
 
     /// Name the workspace-authored Haskell modules already compiled into
@@ -446,6 +482,11 @@ impl ActorWorkbenchSource {
 pub(crate) struct ResidentWorkbenchTools {
     pub(crate) declarations: Vec<exomonad_tool::HostedTool>,
     pub(crate) dispatch: Arc<RootCustody>,
+    /// Installer source roots belong to the installed implementation, not the
+    /// actor's published declaration and value surface.
+    _installation_scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    /// Exact installer row retained with its rooted dispatcher.
+    pub(crate) dispatcher_effects: String,
     /// Which slots the installed record fills, by name, as the same compile
     /// declared them.
     pub(crate) slots: Vec<String>,
@@ -568,45 +609,7 @@ impl InstalledToolsState {
     }
 }
 
-/// What one `installSpec` publishes: the declared surface, and which slots the
-/// same compile filled.
-pub(crate) struct SpecInstallation {
-    pub(crate) tools: Vec<exomonad_tool::ToolDeclaration>,
-    pub(crate) slots: Vec<String>,
-}
-
-/// Read an installation out of the suspension's JSON.
-///
-/// A bare array is a tools-only installation, which is what every spec with no
-/// slot filled publishes and what the shape was before slots existed; the
-/// object form additionally names the slots.
-pub(crate) fn decode_installation(
-    installation: serde_json::Value,
-) -> Result<SpecInstallation, ResidentActorWorkbenchError> {
-    let declarations = |value| {
-        serde_json::from_value::<Vec<exomonad_tool::ToolDeclaration>>(value).map_err(|error| {
-            ResidentActorWorkbenchError::ActorProtocol(format!("tool declarations: {error}"))
-        })
-    };
-    match installation {
-        serde_json::Value::Object(mut fields) => {
-            let tools = declarations(
-                fields
-                    .remove("tools")
-                    .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
-            )?;
-            let slots = fields
-                .remove("slots")
-                .and_then(|slots| serde_json::from_value::<Vec<String>>(slots).ok())
-                .unwrap_or_default();
-            Ok(SpecInstallation { tools, slots })
-        }
-        array => Ok(SpecInstallation {
-            tools: declarations(array)?,
-            slots: Vec::new(),
-        }),
-    }
-}
+pub(crate) use crate::tool_contract::{decode_installation, SpecInstallation};
 
 impl ResidentWorkbenchTools {
     /// The provenance a completed call records: this record, and the revision
@@ -766,9 +769,15 @@ type HostCarrierCache =
 /// installs the supplied actor context before invoking its operation, so a
 /// child cannot leak its lexical scope, runtime resource scope, or principal into the
 /// next parent or sibling entry.
+///
+/// An immutable observation of the actual handler instances in a checkout.
+pub type HandlerEffectSupport<H> =
+    Arc<dyn Fn(&H) -> Vec<exomonad_tool::ToolEffectKey> + Send + Sync + 'static>;
+
 struct ResidentMachineAccess<H, O> {
     machines: Arc<ActorMachineRegistry<H, O>>,
     source: ActorWorkbenchSource,
+    handler_effect_support: HandlerEffectSupport<H>,
     /// Builds a fresh, idle machine for a session id this host has decided
     /// deserves its own — installed once by the composition root; `None`
     /// keeps every launch on the shared session, unchanged, which is also
@@ -850,6 +859,26 @@ impl PendingChildTeardown {
     }
 }
 
+fn reject_activation_declaration<H, O>(
+    session: &ResidentSession<H, O>,
+    scope: ScopeId,
+) -> Result<(), ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    if session
+        .current_decl_heads_in(scope)
+        .iter()
+        .any(|(name, _)| name == "sessionInput")
+    {
+        return Err(ResidentActorWorkbenchError::InputMount(
+            "sessionInput is reserved for activation input; remove its authored declaration before activating".into(),
+        ));
+    }
+    Ok(())
+}
+
 struct CancelCompilerTransactionOnDrop(Option<tidepool_runtime::CompilerTransactionCancellation>);
 
 impl Drop for CancelCompilerTransactionOnDrop {
@@ -865,6 +894,7 @@ impl<H, O> ResidentMachineAccess<H, O> {
         Self {
             machines,
             source,
+            handler_effect_support: Arc::new(|_| Vec::new()),
             child_session_factory: None,
             child_bootstrap_program: None,
             image_registry: None,
@@ -887,6 +917,7 @@ impl<H, O> ResidentMachineAccess<H, O> {
         Self {
             machines: Arc::clone(&self.machines),
             source: self.source.clone(),
+            handler_effect_support: self.handler_effect_support.clone(),
             child_session_factory: self.child_session_factory.clone(),
             child_bootstrap_program: self.child_bootstrap_program.clone(),
             image_registry: self.image_registry.clone(),
@@ -1821,6 +1852,11 @@ pub(crate) enum ResidentActorBoundary {
         request: crate::generated::model_call::ModelReq,
         table: DataConTable,
     },
+    Context {
+        continuation: ResidentHole,
+        request: crate::ContextReq,
+        table: DataConTable,
+    },
     Command {
         continuation: ResidentHole,
         request: crate::generated::commands::CommandsReq,
@@ -2020,6 +2056,20 @@ impl ResidentKernelBoundary {
 }
 
 impl ResidentActorBoundary {
+    pub(crate) fn success_disposition(
+        &self,
+    ) -> tidepool_runtime::session::WorkbenchOperationDisposition {
+        use tidepool_runtime::session::WorkbenchOperationDisposition;
+        match self {
+            Self::Context {
+                request: crate::ContextReq::GetContextWith,
+                ..
+            } => WorkbenchOperationDisposition::Read,
+            Self::Context { .. } => WorkbenchOperationDisposition::Staged,
+            _ => WorkbenchOperationDisposition::Committed,
+        }
+    }
+
     pub(crate) fn operation(&self) -> &'static str {
         match self {
             Self::Completed => "program completion",
@@ -2027,6 +2077,7 @@ impl ResidentActorBoundary {
             Self::Sleep { .. } => "sleep",
             Self::Jev { .. } => "jev",
             Self::Model { .. } => "model call",
+            Self::Context { .. } => "context transformation",
             Self::Command { .. } => "command job",
             Self::Console { .. } => "print",
             Self::NotificationSend { .. } => "notify",
@@ -2168,28 +2219,39 @@ impl From<IntrospectionNameQuery> for tidepool_runtime::session::NameQuery {
 /// The one nominal roster for requests interpreted at actor execution
 /// boundaries. Generated request enums own constructor recognition and field
 /// shape; this sum owns orchestration routing.
-enum ResidentRequest {
-    Console(crate::generated::console::ConsoleReq),
-    Sleep(crate::generated::sleep::SleepReq),
-    Commands(crate::generated::commands::CommandsReq),
-    Notifications(crate::generated::notifications::NotificationsReq),
-    Jev(crate::generated::jev::JevReq),
-    Model(crate::generated::model_call::ModelReq),
-    Actor(crate::generated::actor::ActorReq),
-    ActorContext(crate::generated::actor_context::ActorContextReq),
-    AgentControl(crate::generated::agent_control::AgentControlReq),
-    AgentInspection(crate::generated::agent_inspection::AgentInspectionReq),
-    Lookup(crate::generated::lookup::LookupReq),
-    Introspection(crate::generated::introspection::IntrospectionReq),
-    AgentLaunch(crate::generated::agent_launch::AgentLaunchReq),
-    Forks(crate::generated::forks::ForksReq),
-    ActorKernel(crate::generated::actor_kernel::ActorKernelReq),
-    ActorLocal(crate::generated::actor_local::ActorLocalReq),
-    AgentTools(crate::generated::agent_tools::AgentToolsReq),
-    AgentSession(crate::generated::agent_session::AgentSessionReq),
-    Reflect(crate::generated::reflect::ReflectReq),
-    Replies(RepliesReq),
-    Watches(WatchesReq),
+macro_rules! resident_request_roster {
+    ($($variant:ident($request:ty) => $key:expr,)*) => {
+        enum ResidentRequest { $($variant($request),)* }
+
+        pub(crate) fn intrinsic_effect_families() -> Vec<exomonad_tool::ToolEffectKey> {
+            [$($key,)*].into_iter().flatten().collect()
+        }
+    };
+}
+
+resident_request_roster! {
+    Console(crate::generated::console::ConsoleReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Console)),
+    Sleep(crate::generated::sleep::SleepReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Sleep)),
+    Commands(crate::generated::commands::CommandsReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Commands)),
+    Notifications(crate::generated::notifications::NotificationsReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Notifications)),
+    Jev(crate::generated::jev::JevReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Jev)),
+    Model(crate::generated::model_call::ModelReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::ModelCall)),
+    Context(crate::ContextReq) => None,
+    Actor(crate::generated::actor::ActorReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Actor)),
+    ActorContext(crate::generated::actor_context::ActorContextReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::ActorContext)),
+    AgentControl(crate::generated::agent_control::AgentControlReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::AgentControl)),
+    AgentInspection(crate::generated::agent_inspection::AgentInspectionReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::AgentInspection)),
+    Lookup(crate::generated::lookup::LookupReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Lookup)),
+    Introspection(crate::generated::introspection::IntrospectionReq) => None,
+    AgentLaunch(crate::generated::agent_launch::AgentLaunchReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::AgentLaunch)),
+    Forks(crate::generated::forks::ForksReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Forks)),
+    ActorKernel(crate::generated::actor_kernel::ActorKernelReq) => None,
+    ActorLocal(crate::generated::actor_local::ActorLocalReq) => None,
+    AgentTools(crate::generated::agent_tools::AgentToolsReq) => None,
+    AgentSession(crate::generated::agent_session::AgentSessionReq) => None,
+    Reflect(crate::generated::reflect::ReflectReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Reflect)),
+    Replies(RepliesReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Replies)),
+    Watches(WatchesReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Watches)),
 }
 
 impl ResidentRequest {
@@ -2223,6 +2285,7 @@ impl ResidentRequest {
         try_member!(Self::Sleep, crate::generated::sleep::SleepReq);
         try_member!(Self::Jev, crate::generated::jev::JevReq);
         try_member!(Self::Model, crate::generated::model_call::ModelReq);
+        try_member!(Self::Context, crate::ContextReq);
         try_member!(Self::Commands, crate::generated::commands::CommandsReq);
         try_member!(Self::Console, crate::generated::console::ConsoleReq);
         try_member!(Self::Actor, crate::generated::actor::ActorReq);
@@ -2278,6 +2341,7 @@ impl ResidentRequest {
             Self::Sleep(crate::generated::sleep::SleepReq::SleepWith(..)) => "sleep",
             Self::Jev(crate::generated::jev::JevReq::JevAskWith(..)) => "jev",
             Self::Model(_) => "model call",
+            Self::Context(_) => "context transformation",
             Self::Commands(_) => "command job",
             Self::Console(_) => "console output",
             Self::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(
@@ -2508,9 +2572,21 @@ impl<H, O> ResidentActorRunner<H, O> {
         }
     }
 
+    /// Inspect support from this checkout's actual handler stack, including
+    /// the distinct stack constructed for a dedicated child session.
+    #[must_use]
+    pub fn with_handler_effect_support(
+        mut self,
+        observer: impl Fn(&H) -> Vec<exomonad_tool::ToolEffectKey> + Send + Sync + 'static,
+    ) -> Self {
+        self.access.handler_effect_support = Arc::new(observer);
+        self
+    }
+
     /// Install the composition root's child-session factory. Omitted, every
     /// launch keeps running on the session that admitted it — today's
-    /// behavior, unchanged.
+    /// Install the composition root's child-session factory. Omitted, every
+    /// launch keeps running on the session that admitted it.
     #[must_use]
     pub fn with_child_session_factory(mut self, factory: ChildSessionFactory<H, O>) -> Self {
         self.access.child_session_factory = Some(factory);
@@ -2622,7 +2698,7 @@ impl<H, O> ResidentActorRunner<H, O> {
     ///
     /// `seed`, when the launch carried one (`crate::start::ChildSessionSeed`
     /// — an eligible launch always does), is written to the child's own
-    /// session root BEFORE the bootstrap install: the facade
+    /// session root BEFORE the bootstrap install: any declaration facade
     /// `capture_decoded` materialized under the PARENT's session root (its
     /// `import Tidepool.Session.Lib.G<n> (...)` line names generations that
     /// otherwise exist nowhere the child can find them) and every
@@ -2663,8 +2739,12 @@ impl<H, O> ResidentActorRunner<H, O> {
         let source_layer = source_layer.to_vec();
         let seed = seed.map(|seed| {
             (
-                seed.facade.identity().relative_hs_path(),
-                seed.facade.source().to_owned(),
+                seed.facade.as_ref().map(|facade| {
+                    (
+                        facade.identity().relative_hs_path(),
+                        facade.source().to_owned(),
+                    )
+                }),
                 seed.lib_sources.clone(),
                 seed.val_generation,
             )
@@ -2687,16 +2767,17 @@ impl<H, O> ResidentActorRunner<H, O> {
                     tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
                 )
                 .map_err(|error| format!("child session bootstrap context: {error}"))?;
-            if let Some((facade_path, facade_source, lib_sources, val_generation)) = seed {
+            if let Some((facade, lib_sources, val_generation)) = seed {
                 let root = machine
                     .compile_view_in(tidepool_codegen::scope::ScopeId::ROOT)
                     .ok_or_else(|| {
-                        "child session has no compile view to seed with the parent's facade"
-                            .to_string()
+                        "child session has no compile view for inherited source seeding".to_string()
                     })?
                     .session_root()
                     .to_path_buf();
-                write_seed_source(&root.join(facade_path), &facade_source)?;
+                if let Some((facade_path, facade_source)) = facade {
+                    write_seed_source(&root.join(facade_path), &facade_source)?;
+                }
                 for (relative, source) in &lib_sources {
                     write_seed_source(&root.join(relative), source)?;
                 }
@@ -3029,6 +3110,20 @@ impl<H, O> ResidentActorWorkbench<H, O> {
         }
     }
 
+    pub(crate) fn with_intrinsic_effect_support(
+        mut self,
+        keys: Vec<exomonad_tool::ToolEffectKey>,
+    ) -> Self {
+        let mut support = self.access.source.installed_effect_support.to_vec();
+        for key in keys {
+            if !support.contains(&key) {
+                support.push(key);
+            }
+        }
+        self.access.source.installed_effect_support = support.into();
+        self
+    }
+
     #[must_use]
     pub(crate) fn with_json_input(mut self, input: Option<serde_json::Value>) -> Self {
         self.json_input = input;
@@ -3105,6 +3200,14 @@ pub enum ResidentActorWorkbenchError {
     /// variant proves that it did.
     #[error("resident workbench execution failed after delivering a response: {0}")]
     Delivered(ResidentError),
+    /// A completed machine prefix could not be published after the authored
+    /// cell had already failed. The original failure remains authoritative.
+    #[error("{original}; completed-prefix publication also failed: {publication}")]
+    PrefixPublication {
+        #[source]
+        original: Box<ResidentActorWorkbenchError>,
+        publication: Box<ResidentActorWorkbenchError>,
+    },
     /// An earlier cell hit an integrity failure; this actor's machine refuses
     /// all further execution.
     #[error(
@@ -3145,10 +3248,17 @@ pub enum ResidentActorWorkbenchError {
 }
 
 impl ResidentActorWorkbenchError {
+    pub(crate) fn primary_failure(&self) -> &Self {
+        match self {
+            Self::PrefixPublication { original, .. } => original.primary_failure(),
+            original => original,
+        }
+    }
+
     pub(crate) fn failure_diagnostic(
         &self,
     ) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
-        match self {
+        match self.primary_failure() {
             Self::PrivatePublication { source, .. } => source.failure_diagnostic(),
             Self::Compile(error) => Some(classify_compile(error)),
             Self::CellCheck(failure) => Some(classify_compile(&failure.error)),
@@ -3653,17 +3763,48 @@ where
         &'a self,
         context: crate::ActorSessionContext,
         install: u64,
+        granted_effects: Vec<exomonad_tool::ActorEffectKey>,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
     > {
         Box::pin(async move {
+            let source_support = self.access.source.installed_effect_support().to_vec();
+            let observer = self.access.handler_effect_support.clone();
+            let admitted_support = self
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    let mut support = source_support;
+                    for key in observer(session.handlers()) {
+                        if !support.contains(&key) {
+                            support.push(key);
+                        }
+                    }
+                    Ok(support)
+                })
+                .await?;
+            let admitted_base: Vec<_> = granted_effects
+                .into_iter()
+                .filter(|key| admitted_support.contains(&exomonad_tool::ToolEffectKey::Actor(*key)))
+                .collect();
+            let authored_effects = format!(
+                "'[{}]",
+                admitted_base
+                    .iter()
+                    .map(|key| key.haskell_name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let dispatcher_effects = format!("(Tidepool.Effects.Core.AgentTools ': Tidepool.Effects.Core.ContextReadWrite ': {authored_effects})");
             let resolved = self.resolve_spec(&context);
             let revision = resolved.source_revision();
-            let entry = resolved
-                .entry
-                .clone()
-                .unwrap_or_else(|| "Tidepool.Agent.Contract.defaultSpec".into());
+            let entry = resolved.entry.clone().unwrap_or_else(|| {
+                if admitted_support.contains(&exomonad_tool::ToolEffectKey::ContextReadWrite) {
+                    "Tidepool.Agent.Contract.defaultWorkbenchSpec".into()
+                } else {
+                    "Tidepool.Agent.Contract.defaultAsyncWorkbenchSpec".into()
+                }
+            });
             let mut source = self.access.source.clone();
             // A spec found by convention is named by no configured key, so its
             // module is not in the shared workbench vocabulary; the fragment that
@@ -3678,14 +3819,25 @@ where
                 .extend_text("qualified Tidepool.Agent.Contract");
             source.preamble =
                 insert_preamble_imports(&source.preamble, "qualified Tidepool.Effects.Core").into();
-            source.preamble = format!(
-                "{}\ntype HostedToolEffects = Tidepool.Effects.Core.AgentTools ': {}\n",
-                source.preamble, context.haskell_effects_alias
-            )
-            .into();
-            let authored_effects = context.haskell_effects_alias.clone();
             let mut compile_context = context.clone();
-            compile_context.haskell_effects_alias = "HostedToolEffects".into();
+            compile_context.haskell_effects_alias = dispatcher_effects.clone();
+            let installation_scope = self
+                .access
+                .with_machine(context.clone(), |session, context, _| {
+                    session
+                        .retain_lexical_scope(context.placement.lexical_scope)
+                        .map_err(Into::into)
+                })
+                .await?;
+            compile_context.placement.lexical_scope = installation_scope.scope();
+            let abort_guard = ParkedHoleAbortGuard::with_retained_latest(
+                &self.access,
+                compile_context.clone(),
+                None,
+                "tool installation was abandoned before settlement".into(),
+                Some(installation_scope.clone()),
+            );
+            let registration = abort_guard.registration();
             let block = ParsedBlock {
                 ordinal: 1,
                 total: 1,
@@ -3709,6 +3861,9 @@ where
             };
             installer.access.source = source;
             let publication_resolved = resolved;
+            let installed_effect_support =
+                installer.access.source.installed_effect_support().to_vec();
+            let handler_effect_support = self.access.handler_effect_support.clone();
             // Setup uses the existing public scope while the bootstrap owner
             // retains publication authority. The checked program seals its
             // captured interfaces and protected templates before native execution.
@@ -3742,8 +3897,8 @@ where
                 total: 1,
                 source: checked.items[0].source.clone(),
             };
-            let step = installer
-                .begin_prepared_cell_item(compile_context.clone(), block, item, 0)
+            let step = registration
+                .scope(installer.begin_prepared_cell_item(compile_context.clone(), block, item, 0))
                 .await?;
             let ResidentWorkbenchStep::Running { outcome, .. } = step else {
                 let detail = match step {
@@ -3763,17 +3918,10 @@ where
             // parked. `ParkedHoleAbortGuard` covers that gap the same way
             // `HostInputRetirement` covers the split cell's mounted input:
             // Drop can't await, so it spawns one more checkout in the
-            // background to abort the hole there. Disarmed the moment the
-            // checkout below is actually in hand, since everything past that
-            // point settles the hole synchronously inside it.
-            let abort_guard = ParkedHoleAbortGuard::new(
-                &self.access,
-                compile_context.clone(),
-                hole.cont_id().to_string(),
-                "tool installer's parked hole was abandoned before its resuming checkout".into(),
-            );
-            let registration = abort_guard.registration();
-            let publication = self
+            // background to abort the hole there, retaining the installer
+            // scope until retirement. Successful publication disarms it.
+            let resumption_registration = registration.clone();
+            let publication = registration.scope(self
                 .access
                 .with_machine(compile_context, move |session, context, _| {
                     let publication = (|| {
@@ -3793,7 +3941,27 @@ where
                             session.data_con_table(),
                             0,
                         );
-                        let SpecInstallation { tools, slots } = decode_installation(installation)?;
+                        let SpecInstallation {
+                            tools,
+                            slots,
+                            slot_effect_keys,
+                        } = decode_installation(installation)?;
+                        let mut installed_effect_support = installed_effect_support.to_vec();
+                        for key in handler_effect_support(session.handlers()) {
+                            if !installed_effect_support.contains(&key) {
+                                installed_effect_support.push(key);
+                            }
+                        }
+                        crate::tool_contract::validate_installation(
+                            &tools,
+                            &slots,
+                            &slot_effect_keys,
+                            &admitted_base,
+                            &installed_effect_support,
+                        )
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                        })?;
                         let declarations = crate::resident_interactive::project_tools(tools)
                             .map_err(|error| {
                                 ResidentActorWorkbenchError::ActorProtocol(error.to_string())
@@ -3815,7 +3983,7 @@ where
                         Err(error) => {
                             match session.abort(hole.cont_id(), "tool publication rejected".into())
                             {
-                                Ok(outcome) => registration.replace_in_checkout(session, &outcome),
+                                Ok(outcome) => resumption_registration.replace_in_checkout(session, &outcome),
                                 Err(abort_error) => tracing::warn!(
                                     hole = hole.cont_id(),
                                     %abort_error,
@@ -3828,7 +3996,7 @@ where
                     let settled = session
                         .resume_classified(hole, ())
                         .map_err(classify_resumption)?;
-                    registration.replace_in_checkout(session, &settled);
+                    resumption_registration.replace_in_checkout(session, &settled);
                     if !matches!(
                         settled,
                         ResidentOutcome::Completed { .. }
@@ -3839,7 +4007,7 @@ where
                                 hole.cont_id(),
                                 "tool installer must finish after publication".into(),
                             ) {
-                                Ok(outcome) => registration.replace_in_checkout(session, &outcome),
+                                Ok(outcome) => resumption_registration.replace_in_checkout(session, &outcome),
                                 Err(abort_error) => tracing::warn!(
                                     hole = hole.cont_id(),
                                     %abort_error,
@@ -3854,12 +4022,14 @@ where
                     Ok(ResidentWorkbenchTools {
                         declarations,
                         dispatch: Arc::new(dispatch),
+                        _installation_scope: installation_scope,
+                        dispatcher_effects,
                         slots,
                         resolved: publication_resolved,
                         install,
                         revision,
                     })
-                })
+                }))
                 .await;
             if publication.is_ok() {
                 abort_guard.disarm();
@@ -4074,8 +4244,9 @@ where
             .access
             .with_machine(context, move |session, context, _| {
                 use tidepool_runtime::session::turn::{check_activation_input, compile_activation_input};
+                reject_activation_declaration(session, context.placement.lexical_scope)?;
                 let view = actor_compile_view(session, context, &source, &type_modules)?;
-                let prepared = source.prepare(&view);
+                let prepared = source.prepare_effectful(&view, &context.haskell_effects_alias)?;
                 let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
                 let candidate = session.next_declaration_module().ok_or_else(|| {
                     ResidentActorWorkbenchError::InputMount("activation has no declaration plane".into())
@@ -4623,7 +4794,8 @@ where
                             CellSnapshotAdmission::PrivateExecution(execution.admission.as_ref())
                         }),
                 )?;
-                let prepared = source.prepare(&snapshot.view);
+                let prepared =
+                    source.prepare_effectful(&snapshot.view, &context.haskell_effects_alias)?;
                 let preamble = cell_module_preamble(
                     &prepared.preamble,
                     &snapshot.candidate_module.module_name(),
@@ -4858,7 +5030,8 @@ where
                         source.preamble = actor_preamble(&source.preamble, context).into();
                         let compile_view =
                             actor_compile_view(session, context, &source, &type_modules)?;
-                        let prepared = source.prepare(&compile_view);
+                        let prepared = source
+                            .prepare_effectful(&compile_view, &context.haskell_effects_alias)?;
                         let check_preamble = cell_module_preamble(
                             &prepared.preamble,
                             &candidate_module.module_name(),
@@ -5053,7 +5226,8 @@ where
                         &source,
                         tidepool_runtime::session::NameScope::Current,
                     );
-                    let prepared = source.prepare(&view);
+                    let prepared =
+                        source.prepare_effectful(&view, &context.haskell_effects_alias)?;
                     let mut answer = crate::lookup::execute(
                         request,
                         provenance.fingerprint,
@@ -5100,7 +5274,8 @@ where
             })
             .await?;
 
-        let prepared = source.prepare(&view);
+        let effects_alias = context.haskell_effects_alias.clone();
+        let prepared = source.prepare_effectful(&view, &effects_alias)?;
         let source_layer_revision = crate::agent_spec::layer_revision(&context.source_layer);
         let mut answer = if crate::lookup::requires_inspection(
             &request,
@@ -5121,10 +5296,10 @@ where
             let preamble = prepared.preamble.clone();
             let injected = prepared.injected.clone();
             let include = prepared.include.clone();
-            let effects = context.haskell_effects_alias.clone();
             let workspace_modules = source.workspace_modules.clone();
             let compile_cancellation = cancellation.clone();
             let inspection_view = view.clone();
+            let effects = effects_alias.clone();
             let spawn = {
                 let _entered = compile_span.enter();
                 spawn_blocking_in_span(move || {
@@ -5160,10 +5335,8 @@ where
             };
             let mut spawn = spawn;
             let answer = if let Some(control) = execution_control {
-                // The retained workbench owner keeps this operation alive
-                // until its cancellation path settles. Forward that authority
-                // into the exact compiler transaction instead of relying on
-                // dropping this future to interrupt GHC.
+                // Keep cancellation bound to the exact compiler request, then
+                // wait for that request to settle before abandoning its hole.
                 tokio::select! {
                     result = &mut spawn => result.map_err(ResidentActorWorkbenchError::Join)?,
                     () = control.wait_for_cancellation() => {
@@ -5195,7 +5368,7 @@ where
                         &prepared.imports,
                         &prepared.include,
                         &prepared.injected,
-                        &context.haskell_effects_alias,
+                        &effects_alias,
                         queries,
                         None,
                     )
@@ -5213,15 +5386,18 @@ where
             .with_machine(context, move |session, context, _| {
                 let fresh_view =
                     actor_compile_view(session, context, &revalidate_source, &revalidate_modules)?;
-                let fresh_prepared = revalidate_source.prepare(&fresh_view);
+                let fresh_prepared = revalidate_source
+                    .prepare_effectful(&fresh_view, &context.haskell_effects_alias)?;
                 let source_revision_unchanged =
                     crate::agent_spec::layer_revision(&context.source_layer)
                         == source_layer_revision;
+                let effect_alias_unchanged = context.haskell_effects_alias == effects_alias;
                 if !fresh_view.is_current_for(&view)
                     || fresh_prepared.preamble != prepared.preamble
                     || fresh_prepared.imports != prepared.imports
                     || fresh_prepared.include != prepared.include
                     || !source_revision_unchanged
+                    || !effect_alias_unchanged
                 {
                     answer.results.clear();
                     answer.candidates.clear();
@@ -5720,7 +5896,9 @@ where
         let spawn = {
             let _entered = inspection_span.enter();
             spawn_blocking_in_span(move || {
-                let prepared = compiler_source.prepare(&compile_view);
+                let prepared = compiler_source
+                    .prepare_effectful(&compile_view, &effects)
+                    .map_err(|error| error.to_string())?;
                 let include = prepared
                     .include
                     .iter()
@@ -6417,7 +6595,7 @@ fn compile_fragment_off_checkout(
     effect_stack: &str,
     block: &ParsedBlock,
 ) -> Result<CompiledBlock, ResidentActorWorkbenchError> {
-    let prepared = source.prepare(&snapshot.view);
+    let prepared = source.prepare_effectful(&snapshot.view, effect_stack)?;
     let mut templates =
         resident_workbench_templates(&prepared.preamble, effect_stack, &prepared.imports);
     let include_refs: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
@@ -8294,6 +8472,11 @@ where
                         Ok(ResidentActorBoundary::Jev { continuation: hole, request })
                     }
                     ResidentRequest::Model(request) => Ok(ResidentActorBoundary::Model {
+                        continuation: hole,
+                        request,
+                        table: session.data_con_table().clone(),
+                    }),
+                    ResidentRequest::Context(request) => Ok(ResidentActorBoundary::Context {
                         continuation: hole,
                         request,
                         table: session.data_con_table().clone(),
@@ -11129,7 +11312,7 @@ fn check_cell_off_checkout(
 ) -> Result<(CellCheck, Option<tidepool_runtime::session::TurnResult>), ResidentActorWorkbenchError>
 {
     let compile_view = &snapshot.view;
-    let prepared = source.prepare(compile_view);
+    let prepared = source.prepare_effectful(compile_view, effects)?;
     let check_preamble =
         cell_module_preamble(&prepared.preamble, &snapshot.candidate_module.module_name())?;
     let template = resident_cell_check_template(&check_preamble, effects, &prepared.imports);
@@ -11946,7 +12129,7 @@ fn compile_host_binding_off_checkout(
     retained_imports: &[(SymbolIdentity, u64)],
 ) -> Result<(BoundBinder, CompiledTurn), ResidentActorWorkbenchError> {
     let view = view.clone().with_workbench_imports(&imports);
-    let prepared = source.prepare(&view);
+    let prepared = source.prepare_effectful(&view, effects)?;
     let templates = resident_workbench_templates(&prepared.preamble, effects, &prepared.imports);
     let include: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
     let retained_anchor = format!("__tidepoolCarrierAnchor{generation}");
@@ -12398,7 +12581,7 @@ fn compile_block_off_checkout(
             .map(|module| format!("qualified {module}")),
     );
     let compile_view = compile_view.with_workbench_imports(&expression_imports);
-    let mut prepared = source.prepare(&compile_view);
+    let mut prepared = source.prepare_effectful(&compile_view, effect_stack)?;
     if let Some(prologue) = prologue {
         prepared.preamble = prepared.preamble.replacen(
             "\nmodule ",
@@ -12649,7 +12832,10 @@ fn inspect_compile_view(
     Vec<Result<tidepool_runtime::session::InspectionResult, String>>,
     ResidentActorWorkbenchError,
 > {
-    let prepared = source.prepare(compile_view);
+    let prepared = match effects {
+        Some(effects) => source.prepare_effectful(compile_view, effects)?,
+        None => source.prepare(compile_view),
+    };
     let include_refs = prepared
         .include
         .iter()
@@ -13196,6 +13382,17 @@ mod request_tests {
         ActorWorkbenchSource,
         tempfile::TempDir,
     ) {
+        host_mount_fixture_with_lib(|_| {})
+    }
+
+    fn host_mount_fixture_with_lib(
+        configure: impl FnOnce(&mut tidepool_runtime::session::SessionLib),
+    ) -> (
+        ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        crate::ActorSessionContext,
+        ActorWorkbenchSource,
+        tempfile::TempDir,
+    ) {
         use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
         use tidepool_runtime::session::{ModuleEnv, SessionLib};
 
@@ -13215,13 +13412,14 @@ mod request_tests {
         let effects_alias = "'[Exomonad.Notifications, Sleep]";
         let session_id = tidepool_repr::SessionId((u64::from(std::process::id()) << 16) | 4_244);
         let session_root = tempfile::tempdir().expect("session root");
-        let lib = SessionLib::open(
+        let mut lib = SessionLib::open(
             session_id,
             session_root.path(),
             ModuleEnv::standalone_default(),
         )
         .expect("declaration plane")
         .with_validation_include(include.clone());
+        configure(&mut lib);
         let mut session = ResidentSession::unbootstrapped(
             frunk::HNil,
             tidepool_mcp::CapturedOutput::new(),
@@ -15583,6 +15781,150 @@ mod request_tests {
         );
     }
 
+    #[tokio::test]
+    async fn tool_installation_preserves_durable_child_private_admission() {
+        struct RunOwner {
+            root: PathBuf,
+            _lock: std::fs::File,
+        }
+        impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
+            fn owns_run(&self, root: &std::path::Path) -> std::io::Result<bool> {
+                Ok(root.canonicalize()? == self.root)
+            }
+        }
+        let durable = tempfile::tempdir().unwrap();
+        let manifest = durable.path().join("declarations.json");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(durable.path().join("run-owner.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        let authority = Arc::new(RunOwner {
+            root: durable.path().canonicalize().unwrap(),
+            _lock: lock,
+        });
+        let (mut session, context, source, _root) = host_mount_fixture_with_lib(|lib| {
+            lib.attach_owned_recovery_graph_v3(&manifest, authority)
+                .unwrap();
+        });
+        let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/installer-child").unwrap(),
+            context.actor.incarnation.0,
+        )
+        .unwrap();
+        // Durable children publish their inherited view before native boot
+        // installs tools. The installer must preserve that admitted surface.
+        session
+            .initialize_durable_public_scope(owner.clone(), context.placement.lexical_scope)
+            .unwrap();
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
+        let workbench =
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![])
+                .with_compilation_authority(
+                    crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
+                );
+        let before = workbench
+            .access
+            .with_machine(context.clone(), |session, context, _| {
+                Ok(session
+                    .public_visibility_snapshot_in(context.placement.lexical_scope)
+                    .expect("registered child public surface"))
+            })
+            .await
+            .expect("public baseline after machine registry admission");
+        assert!(before.machine_incarnation.is_none());
+        let manifest_before = std::fs::read(&manifest).unwrap();
+        let tools = workbench
+            .prepare_tools(context.clone(), 1, vec![])
+            .await
+            .unwrap();
+        assert!(!tools.declarations.is_empty());
+        let installation_scope = tools._installation_scope.scope();
+        assert_ne!(installation_scope, context.placement.lexical_scope);
+        let cleanup_owner = owner.clone();
+        let (admission, installed_public) = workbench
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let after = session
+                    .public_visibility_snapshot_in(context.placement.lexical_scope)
+                    .unwrap();
+                // The first prepared install creates the machine identity.
+                // Every declaration, binding, source and visibility fence
+                // still belongs to the unchanged durable public surface.
+                assert!(after.machine_incarnation.is_some());
+                let mut expected = before;
+                expected.machine_incarnation = after.machine_incarnation;
+                assert_eq!(after, expected);
+                assert_eq!(std::fs::read(&manifest).unwrap(), manifest_before);
+                assert!(session
+                    .public_visibility_snapshot_in(installation_scope)
+                    .is_some());
+                let admission = session
+                    .begin_durable_private_execution(&owner, context.placement.lexical_scope)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                Ok((admission, after))
+            })
+            .await
+            .expect("ordinary private notebook admission after tool installation");
+        let mut private_context = context.clone();
+        private_context.placement.lexical_scope = admission.private_scope();
+        let step = workbench
+            .begin_fragment_split(
+                private_context.clone(),
+                source,
+                vec![],
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "pure (7 :: Int)".into(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        match step {
+            ResidentWorkbenchStep::Running { fragment, outcome } => {
+                workbench
+                    .settle_item(private_context, *fragment, *outcome)
+                    .await
+                    .unwrap();
+            }
+            ResidentWorkbenchStep::Committed { .. } => {}
+            _ => panic!(
+                "ordinary private notebook did not execute: {}",
+                describe_step(&step)
+            ),
+        }
+        drop(admission);
+        drop(tools);
+        workbench
+            .access
+            .with_machine(context, move |session, context, _| {
+                assert_eq!(
+                    session.public_visibility_snapshot_in(context.placement.lexical_scope),
+                    Some(installed_public)
+                );
+                let _next = session
+                    .begin_durable_private_execution(
+                        &cleanup_owner,
+                        context.placement.lexical_scope,
+                    )
+                    .map_err(ResidentError::Session)?;
+                assert!(session
+                    .public_visibility_snapshot_in(installation_scope)
+                    .is_none());
+                Ok(())
+            })
+            .await
+            .expect("installed implementation releases its lexical scope");
+    }
+
     /// A bare, unbootstrapped-but-idle machine at an arbitrary session id —
     /// everything a [`ChildSessionFactory`] needs to hand back, without the
     /// notifications/preamble setup [`host_mount_fixture`] does for tests
@@ -17431,6 +17773,371 @@ mod request_tests {
                 Ok(tidepool_repr::SessionVarId::from_extract(binder.var_id))
             })
             .await
+    }
+
+    /// Compile one authentic producer and receiver, then retain two original
+    /// native inputs for independent activation mounts in the same machine.
+    fn activation_input_fixture(
+        configure: impl FnOnce(&mut tidepool_runtime::session::SessionLib),
+    ) -> (
+        ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        crate::ActorSessionContext,
+        ActorWorkbenchSource,
+        Vec<tidepool_runtime::session::RuntimeActivationInput>,
+        tempfile::TempDir,
+    ) {
+        use tidepool_runtime::session::{ModuleEnv, SessionLib};
+        let (_, mut context, _, _) = host_mount_fixture();
+        let declarations = [
+            tidepool_mcp::agent_tools_decl(),
+            tidepool_mcp::agent_session_decl(),
+            tidepool_mcp::actor_decl(),
+            tidepool_mcp::actor_kernel_decl(),
+            tidepool_mcp::actor_local_decl(),
+            tidepool_mcp::fs_read_decl(),
+            tidepool_mcp::worktree_decl(),
+            tidepool_mcp::notifications_decl(),
+            tidepool_mcp::console_decl(),
+            tidepool_mcp::sleep_decl(),
+        ];
+        let effects = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
+        let mut include = effects.include_paths().to_vec();
+        include.push(tidepool_testing::eval_harness::prelude_path());
+        include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/actors"));
+        let mut preamble = tidepool_mcp::build_preamble(&declarations, false);
+        for import in [
+            "Tidepool.Agent.Reply (Replies)",
+            "Tidepool.Agent.Ref (AgentProtocol(..))",
+            "qualified Tidepool.Agent.Ref as Ref",
+            "qualified Tidepool.Actors.Internal.Agent as Agents",
+            "qualified Tidepool.Effects.Core as Core",
+        ] {
+            preamble = insert_preamble_imports(&preamble, import);
+        }
+        context.haskell_effects_alias = "'[Replies]".into();
+        context.effect_policy = tidepool_effect::EffectRunPolicy::SuspendAll;
+        context.placement.lexical_scope = ScopeId::ROOT;
+        let root = tempfile::tempdir().unwrap();
+        let mut lib = SessionLib::open(
+            context.placement.session,
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(include.clone());
+        configure(&mut lib);
+        let mut session = ResidentSession::unbootstrapped(
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput::new(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(lib),
+        );
+        session
+            .set_actor_execution(
+                context.run_context(),
+                context.effect_policy,
+                context.live_payload,
+            )
+            .unwrap();
+        let source = ActorWorkbenchSource::new(preamble, include);
+        let view = actor_compile_view(&session, &context, &source, &[]).unwrap();
+        let prepared = source
+            .prepare_effectful(&view, &context.haskell_effects_alias)
+            .unwrap();
+        let templates = resident_workbench_templates(
+            &prepared.preamble,
+            &context.haskell_effects_alias,
+            &prepared.imports,
+        );
+        let compile = |text: &str| {
+            let include = prepared
+                .include
+                .iter()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>();
+            tidepool_runtime::session::turn::run_turn(TurnRequest {
+                exact_context: None,
+                session_id: None,
+                turn_text: text,
+                templates: &templates,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &[],
+                gen: view.next_value_generation().0,
+                verdict: None,
+                target: None,
+                retained_imports: &[],
+            })
+            .unwrap()
+        };
+        let TurnResult::Bind {
+            compiled: producer, ..
+        } = compile(include_str!(
+            "../../../tidepool/runtime/src/session/fixtures/activation-input-function.hs"
+        ))
+        else {
+            panic!("native input producer must execute a bind");
+        };
+        let TurnResult::Bind {
+            compiled: receiver,
+            bound,
+            ..
+        } = compile(include_str!(
+            "../../../tidepool/runtime/src/session/fixtures/activation-input-receiver.hs"
+        ))
+        else {
+            panic!("native receiver must install retained bindings");
+        };
+        session
+            .run_projected_bind_with_sites(
+                "activationReceiverFixture",
+                receiver.code(),
+                &bound,
+                view.next_value_generation(),
+            )
+            .unwrap();
+        let suspend = |outcome| match outcome {
+            ResidentOutcome::Suspended { hole, .. } => hole,
+            other => panic!("native activation fixture must suspend: {other:?}"),
+        };
+        let mut reservation = suspend(
+            session
+                .run_with_sites("originalActivationRequests", producer.code())
+                .unwrap(),
+        );
+        let mut inputs = Vec::new();
+        for request in 1_i64..=2 {
+            let submission = suspend(session.resume(reservation, request).unwrap());
+            let payload = session
+                .live_payload_handle(submission.cont_id())
+                .unwrap()
+                .unwrap();
+            let receiver = session
+                .retain_binding_custody("activationReceiver")
+                .unwrap()
+                .unwrap();
+            let activation = suspend(
+                session
+                    .run_rooted_application(
+                        "originalActivationInput",
+                        &receiver,
+                        &payload,
+                        context.placement.resource_scope,
+                        None,
+                    )
+                    .unwrap(),
+            );
+            let input = producer
+                .asks
+                .iter()
+                .filter(|site| !site.inputs.is_empty())
+                .find_map(|site| {
+                    session
+                        .capture_activation_input(
+                            &activation,
+                            context.placement.resource_scope,
+                            site.site,
+                        )
+                        .ok()
+                })
+                .expect("original authenticated input site");
+            inputs.push(input);
+            session
+                .abort(
+                    activation.cont_id(),
+                    "fixture retained original input".into(),
+                )
+                .unwrap();
+            let next = session.resume(submission, ()).unwrap();
+            if request == 1 {
+                reservation = suspend(next);
+            } else {
+                break;
+            }
+        }
+        (session, context, source, inputs, root)
+    }
+
+    #[tokio::test]
+    async fn activation_inputs_preserve_durable_private_admission_across_replacement() {
+        struct RunOwner {
+            root: PathBuf,
+            _lock: std::fs::File,
+        }
+        impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
+            fn owns_run(&self, root: &std::path::Path) -> std::io::Result<bool> {
+                Ok(root.canonicalize()? == self.root)
+            }
+        }
+        let durable = tempfile::tempdir().unwrap();
+        let manifest = durable.path().join("declarations.json");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(durable.path().join("run-owner.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        let authority = Arc::new(RunOwner {
+            root: durable.path().canonicalize().unwrap(),
+            _lock: lock,
+        });
+        let (mut session, context, source, inputs, _root) = activation_input_fixture(|lib| {
+            lib.attach_owned_recovery_graph_v3(&manifest, authority)
+                .unwrap();
+        });
+        let path = tidepool_repr::ActorPath::parse("root/activation-child").unwrap();
+        let durable_owner =
+            tidepool_runtime::session::RecoveryPublicOwner::new(&path, context.actor.incarnation.0)
+                .unwrap();
+        let public_scope = context.placement.lexical_scope;
+        session
+            .initialize_durable_public_scope(durable_owner.clone(), public_scope)
+            .unwrap();
+        let descriptor = crate::ActorDescriptor::new("activation-child", context.placement)
+            .with_persistence_policy(crate::ActorPersistencePolicy::Durable)
+            .with_actor_path(path);
+        let owner = crate::resident_actor::WorkbenchPublicOwner::issue(
+            &context,
+            &descriptor,
+            Some(durable_owner.clone()),
+        )
+        .unwrap();
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![])
+            .with_compilation_authority(
+                crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
+            );
+        let mut previous = None;
+        let mut captured = None;
+        for input in inputs {
+            let before_manifest = std::fs::read(&manifest).unwrap();
+            let bootstrap = workbench_runner_for_test(&workbench)
+                .begin_public_bootstrap(context.clone(), owner.clone())
+                .await
+                .unwrap();
+            let (_, _, binding) = workbench
+                .mount_activation_input(context.clone(), input, "()".into(), None, vec![])
+                .await
+                .unwrap();
+            assert_eq!(
+                workbench_runner_for_test(&workbench)
+                    .publish_public_bootstrap(context.clone(), owner.clone(), bootstrap)
+                    .await
+                    .unwrap(),
+                tidepool_runtime::session::PublicManifestCommit::Durable
+            );
+            assert_ne!(std::fs::read(&manifest).unwrap(), before_manifest);
+            assert_ne!(previous, Some(binding));
+            let expected = durable_owner.clone();
+            let custody = workbench
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    let _admission = session
+                        .begin_durable_private_execution(&expected, public_scope)
+                        .map_err(ResidentError::Session)?;
+                    assert_eq!(
+                        session
+                            .current_binding_in(public_scope, "sessionInput")
+                            .unwrap()
+                            .0,
+                        binding
+                    );
+                    let custody = session
+                        .retain_binding_custody_in(public_scope, "sessionInput", binding)?
+                        .unwrap();
+                    Ok(custody)
+                })
+                .await
+                .expect("published activation admits an ordinary durable private cell");
+            if captured.is_none() {
+                captured = Some(custody);
+            }
+            previous = Some(binding);
+        }
+        workbench
+            .access
+            .with_machine(context, move |session, _, _| {
+                let _admission = session
+                    .begin_durable_private_execution(&durable_owner, public_scope)
+                    .map_err(ResidentError::Session)?;
+                assert!(session
+                    .render_retained_preview(&captured.unwrap(), 128)
+                    .is_some());
+                assert!(session
+                    .retain_binding_custody_in(public_scope, "sessionInput", previous.unwrap())?
+                    .is_some());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn activation_refuses_reserved_declaration_without_public_mutation() {
+        let (mut session, context, source, mut inputs, _root) = activation_input_fixture(|_| {});
+        let step = begin_fragment(
+            &mut session,
+            &context,
+            &source,
+            RequestWorkbenchScope {
+                response: None,
+                request: None,
+                type_modules: &[],
+            },
+            ParsedBlock {
+                ordinal: 1,
+                total: 1,
+                source: "sessionInput = ()".into(),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(step, ResidentWorkbenchStep::Committed { .. }));
+        let public_scope = context.placement.lexical_scope;
+        let before = session.public_visibility_snapshot_in(public_scope).unwrap();
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![])
+            .with_compilation_authority(
+                crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
+            );
+        let error = workbench
+            .mount_activation_input(context.clone(), inputs.remove(0), "()".into(), None, vec![])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ResidentActorWorkbenchError::InputMount(ref detail) if detail.contains("reserved"))
+        );
+        workbench
+            .access
+            .with_machine(context, move |session, _, _| {
+                assert_eq!(
+                    session.public_visibility_snapshot_in(public_scope),
+                    Some(before)
+                );
+                assert!(session
+                    .current_decl_heads_in(public_scope)
+                    .iter()
+                    .any(|(name, _)| name == "sessionInput"));
+                assert!(session
+                    .current_binding_in(public_scope, "sessionInput")
+                    .is_none());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    fn workbench_runner_for_test(
+        workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+    ) -> ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput> {
+        ResidentActorRunner {
+            access: workbench.access.sharing(),
+        }
     }
 
     #[tokio::test]

@@ -244,6 +244,11 @@ pub enum WorkbenchOperationDisposition {
     /// The owner reserved state whose publication is coupled to the input
     /// unit's commit boundary (currently an applicative unfold frontier).
     Prepared,
+    /// The invocation read a snapshot without publishing a mutation.
+    Read,
+    /// The invocation staged a mutation for its enclosing Store transaction.
+    /// Cell return, failure, and cancellation never promote this receipt.
+    Staged,
     Committed,
     Rejected,
     /// The effect owner failed after dispatch without proving whether its

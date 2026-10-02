@@ -12,14 +12,18 @@ mod background_command_example_tests;
 mod call_timing_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod cell_compile_cost_tests;
+mod cell_context;
 mod cell_model;
 #[cfg(all(test, feature = "codex-compat"))]
 pub(crate) mod command_jobs_tests;
 #[cfg(test)]
 mod command_test_support;
 mod commands;
+mod context_wire;
 mod effect_vocabulary;
 pub(crate) use effect_vocabulary::exomonad_effect_declarations;
+#[cfg(test)]
+mod context_transaction_acceptance_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod custody_tests;
 #[cfg(all(test, feature = "codex-compat"))]
@@ -43,6 +47,7 @@ mod embedded_projection;
 mod embedded_recovery;
 #[cfg(test)]
 mod embedded_recovery_tests;
+mod embedded_reflect;
 mod embedded_service;
 #[cfg(test)]
 mod embedded_shutdown_tests;
@@ -2803,12 +2808,23 @@ async fn run_owned(
         )?)
         .with_recovery_journal(actor_recovery.clone())
         .with_child_session_factory(child_session_factory)
+        .with_handler_effect_support(tidepool_mcp::InstalledEffectSupport::installed_effect_support)
         .with_image_registry(image_registry);
     #[cfg(feature = "codex-compat")]
     if let HostRuntimeMode::Codex(backend) = &runtime_backend {
         forest = forest.with_conversation_reader(conversation_reader(
             application_owners.clone(),
             backend.clone(),
+        ));
+    }
+    if let Some(service) = &embedded_service {
+        let recovery = actor_recovery.clone();
+        forest = forest.with_conversation_reader(embedded_reflect::conversation_reader(
+            service.runtime.store(),
+            Arc::new(move |actor| {
+                let conversation = recovery.active_application_conversation(actor)?;
+                embedded_recovery::identity_from_conversation(&conversation).ok()
+            }),
         ));
     }
     // No child bootstrap program: every launch stays on its launching
@@ -2819,6 +2835,10 @@ async fn run_owned(
         forest.set_source_layers(layers.clone());
     }
     if let (Some(service), Some(settings)) = (&embedded_service, &config.embedded) {
+        service
+            .runtime
+            .configure_context_models(&config)
+            .map_err(runtime_error)?;
         forest = forest
             .with_cell_model_factory(cell_model::admitted_factory(service, settings, &config));
     }
@@ -4352,7 +4372,16 @@ fn compile_root(
     // rather than a compile failure over a module nothing on its search path
     // defines. The same answer tells the agent so in its instructions.
     let jev = config.jev_surface() == prompt_catalog::JevSurface::Installed;
+    let context_support = if matches!(
+        config.backend,
+        crate::exomonad::HostBackendOptions::Embedded
+    ) {
+        vec![exomonad_tool::ToolEffectKey::ContextReadWrite]
+    } else {
+        Vec::new()
+    };
     let mut workbench = ActorWorkbenchSource::new(preamble, include)
+        .with_installed_effect_support(context_support)
         .with_imports(WORKBENCH_SURFACE_MODULE)
         .with_imports("qualified Tidepool.Actor.Record as R")
         .with_imports("qualified Tidepool.Command as Cmd");
@@ -4727,7 +4756,12 @@ async fn run_interactive_applications(
                         .runtime
                         .store()
                         .embedded_round_frontier(identity)
-                        .map(|frontier| frontier.pending_head.or(frontier.settled_head).map(|request| request.0))
+                        .map(|frontier| {
+                            frontier
+                                .pending_head
+                                .or(frontier.settled_head)
+                                .map(|request| request.0)
+                        })
                 },
                 |actor| !embedded_live.contains(&actor),
             )
@@ -5125,8 +5159,31 @@ async fn run_interactive_applications(
                                 break Some("embedded backend has no launch settings".into());
                             };
                             let actor = installation.actor.identity();
+                            let selected_parent = if actor != root_identity && installation.checkpoint.is_none() && installation.context_parent.is_none() && installation.checkpoint_attachment.is_none() {
+                                let identities = embedded_conversations.iter().map(|(actor, conversation)| (*actor, conversation.identity().clone())).collect();
+                                match embedded_context::selected_provider_parent(
+                                    &embedded_run, installation.creator.or(installation.supervisor_parent), &(host_graph)(), &identities,
+                                ) {
+                                    Ok(parent) => Some(parent),
+                                    Err(error) => {
+                                        if let Some(gate) = installation.fork_gate.as_ref() {
+                                            gate.mark_failed().ok();
+                                        }
+                                        tracing::warn!(?actor, %error, "selected provider ancestry refused");
+                                        if let Err(failure) = apply_application_failure(installation.actor.clone(), ExternalApplicationFailure {
+                                            class: ExternalApplicationFailureClass::ToolHostStartup,
+                                            detail: error,
+                                        }).await {
+                                            tracing::warn!(?actor, %failure, "selected child startup failure was not delivered");
+                                        }
+                                        continue;
+                                    },
+                                }
+                            } else { None };
                             let path = if actor == root_identity {
                                 harness::model::AgentPath("/root".into())
+                            } else if let Some(parent) = &selected_parent {
+                                parent.child_path(actor)
                             } else {
                                 let Some(captured) = installation.checkpoint_attachment.as_ref()
                                     .and_then(|attachment| attachment.downcast::<embedded_harness::EmbeddedHostedCheckpoint>()) else {
@@ -5202,34 +5259,13 @@ async fn run_interactive_applications(
                                 ) {
                                     break Some(error);
                                 }
-                            } else if installation.checkpoint.is_none() && installation.context_parent.is_some() {
+                            } else if installation.checkpoint_attachment.is_none() && installation.context_parent.is_some() {
                                 break Some(format!(
                                     "embedded child actor {actor:?} requires a hosted checkpoint"
                                 ));
                             }
                             let initial_input = installation.initial_user_message.clone();
                             if !is_root {
-                                let selected_parent = if installation.checkpoint.is_none() {
-                                    let identities = embedded_conversations.iter().map(|(actor, conversation)| (*actor, conversation.identity().clone())).collect();
-                                    match embedded_context::selected_provider_parent(
-                                        &embedded_run, installation.creator.or(installation.supervisor_parent), &(host_graph)(), &identities,
-                                    ) {
-                                        Ok(parent) => Some(parent),
-                                        Err(error) => {
-                                            if let Some(gate) = installation.fork_gate.as_ref() {
-                                                gate.mark_failed().ok();
-                                            }
-                                            tracing::warn!(?actor, %error, "selected provider ancestry refused");
-                                            if let Err(failure) = apply_application_failure(local_actor.clone(), ExternalApplicationFailure {
-                                                class: ExternalApplicationFailureClass::ToolHostStartup,
-                                                detail: error,
-                                            }).await {
-                                                tracing::warn!(?actor, %failure, "selected child startup failure was not delivered");
-                                            }
-                                            continue;
-                                        },
-                                    }
-                                } else { None };
                                 let queue_admission = match local_actor.admit_transaction() {
                                     Ok(admission) => admission,
                                     Err(error) => {
@@ -7220,13 +7256,7 @@ async fn launch_prepared_interactive_application(
     let service = hosted_retirement::start_with_resources(
         &hosted_slot,
         actor.clone(),
-        installation
-            .policy
-            .tools()
-            .iter()
-            .filter(|tool| tool.name() != exomonad_actor::HASKELL_TOOL)
-            .cloned()
-            .collect(),
+        installation.policy.tools().iter().cloned().collect(),
         binding_path.clone(),
         expected_resume.clone(),
         listener,

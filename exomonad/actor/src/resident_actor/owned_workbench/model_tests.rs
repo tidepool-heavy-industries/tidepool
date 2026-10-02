@@ -98,6 +98,7 @@ fn execution(model: Arc<ModelOwner>) -> OwnedExecution<frunk::HNil, tidepool_mcp
                 public_visibility: None,
                 control: Some(crate::WorkbenchExecutionControl::untracked()),
                 model: Some(model),
+                context_binding: None,
                 installed_tools: None,
                 admitted_source: Default::default(),
                 reservation_owner,
@@ -257,6 +258,8 @@ async fn terminal_finalization_releases_invocation_reservations_after_model_clea
         )),
         rejected: true,
         retire_scopes: None,
+        context_boundary: None,
+        control: None,
     };
     invocation.close();
     assert!(invocation.cleanup_observation().is_none());
@@ -267,7 +270,7 @@ async fn terminal_finalization_releases_invocation_reservations_after_model_clea
         .is_ok());
     let result =
         settle_execution_finalization(&mut owned, fixture.environment.clone(), finalization).await;
-    let Err(KernelInvocationFailure::CleanupUnconfirmed { detail, .. }) = result else {
+    let Err(KernelInvocationFailure::CleanupUnconfirmed { detail, .. }) = result.result else {
         panic!("model cleanup uncertainty must survive terminal finalization")
     };
     assert!(
@@ -311,7 +314,7 @@ async fn items_callbacks_and_after_tool_prepare_on_the_original_model_binding() 
             tidepool_repr::DataConId(73),
             vec!["original request table".into()],
         );
-        let boundary = prepare_model_effect(
+        let boundary = prepare_execution_effect(
             &execution.state.effects.context,
             &CurrentEffectOwner::Workbench(&execution.state.effects),
             ResidentActorBoundary::Model {
@@ -418,4 +421,76 @@ async fn cancellation_closes_model_while_non_model_callback_wait_remains_parked(
         assert_eq!(model.cancelled.load(Ordering::SeqCst), 1);
         drop(execution);
     }
+}
+
+#[derive(Default)]
+struct ContextOwner {
+    prepared: AtomicUsize,
+    cancelled: AtomicUsize,
+}
+
+impl crate::HostedContextBinding for ContextOwner {
+    fn admit(
+        &self,
+        _: &WorkbenchExecutionId,
+        _: &exomonad_tool::ToolInvocationContext,
+        _: tidepool_repr::PrincipalId,
+    ) -> Result<(), tidepool_effect::error::EffectError> {
+        Ok(())
+    }
+    fn prepare(
+        &self,
+        _: crate::ContextReq,
+        _: tidepool_repr::PrincipalId,
+        _: tidepool_repr::DataConTable,
+    ) -> tidepool_effect::DeferredEffect {
+        self.prepared.fetch_add(1, Ordering::SeqCst);
+        tidepool_effect::DeferredEffect::blocking(|| Ok(tidepool_effect::Response::new(())))
+    }
+    fn cancel(&self) {
+        self.cancelled.fetch_add(1, Ordering::SeqCst);
+    }
+    fn finish(&self, _: crate::CellExit) {}
+}
+
+#[tokio::test]
+async fn context_authority_cannot_escape_to_after_tool_or_actor_callbacks() {
+    let binding = Arc::new(ContextOwner::default());
+    let mut execution = execution(Arc::new(ModelOwner::default()));
+    execution.state.effects.context_binding = Some(binding.clone());
+    let boundary = || ResidentActorBoundary::Context {
+        continuation: ResidentHole::plain("context-owned"),
+        request: crate::ContextReq::GetContextWith,
+        table: tidepool_repr::DataConTable::new(),
+    };
+    let routed = prepare_execution_effect(
+        &execution.state.effects.context,
+        &CurrentEffectOwner::Workbench(&execution.state.effects),
+        boundary(),
+    );
+    assert!(matches!(routed, ResidentActorBoundary::External { .. }));
+    assert_eq!(binding.prepared.load(Ordering::SeqCst), 1);
+    execution.state.effects.after_tool_active = true;
+    let owners = [
+        CurrentEffectOwner::Workbench(&execution.state.effects),
+        CurrentEffectOwner::Actor {
+            publication: ForkPublication::Resident,
+            reservation_owner: None,
+            control: None,
+        },
+    ];
+    for owner in owners {
+        let ResidentActorBoundary::External { work, .. } =
+            prepare_execution_effect(&execution.state.effects.context, &owner, boundary())
+        else {
+            panic!("context authority refusal is resumed through the normal effect route")
+        };
+        let tidepool_effect::DeferredEffect::Blocking(start) = work else {
+            panic!("context authority denial must not start asynchronous work")
+        };
+        assert!(start.into_inner().unwrap()().is_err());
+    }
+    assert_eq!(binding.prepared.load(Ordering::SeqCst), 1);
+    drop(execution);
+    assert_eq!(binding.cancelled.load(Ordering::SeqCst), 1);
 }

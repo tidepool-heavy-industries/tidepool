@@ -129,6 +129,42 @@ fn rejected(message: impl Into<String>) -> ModelBoundaryError {
 fn transport_error(message: impl Into<String>) -> ModelBoundaryError {
     ModelBoundaryError::ModelTransportFailed(message.into())
 }
+fn validate_tools(tools: &[exomonad_tool::ToolDeclaration]) -> Result<(), ModelBoundaryError> {
+    for tool in tools {
+        if tool.implementation == exomonad_tool::ToolImplementation::HaskellCell {
+            return Err(rejected(
+                "bounded model calls do not admit HaskellCell tools",
+            ));
+        }
+        if tool.schedule == exomonad_tool::ToolScheduling::BeforeNextInference {
+            return Err(rejected(
+                "bounded model calls do not admit BeforeNextInference tools",
+            ));
+        }
+        if tool
+            .effect_keys
+            .contains(&exomonad_tool::ToolEffectKey::ContextReadWrite)
+        {
+            return Err(rejected(
+                "bounded model calls do not admit ContextReadWrite tools",
+            ));
+        }
+        if !matches!(
+            tool.kind,
+            exomonad_tool::ToolKind::Call | exomonad_tool::ToolKind::Notify
+        ) {
+            return Err(rejected(
+                "bounded model calls support only Call and Notify tools",
+            ));
+        }
+        if tool.input_schema["type"] != "object" {
+            return Err(rejected(
+                "bounded model tool inputs must have an object schema",
+            ));
+        }
+    }
+    Ok(())
+}
 impl<A: Auth + 'static, C: ResponsesTransport + 'static> CellModelService<A, C> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -333,21 +369,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
                 .unwrap_or(self.policy.limits.reported_tokens),
             seconds: request.limits.seconds.unwrap_or(self.policy.limits.seconds),
         };
-        for tool in &request.tools {
-            if !matches!(
-                tool.kind,
-                exomonad_tool::ToolKind::Call | exomonad_tool::ToolKind::Notify
-            ) {
-                return Err(rejected(
-                    "bounded model calls support only Call and Notify tools",
-                ));
-            }
-            if tool.input_schema["type"] != "object" {
-                return Err(rejected(
-                    "bounded model tool inputs must have an object schema",
-                ));
-            }
-        }
+        validate_tools(&request.tools)?;
         let tools = request.tools.into_iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.input_schema,"strict":true})).collect();
         let config = EngineConfig {
             instructions: request.instructions,
@@ -818,6 +840,18 @@ mod tests {
         for kind in ["raw", "update", "finish"] {
             invalid["tools"][0]["kind"] = json!(kind);
             assert!(service.start(caller, invalid.clone()).is_err());
+        }
+        for (field, value) in [
+            ("implementation", json!("haskell_cell")),
+            ("schedule", json!("before_next_inference")),
+            ("effectKeys", json!(["ContextReadWrite"])),
+        ] {
+            let mut invalid = request(false);
+            invalid["tools"][0][field] = value;
+            assert!(matches!(
+                service.start(caller, invalid),
+                Err(ModelBoundaryError::ModelRejected(_))
+            ));
         }
         let mut invalid = request(false);
         invalid["tools"][0]["inputSchema"] = json!({"type":"string"});

@@ -1,7 +1,27 @@
 //! Transport-neutral model tool contracts shared by actor policies and their
 //! concrete host projections.
 
+mod effects;
 pub mod surface;
+pub use effects::{ActorEffectKey, ToolEffectKey};
+
+/// When this invocation must settle relative to the caller's next inference.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolScheduling {
+    #[default]
+    Async,
+    BeforeNextInference,
+}
+
+/// The installed implementation that receives this tool's input.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolImplementation {
+    #[default]
+    ResidentHandler,
+    HaskellCell,
+}
 
 /// One model-visible tool declaration, independent of who serves it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -13,6 +33,12 @@ pub struct ToolDeclaration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<serde_json::Value>,
     pub kind: ToolKind,
+    #[serde(default)]
+    pub schedule: ToolScheduling,
+    #[serde(default)]
+    pub implementation: ToolImplementation,
+    #[serde(default)]
+    pub effect_keys: Vec<ToolEffectKey>,
 }
 
 /// One raw-text tool whose concrete host transport supplies no argument
@@ -22,6 +48,12 @@ pub struct ToolDeclaration {
 pub struct CustomToolDeclaration {
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub schedule: ToolScheduling,
+    #[serde(default)]
+    pub implementation: ToolImplementation,
+    #[serde(default)]
+    pub effect_keys: Vec<ToolEffectKey>,
 }
 
 /// One model-visible resident tool, independent of the protocol that exposes
@@ -72,6 +104,9 @@ impl TryFrom<ToolDeclaration> for HostedTool {
             Ok(Self::Custom(CustomToolDeclaration {
                 name: declaration.name,
                 description: declaration.description,
+                schedule: declaration.schedule,
+                implementation: declaration.implementation,
+                effect_keys: declaration.effect_keys,
             }))
         } else {
             Ok(Self::Function(declaration))
@@ -93,6 +128,30 @@ impl HostedTool {
         match self {
             Self::Custom(tool) => &tool.description,
             Self::Function(tool) => &tool.description,
+        }
+    }
+
+    #[must_use]
+    pub fn scheduling(&self) -> ToolScheduling {
+        match self {
+            Self::Custom(tool) => tool.schedule,
+            Self::Function(tool) => tool.schedule,
+        }
+    }
+
+    #[must_use]
+    pub fn implementation(&self) -> ToolImplementation {
+        match self {
+            Self::Custom(tool) => tool.implementation,
+            Self::Function(tool) => tool.implementation,
+        }
+    }
+
+    #[must_use]
+    pub fn effect_keys(&self) -> &[ToolEffectKey] {
+        match self {
+            Self::Custom(tool) => &tool.effect_keys,
+            Self::Function(tool) => &tool.effect_keys,
         }
     }
 
@@ -275,6 +334,9 @@ mod tests {
 
     fn declaration(kind: ToolKind, input_schema: serde_json::Value) -> ToolDeclaration {
         ToolDeclaration {
+            schedule: Default::default(),
+            implementation: Default::default(),
+            effect_keys: Vec::new(),
             name: "probe".into(),
             description: "Probe a model-facing tool surface".into(),
             input_schema,
@@ -321,8 +383,39 @@ mod tests {
     }
 
     #[test]
+    fn raw_projection_preserves_invocation_contract_and_rejects_unknown_effects() {
+        let mut declaration = declaration(ToolKind::Raw, serde_json::json!({"type": "string"}));
+        declaration.schedule = ToolScheduling::BeforeNextInference;
+        declaration.implementation = ToolImplementation::HaskellCell;
+        declaration.effect_keys = vec![ToolEffectKey::ContextReadWrite, ActorEffectKey::Jev.into()];
+        let wire = serde_json::to_value(&declaration).unwrap();
+        assert_eq!(wire["schedule"], "before_next_inference");
+        assert_eq!(wire["implementation"], "haskell_cell");
+        assert_eq!(
+            wire["effectKeys"],
+            serde_json::json!(["ContextReadWrite", "Jev"])
+        );
+        let tool =
+            HostedTool::try_from(serde_json::from_value::<ToolDeclaration>(wire.clone()).unwrap())
+                .unwrap();
+        assert_eq!(tool.scheduling(), declaration.schedule);
+        assert_eq!(tool.implementation(), declaration.implementation);
+        assert_eq!(tool.effect_keys(), declaration.effect_keys);
+        let mut unknown = wire;
+        unknown["effectKeys"] = serde_json::json!(["UnregisteredEffect"]);
+        assert!(serde_json::from_value::<ToolDeclaration>(unknown).is_err());
+        assert!(
+            serde_json::from_value::<ActorEffectKey>(serde_json::json!("ContextReadWrite"))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn wire_shape_uses_the_model_facing_schema_name() {
         let declaration = ToolDeclaration {
+            schedule: Default::default(),
+            implementation: Default::default(),
+            effect_keys: Vec::new(),
             name: "status".into(),
             description: "Read status".into(),
             input_schema: serde_json::json!({"type": "object"}),

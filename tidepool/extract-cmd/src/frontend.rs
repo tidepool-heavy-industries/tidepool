@@ -70,11 +70,18 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
             request.worker_argv()
         }
     };
+    let mut build_products = daemon::BuildProductsNamespace::direct()?;
+    let cwd = std::env::current_dir().map_err(FrontendError::Io)?;
+    let (worker_args, diagnostics) = build_products.place(&cwd, &worker_args)?;
+    io::stderr()
+        .write_all(&diagnostics)
+        .map_err(FrontendError::Io)?;
     let worker = prepare_worker()?;
     let mut command = worker.command();
     command.args(worker_args);
     crate::process::child_dies_with_parent(&mut command);
     let status = command.status().map_err(FrontendError::Io)?;
+    build_products.cleanup();
     Ok(exit_code(status))
 }
 
@@ -427,11 +434,11 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
     let (cwd, argv) = daemon::read_request(&mut request)?;
     let worker_argv = daemon::normalize_worker_argv(argv)?;
     let mut worker = daemon::Worker::spawn(&prepared)?;
-    let result = (|| {
+    let result: Result<_, FrontendError> = (|| {
         worker.begin_transaction()?;
         let (code, stdout, stderr) = worker.request(&cwd, &worker_argv)?;
         worker.end_transaction()?;
-        daemon::write_response(io::stdout().lock(), code, &stdout, &stderr)
+        Ok((code, stdout, stderr))
     })();
     if result.is_ok() {
         worker.shutdown();
@@ -440,7 +447,13 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
         // body. Waiting for stdin EOF would not make that worker exit.
         worker.abort();
     }
-    result.map(|()| 0)
+    // A successful response releases the caller's direct endpoint, which can
+    // immediately terminate this frontend. Reap and retire scratch ownership
+    // before publishing that final response.
+    drop(worker);
+    let (code, stdout, stderr) = result?;
+    daemon::write_response(io::stdout().lock(), code, &stdout, &stderr)?;
+    Ok(0)
 }
 
 pub(crate) struct DaemonConfig {

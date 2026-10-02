@@ -11,6 +11,7 @@ pub mod agent_session;
 pub mod agent_tools;
 pub mod commands;
 pub mod console;
+pub mod context_read_write;
 pub mod forks;
 pub mod introspection;
 pub mod jev;

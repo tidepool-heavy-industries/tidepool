@@ -1610,7 +1610,7 @@ dependencies = [
 [[package]]
 name = "harness"
 version = "0.1.0"
-source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=f2d01bd220028844210740ef518c500098982ca4#f2d01bd220028844210740ef518c500098982ca4"
+source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=8b245274c49aabfc64c3f72e1e211e6f3bbb9532#8b245274c49aabfc64c3f72e1e211e6f3bbb9532"
 dependencies = [
  "async-trait",
  "axum",
@@ -3745,6 +3745,7 @@ dependencies = [
  "camino",
  "exomonad-agent",
  "exomonad-node",
+ "exomonad-tool",
  "exomonad-worktree",
  "frunk",
  "genai",
@@ -3788,6 +3789,7 @@ name = "tidepool-mcp"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "exomonad-tool",
  "frunk",
  "parking_lot",
  "proptest",

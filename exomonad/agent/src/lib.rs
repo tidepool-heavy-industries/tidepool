@@ -48,7 +48,8 @@ pub use interactive::{
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
     ModelPolicy, ReasoningEffort, ThreadSpec, TokenUsage, ToolCall, ToolCallId, ToolDeclaration,
-    ToolKind, ToolOutcome, ToolReply, TurnEvent, TurnId,
+    ToolEffectKey, ToolImplementation, ToolKind, ToolOutcome, ToolReply, ToolScheduling, TurnEvent,
+    TurnId,
 };
 pub use spawn::{
     AnswerFailure, CoupledSpawner, CycleProgress, CycleSaga, OneCycleRun, ParkedCycle, SpawnError,

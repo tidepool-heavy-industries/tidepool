@@ -632,6 +632,10 @@ pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
                 args.next()?;
             }
             Some("--build-products-dir") => {
+                // Hash the requested logical root. The process boundary adds
+                // an exclusive writer namespace only for mutable output
+                // placement, after this recipe is formed; it introduces no
+                // source inputs and is deliberately not a recipe dimension.
                 frame(&mut hasher, b"--build-products-dir");
                 let path = std::path::absolute(PathBuf::from(args.next()?)).ok()?;
                 frame(&mut hasher, path.as_os_str().as_encoded_bytes());

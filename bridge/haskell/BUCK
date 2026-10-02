@@ -308,6 +308,12 @@ export_file(
 )
 
 export_file(
+    name = "context_workflow_example",
+    src = "examples/model-turns/ContextWorkflow.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "timing_source",
     src = "src/Tidepool/Timing.hs",
     visibility = ["PUBLIC"],

@@ -8,6 +8,7 @@ rust_filegroup(
     mapped_srcs = {
         "Cargo.toml": "tidepool/bridge-effects/Cargo.toml",
         "src/generated/commands.rs": "tidepool/bridge-effects/src/generated/commands.rs",
+        "src/generated/context_read_write.rs": "tidepool/bridge-effects/src/generated/context_read_write.rs",
         "src/generated/mod.rs": "tidepool/bridge-effects/src/generated/mod.rs",
         "src/generated/reflect.rs": "tidepool/bridge-effects/src/generated/reflect.rs",
         "src/generated/repo_event.rs": "tidepool/bridge-effects/src/generated/repo_event.rs",

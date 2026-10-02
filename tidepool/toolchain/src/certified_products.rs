@@ -1702,6 +1702,10 @@ fn verify_home_witness_with_validation(
     owner: &CachedHomeOwner,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<HomeCertification> {
+    #[cfg(test)]
+    {
+        validation.home_witness_validations += 1;
+    }
     let witness = decode_home_witness(bytes)?;
     if &witness.owner != owner {
         return Err(CertificationError::Mismatch("home certification owner"));

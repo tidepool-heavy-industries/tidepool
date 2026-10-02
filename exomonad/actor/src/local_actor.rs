@@ -790,6 +790,14 @@ pub trait KernelBehavior: Send + 'static {
         Box::pin(async { Ok(()) })
     }
 
+    fn tool_aborted<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+        _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Capture an internal continuation under the same single-admission
     /// scheduler. Behaviors with owned continuation inputs override this
     /// default serial transfer.
@@ -1781,7 +1789,8 @@ where
                 }
             }
             settlement @ (KernelMessage::ReconcileWorkbenchBoundary { .. }
-            | KernelMessage::ToolCompleted { .. }) => {
+            | KernelMessage::ToolCompleted { .. }
+            | KernelMessage::ToolAborted { .. }) => {
                 apply_hosted_settlement(state, settlement).await;
             }
             KernelMessage::ReleaseFork { release } => {
@@ -2102,6 +2111,7 @@ fn can_apply_independent_settlement<B: KernelBehavior>(
     }
     match message {
         KernelMessage::ToolCompleted { boundary, .. }
+        | KernelMessage::ToolAborted { boundary, .. }
         | KernelMessage::ReconcileWorkbenchBoundary { boundary, .. } => {
             !matches!(
                 boundary,
@@ -2159,6 +2169,18 @@ async fn apply_hosted_settlement<B: KernelBehavior>(
             let result = state
                 .behavior
                 .tool_completed(&state.context, boundary)
+                .await
+                .map(|()| serde_json::Value::Null)
+                .map_err(|error| KernelInvocationFailure::Rejected {
+                    actor: state.context.identity,
+                    detail: error.to_string(),
+                });
+            reply.send(result).ok();
+        }
+        KernelMessage::ToolAborted { boundary, reply } => {
+            let result = state
+                .behavior
+                .tool_aborted(&state.context, boundary)
                 .await
                 .map(|()| serde_json::Value::Null)
                 .map_err(|error| KernelInvocationFailure::Rejected {
@@ -2721,6 +2743,7 @@ fn deferred_control(message: &KernelMessage) -> Option<DeferredControl> {
             ..
         } => Some(DeferredControl::RouteSettlement),
         KernelMessage::ToolCompleted { .. }
+        | KernelMessage::ToolAborted { .. }
         | KernelMessage::ReconcileWorkbenchBoundary { .. }
         | KernelMessage::ReconcileWorkbenchCancellation { .. } => {
             Some(DeferredControl::HostedSettlement)

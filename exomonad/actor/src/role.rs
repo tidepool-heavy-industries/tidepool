@@ -57,67 +57,7 @@ impl Default for ResearchPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ActorEffectKey {
-    Replies,
-    Watches,
-    Forks,
-    ActorContext,
-    AgentLaunch,
-    AgentInspection,
-    AgentControl,
-    BoundWorktree,
-    WorktreeRegistry,
-    WorktreeAllocation,
-    WorktreeIntegration,
-    Sleep,
-    Notifications,
-    Jev,
-    ModelCall,
-    Commands,
-    Console,
-    Actor,
-    Reflect,
-    Lookup,
-    RepoEvent,
-    Journal,
-    /// Reloading the source layer the holder's own cells compile against. The
-    /// root's layer is the run's; an actor launched with a checkout has its
-    /// own, captured from that checkout. The key names the verb, never the
-    /// layer: which layer a call reaches is fixed when the actor is built, so
-    /// holding this key in a checkout cannot reach the run's source.
-    Source,
-}
-
-impl ActorEffectKey {
-    const fn haskell_name(self) -> &'static str {
-        match self {
-            Self::Replies => "Replies",
-            Self::Watches => "Watches",
-            Self::Forks => "Forks",
-            Self::ActorContext => "ActorContext",
-            Self::AgentLaunch => "AgentLaunch",
-            Self::AgentInspection => "AgentInspection",
-            Self::AgentControl => "AgentControl",
-            Self::BoundWorktree => "BoundWorktree",
-            Self::WorktreeRegistry => "WorktreeRegistry",
-            Self::WorktreeAllocation => "WorktreeAllocation",
-            Self::WorktreeIntegration => "WorktreeIntegration",
-            Self::Sleep => "Sleep",
-            Self::Notifications => "Notifications",
-            Self::Jev => "Jev",
-            Self::ModelCall => "ModelCall",
-            Self::Commands => "Commands",
-            Self::Console => "Console",
-            Self::Actor => "Actor",
-            Self::Reflect => "Reflect",
-            Self::Lookup => "Lookup",
-            Self::RepoEvent => "RepoEvent",
-            Self::Journal => "Journal",
-            Self::Source => "Source",
-        }
-    }
-}
+pub use exomonad_tool::ActorEffectKey;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveRole {

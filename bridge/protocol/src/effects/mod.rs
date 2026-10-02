@@ -29,6 +29,7 @@ pub mod ask;
 pub mod ask_user;
 pub mod commands;
 pub mod console;
+pub mod context_read_write;
 pub mod event;
 pub mod exec;
 pub mod finalize;
@@ -99,6 +100,7 @@ pub fn all() -> Vec<Effect> {
         reflect::reflect(),
         source::source(),
         model::model(),
+        context_read_write::context_read_write(),
         worktree_facades::bound_worktree(),
         worktree_facades::worktree_registry(),
         worktree_facades::worktree_allocation(),

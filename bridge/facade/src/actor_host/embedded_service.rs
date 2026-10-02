@@ -8,8 +8,8 @@ use harness::{
     model::{AgentPath, Effort},
     server::{QueuedCommand, ServerConfig, ServerControl, SessionSecret},
     transport::{
-        Auth, AuthCredentials, ResponsesClient, ResponsesProtocol, ResponsesRoute, TransportError,
         auth::{ChatGptPlanAuth, CodexFileAuth},
+        Auth, AuthCredentials, ResponsesClient, ResponsesProtocol, ResponsesRoute, TransportError,
     },
 };
 use tokio::{
@@ -78,8 +78,10 @@ pub(super) fn responses_client(settings: &EmbeddedLaunchConfig) -> ResponsesClie
     let auth_file = settings.credential_file.clone();
     match settings.provider {
         EmbeddedModelProvider::Codex => {
+            // Native async calls must remain pending across model requests.
+            // Responses Lite rejects async declarations and cannot carry them.
             ResponsesClient::new(EmbeddedAuth::Codex(CodexFileAuth::new(auth_file)))
-                .with_protocol(ResponsesProtocol::Lite)
+                .with_protocol(ResponsesProtocol::Standard)
         }
         EmbeddedModelProvider::ChatGptPlan => {
             ResponsesClient::new(EmbeddedAuth::ChatGptPlan(ChatGptPlanAuth::new(auth_file)))
@@ -320,13 +322,6 @@ pub(super) async fn attach_checkpoint_actor(
     initial_input: Option<String>,
 ) -> Result<EmbeddedActor, String> {
     let actor = installation.actor.identity();
-    let lease = installation
-        .checkpoint
-        .as_ref()
-        .ok_or("embedded child requires a checkpoint")?;
-    if installation.context_parent != Some(lease.issuer) {
-        return Err("embedded child context parent does not match checkpoint issuer".into());
-    }
     let gate = installation
         .fork_gate
         .as_ref()
@@ -337,10 +332,12 @@ pub(super) async fn attach_checkpoint_actor(
     if gate.publication().map_err(|error| error.to_string())?
         == exomonad_actor::ForkGroupPublication::Deferred
     {
-        lease
-            .wait_published()
-            .await
-            .map_err(|refusal| format!("checkpoint publication refused: {refusal:?}"))?;
+        if let Some(lease) = &installation.checkpoint {
+            lease
+                .wait_published()
+                .await
+                .map_err(|refusal| format!("checkpoint publication refused: {refusal:?}"))?;
+        }
     }
     let captured = installation
         .checkpoint_attachment
@@ -357,14 +354,7 @@ pub(super) async fn attach_checkpoint_actor(
     };
     let policy = Arc::new(EmbeddedPolicyInstallation::from_installation(&installation));
     let embedded = runtime
-        .attach_checkpoint(
-            identity,
-            installation.actor.clone(),
-            policy,
-            lease,
-            gate,
-            captured,
-        )
+        .attach_checkpoint(identity, &installation, policy, captured)
         .map_err(|error| error.to_string())?;
     if let Some(input) = initial_input.filter(|_| runtime.admit_initial_input(actor)) {
         embedded
@@ -765,19 +755,44 @@ mod shutdown_tests {
     use super::*;
     use harness::{engine::EngineError, model::RequestId};
 
-    #[test]
-    fn embedded_provider_choice_routes_actor_and_cell_clients() {
+    #[tokio::test]
+    async fn embedded_provider_choice_routes_actor_and_cell_clients() {
         let source = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\nprovider = 'chatgpt_plan'\ncredential_file = '/tmp/exomonad-auth'\ncontext_capacity_tokens = 4096\n";
         let mut settings: EmbeddedLaunchConfig = toml::from_str(source).unwrap();
-        assert_eq!(
-            responses_client(&settings).auth.route(),
-            ResponsesRoute::ChatGptPlan
-        );
-        settings.provider = EmbeddedModelProvider::Codex;
-        assert_eq!(
-            responses_client(&settings).auth.route(),
-            ResponsesRoute::Codex
-        );
+        let credentials = tempfile::tempdir().unwrap();
+        settings.credential_file = credentials.path().join("absent.json");
+        for (provider, route) in [
+            (
+                EmbeddedModelProvider::ChatGptPlan,
+                ResponsesRoute::ChatGptPlan,
+            ),
+            (EmbeddedModelProvider::Codex, ResponsesRoute::Codex),
+        ] {
+            settings.provider = provider;
+            let client = responses_client(&settings);
+            assert_eq!(client.auth.route(), route);
+            // Normalization happens before credential access. Lite rejects the
+            // plan route, and rejects this native tool on the Codex route.
+            // Authentication proves the selected Standard path normalized; the
+            // deliberately missing file prevents network traffic.
+            let tools = if route == ResponsesRoute::Codex {
+                vec![serde_json::json!({"type": "tool_search"})]
+            } else {
+                Vec::new()
+            };
+            let result = client
+                .create(harness::transport::ResponsesRequest {
+                    input: Vec::new(),
+                    instructions: String::new(),
+                    tools: tools.into(),
+                    tools_allowed: None,
+                    model: "gpt-6.1-sol".into(),
+                    pinned_effort: Effort::Medium,
+                    session_id: "provider-constructor-test".into(),
+                })
+                .await;
+            assert!(matches!(result, Err(TransportError::Authentication)));
+        }
     }
 
     #[test]

@@ -579,13 +579,13 @@ impl ExtractCmd {
         self
     }
 
-    /// `--build-products-dir <dir>` — a persistent, shared `-fwrite-interface`
-    /// output dir the extract points `hiDir`/`objectDir` at, so a LATER spawn's
-    /// `load'` can skip an unchanged home module via GHC's own `checkOldIface`
-    /// (spike-verified). Dropped from
-    /// the compile-memo key, same
-    /// bucket as `--output-dir`: it changes nothing about the OUTPUT bytes,
-    /// only whether GHC's frontend can skip work to produce them.
+    /// Logical root for GHC interface/object products. The process boundary
+    /// appends a private invocation or daemon-epoch/worker-slot namespace.
+    /// Requests in one slot reuse validated interfaces; rotation reuses that
+    /// placement only after the previous child is reaped. The logical root is
+    /// retained in the artifact recipe, independently of physical placement.
+    /// Final process retirement removes its private scratch after reaping;
+    /// materialized caller artifacts and the logical root remain intact.
     pub fn build_products_dir(&mut self, dir: impl AsRef<OsStr>) -> &mut Self {
         self.request.build_products_dir(dir);
         self

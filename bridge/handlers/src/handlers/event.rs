@@ -661,6 +661,11 @@ impl SubscriptionRegistry {
 /// entry. A "start from now" source is therefore legitimate ONLY in a
 /// single-loop-iteration test; it must never be the production implementation.
 pub trait ObservationSource: Send {
+    /// Whether this installed source can service repository subscriptions.
+    fn supports_repository_events(&self) -> bool {
+        true
+    }
+
     /// Establish this source's "start from now" cutoff before a subscription
     /// becomes live. Production resolves the durable worktree path and primes
     /// the monitor here; focused policy seams may keep the default no-op when
@@ -690,6 +695,10 @@ pub trait ObservationSource: Send {
 pub struct InertObservationSource;
 
 impl ObservationSource for InertObservationSource {
+    fn supports_repository_events(&self) -> bool {
+        false
+    }
+
     fn register(&mut self, _worktree: &WtWorktreeId) -> Result<(), EventError> {
         Err(EventError::EventSourceLost(
             "repository events are served by the root session".into(),
@@ -1862,6 +1871,36 @@ mod tests {
             source.observe(&wt("a")),
             Err(EventError::EventSourceLost(_))
         ));
+    }
+
+    #[test]
+    fn installed_support_distinguishes_active_and_inert_sources() {
+        use tidepool_mcp::InstalledEffectSupport;
+        struct Active;
+        impl ObservationSource for Active {
+            fn observe(&mut self, _: &WtWorktreeId) -> Result<Vec<EvRepositoryEvent>, EventError> {
+                Ok(Vec::new())
+            }
+        }
+        let inert =
+            RepoEventHandler::with_source(Box::new(InertObservationSource), EventConfig::default());
+        let active = RepoEventHandler::with_source(Box::new(Active), EventConfig::default());
+        let inert_stack =
+            frunk::hlist![crate::handlers::source::SourceHandler::unavailable(), inert];
+        let active_stack = frunk::hlist![
+            crate::handlers::source::SourceHandler::unavailable(),
+            active
+        ];
+        assert!(inert_stack.installed_effect_support().is_empty());
+        assert_eq!(
+            active_stack.installed_effect_support(),
+            vec![exomonad_tool::ActorEffectKey::RepoEvent.into()]
+        );
+        let shadowed = frunk::hlist![
+            RepoEventHandler::with_source(Box::new(InertObservationSource), EventConfig::default()),
+            RepoEventHandler::with_source(Box::new(Active), EventConfig::default())
+        ];
+        assert!(shadowed.installed_effect_support().is_empty());
     }
 
     fn commit_event(id: i64, tree: &str, oid: &str) -> EvRepositoryEvent {
@@ -3348,5 +3387,19 @@ mod tests {
             "an id the registry also does not know must still fail the \
              existing typed path, unchanged"
         );
+    }
+}
+
+impl tidepool_mcp::InstalledEffectSupport for RepoEventHandler {
+    fn handled_effect_families(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+        vec![exomonad_tool::ActorEffectKey::RepoEvent.into()]
+    }
+
+    fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+        if self.state.lock().source.lock().supports_repository_events() {
+            self.handled_effect_families()
+        } else {
+            Vec::new()
+        }
     }
 }

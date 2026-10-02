@@ -23,7 +23,9 @@
 pub(crate) mod after_tool;
 pub mod agent_spec;
 mod call_timing;
+mod cell_context;
 mod cell_model;
+pub use cell_context::{CellExit, CellExitCause, ContextReq, HostedContextBinding};
 pub use cell_model::{CellModelBinding, CellModelFactory, ModelBoundaryError, ModelReq};
 mod conversation;
 mod descriptor;
@@ -56,6 +58,8 @@ mod resident_interactive;
 mod resident_tools;
 mod resident_workbench;
 mod role;
+pub(crate) mod tool_contract;
+pub use tool_contract::ToolContractError;
 mod runtime_observation;
 mod start;
 pub(crate) mod status_tool;

@@ -97,6 +97,18 @@ See `daemon::DEFAULT_WORKER_COUNT`, `daemon::WARM_WORKER_MB`, and
 `daemon::default_memory_budget_mb`'s doc comments for the exact sizing and
 the matching `.config/nextest.toml` `[test-groups.ghc-heavy] max-threads`.
 
+Mutable GHC interface/object products are private to a daemon epoch and worker
+slot below the requested logical build-products root. Successive requests and
+worker rotations reuse that slot's directory only after its former child is
+reaped. Independent daemons and direct invocations receive fresh namespaces;
+disk warmth across daemon reboots/direct invocations is deliberately sacrificed
+for exclusive output ownership. This transport placement preserves the logical
+request used for artifact recipes and diagnostic correlation. The immutable
+artifact cache remains shared. The process owner removes its private scratch
+directories after its final child is reaped, preserving the logical root and
+other owners. Ungraceful frontend/daemon death can leave orphan directories;
+this boundary does not sweep another process's outputs.
+
 Idle worker slots wait for accepted requests. Source compilation can run
 compile-time IO, so daemon startup and idleness never replay a caller's request.
 

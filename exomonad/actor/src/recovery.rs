@@ -606,6 +606,19 @@ impl ActorRecoveryJournal {
         Ok(replay(rows)?.0.into_values().collect())
     }
 
+    /// Resolve one live incarnation without copying the run's other records.
+    pub fn active_application_conversation(
+        &self,
+        actor: ActorRef,
+    ) -> Option<ApplicationConversation> {
+        let state = self.state.lock();
+        let record = state.records.get(&actor)?;
+        if record.terminal.is_some() {
+            return None;
+        }
+        record.application.as_ref()?.conversation.clone()
+    }
+
     pub fn records(&self) -> Vec<DurableActorRecord> {
         self.state.lock().records.values().cloned().collect()
     }

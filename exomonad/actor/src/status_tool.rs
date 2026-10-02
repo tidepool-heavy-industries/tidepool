@@ -59,6 +59,9 @@ pub(crate) struct StatusInputError(String);
 
 pub(crate) fn declaration() -> HostedTool {
     HostedTool::Function(ToolDeclaration {
+        schedule: Default::default(),
+        implementation: Default::default(),
+        effect_keys: Vec::new(),
         name: STATUS_TOOL.into(),
         description: "Inspect this actor and its workbench. Example: {\"view\":\"recovery\"}. Omit view for the compact summary's rows that changed since your previous status call; use summary (or all) for every row, revisions for the source revisions you are working against, or detailed, lineage, trace, bindings, live, or watches for other perspectives.".into(),
         input_schema: serde_json::json!({

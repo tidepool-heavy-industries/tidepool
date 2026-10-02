@@ -81,6 +81,7 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
         issuer: campaign.actor.identity(),
         snapshot: Arc::new(installation.request_snapshot().unwrap()),
         store: store.clone(),
+        context_models: Arc::new(OnceLock::new()),
     });
     let provider = Arc::new(HeldDispatch {
         dispatcher,

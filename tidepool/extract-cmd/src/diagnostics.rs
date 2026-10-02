@@ -1,6 +1,6 @@
 //! Recognized `tidepool-*` machine-readable stderr prefixes.
 //!
-//! The compiler worker (`bridge/haskell/src/Tidepool/Timing.hs` and
+//! The process boundary and compiler worker (`bridge/haskell/src/Tidepool/Timing.hs` and
 //! `GhcPipeline.hs`) writes these lines to stderr under `TIDEPOOL_TIMING=1`
 //! and during structural module accounting. They are measurements for the
 //! daemon's detailed log, never source diagnostics, so every consumer that
@@ -13,7 +13,8 @@
 /// machine-readable measurement/accounting lines (as opposed to a GHC source
 /// diagnostic). A worker line starting with one of these, after leading
 /// whitespace is trimmed, is machine-readable and never a source diagnostic.
-pub const MACHINE_STDERR_PREFIXES: [&str; 17] = [
+pub const MACHINE_STDERR_PREFIXES: [&str; 21] = [
+    "tidepool-build-products ",
     "tidepool-prepared-interface-elided ",
     "tidepool-timing ",
     "tidepool-timing-detail ",
@@ -23,6 +24,9 @@ pub const MACHINE_STDERR_PREFIXES: [&str; 17] = [
     "tidepool-compile-summary ",
     "tidepool-memo-miss ",
     "tidepool-checked ",
+    "tidepool-checked-loaded-source ",
+    "tidepool-candidate-admission ",
+    "tidepool-exact-execution-load ",
     "tidepool-checked-dependency-executable ",
     "tidepool-checked-interface-retained ",
     "tidepool-checked-interface-elided ",

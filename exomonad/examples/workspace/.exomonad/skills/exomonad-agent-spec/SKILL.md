@@ -12,16 +12,25 @@ compiled from the run's current source; saving a file does not install it.
 
 The conventional module is `AgentSpec`, exporting `agentSpec`. Workspace
 configuration may set `[haskell] spec` to another exported spec. The conventional
-module takes precedence; with neither, the host installs an empty spec. The obsolete
-`[haskell] tools` key is rejected; wrap the typed tools record with `installSpec` and
-configure that spec. The spec comes from the run's current tooling graph, not a
-child's historical checkout. Use `status` with `view: "detailed"` to see the selected
+module takes precedence; with neither, the host installs the default notebook
+spec. A host with context-editing support exposes `haskell` and `haskell_sync`;
+other hosts expose only `haskell`. The obsolete `[haskell] tools` key is rejected;
+put the typed tools record in an `AgentSpec` and configure its exported value.
+The spec comes from the run's current tooling graph, not a child's historical
+checkout. Use `status` with `view: "detailed"` to see the selected
 rule, source file, and installed revision. Run
 `exomonad check --workspace <path>` to typecheck a workspace before launch.
 
 ## Put behavior at the right boundary
 
 A tool body receives its declared Haskell input and can use typed effects.
+Ordinary tool fields are asynchronous; wrap a `Call`, `RawCall`, or `Notify`
+endpoint in `Sync` to hold the caller's next inference until it settles.
+A notebook field uses `HaskellCell effects`, optionally wrapped in `Sync`;
+`haskellTool` builds its checked profile. Only a synchronous profile can include
+`ContextReadWrite`. The installer checks selected effects against this actor's
+grants and installed interpreters.
+
 When the tool needs to select or present its own result, use that tool's typed
 seam:
 
@@ -46,8 +55,8 @@ of acceptance or completion. Use a tool's typed seam for result presentation.
 The run owner edits the run workspace, calls `reloadSource`, then calls
 `reload_agent_spec` to rebuild its own spec. A child can prepare edits in its
 checkout, but cannot publish them into the active run tooling. A typecheck
-failure or changed declared tool name, description,
-kind, schema, or order refuses the reload and leaves the installed record
-active. A tool call already running keeps its implementation. A changed tool
-surface takes effect in a new actor incarnation; this reload never changes a
-child actor's spec.
+failure or changed declared tool name, description, kind, schema, scheduling,
+implementation kind, effect profile, or order refuses the reload and leaves the
+installed record active. A tool call already running keeps its implementation.
+A changed tool surface takes effect in a new actor incarnation; this reload
+never changes a child actor's spec.
