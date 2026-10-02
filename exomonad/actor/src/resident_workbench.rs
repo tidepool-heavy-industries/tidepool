@@ -4094,7 +4094,6 @@ where
                     &context.haskell_effects_alias,
                     ACTIVATION_INPUT_LIMIT,
                     template,
-                    prepared.injected,
                     authority.clone(),
                     authority.authority_digest(),
                     prepared.include,

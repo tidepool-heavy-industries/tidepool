@@ -435,7 +435,7 @@ fn checked_input(
     let view = resident.compile_view_in(ScopeId::ROOT).unwrap();
     let imports = view.turn_imports(&SourceImports::new());
     let template = resident_cell_check_template(&recipe.preamble, &recipe.row, &imports);
-    let owner = resident
+    let mut owner = resident
         .admit_activation_input_in(
             ScopeId::ROOT,
             input,
@@ -443,13 +443,55 @@ fn checked_input(
             &recipe.row,
             512,
             template,
-            view.injected_module_names(),
             recipe.clone(),
             recipe.digest(),
             view.include_paths(&recipe.include),
             String::new(),
         )
         .expect("seal original input under the owning scope and source recipe");
+    assert_eq!(
+        owner.specification.injected_modules,
+        owner.admission.view().injected_module_names()
+    );
+    let original_specification = owner.specification.clone();
+    let before = resident.residency();
+    let visibility = resident
+        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .unwrap();
+    let mut injections = vec![{
+        let mut injected = original_specification.injected_modules.clone();
+        injected.push("Val.G999999".into());
+        injected
+    }];
+    if original_specification.injected_modules.len() > 1 {
+        injections.push(
+            original_specification
+                .injected_modules
+                .iter()
+                .rev()
+                .cloned()
+                .collect(),
+        );
+    }
+    for injected_modules in injections {
+        let mut changed = (*original_specification).clone();
+        changed.injected_modules = injected_modules;
+        owner.specification = Arc::new(changed);
+        let failure = turn::check_activation_input(&owner)
+            .expect_err("extra or reordered injection must be refused before compilation");
+        assert!(matches!(
+            failure.error,
+            crate::CompileError::ExtractFailed(_)
+        ));
+        assert_eq!(resident.residency(), before);
+        assert_eq!(
+            resident
+                .public_visibility_snapshot_in(ScopeId::ROOT)
+                .unwrap(),
+            visibility
+        );
+    }
+    owner.specification = original_specification;
     let checked = turn::check_activation_input(&owner).expect("check host input interface");
     let item = resident
         .admit_activation_input_item(&owner, &checked)

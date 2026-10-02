@@ -2571,7 +2571,6 @@ where
         effect_stack: &str,
         preview_budget: usize,
         cell_template: String,
-        injected_modules: Vec<String>,
         retained_source: Arc<dyn std::any::Any + Send + Sync>,
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
@@ -2599,6 +2598,12 @@ where
             input.input_type(),
             preview_budget,
         );
+        let injected_modules = self
+            .state
+            .compile_view_in(scope)
+            .ok_or(SessionError::DeadScope(scope))?
+            .with_scoped_injection()
+            .injected_module_names();
         let specification = Arc::new(tidepool_toolchain::checked_cell::CheckedCellSpecification {
             admission_digest: [0; 32],
             cell_source: input.placeholder_source(),
