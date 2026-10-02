@@ -34,7 +34,9 @@ import Control.Monad.State.Strict
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.IntMap.Strict qualified as IntMap
-import Data.List (find)
+import Data.Foldable (toList)
+import Data.Sequence (Seq, (|>))
+import Data.Sequence qualified as Seq
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Tidepool.PreparedBuiltins
   ( DeferredFunction(..), deferredFunction, wiredInErrorKind )
@@ -65,6 +67,7 @@ import GHC.Stg.Syntax
 import GHC.Stg.Syntax qualified as Stg
 import GHC.StgToCmm.Closure (importedIdLFInfo)
 import GHC.StgToCmm.Types (LambdaFormInfo(..))
+import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.Demand (splitDmdSig)
 import GHC.Types.Literal (LitNumType(..), Literal(..), literalType)
 import GHC.Types.Id (idDmdSig, isDeadEndId, isDataConWorkId_maybe)
@@ -103,7 +106,7 @@ import Tidepool.PreparedFormatting
   (FormattingAuthority, FormattingSpec(..), FormattingIntrinsic(..), classifyFormatting)
 import Tidepool.PreparedTime (TimeAuthority, TimeSpec(..), classifyTime)
 import Tidepool.PreparedJson
-  ( JsonAuthority, JsonSpec(..), classifyJson, jsonAuthorityLayout )
+  ( JsonAuthority, JsonSpec(..), classifyJson, jsonAuthorityLayout, jsonValueLayoutForType )
 
 data ProjectionContext = ProjectionContext
   { projectionProfile :: Text
@@ -149,11 +152,17 @@ data PState = PState
   , topSymbols :: VarEnv SymbolIdentity, topValues :: Map SymbolIdentity ValueId
   , implicitTops :: [TopBinding]
   , implicitValues :: Map SymbolIdentity ValueId
-  , globals :: VarEnv GlobalId, globalDecls :: [GlobalDecl]
-  , constructors :: [(DataCon, ConstructorId)], constructorDecls :: [ConstructorDecl]
-  , operations :: [(Schema.OperationIdentity, Signature, OperationId)]
-  , operationDecls :: [OperationDecl]
-  , signatures :: [(Signature, SignatureId)]
+  -- Tables retain first-encounter order; each ID is its declaration position.
+  -- Lookup indexes and counters share the projection's representation rollback.
+  , nextGlobal :: !Word32, nextConstructor :: !Word32
+  , nextOperation :: !Word32, nextSignature :: !Word32
+  , globals :: VarEnv GlobalId, globalDecls :: Seq GlobalDecl
+  , constructors :: Seq (DataCon, ConstructorId), constructorDecls :: Seq ConstructorDecl
+  , constructorIndex :: Map SymbolIdentity (ConstructorId, ConstructorDecl)
+  , operations :: Map (Schema.OperationIdentity, SignatureId) OperationId
+  , operationDecls :: Seq OperationDecl
+  , signatures :: Seq Signature
+  , signatureIndex :: Map ([RuntimeRep], ResultContract) SignatureId
   , target :: TargetDescriptor
   , retainedGenerations :: Map SymbolIdentity Word64
   , homeModules :: Set (Text, Text)
@@ -204,7 +213,9 @@ resolveTextPackageUnit hscEnv =
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
-  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty Nothing Nothing Nothing Nothing Set.empty ExecutableTarget)
+  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty
+    0 0 0 0 emptyVarEnv Seq.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
+    machine Map.empty Set.empty Nothing Nothing Nothing Nothing Set.empty ExecutableTarget)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
@@ -261,6 +272,7 @@ projectPreparedModuleGroupsFor purpose context prepared selection = traverse pro
   where
     identities = buildTopIdentityMap [prepared]
     originals = pmBindings prepared
+    evidenceIndex = indexPreparedEvidence prepared
     ordinalByFirst = Map.fromList
       [ (getKey (varUnique first), fromIntegral ordinal)
       | (ordinal, (binding, _)) <- zip [0 :: Int ..] originals
@@ -279,8 +291,8 @@ projectPreparedModuleGroupsFor purpose context prepared selection = traverse pro
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
     projectOne item@(binding, _) = do
       case [ srMessage rejection
-           | rejection <- pmSiteRejections prepared
-           , varUnique (srBinder rejection) `elem` map varUnique (topBinders binding)
+           | rejection <- selectOwnedEvidence (topBinders binding)
+               (evidenceRejectionsByOwner evidenceIndex)
            , not (skippedFromRecovery context (srBinder rejection)) ] of
         message : _ -> Left (RejectedTypedSite (Text.pack message))
         [] -> pure ()
@@ -295,19 +307,19 @@ projectPreparedModuleGroupsFor purpose context prepared selection = traverse pro
       let onlyGroup = prepared { pmBindings = [item] }
           outside = allSymbols `Set.difference` Set.fromList binders
           initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv identities
-            Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] []
+            Map.empty [] Map.empty 0 0 0 0 emptyVarEnv Seq.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
             (projectionTarget context) (projectionRetainedGenerations context)
             (if pmCoverage prepared == CompleteSourceModule
               then Set.singleton owner else Set.empty)
             (projectionFormattingAuthority context) (projectionTimeAuthority context)
             (projectionJsonAuthority context) (projectionTextUnit context) outside purpose
+      evidence <- selectPreparedEvidence evidenceIndex (topBinders binding)
       ((groups, types, sites, verbSites, jsonLayout), final) <- runStateT
-        (do validatePreparedEvidence context [onlyGroup]
+        (do validatePreparedEvidence context [onlyGroup] [evidence]
             preallocate [onlyGroup]
             groups <- projectModule onlyGroup
-            (types, sites, verbSites) <- lowerPreparedEvidence context [onlyGroup]
-            jsonLayout <- traverse (traverse internConstructor . jsonAuthorityLayout)
-              (projectionJsonAuthority context)
+            (types, sites, verbSites) <- lowerPreparedEvidence context [onlyGroup] [evidence]
+            jsonLayout <- lowerJsonLayout [onlyGroup]
             pure (groups, types, sites, verbSites, jsonLayout)) initial
       pure ProjectedGroup
         { projectedOriginalOrdinal = ordinal
@@ -316,10 +328,10 @@ projectPreparedModuleGroupsFor purpose context prepared selection = traverse pro
             { projectedEnvelope = ProgramEnvelope schemaVersion
                 (projectionProfile context) (projectionToolchain context)
                 executionAbiVersion (projectionTarget context)
-            , projectedSignatures = map fst (signatures final)
-            , projectedGlobals = globalDecls final
-            , projectedConstructors = constructorDecls final
-            , projectedOperations = operationDecls final
+            , projectedSignatures = toList (signatures final)
+            , projectedGlobals = toList (globalDecls final)
+            , projectedConstructors = toList (constructorDecls final)
+            , projectedOperations = toList (operationDecls final)
             , projectedBindings = map NonRecursive (reverse (implicitTops final)) ++ groups
             , projectedTypes = types
             , projectedSites = sites
@@ -348,7 +360,7 @@ projectPreparedWithTopSymbols :: ProjectionContext -> [PreparedModule]
   -> VarEnv SymbolIdentity -> Either ProjectionError (WireProgram, [DataCon])
 projectPreparedWithTopSymbols context modules topIdentityMap = do
   let initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv topIdentityMap Map.empty [] Map.empty
-        emptyVarEnv [] [] [] [] [] [] (projectionTarget context)
+        0 0 0 0 emptyVarEnv Seq.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty (projectionTarget context)
         (projectionRetainedGenerations context) (Set.fromList
           [ (Text.pack (unitString (moduleUnit (pmModule prepared))),
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
@@ -363,12 +375,12 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
       -- standing from the retained one), but nothing here recovers its body.
       projectable = map (dropRetainedTops context) modules
   ((bindingGroups, programTypes, programSites, programVerbSites, programJsonLayout), final) <- runStateT
-    (do validatePreparedEvidence context projectable
+    (do evidence <- lift (traverse preparedEvidence projectable)
+        validatePreparedEvidence context projectable evidence
         preallocate projectable
         groups <- concat <$> mapM projectModule projectable
-        (types, sites, verbSites) <- lowerPreparedEvidence context projectable
-        jsonLayout <- traverse (traverse internConstructor . jsonAuthorityLayout)
-          (projectionJsonAuthority context)
+        (types, sites, verbSites) <- lowerPreparedEvidence context projectable evidence
+        jsonLayout <- lowerJsonLayout projectable
         pure (groups, types, sites, verbSites, jsonLayout)) initial
   entryTop <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
     pure (findTop bindingGroups)
@@ -376,17 +388,18 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
       TopBinding _ entryBinding = entryTop
   case heapBindingRhs entryBinding of
     Function signature _ _ _
-      | lookup signature [(identity, signatureResults contract)
-          | (contract, identity) <- signatures final] == Just CallerResult ->
+      | SignatureId index <- signature
+      , (signatureResults <$> Seq.lookup (fromIntegral index) (signatures final))
+          == Just CallerResult ->
           Left (InvalidPreparedRepresentation "program entry requires a concrete result contract")
     _ -> pure ()
   let program = WireProgram
         { programEnvelope = ProgramEnvelope schemaVersion (projectionProfile context)
             (projectionToolchain context) executionAbiVersion (projectionTarget context)
-        , programSignatures = map fst (signatures final)
-        , programGlobals = globalDecls final
-        , programConstructors = constructorDecls final
-        , programOperations = operationDecls final
+        , programSignatures = toList (signatures final)
+        , programGlobals = toList (globalDecls final)
+        , programConstructors = toList (constructorDecls final)
+        , programOperations = toList (operationDecls final)
         , programBindings = map NonRecursive (reverse (implicitTops final)) ++ bindingGroups
         , programEntry = entry
         , programTypes = programTypes
@@ -394,7 +407,7 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
         , programVerbSites = programVerbSites
         , programJsonLayout = programJsonLayout
         }
-  pure (program, map fst (constructors final))
+  pure (program, map fst (toList (constructors final)))
   where
     topValue (TopBinding _ binding) = heapBindingId binding
     findTop = foldr findGroup Nothing
@@ -405,6 +418,38 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
     groupItems (NonRecursive top) = [top]
     groupItems (Recursive tops) = tops
     topSymbol (TopBinding symbol _) = symbol
+
+-- JSON operations, structural answers and host mounts consume authenticated
+-- roles. A host carrier can have a Value root without constructing a Value or
+-- declaring a site, so its binder type must also retain the layout. Unrelated
+-- original groups need neither the roles nor their constructor declarations.
+lowerJsonLayout :: [PreparedModule] -> P (Maybe (JsonLayout ConstructorId))
+lowerJsonLayout modules = do
+  authority <- gets jsonAuthority
+  case authority of
+    Nothing -> pure Nothing
+    Just owner -> do
+      emittedOperations <- gets operationDecls
+      admittedConstructors <- gets constructors
+      let layout = jsonAuthorityLayout owner
+          needsOperations = any (isJsonOperation . operationIdentity) emittedOperations
+          needsConstructors = any
+            (isJust . jsonValueLayoutForType owner . dataConOrigResTy . fst)
+            admittedConstructors
+          needsHostRoot = any (isValueResult owner)
+            [ binder | prepared <- modules, (binding, _) <- pmBindings prepared
+                     , binder <- topBinders binding ]
+      if needsOperations || needsConstructors || needsHostRoot
+        then Just <$> traverse internConstructor layout
+        else pure Nothing
+ where
+  isJsonOperation Schema.JsonDecodeIdentity{} = True
+  isJsonOperation Schema.JsonEncodeIdentity = True
+  isJsonOperation _ = False
+  isValueResult authority binder =
+    let (_, _, body) = tcSplitSigmaTy (varType binder)
+        result = snd (splitFunTys body)
+    in isJust (jsonValueLayoutForType authority (unwrapType result))
 
 -- | Project only the supplied top-level closure reachable from the selected
 -- entry. Package imports remain explicit globals for atomic linking. This
@@ -500,7 +545,7 @@ preparedModuleReferenceFacts context prepared = Map.fromList
   , let entryReferences =
           [ ReferenceFact binder (idSymbol "value" binder)
           | binder <- preparedReferencedIds (extractPreparedFacts
-              (pmModule prepared) (pmTagSigs prepared) (recoveryReferences context binding))
+              (pmModule prepared) (recoveryReferences context binding))
           , isExternalName (varName binder)
           , isNothing (nullaryWorkerConstructor binder) ]
   ]
@@ -894,6 +939,51 @@ preallocate modules = do
 projectModule :: PreparedModule -> P [Group TopBinding]
 projectModule = mapM (projectTop . fst) . pmBindings
 
+-- One module projection owns this immutable index. Its graph stays lazy so
+-- groups without typed sites do not force an otherwise unused full graph.
+data PreparedEvidenceIndex = PreparedEvidenceIndex
+  { evidenceGraph :: IntMap.IntMap TypePolicy.TypeNodeG
+  , evidenceSitesByOwner :: Map Word64 [(Int, PreparedSite)]
+  , evidenceRejectionsByOwner :: Map Word64 [(Int, SiteRejection)]
+  }
+
+data SelectedPreparedEvidence = SelectedPreparedEvidence
+  { selectedEvidenceGraph :: IntMap.IntMap TypePolicy.TypeNodeG
+  , selectedEvidenceSites :: [PreparedSite]
+  }
+
+indexPreparedEvidence :: PreparedModule -> PreparedEvidenceIndex
+indexPreparedEvidence prepared = PreparedEvidenceIndex
+  { evidenceGraph = IntMap.fromAscList
+      (zip [0 :: Int ..] (TypePolicy.tgNodes (pmTypeGraph prepared)))
+  , evidenceSitesByOwner = Map.fromListWith (<>)
+      [ (getKey (varUnique (psOwner site)), [(ordinal, site)])
+      | (ordinal, site) <- zip [0 :: Int ..] (pmPreparedSites prepared) ]
+  , evidenceRejectionsByOwner = Map.fromListWith (<>)
+      [ (getKey (varUnique (srBinder rejection)), [(ordinal, rejection)])
+      | (ordinal, rejection) <- zip [0 :: Int ..] (pmSiteRejections prepared) ]
+  }
+
+selectPreparedEvidence :: PreparedEvidenceIndex -> [Id]
+  -> Either ProjectionError SelectedPreparedEvidence
+selectPreparedEvidence index binders = do
+  let sites = selectOwnedEvidence binders (evidenceSitesByOwner index)
+      roots = concat [ psWireNode site : psInputNodes site | site <- sites ]
+  graph <- selectTypeGraph (evidenceGraph index) roots
+  pure (SelectedPreparedEvidence graph sites)
+
+-- Original ordinals recover module row order even for recursive groups whose
+-- binders are encountered in a different order.
+selectOwnedEvidence :: [Id] -> Map Word64 [(Int, a)] -> [a]
+selectOwnedEvidence binders rowsByOwner = IntMap.elems (IntMap.fromList
+  [ row
+  | owner <- Set.toList (Set.fromList (map (getKey . varUnique) binders))
+  , row <- Map.findWithDefault [] owner rowsByOwner ])
+
+preparedEvidence :: PreparedModule -> Either ProjectionError SelectedPreparedEvidence
+preparedEvidence prepared = selectPreparedEvidence (indexPreparedEvidence prepared)
+  [ binder | (binding, _) <- pmBindings prepared, binder <- topBinders binding ]
+
 -- | Lower only evidence owned by the executable tops retained in each module.
 -- Graph ids are module-local during elaboration; this pass compacts reachable
 -- nodes in module/original order and rebases every edge into one program table.
@@ -901,9 +991,9 @@ projectModule = mapM (projectTop . fst) . pmBindings
 -- ('lowerAuxiliaryRootEvidence'); synthetic reply sites for the program's
 -- request constructors follow that ('lowerVerbEvidence').
 lowerPreparedEvidence :: ProjectionContext -> [PreparedModule]
-  -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
-lowerPreparedEvidence context modules = do
-  (moduleNodes, moduleSites) <- foldM lowerOne ([], []) modules
+  -> [SelectedPreparedEvidence] -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
+lowerPreparedEvidence context modules evidence = do
+  (moduleNodes, moduleSites) <- foldM lowerOne ([], []) evidence
   auxNodes <- lowerAuxiliaryRootEvidence context modules (length moduleNodes)
   (verbNodes, verbRows, verbSites) <-
     lowerVerbEvidence (Set.unions (map pmEffectRequestTypeIds modules))
@@ -916,12 +1006,10 @@ lowerPreparedEvidence context modules = do
       ("duplicate selected prepared site id " <> Text.pack (show duplicate))
     [] -> pure (moduleNodes <> auxNodes <> verbNodes, sites, verbSites)
  where
-  lowerOne (priorNodes, priorSites) prepared = do
-    let selected = selectedPreparedSites prepared
-        roots = concat
-          [ psWireNode site : psInputNodes site | site <- selected ]
-    (lowered, rebase) <- lowerTypeGraph (length priorNodes)
-      (TypePolicy.tgNodes (pmTypeGraph prepared)) roots
+  lowerOne (priorNodes, priorSites) selectedEvidence = do
+    let selected = selectedEvidenceSites selectedEvidence
+    (lowered, rebase) <- lowerSelectedTypeGraph (length priorNodes)
+      (selectedEvidenceGraph selectedEvidence)
     rows <- traverse (\site -> do
           wire <- rebase (psWireNode site)
           inputs <- traverse rebase (psInputNodes site)
@@ -939,29 +1027,14 @@ lowerPreparedEvidence context modules = do
 -- lowering any one graph. Representation recovery may roll one graph's local
 -- state back; a conflict in that graph must still reject the complete program
 -- in either encounter order. Publication remains owned by 'internConstructor'.
-validatePreparedEvidence :: ProjectionContext -> [PreparedModule] -> P ()
-validatePreparedEvidence context modules = do
-  moduleEvidence <- lift . fmap concat . traverse evidenceForModule $ modules
+validatePreparedEvidence :: ProjectionContext -> [PreparedModule]
+  -> [SelectedPreparedEvidence] -> P ()
+validatePreparedEvidence context modules evidence = do
+  let moduleEvidence = concatMap
+        (constructorsForSelectedTypeGraph . selectedEvidenceGraph) evidence
   (auxiliaryNodes, auxiliaryRoots) <- auxiliaryRootTypeGraph context modules
   auxiliaryEvidence <- lift (constructorsForTypeGraph auxiliaryNodes auxiliaryRoots)
   validateConstructorEvidence (moduleEvidence <> auxiliaryEvidence)
- where
-  evidenceForModule prepared =
-    constructorsForTypeGraph
-      (TypePolicy.tgNodes (pmTypeGraph prepared))
-      (concat [ psWireNode site : psInputNodes site
-              | site <- selectedPreparedSites prepared ])
-
-selectedPreparedSites :: PreparedModule -> [PreparedSite]
-selectedPreparedSites prepared =
-  let owners = mkUniqSet
-        [ varUnique binder
-        | (binding, _) <- pmBindings prepared
-        , binder <- topBinders binding
-        ]
-  in filter
-    (\site -> elementOfUniqSet (varUnique (psOwner site)) owners)
-    (pmPreparedSites prepared)
 
 -- | Force-intern type evidence for every admitted auxiliary root's own
 -- answer type, the same way a declared site's answer type is interned
@@ -1017,7 +1090,7 @@ auxiliaryRootTypeGraph context modules = do
 -- (ordinary data constructors such as (:|) can have that shape too).
 lowerVerbEvidence :: Set Word64 -> Int -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
 lowerVerbEvidence effectRequestTypeIds base = do
-  known <- gets constructors
+  known <- gets (toList . constructors)
   let candidates =
         [ (identity, qualified, index)
         | (constructor, identity) <- known
@@ -1055,10 +1128,23 @@ lowerVerbEvidence effectRequestTypeIds base = do
 lowerTypeGraph :: Int -> [TypePolicy.TypeNodeG] -> [TypePolicy.TypeNodeId]
   -> P ([TypeNode], TypePolicy.TypeNodeId -> P TypeNodeId)
 lowerTypeGraph base nodes roots = do
-  let graphNodes = IntMap.fromAscList (zip [0 :: Int ..] nodes)
-  reachable <- lift (reachableTypeNodes graphNodes roots)
-  let ordered = [ TypePolicy.TypeNodeId (fromIntegral index)
-                | index <- IntMap.keys graphNodes, Set.member index reachable ]
+  selected <- lift (selectTypeGraph (IntMap.fromAscList (zip [0 :: Int ..] nodes)) roots)
+  lowerSelectedTypeGraph base selected
+
+-- Select only reachable keys, preserving the graph's original order without
+-- scanning every module node. Empty roots grant no evidence and need no graph.
+selectTypeGraph :: IntMap.IntMap TypePolicy.TypeNodeG -> [TypePolicy.TypeNodeId]
+  -> Either ProjectionError (IntMap.IntMap TypePolicy.TypeNodeG)
+selectTypeGraph _ [] = Right IntMap.empty
+selectTypeGraph nodes roots = do
+  reachable <- reachableTypeNodes nodes roots
+  pure (IntMap.fromAscList
+    [ (index, nodes IntMap.! index) | index <- Set.toAscList reachable ])
+
+lowerSelectedTypeGraph :: Int -> IntMap.IntMap TypePolicy.TypeNodeG
+  -> P ([TypeNode], TypePolicy.TypeNodeId -> P TypeNodeId)
+lowerSelectedTypeGraph base graphNodes = do
+  let ordered = map (TypePolicy.TypeNodeId . fromIntegral) (IntMap.keys graphNodes)
       mapping = Map.fromList
         [ (old, TypeNodeId (fromIntegral (base + offset)))
         | (offset, old) <- zip [0 :: Int ..] ordered ]
@@ -1070,12 +1156,12 @@ lowerTypeGraph base nodes roots = do
 
 constructorsForTypeGraph :: [TypePolicy.TypeNodeG] -> [TypePolicy.TypeNodeId]
   -> Either ProjectionError [DataCon]
-constructorsForTypeGraph nodes roots = do
-  let graphNodes = IntMap.fromAscList (zip [0 :: Int ..] nodes)
-  reachable <- reachableTypeNodes graphNodes roots
-  pure (concatMap nodeConstructors
-    [ node | (index, node) <- IntMap.toAscList graphNodes
-           , Set.member index reachable ])
+constructorsForTypeGraph nodes roots =
+  constructorsForSelectedTypeGraph <$>
+    selectTypeGraph (IntMap.fromAscList (zip [0 :: Int ..] nodes)) roots
+
+constructorsForSelectedTypeGraph :: IntMap.IntMap TypePolicy.TypeNodeG -> [DataCon]
+constructorsForSelectedTypeGraph = concatMap nodeConstructors . IntMap.elems
  where
   nodeConstructors node = case node of
     TypePolicy.DataG _ _ _ rows -> map fst rows
@@ -1144,8 +1230,8 @@ lowerTypeNode nodes rebase (TypePolicy.TypeNodeId raw) = case IntMap.lookup (fro
         -- not only the type graph's DataCon. Evidence reached through another
         -- DataCon object for the same constructor must not borrow that
         -- declaration with a different field shape.
-        declared <- gets (fmap constructorFieldReps . listToMaybe
-          . drop (fromIntegral index) . constructorDecls)
+        declared <- gets (fmap constructorFieldReps
+          . Seq.lookup (fromIntegral index) . constructorDecls)
         unless (declared == Just sourceReps)
           (failLayout "prepared type constructor declaration differs from its source fields")
         CtorRow identity <$> traverse rebase fields
@@ -1951,11 +2037,11 @@ internGlobal binder = do
             _ -> failRepresentation "global value has more than one representation component"
           (entry, evaluated) <- importedEntry externalBinder
           signature <- traverse internSignature entry
-          existing <- gets globalDecls
+          next <- gets nextGlobal
           generations <- gets retainedGenerations
           names <- gets topSymbols
           purpose <- gets projectionPurpose
-          let identity = GlobalId (fromIntegral (length existing))
+          let identity = GlobalId next
               symbol = fromMaybe (idSymbol "value" externalBinder)
                 (lookupVarEnv names externalBinder)
               retainedGeneration = case purpose of
@@ -1967,17 +2053,23 @@ internGlobal binder = do
                 retainedGeneration
           modify' (\current -> current
             { globals = extendVarEnv (globals current) externalBinder identity
-            , globalDecls = globalDecls current <> [declaration] })
+            , nextGlobal = next + 1
+            , globalDecls = globalDecls current |> declaration })
           pure identity
 
 internSignature :: Signature -> P SignatureId
 internSignature signature = do
-  known <- gets signatures
-  case find ((== signature) . fst) known of
-    Just (_, identity) -> pure identity
+  let key = (signatureArguments signature, signatureResults signature)
+  known <- gets signatureIndex
+  case Map.lookup key known of
+    Just identity -> pure identity
     Nothing -> do
-      let identity = SignatureId (fromIntegral (length known))
-      modify' (\current -> current { signatures = signatures current <> [(signature, identity)] })
+      next <- gets nextSignature
+      let identity = SignatureId next
+      modify' (\current -> current
+        { nextSignature = next + 1
+        , signatures = signatures current |> signature
+        , signatureIndex = Map.insert key identity (signatureIndex current) })
       pure identity
 
 constructorDeclaration :: DataCon -> P ConstructorDecl
@@ -2023,31 +2115,24 @@ validateConstructorEvidence = mapM_ validateOne
 
 internConstructor :: DataCon -> P ConstructorId
 internConstructor con = do
+  -- Validate each incoming GHC declaration before nominal reuse: equal names
+  -- and uniques do not prove equal physical declarations or layout authority.
   declaration <- constructorDeclaration con
-  prior <- gets constructorDecls
+  known <- gets constructorIndex
   let nominal = constructorIdentity declaration
-      -- 'DataCon' equality follows a GHC object, not its durable nominal
-      -- identity. The same source can therefore reach this boundary via a
-      -- separately loaded interface. Only one physical declaration may be
-      -- published for that nominal constructor.
-      priorNominal =
-        [ (ConstructorId (fromIntegral index), existing)
-        | (index, existing) <- zip [0 :: Int ..] prior
-        , constructorIdentity existing == nominal
-        ]
-  case priorNominal of
-    [] -> do
-      let identity = ConstructorId (fromIntegral (length prior))
+  case Map.lookup nominal known of
+    Nothing -> do
+      next <- gets nextConstructor
+      let identity = ConstructorId next
       modify' (\current -> current
-        { constructors = constructors current <> [(con, identity)]
-        , constructorDecls = constructorDecls current <> [declaration] })
+        { nextConstructor = next + 1
+        , constructors = constructors current |> (con, identity)
+        , constructorDecls = constructorDecls current |> declaration
+        , constructorIndex = Map.insert nominal (identity, declaration) (constructorIndex current) })
       pure identity
-    [(identity, existing)]
+    Just (identity, existing)
       | existing == declaration -> pure identity
       | otherwise -> failConstructorConflict existing declaration
-    _ -> lift . Left . InvalidPreparedIdentity $
-      ("nominal constructor has multiple declarations before interning: "
-        <> symbolText nominal)
 
 failConstructorConflict :: ConstructorDecl -> ConstructorDecl -> P a
 failConstructorConflict existing incoming =
@@ -2169,27 +2254,27 @@ internOperation op signature = do
 
 internSyntheticOperation :: Schema.OperationIdentity -> SignatureId -> P OperationId
 internSyntheticOperation operationIdentity signature = do
-  operationSignature <- signatureForId signature
+  -- Interned signature IDs are canonical; validate the reference before reuse.
+  _ <- signatureForId signature
   known <- gets operations
-  case find (matches operationIdentity operationSignature) known of
-    Just (_, _, identity) -> pure identity
+  let key = (operationIdentity, signature)
+  case Map.lookup key known of
+    Just identity -> pure identity
     Nothing -> do
-      prior <- gets operationDecls
-      let identity = OperationId (fromIntegral (length prior))
+      next <- gets nextOperation
+      let identity = OperationId next
           declaration = OperationDecl operationIdentity signature
       modify' (\current -> current
-        { operations = operations current <> [(operationIdentity, operationSignature, identity)]
-        , operationDecls = operationDecls current <> [declaration] })
+        { nextOperation = next + 1
+        , operations = Map.insert key identity (operations current)
+        , operationDecls = operationDecls current |> declaration })
       pure identity
-  where
-    matches wantedIdentity wantedSignature (knownIdentity, knownSignature, _) =
-      wantedIdentity == knownIdentity && wantedSignature == knownSignature
 
 signatureForId :: SignatureId -> P Signature
-signatureForId identity = do
+signatureForId (SignatureId index) = do
   known <- gets signatures
-  case find ((== identity) . snd) known of
-    Just (signature, _) -> pure signature
+  case Seq.lookup (fromIntegral index) known of
+    Just signature -> pure signature
     Nothing -> failIdentity "operation refers to an unknown signature"
 
 signatureFor :: [Id] -> ResultContract -> P Signature

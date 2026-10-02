@@ -14,8 +14,8 @@ import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
-import Data.List (isInfixOf, isPrefixOf, sortOn)
-import Data.Maybe (isJust, isNothing, maybeToList)
+import Data.List (isInfixOf, isPrefixOf, sortOn, stripPrefix)
+import Data.Maybe (catMaybes, isJust, isNothing, maybeToList)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -69,6 +69,7 @@ import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Tidepool.CertifiedProducts (encodeCertifiedProducts)
 import Tidepool.ExecutionEncode (encodeModuleProducts)
+
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, topBinders
@@ -84,10 +85,11 @@ import GHC.Driver.Env (hsc_home_unit)
 import GHC.Unit.Home (isHomeUnit)
 import GHC.Core.DataCon (dataConWorkId, dataConTyCon)
 import GHC.Core.TyCon (tyConDataCons)
-import Tidepool.PreparedFacts (PreparedFacts(..))
+import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import GHC.Types.Name (nameModule_maybe)
 import GHC.Types.Var (varName)
 import Tidepool.CompileInput (writeCompileInputProof)
+import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.ExecutionSchema
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencyImport(..)
@@ -121,7 +123,49 @@ import Tidepool.Binders (BoundBinder(..))
 import Tidepool.ExecutionSource
   ( ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
   , executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure, executionIdentityKey
-  , ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences )
+  , ExecutionSourceFailure(..), ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences )
+
+counterValues :: String -> String -> [Integer]
+counterValues name diagnostics = map parseCount matching
+  where
+    prefix = "tidepool-count name=" ++ name ++ " "
+    matching = [line | line <- lines diagnostics, prefix `isPrefixOf` line]
+    parseCount line = case
+      [raw | field <- words line, Just raw <- [stripPrefix "count=" field]] of
+        [raw] -> case reads raw of
+          [(value, "")] -> value
+          _ -> error ("invalid count field for " ++ name ++ " in diagnostic: " ++ line)
+        _ -> error ("missing or duplicate count field for " ++ name
+          ++ " in diagnostic: " ++ line)
+
+counterTotal :: String -> String -> Integer
+counterTotal name = sum . counterValues name
+
+exactCompilationCacheSafety
+  :: FilePath -> BS.ByteString -> Either String (Maybe Bool)
+exactCompilationCacheSafety expectedSource bytes = do
+  (remaining, term) <- case deserialiseFromBytes decodeTerm (BSL.fromStrict bytes) of
+    Left failure -> Left ("invalid exact compilation receipt CBOR: " ++ show failure)
+    Right decoded -> Right decoded
+  unless (BSL.null remaining) (Left "exact compilation receipt has trailing CBOR bytes")
+  case term of
+    TList (TString "TPEXACTCOMPILE" : TString version : fields)
+      | version /= "2" -> Left ("unsupported exact compilation receipt schema " ++ T.unpack version)
+      | length fields /= 8 -> Left ("exact compilation receipt v2 has "
+          ++ show (length fields + 2) ++ " fields; expected 10")
+      | otherwise -> case fields of
+          [_, _, TString source, _, _, TString facts, _, _]
+            | source /= T.pack expectedSource -> Right Nothing
+            | otherwise -> Just <$> dependencyCacheSafe (T.unpack facts)
+          _ -> Left "exact compilation receipt v2 has invalid source or evidence fields"
+    _ -> Left "exact compilation receipt has an invalid tag or outer record"
+  where
+    dependencyCacheSafe facts = case stripPrefix "{\"version\":4,\"cache_safe\":" facts of
+      Nothing -> Left "exact compilation receipt has invalid dependency evidence v4 JSON"
+      Just value
+        | Just rest <- stripPrefix "false," value, not (null rest), last rest == '}' -> Right False
+        | Just rest <- stripPrefix "true," value, not (null rest), last rest == '}' -> Right True
+        | otherwise -> Left "dependency evidence v4 has no canonical cache_safe boolean"
 
 main :: IO ()
 main = getArgs >>= \case
@@ -151,6 +195,7 @@ main = getArgs >>= \case
   ["--exact-to-ordinary"] -> exactToOrdinary
   ["--checked-value-imports"] -> checkedValueImports
   ["--exact-loaded-metadata"] -> exactLoadedMetadata
+  ["--quasiquote-codegen-transition"] -> quasiQuoteCodegenTransition
   ["--exact-bash-metadata", effects] -> exactBashMetadata effects
   ["--package-inputs"] -> packageInputs
   ["--home-instance-edges"] -> selectedHomeInstanceEdges
@@ -767,10 +812,13 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
     (hidden,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
       (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult))
     unless (case hidden of
-      Left reason -> "source graph imports unadmitted home implementation" `isInfixOf` show reason
-        && not ("tidepool-timing phase=ghc_load" `isInfixOf` diagnostics)
+      Left reason
+        | Just (OriginalSourceSelectionRejected
+            (ExecutionSourceUnavailable ("main", "MetadataQuoteSupport"))) <- fromException reason ->
+          not ("tidepool-timing phase=ghc_load" `isInfixOf` diagnostics)
       _ -> False) $
-      fail "execution recipe granted a fresh provider a hidden lexical import"
+      fail ("hidden lexical import did not refuse its missing source-selection authority: "
+        ++ either show (const "unexpected success") hidden)
   unless (null (scopeExecutionOwners originalScope)) (fail "legacy scope gained execution authority")
   putStrLn "exact retained quoter: metadata/native, missing/change/preprocess refusals, A/B/A, cancellation, hidden-import preflight passed"
 
@@ -865,7 +913,7 @@ exactReexportQuoter = withTiming $ withScratch $ \work -> do
     mapM_ putStrLn [row | row <- lines diagnostics, "tidepool-exact-execution-load " `isPrefixOf` row]
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult result))) $
       fail "retained facade did not execute its original defining quoter"
-    unless ("tidepool-count name=exact_execution_original_load_owners count=2" `elem` lines diagnostics) $
+    unless (counterValues "exact_execution_original_load_owners" diagnostics == [2]) $
       fail "reexport fixture did not select exactly the defining quoter and pure helper"
     let loadRows = [row | row <- lines diagnostics, "tidepool-exact-execution-load " `isPrefixOf` row]
     unless (length loadRows == 2 && all ("allow_object=False bytecode=True" `isInfixOf`) loadRows
@@ -917,7 +965,7 @@ exactExecutionHiddenInstance = withTiming $ withScratch $ \work -> do
       fail "qualified quoter lost its full defining original owner"
     (hiddenQuote,hiddenDiagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
       (work </> "ExecutionHiddenQuoteTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult))
-    unless (case hiddenQuote of Left _ -> "tidepool-count name=exact_execution_original_load_owners count=0" `elem` lines hiddenDiagnostics; _ -> False) $
+    unless (case hiddenQuote of Left _ -> counterValues "exact_execution_original_load_owners" hiddenDiagnostics == [0]; _ -> False) $
       fail "hidden qualified export acquired an execution recipe"
     (fresh,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
       (work </> "ExecutionFreshTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult))
@@ -935,7 +983,7 @@ exactExecutionHiddenInstance = withTiming $ withScratch $ \work -> do
     (classHidden,classDiagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile
       (Just classScope) (work </> "ExecutionClassQuoteHidden.hs") [work] Nothing)
       :: IO (Either SomeException CheckedEnvironmentResult))
-    unless (case classHidden of Left _ -> "tidepool-count name=exact_execution_original_load_owners count=0" `elem` lines classDiagnostics; _ -> False) $
+    unless (case classHidden of Left _ -> counterValues "exact_execution_original_load_owners" classDiagnostics == [0]; _ -> False) $
       fail "hiding a class parent acquired its child quoter execution capability"
   putStrLn "execution instances: sealed quoter executes, fresh provider cannot borrow private orphan, failure recovers"
 
@@ -1000,11 +1048,17 @@ exactToOrdinary = withTiming $ withScratch $ \work -> do
     unless (fmap renderType (crResultType afterExactLegacy) == Just "Int") $
       fail "legacy value request inherited the preceding exact graph"
     ordinaryQuote
-    refused <- try (compile CheckedEnvironment Set.empty GeneralCompile
+    (refused, refusalDiagnostics) <- captureDiagnostics $ try (compile CheckedEnvironment Set.empty GeneralCompile
       (Just scope {ssExactScope=Just hiddenPath}) (work </> "ExecutionSealedTarget.hs") [work] Nothing)
-      :: IO (Either SomeException CheckedEnvironmentResult)
-    unless (case refused of Left reason -> "unadmitted home implementation" `isInfixOf` show reason; _ -> False) $
-      fail "hidden original unexpectedly became a fresh lexical import"
+      :: IO (Either SomeException CheckedEnvironmentResult, String)
+    unless (case refused of
+      Left reason
+        | Just (OriginalSourceSelectionRejected
+            (ExecutionSourceUnavailable ("main", "ExecutionSealedQuoter"))) <- fromException reason ->
+          not ("tidepool-timing phase=ghc_load" `isInfixOf` refusalDiagnostics)
+      _ -> False) $
+      fail ("hidden original did not refuse its missing source-selection authority: "
+        ++ either show (const "unexpected success") refused)
     ordinaryQuote
     cancelling <- readFile "test-source-boot/fixtures/ExecutionCancellingQuoter.hs"
     let marker = work </> "cancel-marker"
@@ -1078,7 +1132,8 @@ originalPackageProjection = withScratch $ \work -> do
         , references <- Map.elems (preparedModuleReferenceFacts context prepared)
         , reference <- references]
         ++ [dataConWorkId member | prepared <- modules
-           , (constructor, _) <- preparedConstructors (pmFacts prepared)
+           , (constructor, _) <- preparedConstructors
+               (extractPreparedFacts (pmModule prepared) (map fst (pmBindings prepared)))
            , member <- tyConDataCons (dataConTyCon constructor)]
       packages = [preparedRootIdentity binder | binder <- imported
         , Just owner <- [nameModule_maybe (varName binder)]
@@ -1181,7 +1236,8 @@ originalPackageCohort coreRoot output = do
         , references <- Map.elems (preparedModuleReferenceFacts context prepared)
         , reference <- references]
         ++ [dataConWorkId member | prepared <- modules
-           , (constructor, _) <- preparedConstructors (pmFacts prepared)
+           , (constructor, _) <- preparedConstructors
+               (extractPreparedFacts (pmModule prepared) (map fst (pmBindings prepared)))
            , member <- tyConDataCons (dataConTyCon constructor)]
       packages = Set.fromList [preparedRootIdentity binder | binder <- imported
         , Just owner <- [nameModule_maybe (varName binder)]
@@ -1623,7 +1679,7 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
           result = pprPipelineResult reused
       unless (accepted == (if expected == 42 then ["MetadataQuoteSupport"] else [])
           && ("MetadataQuoteSupport" `elem` fresh) == (expected /= 42)
-          && ("tidepool-count name=candidate_source_load_required count=" ++ show required) `elem` lines diagnostics
+          && counterValues "candidate_source_load_required" diagnostics == [fromIntegral required]
           && hasIntResultLiteral expected (prBinds result)) $
         fail ("native candidate reuse skipped GHC execution or retained an old quoted helper body: "
           ++ show (expected, accepted, fresh) ++ "\n" ++ diagnostics ++ "\n"
@@ -2093,6 +2149,50 @@ hasIntResultLiteral expected = any (\case
       Core.Tick _ body -> contains body
       _ -> False
 
+quasiQuoteCodegenTransition :: IO ()
+quasiQuoteCodegenTransition = withTiming $ withScratch $ \work -> do
+  let fixture name = "test-source-boot/fixtures" </> name
+      target = work </> "MetadataQuoteFreeTarget.hs"
+      providers = ["MetadataQuoter", "MetadataQuoteSupport"]
+      providerExecutable name env = case lookupHpt (hsc_HPT env) (mkModuleName name) of
+        Just hmi -> let linkable = hm_linkable hmi
+          in isJust (homeMod_bytecode linkable) || isJust (homeMod_object linkable)
+        Nothing -> False
+  forM_ ["MetadataQuoteFreeTarget.hs", "MetadataQuoter.hs", "MetadataQuoteSupport.hs"] $ \name ->
+    copyFile (fixture name) (work </> name)
+  quoteFree <- readFile (fixture "MetadataQuoteFreeTarget.hs")
+  quoted <- readFile (fixture "MetadataQuotedTarget.hs")
+  let quotedTarget = T.unpack (T.replace "MetadataQuotedTarget" "MetadataQuoteFreeTarget" (T.pack quoted))
+  withResidentPipelineSelected [work] $ \compile -> do
+    let run = captureDiagnostics $
+          compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] Nothing
+        requireFree label (result, diagnostics) = do
+          unless (hasIntResultLiteral 0 (prBinds (pprPipelineResult result))
+              && counterValues "quasiquote_codegen_elided_modules" diagnostics == [2]
+              && all (\name -> not (providerExecutable name (prHscEnv (pprPipelineResult result)))) providers) $
+            fail (label ++ ": quote-free graph retained executable providers or changed its result")
+    run >>= requireFree "cold"
+    writeFile target quotedTarget
+    (executing, diagnostics) <- run
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult executing))
+        && null (counterValues "quasiquote_codegen_elided_modules" diagnostics)
+        && all (\name -> providerExecutable name (prHscEnv (pprPipelineResult executing))) providers) $
+      fail "warm real quote did not provision and execute its transitive providers"
+    writeFile target quoteFree
+    run >>= requireFree "warm after quotation"
+    copyFile (fixture "MetadataQuoteSupportExternalPlugin.hs") (work </> "MetadataQuoteSupport.hs")
+    (pluginResult, pluginDiagnostics) <- captureDiagnostics $
+      try (compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] Nothing)
+        :: IO (Either SomeException PreparedPipelineResult, String)
+    case pluginResult of
+      Left failure
+        | "tidepool-quotation-plugin" `isInfixOf` show failure
+        , null (counterValues "quasiquote_codegen_elided_modules" pluginDiagnostics) -> pure ()
+      _ -> fail "external library plugin input entered quotation elision or bypassed GHC loading"
+    copyFile (fixture "MetadataQuoteSupport.hs") (work </> "MetadataQuoteSupport.hs")
+    run >>= requireFree "after plugin refusal"
+  putStrLn "quasiquote codegen: resident quote-free/real-quote/quote-free, external plugin refusal and recovery passed"
+
 exactLoadedMetadata :: IO ()
 exactLoadedMetadata = withTiming $ withScratch $ \work -> do
   let fixture name = "test-source-boot/fixtures" </> name
@@ -2103,7 +2203,7 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       resultType = fmap renderType . crResultType
       loadedOwner = "tidepool-checked-loaded-source module=MetadataOwner"
       checkedOwner = "tidepool-checked module=MetadataOwner target=False"
-  forM_ ["MetadataOwner.hs", "MetadataTarget.hs", "MetadataLoadedFamily.hs"
+  forM_ ["MetadataOwner.hs", "MetadataTarget.hs", "MetadataExtensionOnlyTarget.hs", "MetadataLoadedFamily.hs"
     , "MetadataFamilyTarget.hs", "MetadataHiddenFamily.hs", "MetadataUntracked.hs"
     , "MetadataUntrackedTarget.hs", "MetadataQuoter.hs", "MetadataQuotedTarget.hs", "MetadataQuoteSupport.hs"] install
   writeExactMetadataScope scopePath []
@@ -2118,6 +2218,23 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
         && checkedOwner `notElem` lines diagnostics
         && "tidepool-checked module=MetadataTarget target=True" `elem` lines diagnostics) $
       fail "exact metadata repeated the loaded source frontend or changed its instance result"
+    (extensionOnly, extensionDiagnostics) <- captureDiagnostics
+      (checked "MetadataExtensionOnlyTarget.hs")
+    let executableOwner env = case lookupHpt (hsc_HPT env) (mkModuleName "MetadataOwner") of
+          Just hmi -> let linkable = hm_linkable hmi
+            in isJust (homeMod_bytecode linkable) || isJust (homeMod_object linkable)
+          Nothing -> False
+    unless (resultType extensionOnly == resultType exact
+        && counterValues "quasiquote_codegen_elided_modules" extensionDiagnostics == [1]
+        && not (executableOwner (crHscEnv extensionOnly))) $
+      fail "extension-only metadata unnecessarily provisioned an executable dependency"
+    (extensionNative, nativeDiagnostics) <- captureDiagnostics $
+      compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataExtensionOnlyTarget.hs") [work] Nothing
+    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult extensionNative))
+        && counterValues "quasiquote_codegen_elided_modules" nativeDiagnostics == [1]
+        && not (executableOwner (prHscEnv (pprPipelineResult extensionNative)))) $
+      fail "extension-only native compilation changed its result or retained dependency execution"
     copyFile (fixture "MetadataOwnerWithoutInstance.hs") (work </> "MetadataOwner.hs")
     changed <- try (checked "MetadataTarget.hs") :: IO (Either SomeException CheckedEnvironmentResult)
     case changed of
@@ -2128,6 +2245,7 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
     unless (resultType recovered == Just "Int") $ fail "exact metadata did not recover after source refusal"
     (quoted, quoteDiagnostics) <- captureDiagnostics (checked "MetadataQuotedTarget.hs")
     unless (resultType quoted == Just "Int"
+        && null (counterValues "quasiquote_codegen_elided_modules" quoteDiagnostics)
         && "tidepool-checked-dependency-executable module=MetadataQuoter bytecode=True object=False" `elem` lines quoteDiagnostics
         && "tidepool-checked-loaded-source module=MetadataQuoter" `elem` lines quoteDiagnostics) $
       fail "exact metadata discarded the loaded quoter's executable linkable"
@@ -2142,7 +2260,7 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
     unless (resultType quotedCandidate == Just "Int"
         && "tidepool-checked-loaded-source module=MetadataQuoter" `elem` lines candidateQuoteDiagnostics
         && "tidepool-checked-dependency-executable module=MetadataQuoteSupport bytecode=True object=False" `elem` lines candidateQuoteDiagnostics
-        && "tidepool-count name=candidate_source_load_required count=1" `elem` lines candidateQuoteDiagnostics) $
+        && counterValues "candidate_source_load_required" candidateQuoteDiagnostics == [1]) $
       fail "source candidate discarded a GHC-required quoter executable"
     hidden <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
       (work </> "MetadataHiddenFamily.hs") [work] Nothing
@@ -2179,15 +2297,20 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
         && "tidepool-checked-loaded-source module=MetadataUntracked" `notElem` lines untrackedDiagnostics) $
       fail "untracked compile-time input was promoted to loaded metadata evidence"
     receipts <- listDirectory (work </> ".exact-compilations")
-    evidence <- forM receipts $ \entry -> do
+    receiptSafety <- fmap catMaybes $ forM receipts $ \entry -> do
       bytes' <- BS.readFile (work </> ".exact-compilations" </> entry </> "receipt.cbor")
-      pure $ case deserialiseFromBytes decodeTerm (BSL.fromStrict bytes') of
-        Right (_, TList [_, _, _, _, TString source, _, _, TString facts, _])
-          | source == T.pack (work </> "MetadataUntrackedTarget.hs") -> T.unpack facts
-        _ -> ""
-    unless (any (isInfixOf "\"cache_safe\":false") evidence) $
-      fail "untracked dependency was certified as cache safe"
-  putStrLn "exact loaded metadata: parity, source drift, quoter bytecode, hidden family and untracked input passed"
+      either (\reason -> fail ("invalid exact compilation receipt " ++ entry ++ ": " ++ reason)) pure $
+        exactCompilationCacheSafety (work </> "MetadataUntrackedTarget.hs") bytes'
+    case receiptSafety of
+      [cacheSafe] -> do
+        putStrLn ("untracked target receipt: schema=TPEXACTCOMPILE/2 fields=10 "
+          ++ "dependency_evidence=v4 cache_safe=" ++ show cacheSafe)
+        unless (not cacheSafe) $
+          fail "untracked dependency receipt marked dependency evidence cache_safe=true"
+      [] -> fail "no exact compilation v2 receipt matched the untracked target source"
+      _ -> fail ("multiple exact compilation receipts matched the untracked target: "
+        ++ show (length receiptSafety))
+  putStrLn "exact loaded metadata: parity, extension-only execution elision, source drift, quoter bytecode, hidden family and untracked input passed"
 
 -- Native candidates and exact owners bypass fresh preparation. Their defining
 -- interfaces must still supply typed site siblings without widening imports.
@@ -2503,10 +2626,7 @@ verifyCollectivePackageProof work prepared = withTiming $ do
       roots = [selectedRoot | (selectedRoot,_,_) <- mutable]
       firstRoot = root
       count :: String -> String -> Integer
-      count name diagnostics = sum
-        [read value | line <- lines diagnostics, prefix `isPrefixOf` line,
-          value:_ <- [words (drop (length prefix) line)]]
-        where prefix = "tidepool-count name=" ++ name ++ " count="
+      count = counterTotal
       requireRight label = \case
         Right () -> pure ()
         Left reason -> fail (label ++ " refused: " ++ reason)
@@ -2795,9 +2915,7 @@ verifyRetainedPackageWitness producer evidence = do
 
   where
     count :: String -> String -> Integer
-    count name diagnostics = sum
-      [read (drop (length prefix) line) | line <- lines diagnostics, prefix `isPrefixOf` line]
-      where prefix = "tidepool-count name=" ++ name ++ " count="
+    count = counterTotal
 
 -- A mutable installed interface exercises the same environment on successive
 -- certifications. No successful owner selection may survive into the next one.
@@ -2903,10 +3021,8 @@ mixedGraph required count = withScratch $ \work -> do
   (exit, _, errors) <- readProcessWithExitCode executable ["--mixed-fresh", work, show count] ""
   unless (exit == ExitSuccess) $ fail ("fresh mixed worker failed: " ++ errors)
   let expectedLoad = if required then 3 else 2 :: Int
-      loadCounts = [line | line <- lines errors
-        , "tidepool-count name=home_products_source_load_owners " `isPrefixOf` line]
-      expectedLine = "tidepool-count name=home_products_source_load_owners count=" ++ show expectedLoad
-  unless (loadCounts == [expectedLine]) $
+      loadCounts = counterValues "home_products_source_load_owners" errors
+  unless (loadCounts == [fromIntegral expectedLoad]) $
     fail ("fresh mixed worker loaded unrelated owners: " ++ show loadCounts)
   putStrLn ("mixed SOURCE: PASS independent=" ++ show count ++ " required=" ++ show required)
 

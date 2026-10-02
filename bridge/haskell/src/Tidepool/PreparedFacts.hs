@@ -1,8 +1,8 @@
--- | Exact GHC-owned facts retained with a prepared module.
+-- | Exact GHC-owned facts extracted from prepared bindings on demand.
 --
--- These values are internal compiler data, not a wire format. The M3 projector
--- can consume them without reconstructing signatures or layouts from rendered
--- names, and can reject forms it does not support.
+-- Recovery consumes referenced Ids; diagnostic inventories consume typed
+-- signatures, layouts, captures and literals. These are internal compiler
+-- values, not a wire format.
 module Tidepool.PreparedFacts
   ( PreparedFacts(..)
   , PreparedOperation(..)
@@ -15,10 +15,8 @@ import GHC.Core (AltCon(..))
 import GHC.Core.DataCon (DataCon, dataConRepArgTys)
 import GHC.Core.TyCo.Rep (Scaled(..), Type)
 import GHC.Stg.Syntax
-import GHC.Stg.Pipeline (StgCgInfos)
 import GHC.Types.Literal (Literal(..), literalType)
 import GHC.Types.Name (nameModule_maybe)
-import GHC.Types.Name.Env (emptyNameEnv, plusNameEnv)
 import GHC.Types.RepType (PrimRep, typePrimRep_maybe)
 import GHC.Types.Var (Id, varName, varType)
 import GHC.Types.Var.Set (dVarSetElems)
@@ -46,22 +44,20 @@ data PreparedFacts = PreparedFacts
   , preparedConstructors :: [(DataCon, [PreparedRepresentation])]
   , preparedOperations :: [PreparedOperation]
   , preparedLiterals :: [Literal]
-  , preparedTagSigs :: StgCgInfos
   , preparedSupport :: [PreparedSupport]
   }
 
 instance Semigroup PreparedFacts where
-  PreparedFacts a b c d e f g h <> PreparedFacts i j k l m n o p =
-    PreparedFacts (a <> i) (b <> j) (c <> k) (d <> l) (e <> m)
-      (f <> n) (plusNameEnv g o) (h <> p)
+  PreparedFacts a b c d e f g <> PreparedFacts h i j k l m n =
+    PreparedFacts (a <> h) (b <> i) (c <> j) (d <> k) (e <> l)
+      (f <> m) (g <> n)
 
 instance Monoid PreparedFacts where
-  mempty = PreparedFacts [] [] [] [] [] [] emptyNameEnv []
+  mempty = PreparedFacts [] [] [] [] [] [] []
 
-extractPreparedFacts :: Module -> StgCgInfos -> [CgStgTopBinding] -> PreparedFacts
-extractPreparedFacts thisModule tagSigs bindings = collected
+extractPreparedFacts :: Module -> [CgStgTopBinding] -> PreparedFacts
+extractPreparedFacts thisModule bindings = collected
   { preparedImportedIds = filter isImport (preparedReferencedIds collected)
-  , preparedTagSigs = tagSigs
   , preparedSupport =
       [CharacterLiteralsSupported, EmbeddedNulStringsRetainedAsModifiedUtf8]
   }

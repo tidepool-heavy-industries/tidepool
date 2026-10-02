@@ -48,7 +48,7 @@ import GHC.Unit.Types (unitString)
 import Tidepool.PreparedStg (PreparedModule(..))
 import Tidepool.PreparedFacts
   ( PreparedFacts(..), PreparedOperation(..), PreparedRepresentation(..)
-  , PreparedSupport(..)
+  , PreparedSupport(..), extractPreparedFacts
   )
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 
@@ -148,13 +148,14 @@ inventoryPreparedModule prepared =
       scope = Scope (pmModule prepared) tops emptyUniqSet emptyUniqSet
       Acc dependencies _walkedLiterals forms _walkedFacts _references =
         foldMap (walkTop scope . fst) (pmBindings prepared)
-      literals = Set.fromList (map literalInventory (preparedLiterals (pmFacts prepared)))
+      exactFacts = extractPreparedFacts (pmModule prepared) (map fst (pmBindings prepared))
+      literals = Set.fromList (map literalInventory (preparedLiterals exactFacts))
       imported = Set.fromList
         [ ImportedValue name
         | Dependency LibraryDependency name <- Set.toList dependencies
         ]
       tags = Set.singleton (TagInferenceCount (length (nonDetNameEnvElts (pmTagSigs prepared))))
-      facts = inventoryExactFacts (pmModule prepared) (pmFacts prepared)
+      facts = inventoryExactFacts (pmModule prepared) exactFacts
   in PreparedInventory (moduleIdentity (pmModule prepared)) dependencies literals forms
        (facts <> imported <> tags)
 

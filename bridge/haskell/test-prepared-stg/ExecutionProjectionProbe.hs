@@ -5,6 +5,7 @@ import CallerResultProjectionTest (verifyCallerResultProjection)
 import DeferredFunctionProjectionTest (verifyDeferredFunctionProjection)
 import ExecutionProjectionTest
   (projectProjectionContract, verifyRetainedImportProjection)
+import ModuleEvidenceProjectionTest (verifyModuleEvidenceProjection)
 import System.Environment (getArgs)
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.GhcPipeline
@@ -18,6 +19,7 @@ main = do
   arguments <- getArgs
   case arguments of
     ["--caller-result"] -> verifyCallerResultProjection
+    ["--module-evidence"] -> verifyModuleEvidenceProjection
     _ -> fullProbe arguments
 
 fullProbe :: [String] -> IO ()

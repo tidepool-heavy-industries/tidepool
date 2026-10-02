@@ -2,8 +2,10 @@ module Main (main) where
 
 import Control.Exception (SomeException, bracket, evaluate, try)
 import Control.Monad (unless)
+import Data.ByteString qualified as BS
 import Data.List (isInfixOf, nub, sort)
 import Data.String (fromString)
+import Data.Set qualified as Set
 import Data.Text qualified as Text
 import GHC (moduleNameString)
 import GHC.Builtin.Types (boolTy)
@@ -11,9 +13,11 @@ import GHC.Core (Expr(..), bindersOf, flattenBinds)
 import GHC.Core.DataCon (dataConName, dataConRepArgTys)
 import GHC.Core.DataCon qualified as DC
 import GHC.Core.TyCon (PromDataConInfo(NoPromInfo))
+import GHC.Core.TyCon qualified as TC
+import GHC.Core.Type (mkTyConApp)
 import GHC.Builtin.Types.Prim (wordPrimTy)
 import GHC.Core.FVs (exprSomeFreeVarsList)
-import GHC.Core.TyCo.Rep (Scaled(..))
+import GHC.Core.TyCo.Rep (Scaled(..), Type(TyConApp))
 import GHC.Types.Id (idName)
 import GHC.Types.Name (nameOccName, setNameUnique)
 import GHC.Types.Unique (mkUnique)
@@ -39,6 +43,7 @@ import qualified Tidepool.TypePolicy as TypePolicy
 import Tidepool.EffectSchema
   ( SiteDelivery(..), SiteType(..), SiteWireSource(..), YieldSite(..)
   , sitedVerbs, vsDelivery, vsName, vsWireSource )
+import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionIR
   ( LiteralInventory(..), PreparedFact(..), PreparedInventory(..), PreparedSupport(..), inventoryPreparedModule
   , renderPreparedInventory )
@@ -100,9 +105,10 @@ projectEntry result modul entry retained =
 projectEntryWithJsonAuthority :: JsonAuthority -> PreparedPipelineResult
   -> String -> String -> Either Projection.ProjectionError Schema.WireProgram
 projectEntryWithJsonAuthority authority result modul entry =
-  Projection.projectPreparedTarget context (pprModules result)
- where
-  context = Projection.ProjectionContext
+  Projection.projectPreparedTarget (jsonProjectionContext authority modul entry) (pprModules result)
+
+jsonProjectionContext :: JsonAuthority -> String -> String -> Projection.ProjectionContext
+jsonProjectionContext authority modul entry = Projection.ProjectionContext
     { Projection.projectionProfile = "ghc-9.12-prepared-stg"
     , Projection.projectionToolchain = "ghc-9.12.2"
     , Projection.projectionTarget =
@@ -164,6 +170,10 @@ verifyJsonDependencyAuthority dir = do
   trusted <- runPipelineSelected PreparedStg fixture ["test-prepared-stg", "lib"]
   trustedAuthority <- resolveJsonAuthority (prHscEnv (pprPipelineResult trusted))
   assert (trustedAuthority /= Nothing) "shipped JSON dependency graph lacks authority"
+  trustedOwner <- maybe (ioError (userError "installed JSON owners did not resolve")) pure
+    trustedAuthority
+  verifyJsonLayoutDemand trustedOwner trusted
+  verifyNominalJsonConstructorDemand dir
   source <- readFile "lib/Tidepool/Aeson/Scientific.hs"
   let shadow = Text.replace "coefficient (Scientific c _) = c"
         "coefficient (Scientific c _) = c + 1" (Text.pack source)
@@ -211,6 +221,136 @@ verifyJsonDependencyAuthority dir = do
       ("JSON authority admitted a home-shadowed Either dependency: "
         ++ either show (const "projected") outcome))
 
+verifyJsonLayoutDemand :: JsonAuthority -> PreparedPipelineResult -> IO ()
+verifyJsonLayoutDemand authority result = do
+  let context = jsonProjectionContext authority "JsonAuthorityContract" "unrelated"
+      plain = context { Projection.projectionJsonAuthority = Nothing }
+      project = Projection.projectPreparedTarget
+      require :: Show failure => String -> Either failure value -> IO value
+      require label = either (ioError . userError . ((label ++ ": ") ++) . show) pure
+  unrelated <- require "unrelated target" (project context (pprModules result))
+  plainUnrelated <- require "unrelated target without authority" (project plain (pprModules result))
+  assert (unrelated == plainUnrelated)
+    "unused JSON authority changed an unrelated executable's declarations or bytes"
+  prepared <- case filter ((== "JsonAuthorityContract") . moduleNameString . moduleName . pmModule)
+      (pprModules result) of
+    [value] -> pure value
+    _ -> ioError (userError "JSON demand fixture lacks its prepared owner")
+  let selectionFor owner occurrences = Just (Set.fromList [ fromIntegral ordinal
+        | (ordinal, (binding, _)) <- zip [0 :: Int ..] (pmBindings owner)
+        , any ((`elem` occurrences) . occNameString . nameOccName . idName)
+            (Projection.topBinders binding) ])
+      selection = selectionFor prepared ["unrelated"]
+  groups <- require "unrelated original group"
+    (Projection.projectPreparedModuleGroupsSelected context prepared selection)
+  plainGroups <- require "unrelated original group without authority"
+    (Projection.projectPreparedModuleGroupsSelected plain prepared selection)
+  assert (not (null groups) && groups == plainGroups)
+    "unused JSON authority changed an original group's declarations or ordinals"
+  hostGroups <- require "host original groups"
+    (Projection.projectPreparedModuleGroupsSelected context prepared
+      (selectionFor prepared ["hostValue"]))
+  assert (length hostGroups == 1 && all
+      ((/= Nothing) . Schema.projectedJsonLayout . Schema.projectedBody) hostGroups)
+    "JSON host original group omitted authenticated roles"
+  valueModule <- case filter ((== "Tidepool.Aeson.Value") . moduleNameString . moduleName . pmModule)
+      (pprModules result) of
+    [value] -> pure value
+    _ -> ioError (userError "JSON demand fixture lacks its authenticated Value module")
+  jsonGroups <- require "intrinsic original groups"
+    (Projection.projectPreparedModuleGroupsSelected context valueModule
+      (selectionFor valueModule ["encodeValue", "eitherDecodeValue"]))
+  assert (length jsonGroups == 2 && all
+      ((/= Nothing) . Schema.projectedJsonLayout . Schema.projectedBody) jsonGroups)
+    "JSON intrinsic original groups omitted authenticated roles"
+  mapM_ (\entry -> do
+      program <- require entry (projectEntryWithJsonAuthority authority result "JsonAuthorityContract" entry)
+      assert (Schema.programJsonLayout program /= Nothing)
+        (entry ++ ": omitted required JSON layout"))
+    ["result", "encodeOnly", "decodeOnly", "hostValue", "polymorphicValue"]
+  mapM_ (\entry -> do
+      program <- require entry (projectEntryWithJsonAuthority authority result "JsonAuthorityContract" entry)
+      assert (any isJsonOperation (Schema.programOperations program))
+        (entry ++ ": intrinsic regression fixture lacks JSON operations")) ["encodeOnly", "decodeOnly"]
+  host <- require "host carrier" (projectEntryWithJsonAuthority authority result "JsonAuthorityContract" "hostValue")
+  assert (not (any isJsonOperation (Schema.programOperations host)))
+    "host carrier regression fixture unexpectedly uses JSON operations"
+  let nestedContext = context { Projection.projectionAuxiliaryRoots =
+        [Schema.SymbolIdentity "main" "JsonAuthorityContract" "value" "nestedValue" Nothing] }
+  nested <- require "nested JSON evidence" (project nestedContext (pprModules result))
+  assert (Schema.programJsonLayout nested /= Nothing)
+    "nested JSON type evidence omitted authenticated roles"
+  assert (not (null (Schema.programTypes nested))
+      && not (any isJsonOperation (Schema.programOperations nested)))
+    "nested type regression fixture unexpectedly requires JSON operations"
+ where
+  isJsonOperation declaration = case Schema.operationIdentity declaration of
+    Schema.JsonDecodeIdentity{} -> True
+    Schema.JsonEncodeIdentity -> True
+    _ -> False
+
+-- Separately loaded nominal evidence may use a different GHC Unique. The
+-- roles must survive while the canonical physical declarations still agree.
+verifyNominalJsonConstructorDemand :: FilePath -> IO ()
+verifyNominalJsonConstructorDemand dir = do
+  createDirectoryIfMissing True (dir </> "Tidepool" </> "Effects")
+  writeFile (dir </> "Tidepool" </> "Effects" </> "Core.hs") (unlines
+    [ "module Tidepool.Effects.Core where"
+    , "{-# OPAQUE runLLMTurn #-}"
+    , "runLLMTurn :: forall answer. String -> Maybe answer"
+    , "runLLMTurn _ = Nothing"
+    , "{-# OPAQUE runLLMTurnSited #-}"
+    , "runLLMTurnSited :: forall answer. Int -> String -> Maybe answer"
+    , "runLLMTurnSited _ _ = Nothing"
+    ])
+  let source = dir </> "JsonNominalAnswer.hs"
+  writeFile source (unlines
+    [ "{-# LANGUAGE TypeApplications #-}"
+    , "module JsonNominalAnswer where"
+    , "import Tidepool.Aeson.Value (Value)"
+    , "import Tidepool.Effects.Core"
+    , "answer :: Maybe Value"
+    , "answer = runLLMTurn @Value \"json\""
+    ])
+  result <- runPipelineSelected PreparedStg source [dir, "lib"]
+  authority <- resolveJsonAuthority (prHscEnv (pprPipelineResult result))
+    >>= maybe (ioError (userError "nominal JSON fixture lacks authority")) pure
+  let valueTyCons = [ tc | prepared <- pprModules result
+        , TypePolicy.DataG _ tc _ _ <- TypePolicy.tgNodes (pmTypeGraph prepared)
+        , occNameString (nameOccName (TC.tyConName tc)) == "Value" ]
+  valueTyCon <- case valueTyCons of
+    tc : _ -> pure tc
+    [] -> ioError (userError "nominal JSON fixture lacks Value type evidence")
+  let newUnique = mkUnique 'z' 54322
+      otherTyCon = valueTyCon
+        { TC.tyConUnique = newUnique
+        , TC.tyConName = setNameUnique (TC.tyConName valueTyCon) newUnique
+        , TC.tyConNullaryTy = TyConApp otherTyCon [] }
+      clone constructor = DC.mkDataCon (dataConName constructor) False
+        (dataConName constructor) (DC.dataConSrcBangs constructor)
+        [] [] [] (DC.dataConConcreteTyVars constructor) [] [] []
+        (DC.dataConOrigArgTys constructor) (mkTyConApp otherTyCon []) NoPromInfo
+        otherTyCon (DC.dataConTag constructor) [] (DC.dataConWorkId constructor)
+        (case DC.dataConBoxer constructor of
+          Nothing -> DC.NoDataConRep
+          Just boxer -> DC.DCR (DC.dataConWrapId constructor) boxer
+            (DC.dataConRepArgTys constructor) (DC.dataConRepStrictness constructor)
+            (DC.dataConImplBangs constructor))
+      replace prepared = prepared { pmTypeGraph = TypePolicy.TypeGraph
+        [ case node of
+            TypePolicy.DataG ty tc args rows | tc == valueTyCon ->
+              TypePolicy.DataG ty tc args [(clone con, children) | (con, children) <- rows]
+            _ -> node
+        | node <- TypePolicy.tgNodes (pmTypeGraph prepared) ] }
+      context = jsonProjectionContext authority "JsonNominalAnswer" "answer"
+      project modules = either (ioError . userError . show) pure
+        (Projection.projectPreparedTarget context modules)
+  assert (otherTyCon /= valueTyCon) "nominal JSON fixture did not change GHC identity"
+  original <- project (pprModules result)
+  separate <- project (map replace (pprModules result))
+  assert (Schema.programJsonLayout original /= Nothing && original == separate)
+    "equal nominal JSON constructor evidence lost canonical roles or declarations"
+
 -- An O0 bytecode interface exposes a private helper that the prepared O2 body
 -- removes. Importers must receive the prepared owner's interface, including on
 -- a warm request where that owner comes from the compiler memo.
@@ -233,20 +373,43 @@ verifyPreparedPrivateImports = do
     assert (preparedShape cold == preparedShape warm)
       "warm private TH dependency changed prepared module shape"
 
--- | TH's bytecode provisioning must not change a constructor declared by an
--- unchanged home module.  The graph checks run after metadata preparation and
--- before projection or execution; the executable checks then compare the
--- declarations a shared prepared machine receives from ordinary and quoted
--- source.
-verifyConstructorRepresentations :: FilePath -> IO ()
-verifyConstructorRepresentations dir = do
+verifyProjectionInterning :: FilePath -> FilePath -> IO ()
+verifyProjectionInterning dir output = do
+  vertical <- runPipelineSelected PreparedStg "test-prepared-stg/M3Vertical.hs"
+    ["test-prepared-stg"]
+  let context = Projection.ProjectionContext
+        { Projection.projectionProfile = "ghc-9.12-prepared-stg"
+        , Projection.projectionToolchain = "ghc-9.12.2"
+        , Projection.projectionTarget =
+            Schema.TargetDescriptor Schema.X86_64 Schema.LittleEndian 64 64 "sysv64" []
+        , Projection.projectionRetainedGenerations = mempty
+        , Projection.projectionEntry = Schema.SymbolIdentity "main" "M3Vertical" "value" "result" Nothing
+        , Projection.projectionAuxiliaryRoots = []
+        , Projection.projectionFormattingAuthority = Nothing
+        , Projection.projectionTimeAuthority = Nothing
+        , Projection.projectionJsonAuthority = Nothing
+        , Projection.projectionTextUnit = Nothing
+        }
+      project = Projection.projectPrepared context (pprModules vertical)
+  program <- either (ioError . userError . show) pure project
+  assert (length (Schema.programSignatures program) > 1
+    && length (Schema.programGlobals program) > 1
+    && length (Schema.programConstructors program) > 1
+    && length (Schema.programOperations program) > 1)
+    "interning fixture does not exercise distinct table insertions"
+  BS.writeFile output (encodeWireProgram program)
+  putStrLn ("interned table sizes (signatures/globals/constructors/operations): "
+    ++ show (length (Schema.programSignatures program), length (Schema.programGlobals program),
+      length (Schema.programConstructors program), length (Schema.programOperations program)))
+  strictPlain <- writePlainConstructorEvidenceFixture dir
+  strictPlainResult <- runPipelineSelected PreparedStg strictPlain [dir, "test/prepared-stg", "lib"]
+  verifyRepeatedConstructorEvidence strictPlainResult
+  putStrLn "projection interning: deterministic bytes and 16 constructor-conflict paths passed"
+
+writePlainConstructorEvidenceFixture :: FilePath -> IO FilePath
+writePlainConstructorEvidenceFixture dir = do
   let strictOwned = dir </> "StrictOwned.hs"
       strictPlain = dir </> "StrictPlainMetadata.hs"
-      strictQuoted = dir </> "StrictQuotedMetadata.hs"
-      scientificPlain = dir </> "ScientificPlain.hs"
-      scientificQuoted = dir </> "ScientificQuoted.hs"
-      scientificMetadataPlain = dir </> "ScientificMetadataPlain.hs"
-      scientificMetadataQuoted = dir </> "ScientificMetadataQuoted.hs"
   writeFile strictOwned (unlines
     [ "{-# OPTIONS_GHC -O0 #-}"
     , "module StrictOwned where"
@@ -255,6 +418,49 @@ verifyConstructorRepresentations dir = do
     , "data ExplicitUnpack = ExplicitUnpack {-# UNPACK #-} !Int"
     ])
   writeFile strictPlain (strictMetadataSource "StrictPlainMetadata" False)
+  pure strictPlain
+
+strictMetadataSource :: String -> Bool -> String
+strictMetadataSource modul quoted = unlines $
+  [ "{-# LANGUAGE TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
+  [ "module " ++ modul ++ " where"
+  , "import StrictOwned"
+  , "import Tidepool.Effects.Core"
+  ] ++ quasiquoteBindings quoted ++
+  [ "automatic :: Maybe Automatic"
+  , "automatic = runLLMTurn @Automatic \"automatic\""
+  , "noUnpack :: Maybe NoUnpack"
+  , "noUnpack = runLLMTurn @NoUnpack \"nounpack\""
+  , "explicitUnpack :: Maybe ExplicitUnpack"
+  , "explicitUnpack = runLLMTurn @ExplicitUnpack \"unpack\""
+  ]
+
+quasiquoteLanguage :: Bool -> [String]
+quasiquoteLanguage False = []
+quasiquoteLanguage True = ["{-# LANGUAGE QuasiQuotes #-}"]
+
+quasiquoteBindings :: Bool -> [String]
+quasiquoteBindings False = []
+quasiquoteBindings True =
+  [ "import Tidepool.Aeson.Value (Value)"
+  , "import Tidepool.QQ (j)"
+  , "quotedValue :: Value"
+  , "quotedValue = [j|42|]"
+  ]
+
+-- | TH's bytecode provisioning must not change a constructor declared by an
+-- unchanged home module.  The graph checks run after metadata preparation and
+-- before projection or execution; the executable checks then compare the
+-- declarations a shared prepared machine receives from ordinary and quoted
+-- source.
+verifyConstructorRepresentations :: FilePath -> IO ()
+verifyConstructorRepresentations dir = do
+  strictPlain <- writePlainConstructorEvidenceFixture dir
+  let strictQuoted = dir </> "StrictQuotedMetadata.hs"
+      scientificPlain = dir </> "ScientificPlain.hs"
+      scientificQuoted = dir </> "ScientificQuoted.hs"
+      scientificMetadataPlain = dir </> "ScientificMetadataPlain.hs"
+      scientificMetadataQuoted = dir </> "ScientificMetadataQuoted.hs"
   writeFile strictQuoted (strictMetadataSource "StrictQuotedMetadata" True)
   writeFile scientificPlain (unlines
     [ "module ScientificPlain where"
@@ -272,7 +478,7 @@ verifyConstructorRepresentations dir = do
     ])
   writeFile scientificMetadataPlain (scientificMetadataSource "ScientificMetadataPlain" False)
   writeFile scientificMetadataQuoted (scientificMetadataSource "ScientificMetadataQuoted" True)
-  strictPlainResult <- runPipelineSelected PreparedStg strictPlain [dir, "lib"]
+  strictPlainResult <- runPipelineSelected PreparedStg strictPlain [dir, "test/prepared-stg", "lib"]
   strictQuotedResult <- runPipelineSelected PreparedStg strictQuoted [dir, "lib"]
   scientificPlainResult <- runPipelineSelected PreparedStg scientificPlain [dir, "lib"]
   scientificQuotedResult <- runPipelineSelected PreparedStg scientificQuoted [dir, "lib"]
@@ -299,19 +505,6 @@ verifyConstructorRepresentations dir = do
     ("Scientific did not retain the canonical physical representation: "
       ++ show (Schema.constructorFieldReps plainDecl))
  where
-  strictMetadataSource modul quoted = unlines $
-    [ "{-# LANGUAGE TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
-    [ "module " ++ modul ++ " where"
-    , "import StrictOwned"
-    , "import Tidepool.Effects.Core"
-    ] ++ quasiquoteBindings quoted ++
-    [ "automatic :: Maybe Automatic"
-    , "automatic = runLLMTurn @Automatic \"automatic\""
-    , "noUnpack :: Maybe NoUnpack"
-    , "noUnpack = runLLMTurn @NoUnpack \"nounpack\""
-    , "explicitUnpack :: Maybe ExplicitUnpack"
-    , "explicitUnpack = runLLMTurn @ExplicitUnpack \"unpack\""
-    ]
   scientificMetadataSource modul quoted = unlines $
     [ "{-# LANGUAGE TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
     [ "module " ++ modul ++ " where"
@@ -320,15 +513,6 @@ verifyConstructorRepresentations dir = do
     ] ++ quasiquoteBindings quoted ++
     [ "result :: Maybe Value"
     , "result = runLLMTurn @Value \"scientific\""
-    ]
-  quasiquoteLanguage False = []
-  quasiquoteLanguage True = ["{-# LANGUAGE QuasiQuotes #-}"]
-  quasiquoteBindings False = []
-  quasiquoteBindings True =
-    [ "import Tidepool.Aeson.Value (Value)"
-    , "import Tidepool.QQ (j)"
-    , "quotedValue :: Value"
-    , "quotedValue = [j|42|]"
     ]
   assertMetadataReps occurrence plain quoted expected = do
     let plainReps = typeGraphReps occurrence plain
@@ -461,8 +645,11 @@ verifyRepeatedConstructorEvidence result = do
         outcome -> ioError (userError
           ("conflicting constructor evidence in separate graphs was not rejected: "
             ++ either show (const "accepted") outcome))
-  assertProjects "identical constructor provenance"
+  canonical <- either (ioError . userError . show) pure (project [original, original])
+  repeated <- either (ioError . userError . show) pure
     (project [original, clone otherName fields runtimeFields])
+  assert (encodeWireProgram repeated == encodeWireProgram canonical)
+    "equivalent constructor provenance changed IDs, table order or encoded bytes"
   mapM_ (\changed -> do
     rejects [original, changed]
     rejects [changed, original]
@@ -506,6 +693,13 @@ main :: IO ()
 main = do
   args <- getArgs
   case args of
+    ["--json-authority"] -> do
+      tmp <- getTemporaryDirectory
+      let work = tmp </> "tidepool-json-authority-test"
+      bracket
+        (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
+        removePathForcibly
+        verifyJsonDependencyAuthority
     ["--retained-scope"] -> do
       tmp <- getTemporaryDirectory
       let work = tmp </> "tidepool-retained-scope-test"
@@ -513,6 +707,13 @@ main = do
         (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
         removePathForcibly
         $ \dir -> verifyCompilerReuse dir >> verifyPreparedScope dir
+    ["--projection-interning", output] -> do
+      tmp <- getTemporaryDirectory
+      let work = tmp </> "tidepool-projection-interning-test"
+      bracket
+        (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
+        removePathForcibly
+        (\dir -> verifyProjectionInterning dir output)
     ["--module-product-roundtrip"] -> do
       tmp <- getTemporaryDirectory
       let work = tmp </> "tidepool-module-product-roundtrip-test"
