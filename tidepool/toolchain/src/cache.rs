@@ -336,7 +336,7 @@ impl ImportQualifier {
     }
 }
 
-const GENERATED_SOURCE: &str = "@generated-source";
+pub(crate) const GENERATED_SOURCE: &str = "@generated-source";
 
 impl ModuleEvidence {
     /// In evidence issued by `from_worker`, this marks the exact request

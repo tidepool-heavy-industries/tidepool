@@ -1131,11 +1131,20 @@ impl ExactCompilationRequest {
                                         && module.boot == owner.2
                                 })
                                 .is_some_and(|module| {
+                                    // from_worker has already bound this marker to
+                                    // the hash-verified receipt target snapshot.
+                                    let module_source = if module.source
+                                        == Path::new(crate::cache::GENERATED_SOURCE)
+                                    {
+                                        &source_path
+                                    } else {
+                                        &module.source
+                                    };
                                     authority.permits(
                                         context,
                                         source,
                                         &source_path,
-                                        &module.source,
+                                        module_source,
                                         unit,
                                         name,
                                         qualifier,
@@ -2149,6 +2158,10 @@ mod tests {
     use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
 
     fn support_product(module: &str) -> CertifiedRecoveryProduct {
+        support_product_in_unit("fixture", module)
+    }
+
+    fn support_product_in_unit(unit: &str, module: &str) -> CertifiedRecoveryProduct {
         let interface = format!("{module} interface").into_bytes();
         let mut product = Vec::new();
         ciborium::ser::into_writer(
@@ -2156,7 +2169,7 @@ mod tests {
                 text("TPMOD"),
                 Value::Integer(1.into()),
                 Value::Array(vec![Value::Array(vec![
-                    text("fixture"),
+                    text(unit),
                     text(module),
                     Value::Bytes(interface.clone()),
                     Value::Array(vec![]),
@@ -2166,7 +2179,7 @@ mod tests {
         )
         .unwrap();
         let owner = CachedHomeOwner {
-            unit: "fixture".into(),
+            unit: unit.into(),
             module: module.into(),
             module_version: ModuleVersion([1; 32]),
             skinny_iface_sha256: Sha256::digest(&interface).into(),
@@ -2593,9 +2606,28 @@ mod tests {
         qualifier: &str,
         boot: bool,
     ) -> PathBuf {
+        import_receipt_source_owner(
+            root,
+            request,
+            unit,
+            imported,
+            qualifier,
+            boot,
+            "module Consumer where\n",
+        )
+    }
+
+    fn import_receipt_source_owner(
+        root: &Path,
+        request: &ExactCompilationRequest,
+        unit: &str,
+        imported: &str,
+        qualifier: &str,
+        boot: bool,
+        source: &str,
+    ) -> PathBuf {
         let directory = root.join(format!("receipt-{unit}-{imported}-{qualifier}-{boot}"));
         std::fs::create_dir_all(&directory).unwrap();
-        let source = "module Consumer where\n";
         let path = root.join("Consumer.hs");
         std::fs::write(&path, source).unwrap();
         let snapshot = directory.join("source.hs");
@@ -3306,6 +3338,67 @@ mod tests {
         .with_execution_source_with_validation(graph, &mut validation)
         .unwrap();
         Arc::new(ArtifactEntry::original([7; 32], product, vec![]).unwrap())
+    }
+
+    #[test]
+    fn generated_scaffold_receipt_resolves_only_normalized_request_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = format!("module Consumer where\n{GENERATED_RESUME_IMPORT}\n");
+        let context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_checked_original_products(
+                    [2; 32],
+                    &[support_product_in_unit("main", "Tidepool.Internal.Resume")],
+                    &BTreeMap::new(),
+                )
+                .unwrap(),
+        );
+        let request = program_request(directory.path(), context.clone())
+            .with_generated_scaffold_imports([source.as_str()]);
+        assert!(context.lexical_graph().is_empty());
+        let receipt = import_receipt_source_owner(
+            directory.path(),
+            &request,
+            "main",
+            "Tidepool.Internal.Resume",
+            "none",
+            false,
+            &source,
+        );
+        let admitted = request.validate_receipt(&receipt, None, &context).unwrap();
+        assert_eq!(
+            admitted.evidence.modules[0].source,
+            Path::new(crate::cache::GENERATED_SOURCE)
+        );
+        assert!(admitted
+            .witness
+            .matches_source(&directory.path().join("Consumer.hs"), &source));
+        let mut unprotected = request.clone();
+        unprotected.generated_scaffold_imports = None;
+        assert!(unprotected
+            .validate_receipt(&receipt, None, &context)
+            .is_err());
+
+        // Identical bytes in a separate authored module do not grant the
+        // compiler scaffold's request-target authority.
+        let mut value: Value =
+            ciborium::de::from_reader(std::fs::read(&receipt).unwrap().as_slice()).unwrap();
+        let fields = value.as_array_mut().unwrap();
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(fields[7].as_text().unwrap()).unwrap();
+        let authored = directory.path().join("Authored.hs");
+        std::fs::write(&authored, &source).unwrap();
+        evidence.sources.push(crate::cache::SourceEvidence {
+            path: authored.clone(),
+            sha256: sha256(source.as_bytes()),
+        });
+        evidence.modules[0].source = authored;
+        fields[7] = text(serde_json::to_string(&evidence).unwrap());
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+        std::fs::write(&receipt, bytes).unwrap();
+        assert!(request.validate_receipt(&receipt, None, &context).is_err());
     }
 
     #[test]
