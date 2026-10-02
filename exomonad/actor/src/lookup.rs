@@ -319,6 +319,33 @@ pub(crate) fn queries(
         .collect()
 }
 
+/// Whether resolving this request can submit any inspection batch. This is
+/// shared with the resident workbench so documentation-only requests can
+/// finish inline, while references and discovery-capable misses retain the
+/// same inspection path as ordinary names.
+pub(crate) fn has_inspection_work(request: &LookupRequest, imports: &str) -> bool {
+    if !request.references.is_empty() {
+        return true;
+    }
+    if request.queries.is_empty() {
+        return false;
+    }
+    let Ok(prepared) =
+        lookup_tool::prepare(serde_json::json!({"queries": request.queries.clone()}))
+    else {
+        return false;
+    };
+    !queries(&prepared, imports).is_empty()
+}
+
+pub(crate) fn requires_inspection(request: &LookupRequest, imports: &str, view: &str) -> bool {
+    !request
+        .expected_view
+        .as_ref()
+        .is_some_and(|expected| expected != view)
+        && has_inspection_work(request, imports)
+}
+
 /// Bare names bound only while a typed request is being presented to this
 /// actor (`Tidepool.RequestWorkbenchScope`'s preamble, mounted only for the
 /// `Interactive` workbench). A miss on one of these looks exactly like any
@@ -1028,6 +1055,40 @@ mod tests {
         assert!(result.issue.is_some());
         assert!(result.results.is_empty());
     }
+
+    #[test]
+    fn inspection_admission_skips_docs_and_pre_rejected_requests() {
+        let view = "current";
+        assert!(!has_inspection_work(
+            &request(&["doc workbench"], false),
+            ""
+        ));
+        assert!(!has_inspection_work(&request(&[" "], false), ""));
+        assert!(!has_inspection_work(&request(&[""], false), ""));
+        assert!(requires_inspection(
+            &request(&["pollResponse"], false),
+            "",
+            view
+        ));
+        assert!(requires_inspection(
+            &request(&[":: Int -> Int"], false),
+            "",
+            view
+        ));
+
+        let mut reference_only = request(&[], false);
+        reference_only.references.push(LookupReference {
+            module: "Tidepool.Effects.Core".into(),
+            name: "LookupBatch".into(),
+            namespace: LookupNamespace::Type,
+        });
+        assert!(requires_inspection(&reference_only, "", view));
+
+        let mut changed = request(&["pollResponse"], false);
+        changed.expected_view = Some("old".into());
+        assert!(!requires_inspection(&changed, "", view));
+    }
+
     #[test]
     fn raw_lookup_never_discovers_and_preserves_outcome() {
         let calls = Cell::new(0);
