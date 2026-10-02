@@ -166,6 +166,21 @@ pub fn write_shim_module(shim_src: &str, orchestrate_src: &str) -> std::io::Resu
     )
 }
 
+/// Materialize an immutable invocation-specific `Tidepool.Effects.M` shim.
+/// Put this root ahead of the installed handler shim in the compiler include
+/// list. The existing artifact recipe then binds the selected root and the
+/// worker's dependency evidence binds its exact source bytes. Orchestration
+/// support continues to resolve from the installed handler shim.
+pub fn ensure_selected_effects_shim(effect_stack: &str) -> std::io::Result<PathBuf> {
+    write_module_dir(
+        "tidepool-selected-effects",
+        &[(
+            "Effects.hs",
+            &selected_effects_shim_module_source(effect_stack),
+        )],
+    )
+}
+
 /// Process-level write-through cache for the content-addressed generated-module
 /// directories, keyed on `(dir prefix, content hash)` — the prefix keeps the
 /// core dir's cache entries from colliding with the shim dir's (or any future

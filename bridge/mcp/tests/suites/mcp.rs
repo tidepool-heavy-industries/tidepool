@@ -15,3 +15,5 @@ mod protocol_goldens;
 mod protocol_schema_equivalence;
 #[path = "../repro_print_unresolved.rs"]
 mod repro_print_unresolved;
+#[path = "../selected_effects.rs"]
+mod selected_effects;
