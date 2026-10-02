@@ -5907,7 +5907,14 @@ where
         let request_message =
             contract.message(request.request, request.initial_user_message.as_deref());
         let installation = match prepared_installation {
-            Some(installation) => Some(installation),
+            Some(mut installation) => {
+                installation.initial_user_message =
+                    Some(match installation.initial_user_message.take() {
+                        Some(attachment) => format!("{attachment}\n\n{request_message}"),
+                        None => request_message.clone(),
+                    });
+                Some(installation)
+            }
             None if !self.policy_installed => Some(
                 self.prepare_interactive_policy(kernel, context, Some(request_message.clone()))
                     .await?,
@@ -5920,53 +5927,58 @@ where
             self.commit_interactive_installation(kernel, context, installation)?;
         }
         self.check_application_readiness(kernel, context)?;
-        self.outstanding_interactive = Some(OutstandingInteractive::new(
-            &request,
-            input_binding,
-            context.placement.lexical_scope,
-        ));
-        self.set_standing(
-            context.actor,
-            ResidentStanding::Interactive(crate::interactive_session::ResidentInteractiveAwait {
-                request,
-                hole,
-            }),
-        );
-        let active_request = match &self.standing {
-            ResidentStanding::Interactive(awaiting) => awaiting.request.request,
-            _ => unreachable!(),
-        };
-        self.runtime_observation.publish_request_activation(
-            active_request,
-            if already_installed {
-                self.next_activation_sequence
-            } else {
-                0
-            },
-        );
-        if already_installed {
-            let activation = crate::ResidentActivation::mounted(
-                context.actor,
-                self.next_activation_sequence,
-                match &self.standing {
+        kernel
+            .retained_exit()
+            .claim_before_shutdown(|| {
+                self.outstanding_interactive = Some(OutstandingInteractive::new(
+                    &request,
+                    input_binding,
+                    context.placement.lexical_scope,
+                ));
+                self.set_standing(
+                    context.actor,
+                    ResidentStanding::Interactive(
+                        crate::interactive_session::ResidentInteractiveAwait { request, hole },
+                    ),
+                );
+                let active_request = match &self.standing {
                     ResidentStanding::Interactive(awaiting) => awaiting.request.request,
                     _ => unreachable!(),
-                },
-                contract,
-                match &self.standing {
-                    ResidentStanding::Interactive(awaiting) => {
-                        awaiting.request.initial_user_message.as_deref()
-                    }
-                    _ => unreachable!(),
-                },
-            );
-            self.next_activation_sequence += 1;
-            // best-effort: deployment observer channel may have no listener.
-            self.environment
-                .deployments
-                .try_send(LocalResidentDeployment::SessionReady { activation })
-                .ok();
-        }
+                };
+                self.runtime_observation.publish_request_activation(
+                    active_request,
+                    if already_installed {
+                        self.next_activation_sequence
+                    } else {
+                        0
+                    },
+                );
+                if already_installed {
+                    let activation = crate::ResidentActivation::mounted(
+                        context.actor,
+                        self.next_activation_sequence,
+                        match &self.standing {
+                            ResidentStanding::Interactive(awaiting) => awaiting.request.request,
+                            _ => unreachable!(),
+                        },
+                        contract,
+                        match &self.standing {
+                            ResidentStanding::Interactive(awaiting) => {
+                                awaiting.request.initial_user_message.as_deref()
+                            }
+                            _ => unreachable!(),
+                        },
+                    );
+                    self.next_activation_sequence += 1;
+                    // best-effort: deployment observer channel may have no listener.
+                    self.environment
+                        .deployments
+                        .try_send(LocalResidentDeployment::SessionReady { activation })
+                        .ok();
+                }
+                true
+            })
+            .map_err(ResidentActorWorkbenchError::RetiredBeforeAdmission)?;
         Ok(InteractivePark::Parked)
     }
 
@@ -6008,14 +6020,20 @@ where
         installation: LocalResidentInstallation,
     ) -> Result<(), ResidentActorWorkbenchError> {
         self.check_application_readiness(kernel, context)?;
-        self.publish_installation(installation);
-        self.policy_installed = true;
-        for notice in self.deferred_child_failures.drain(..) {
-            self.environment
-                .deployments
-                .try_send(LocalResidentDeployment::ChildExited { notice })
-                .ok();
-        }
+        kernel
+            .retained_exit()
+            .claim_before_shutdown(|| {
+                self.publish_installation(installation);
+                self.policy_installed = true;
+                for notice in self.deferred_child_failures.drain(..) {
+                    self.environment
+                        .deployments
+                        .try_send(LocalResidentDeployment::ChildExited { notice })
+                        .ok();
+                }
+                true
+            })
+            .map_err(ResidentActorWorkbenchError::RetiredBeforeAdmission)?;
         Ok(())
     }
 
