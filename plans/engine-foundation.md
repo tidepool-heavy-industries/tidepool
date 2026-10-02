@@ -1,6 +1,10 @@
 # Compiler, code lifetime and external execution foundation
 
 Approved implementation, 2026-09-28. Base: `1d10fac72d948adba75b9fe5bf47360e0701d0de`.
+This is the foundation's historical design and investigation ledger. Later
+implementation and acceptance are recorded in
+[final delivery](engine-harness-final-delivery.md) and its linked evidence;
+unchecked rows below are not a current source inventory.
 The wave22 investigation found three coupled mechanisms: unrelated retained
 symbols multiplied interface fingerprint work; run-owned image references
 prevented native code reclamation; external operations held shared machinery
@@ -10,7 +14,9 @@ and delayed control delivery. Fix the owning mechanisms, not timeout symptoms.
 
 - Preserve one active notebook operation per actor and current publication
   semantics. Prepare explicit execution/continuation ownership for the future
-  concurrent notebook contract in `harness-integration.md`; do not enable it here.
+  concurrent notebook contract in
+  [final delivery](engine-harness-final-delivery.md#retained-integration-contract);
+  do not enable it as part of this foundation slice.
 - Compiler context is immutable per request and scoped per module at every
   compilation entry point. Unrelated retained symbols cannot change a module's
   fingerprint or multiply its interface work.
@@ -159,39 +165,12 @@ loops amplify each other. The controlled fork experiment confirms a large
 mapping/resident-memory cost, but does not attribute all production wait time
 to fork. Continue measuring at the owning boundaries after each change.
 
-## Active integration notes
+## Subsequent integration
 
-The final Codex settlement candidate is
-`c09c2b067774be4104fad878ee271a6a14f12690`. Its source-box focused run passed
-13/13 after repairing stale test APIs, registration and fixture drift. The
-destination candidate pins that commit; destination verification is recorded
-in `engine-foundation-transfer.md`. No running client or service was replaced.
-
-The destination join includes the transferred foundation, module-product,
-adapter and transitive binding-retention candidates. Root owns integration;
-bounded agents own ABI validation, compiler publication proof and companion
-review. Parallel checks use separate mutable outputs and explicit memory
-limits. Drafts, target compilation and executed tests remain distinct evidence.
-
-## User review boundary
-
-The 2026-09-28 review is complete. Implementation of the remaining parcels is
-authorized under [engine-harness-integration.md](engine-harness-integration.md),
-including the concurrent resident follow-on. The earlier hold below records the
-boundary that led to that review; it no longer blocks the approved batch.
-
-Inanna requested an explicit yield before the next major design review.
-Finish and review the active fixes and their focused verification, including
-constructor identity, code lookup/coalescing, external execution, actor control,
-client settlement and source observation freshness. Do not begin implementation
-of either remaining design parcel before that review:
-
-- Durable module artifacts and demand-driven native compilation.
-- Git admission and the thin namespace launcher.
-
-When the active work reaches a reviewable handoff, flag that the review point
-has arrived and yield to Inanna, who will set up the higher-effort review.
-Present current evidence, remaining decisions and curated alternatives. If an
-active fix exposes a consequential unresolved design choice sooner, flag it
-and yield at that point instead. These parcels remain required in the overall
-foundation plan; this boundary changes sequencing, not the intended outcome.
+The September 28 review authorized the remaining compiler/native, Git/process
+and resident parcels. The superseded transfer/restart queues no longer prescribe
+application order or build admission. Their distinctive destination and companion
+results are retained in
+[historical foundation evidence](engine-harness-final-delivery.md#historical-foundation-evidence).
+Use the current delivery contract and owning source for remaining work; retain
+the distinction between review, compilation, executed tests and joined acceptance.

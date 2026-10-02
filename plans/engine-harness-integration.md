@@ -16,7 +16,9 @@ Stop at verified readiness. Do not deploy or launch a live worker tree.
 - Demand compilation selects the statically reachable recursive groups of an
   admitted entry before execution, outside checkout. No in-JIT compile traps.
 - Keep existing owners for scheduling, compilation, resources and persistence.
-- Never edit `harness-adoption.md`. Update its reconciliation separately.
+- Current adoption requirements and retained evidence are consolidated in
+  [final delivery](engine-harness-final-delivery.md); Git retains the original
+  adoption proposal.
 
 ## Tracks and boundaries
 

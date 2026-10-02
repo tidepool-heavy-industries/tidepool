@@ -41,9 +41,9 @@ and reusable captures that survive later parent failure. Stock Codex remains a
 separate fallback; do not build it with Buck. The resident compiler remains a
 runtime service, not a Buck runtime scheduler.
 
-Read AGENTS.md, docs/GLOSSARY.md, plans/engine-harness-final-delivery.md,
-plans/harness-first-tree-prd.md, plans/harness-integration-runtime.md, and
-plans/engine-harness-integration.md. Reconcile those plans with current production
+Read AGENTS.md, docs/GLOSSARY.md, and
+[final delivery](engine-harness-final-delivery.md), including its retained
+integration contract and historical evidence. Reconcile that contract with current production
 callers. `plans/engine-final-coverage-de31.md` is an explicitly historical audit,
 not current acceptance. In the pinned harness read its contributor rules, NEXT.md
 and docs/embedding-ready-handoff.md where present.

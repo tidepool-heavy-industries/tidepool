@@ -40,7 +40,8 @@ Do not expose standalone spawn/message/retirement tools in embedded mode.
 Use the existing router, authentication and matching immutable browser assets.
 Retain configured read-only Codex credentials, explicit public HTTPS scheme,
 session expiry/rotation checks, compaction and unavailable-after-host-loss
-semantics from `harness-integration.md`.
+semantics from the
+[retained integration contract](engine-harness-final-delivery.md#retained-integration-contract).
 
 ### Compiler / runtime
 

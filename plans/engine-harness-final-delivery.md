@@ -8,6 +8,105 @@ revisions must be published before their consumers when publication resumes.
 Native goal tools stay disabled. Codex is not
 built with Buck; the resident compiler remains a runtime service.
 
+The integration and foundation requirements below consolidate the superseded
+September 27–29 adoption, runtime, transfer and restart plans. Their branch
+queues, host paths and temporary build state are historical. The current
+[acceptance evidence](engine-harness-completion-evidence.md) and
+[remaining M1 gates](engine-harness-m1-remaining-gates.md) distinguish source,
+component execution and joined acceptance; this cleanup closes no gate.
+
+## Retained integration contract
+
+One process per run shares Harness services and the actor kernel. Raw Haskell
+notebook cells and AgentSpec tools are the model-facing surface. Haskell authors
+programs and orchestration; Rust owns providers, scheduling, processes, storage
+and resource authority. Typed kernel requests/replies remain live kernel-owned
+values, separate from durable Harness model-input envelopes.
+
+| Boundary | Owner and invariant |
+| --- | --- |
+| Actor lifecycle | Existing kernel owns identity/incarnation, admission, supervision and retirement. Embedded composition does not install the standalone demo TreeDriver as another supervisor. |
+| Conversation and calls | Harness Engine/Store owns model rounds, history, input inclusion and original operations/claims. One owner sequences provider rounds per conversation, while tool executions may remain pending. |
+| Tool execution | The admitted resident endpoint binds actor authority; each request pins raw/structured kind, immutable handler, source and tool manifest. Reload affects later admission, never reinterprets an issued call. |
+| Source and notebook state | Resident session/source owners retain exact admitted compiler/helper source, declarations, bindings, native instances and publication receipts. A path or generation alone is not a source lease. |
+| Commands and cleanup | Existing resource owners retain original handles, output and actual cleanup disposition. Dropping a dispatch waiter or browser connection proves neither cancellation nor descendant cleanup. |
+| Browser | The facade composes the Harness authenticated router, authoritative snapshots/cursors and matching immutable assets. Retention gaps require a new snapshot; reconnect never submits commands automatically. |
+
+Internal operation identity includes originating conversation/incarnation,
+request and original provider call ID. Preserve public IDs verbatim. Independent
+conversations and requests may return equal provider IDs; inherited claims refer
+to the same original operation rather than redispatching it in a child. Store,
+scheduler, cancellation and recovery must agree. Test collisions and shared
+inherited claims through those owners, not a Tidepool-side ID rewrite.
+
+Durable input admission, successful wake and inclusion in an actual provider
+request are distinct observations. Embedded input is not also copied into the
+Codex inbox. Model final means conversation idle, not typed assignment
+completion or actor retirement. Host loss retains historical receipts but does
+not reconstruct live heaps, lexical capabilities or external resources.
+
+Backend selection is immutable for an admitted run. Preserve Codex compatibility
+and stock Codex independently until the explicit cutover decision; no running
+session migration or transcript conversion is implied. Startup validates backend,
+workspace, Store schema, assets and bound tool host before readiness. Readiness
+does not prove provider authentication. Browser authorization includes explicit
+public scheme, origin checks, session expiry and configured-secret rotation;
+forwarded identity headers and private-network placement grant no authority.
+Authentication failure preserves uncertain calls instead of replaying them.
+Compaction preserves runtime state and pending raw/typed claims separately from
+its text summary; failed/no-progress compaction retains the last valid history.
+
+### M1 and M2 remain distinct
+
+M1 proves the sequential resident path through the actual embedded Engine,
+bound endpoint, Store and authenticated browser: raw Haskell and typed calls,
+original output, input inclusion, exact cancellation, retained commands,
+reconnect/retry without replay, pinned reload, pending-call compaction/late
+output, host loss and resource disposition. A mock hosted operation or
+component browser test does not prove resident Haskell or the UI-to-host path.
+M1 does not advertise concurrent cells or close M2.
+
+M2 retains one execution identity and its admitted public/source/tool authority
+through every park/wake. Each execution owns its private scope, final write set,
+continuations, reply/control, effect receipts, after-tool invocation and cleanup.
+External waits release machine checkout. Request reservation cleanup and
+after-tool timeout cleanup name exact owned operations, never a session-wide
+before/after subtraction that can consume a sibling's work. Aggregate posture,
+drain and retirement include every admitted execution; structured mailbox turns
+remain non-reentrant.
+
+Successful completion publishes a final declaration/binding delta atomically
+against the current public view. Unrelated writes survive; same-name winners
+follow publication completion order, including reverse compile-generation order.
+Old cells/captures retain original Names, SessionVarIds, interfaces, instances
+and roots. Do not restore a private starting tip, manufacture typed aliases,
+merge rendered names, or replay private source against newer public meanings.
+Compiler certification includes original exports, constructors/class methods,
+normalized imports, replacements/retractions, instance-only writes and selected
+instance plus retained-family consistency. A wrapper typecheck alone is
+insufficient. Invalid joins publish nothing; already-performed effects remain
+real. Both stale acceptance and stale rejection restage the same frozen intent
+without effects. The publication/cancellation ordering and post-rename
+confirmation contract below remain authoritative.
+
+A successful capture includes completed private scaffold at its issuing effect
+boundary and independent leases on admitted source and lexical/native state.
+Function-local values cross as explicit typed inputs. Captures do not snapshot
+arbitrary filesystem reads or freeze mutable resources; child admission
+revalidates authority and revocation. Reuse a capture for children before the
+parent returns; later parent failure, cancellation or token release cannot
+invalidate a successfully retained capture. Pending parent calls retain their
+original eventual outcomes, never fabricated success or repeated effects.
+
+The full worker-tree gate uses ordinary compiled Haskell orchestration and at
+least one Haskell-only result join: a bounded Sol root delegates two useful
+components through recursive Luna owners/leaves, receives typed results,
+commissions exact-candidate review, repairs, integrates and verifies cleanup.
+Retain commits/checks, ancestry, models/effort, call/execution correlation,
+latency/memory and resource disposition; interview the root before retirement.
+Do not manufacture actors to meet a headcount. This live gate still requires its
+separate readiness packet and approval after deterministic M1/M2 gates.
+
 ### Publication checkpoint, 2026-09-30
 
 At `b38490f520290f83ff9cbe60bb2eb7cea898502f`, GitHub Tidepool main was
@@ -28,7 +127,7 @@ origin currently names a local bundle, so publication must explicitly target
 the harness GitHub repository. These delivery checks do not establish M1,
 M2, or full-engine acceptance.
 
-## Source checkpoint and ownership
+## September 30 source checkpoint and ownership
 
 Starting main: `ff2a9c3edde61690a49012fd8d848e2955d2afd7`.
 Candidate tips: compiler `595b2f72f`, runtime `dccb98a26`, actor `f5ba3851b`,
@@ -37,11 +136,13 @@ apply dependency-complete commits rather than importing older branch ancestry.
 Compiler/helper and generated Buck WIP is preserved under
 `target/completion-evidence/final-delivery/20260930T165141Z`.
 
-The protected hidden display and original declaration-to-binding-to-expression
-native gates passed on compiler candidates. Runtime Ephemeral binding tests
-passed. Neither M1 nor M2 is accepted; private and keyed actor admission remain
-disabled. Existing runtime fresh-process recovery does not establish production
-embedded startup/restart. The evidence ledger must distinguish these results.
+At this checkpoint, the protected hidden display and original
+declaration-to-binding-to-expression native gates had passed on compiler
+candidates, as had runtime Ephemeral binding tests. Neither M1 nor M2 was
+accepted; private and keyed actor admission remained disabled. These historical
+states do not describe later activation. Existing runtime fresh-process recovery
+does not establish production embedded startup/restart. The evidence ledger must
+distinguish these results.
 
 Root owns integration, native focused execution, browser acceptance and packaging.
 Up to eight workers own disjoint parcels:
@@ -254,3 +355,63 @@ The companion has a verified complete-history bundle at
 `target/completion-evidence/final-delivery/harness-retained-model-requests.bundle`.
 Combined Tidepool compilation and the actual browser journey remain pending;
 this checkpoint does not establish M1 acceptance.
+
+## Historical foundation evidence
+
+These results belong to the September 29 checkpoints, not the current joined
+release. Source-box transfer queues and temporary process state are superseded;
+Git tree `d14deb83418d3c831e74b870204344b43955302c` retains the original
+transfer/restart documents, exact commands, filters and branch/application
+history. The historical destination
+join used Harness `c485edb9b697ffc671b22c9ef25a73fc84763d76`, Codex
+`2d58f00c6f139d745e0c123d31dfe6d2f04ff997` and workspace
+`5248b927e7b432d1747891df5285d6827eace7d6`. Its bundle manifest and bounded
+logs were recorded in `/srv/swarm/checkouts/foundation-transfer/README.md` and
+`tidepool-evidence/` there. Those local preservation records are not published
+dependencies or proof that present source can be rebuilt remotely.
+
+| Historical boundary | Exact result and recorded evidence |
+| --- | --- |
+| Artifact migration | Seven registered producers regenerated ABI 8/schema 14 artifacts; seven decoded successfully and an old ABI 7 artifact was refused. Destination `target/transfer-evidence/{embedded-fixtures-update-2,embedded-artifact-gate-final,stale-abi-rejection-final}.log`. |
+| Native/runtime parcel repair | At `c25a654476b0cd584bb6cf62fddb2aa2245df556`, 638 native library tests and 32 runtime session tests passed, one intentionally skipped in each selection. `joined-native-libs-repaired.log`, `joined-runtime-session-repaired.log`; the original failure remains in `joined-runtime-session.log`. |
+| Full structural corpus | At `7881626da56c23732e27ed7af216614ac303a8b1`, unrestricted `scripts/fixtures.sh check` accepted all 12 reported cohorts, metadata and seven embedded artifacts. Suite: 234 successful comparisons; other cohorts: 48. `target/prepared-corpus/latest-success.json` records stage accounting; `fixtures-check-final.log` records the run. Oracle regeneration changed only the fingerprint, retaining payload digest `35ea9188d22b81bb8703f2cac36831935afc114d55acf1176009552d08565a98`. |
+| Compiler product | Source-hidden fat/skinny typechecking, product roundtrip and retained-scope cases passed; one skinny interface was 2,336 bytes versus 2,747 fat bytes. `module-product-roundtrip.log`, `retained-scope.log`. This fixture-size result does not establish aggregate savings or durable reuse. |
+| Matched host and adapter | Declared local host build and four facade admission/installed-handler/real-Event checks passed after parcel repair. `matched-host-build-repaired.log`, `joined-facade-adapter-repaired.log`; no live session or full M1 composition. |
+| Companion | Harness embedded-host selection 5/5 and owner-completion race 1/1; exact Codex source selection 13/13 under Rust 1.95.0, retained in `foundation-transfer/client/exact13.log`. Component evidence is separate from joined M1. |
+
+The compiler declaration-join experiment ran `cabal test
+declaration-join-proof --test-show-details=direct` in the declared Nix shell.
+Its six join/consumer pairs accepted hidden-name isolation, changed-type
+replacement and distinct instance-only imports, and rejected ambiguous class
+exports and conflicting type-family instances. The duplicate `instance C Int`
+wrapper **compiled**, while later constraint use failed. The recorded
+`declaration-join-proof.log` motivates explicit combined-instance validation;
+it is not M2 publication acceptance.
+
+Wave22's historical fingerprint input/run and nonreproducibility limits remain
+in [the foundation investigation](engine-foundation.md#retained-investigation).
+Source-box `/tmp/tidepool-wave22-fullcore` logs were not transferred by the
+destination work; historical `G2` source/private `W2` dependencies were missing.
+The portable probe has different dependencies, so compare its 0/1,000/10,000
+rows internally, never claim an absolute historical speedup. The destination
+probe recorded G3 approximately 0.917/0.214/0.221 ms and whole requests
+160/183/539 ms in `retained-fingerprint-probe.log`; the first sample included
+allocation activity absent in the later samples.
+
+The shared-host memory hypothesis came from 37 wave21 native clients totaling
+about 18.1 GiB PSS plus SwapPSS. It is a baseline, not measured replacement
+savings. Process sharing does not eliminate compiler/JIT retention or serialize
+CPU execution differently by itself; compare equal useful work/concurrency and
+live versus retired owners. The original run observations remain in
+[the wave22 audit](../docs/reports/wave22-audit/batch.md).
+
+The September 29 runtime checkpoint also retained real Haskell capture tests
+(2/2), failed-release/reinstallation retry tests (4/4), and exact idempotent
+release-confirmation tests (2/2), under the runtime worktree's
+`target/completion-evidence/{capture-haskell-final,release-retry,release-confirm}.log`.
+Their producer commits were `a6ab1dbb38f2a55997e5b297fb69eea0c9a0fe96`,
+`9a330b2223c5ed1f942c0dfad65f6f7c7b1c5610` and
+`9350b19392328db41df8265a853c1870b9db588a`. They do not prove later private
+publication or the full worker tree. Terminal/unavailable checkout keeps exact
+unconfirmed cleanup custody with the existing owner; contention waits through
+the session registry, and teardown reports unresolved custody.

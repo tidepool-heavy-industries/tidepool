@@ -1,7 +1,9 @@
 # Engine completion: approved implementation wave
 
 Approved 2026-09-29 after the design review. This updates conflicting portions
-of `engine-completion.md` and `harness-integration-runtime.md`. Root baseline is
+of `engine-completion.md` and the earlier runtime handoff, now consolidated in
+[final delivery](engine-harness-final-delivery.md#retained-integration-contract).
+Root baseline is
 `8bbfb9489`; preserve all existing worker commits and dirty changes. Foundation
 is complete, but compiler reuse, concurrent publication, and final acceptance
 are not. Pushes remain deferred; live G5 requires its separate readiness approval.

@@ -48,7 +48,7 @@ Next-run samples should distinguish local resource release from those retained
 owners before proposing another memory mechanism.
 
 The shared-harness direction is now recorded in
-plans/harness-adoption-reconciliation.md: one instance for all actors, with
+[the retained integration contract](../../../plans/engine-harness-final-delivery.md#retained-integration-contract): one instance for all actors, with
 independent authority/lifecycle. Savings remain a hypothesis to measure.
 
 
