@@ -165,7 +165,10 @@ data CheckedTypeWitness = CheckedTypeWitness
   , witnessStructure :: BS.ByteString
   , witnessOwners :: [Module]
   , witnessInterfaces :: Maybe [(Module, String)]
-  } deriving (Eq, Show)
+  } deriving (Eq)
+
+instance Show CheckedTypeWitness where
+  show witness = "CheckedTypeWitness " ++ show (witnessSignature witness)
 
 captureCheckedTypeWitness :: HscEnv -> Type -> Maybe CheckedTypeWitness
 captureCheckedTypeWitness env original = case evalStateT (shape 0 [] stable) (0 :: Int) of

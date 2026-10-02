@@ -82,7 +82,7 @@ import GHC.Builtin.Names (gHC_PRIM)
 import Tidepool.FatIface (readExactInterface)
 import GHC.Unit.Types (unitString, stringToUnit)
 import qualified GHC.Data.Maybe as MErr
-import GHC.Utils.Outputable (text, ppr)
+import GHC.Utils.Outputable (text)
 import Numeric (showHex)
 import System.Directory (getTemporaryDirectory, removeFile, canonicalizePath)
 import GHC.Fingerprint.Type (Fingerprint)
