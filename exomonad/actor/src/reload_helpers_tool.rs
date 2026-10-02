@@ -18,6 +18,9 @@ pub(crate) struct ReloadHelpersInputError(String);
 
 pub(crate) fn declaration() -> HostedTool {
     HostedTool::Function(ToolDeclaration {
+        schedule: Default::default(),
+        implementation: Default::default(),
+        effect_keys: Vec::new(),
         name: RELOAD_HELPERS_TOOL.into(),
         description: "Edit .exomonad/helpers/SessionHelpers.hs (and any SessionHelpers.* modules), then call reload_helpers to typecheck and publish them for later Haskell cells. New modules are allowed. Invalid drafts stay on disk while the last valid revision remains active. Publication is scoped to this actor; it does not change AgentSpec or the registered tool list. Supply also_check to include additional modules in the check.".into(),
         input_schema: serde_json::json!({

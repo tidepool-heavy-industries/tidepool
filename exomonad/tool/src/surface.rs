@@ -21,6 +21,9 @@ pub enum ToolField {
     InputSchema,
     OutputSchema,
     Kind,
+    Scheduling,
+    Implementation,
+    EffectKeys,
     /// The schemas mean the same thing but do not serialize identically.
     SchemaRendering,
 }
@@ -33,6 +36,9 @@ impl ToolField {
             Self::InputSchema => "input schema",
             Self::OutputSchema => "output schema",
             Self::Kind => "kind",
+            Self::Scheduling => "scheduling",
+            Self::Implementation => "implementation",
+            Self::EffectKeys => "supported effects",
             Self::SchemaRendering => "schema rendering",
         }
     }
@@ -134,6 +140,15 @@ fn compare_one(active: &HostedTool, candidate: &HostedTool) -> Vec<ToolField> {
     if kind_of(active) != kind_of(candidate) {
         fields.push(ToolField::Kind);
     }
+    if active.scheduling() != candidate.scheduling() {
+        fields.push(ToolField::Scheduling);
+    }
+    if active.implementation() != candidate.implementation() {
+        fields.push(ToolField::Implementation);
+    }
+    if active.effect_keys() != candidate.effect_keys() {
+        fields.push(ToolField::EffectKeys);
+    }
     let (active_input, candidate_input) = (input_schema(active), input_schema(candidate));
     let (active_output, candidate_output) = (output_schema(active), output_schema(candidate));
     if active_input != candidate_input {
@@ -212,6 +227,9 @@ mod tests {
 
     fn function(name: &str, description: &str, input: serde_json::Value) -> HostedTool {
         HostedTool::Function(ToolDeclaration {
+            schedule: Default::default(),
+            implementation: Default::default(),
+            effect_keys: Vec::new(),
             name: name.into(),
             description: description.into(),
             input_schema: input,
@@ -228,10 +246,36 @@ mod tests {
                 serde_json::json!({"type": "object"}),
             ),
             HostedTool::Custom(CustomToolDeclaration {
+                schedule: Default::default(),
+                implementation: Default::default(),
+                effect_keys: Vec::new(),
                 name: "bash".into(),
                 description: "Run a command".into(),
             }),
         ]
+    }
+
+    #[test]
+    fn invocation_contract_changes_refuse_reload() {
+        let active = surface();
+        let mut candidate = surface();
+        let HostedTool::Custom(tool) = &mut candidate[1] else {
+            unreachable!()
+        };
+        tool.schedule = crate::ToolScheduling::BeforeNextInference;
+        tool.implementation = crate::ToolImplementation::HaskellCell;
+        tool.effect_keys = vec![crate::ToolEffectKey::ContextReadWrite];
+        assert_eq!(
+            compare_surfaces(&active, &candidate),
+            vec![SurfaceChange::Changed {
+                name: "bash".into(),
+                fields: vec![
+                    ToolField::Scheduling,
+                    ToolField::Implementation,
+                    ToolField::EffectKeys
+                ],
+            }]
+        );
     }
 
     #[test]

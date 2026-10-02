@@ -132,6 +132,9 @@ pub(crate) fn project_tools(
 
 fn haskell_tool_declaration() -> HostedTool {
     HostedTool::Custom(CustomToolDeclaration {
+        schedule: Default::default(),
+        implementation: Default::default(),
+        effect_keys: Vec::new(),
         name: HASKELL_TOOL.into(),
         description: PromptId::HaskellToolDescription.body().into(),
     })
@@ -290,6 +293,9 @@ mod tests {
 
     fn raw(name: &str) -> exomonad_tool::ToolDeclaration {
         exomonad_tool::ToolDeclaration {
+            schedule: Default::default(),
+            implementation: Default::default(),
+            effect_keys: Vec::new(),
             name: name.into(),
             description: "literal input".into(),
             input_schema: serde_json::json!({"type":"string"}),

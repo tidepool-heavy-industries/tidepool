@@ -1124,6 +1124,9 @@ mod tests {
         input_schema: serde_json::Value,
     ) -> exomonad_tool::ToolDeclaration {
         exomonad_tool::ToolDeclaration {
+            schedule: Default::default(),
+            implementation: Default::default(),
+            effect_keys: Vec::new(),
             name: name.into(),
             description: format!("{name} tool"),
             input_schema,

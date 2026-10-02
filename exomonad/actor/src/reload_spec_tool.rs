@@ -25,6 +25,9 @@ pub(crate) struct ReloadSpecInputError(String);
 
 pub(crate) fn declaration() -> HostedTool {
     HostedTool::Function(ToolDeclaration {
+        schedule: Default::default(),
+        implementation: Default::default(),
+        effect_keys: Vec::new(),
         name: RELOAD_SPEC_TOOL.into(),
         description: "Rebuild YOUR OWN agent spec from the source in your own checkout, and serve later tool calls from the rebuilt implementations. Publishes your checkout's source layer first, then recompiles the spec against it. The DECLARED surface must not change: if the rebuilt spec declares a different tool name, description, schema, kind or order, the reload is refused, the difference is returned, and the previously installed record keeps answering — a changed surface takes effect at your next incarnation, because the tool list is registered once per session. A spec that does not typecheck is an ordinary refusal too: your edited files stay exactly as you wrote them and the previous spec stays active. A call already accepted keeps the implementation it started with. This reload is yours alone and never upgrades a child.".into(),
         input_schema: serde_json::json!({
