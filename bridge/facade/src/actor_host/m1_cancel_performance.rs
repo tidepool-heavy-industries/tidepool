@@ -269,7 +269,8 @@ async fn production_engine_store_active_cancellation_50() {
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),
-        codex_auth_file: auth_file,
+        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        credential_file: auth_file,
         context_capacity_tokens: 2_000_000,
         concurrent_jobs: 1,
     };

@@ -2,12 +2,10 @@
 use std::{marker::PhantomData, sync::Arc};
 
 use exomonad_actor::{ActorDescriptor, CellModelBinding, CellModelFactory, ForkEffort, ModelReq};
+#[cfg(test)]
+use harness::transport::auth::CodexFileAuth;
 use harness::{
-    engine::ResponsesTransport,
-    invocation::Limits,
-    model::Effort,
-    store::Store,
-    transport::{auth::CodexFileAuth, Auth},
+    engine::ResponsesTransport, invocation::Limits, model::Effort, store::Store, transport::Auth,
     turn::JobScheduler,
 };
 use tidepool_effect::{DeferredEffect, Response};
@@ -213,14 +211,14 @@ pub(super) fn admitted_factory(
             .with_launch_config(config),
         );
     }
-    let auth_file = settings.codex_auth_file.clone();
+    let settings = settings.clone();
     Arc::new(
-        EmbeddedCellModelFactory::<CodexFileAuth, _>::new(
+        EmbeddedCellModelFactory::<super::embedded_service::EmbeddedAuth, _>::new(
             service.runtime.store(),
             service.runtime.scheduler(),
             config.model.clone(),
             effort,
-            Arc::new(move || responses_client(&auth_file)),
+            Arc::new(move || responses_client(&settings)),
         )
         .with_launch_config(config),
     )

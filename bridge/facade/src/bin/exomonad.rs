@@ -12,6 +12,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Connect an Exomonad credential record to a ChatGPT plan.
+    Auth {
+        #[command(subcommand)]
+        action: AuthCommand,
+    },
     /// Complete a mount transition after its pre-exec syscall phase.
     #[command(name = "__exomonad_mount_helper", hide = true)]
     MountHelper,
@@ -188,6 +193,19 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+enum AuthCommand {
+    /// Continue with ChatGPT using a protected Exomonad credential record.
+    Login {
+        /// Select one registration; defaults to the private Exomonad account file.
+        #[arg(long)]
+        credential_file: Option<PathBuf>,
+        /// The browser returns to 127.0.0.1 on this port.
+        #[arg(long, default_value_t = 1455)]
+        port: u16,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum OperatorCommand {
     New,
     List,
@@ -289,6 +307,28 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     match command {
+        Command::Auth {
+            action:
+                AuthCommand::Login {
+                    credential_file,
+                    port,
+                },
+        } => {
+            let path = match credential_file {
+                Some(path) => path,
+                None => harness::transport::auth::ChatGptPlanAuth::default_path()?,
+            };
+            harness::transport::auth::chatgpt::login(path.clone(), port, |url| {
+                println!("Continue with ChatGPT in your browser:\n{url}");
+                println!("The callback uses 127.0.0.1 on the host running this command.");
+            })
+            .await?;
+            println!(
+                "Saved the protected Exomonad registration at {}",
+                path.display()
+            );
+            Ok(())
+        }
         Command::MountHelper => unreachable!("handled before runtime construction"),
         Command::InSlice { .. } => unreachable!("handled before runtime construction"),
         Command::Resources { socket, policy } => {
@@ -484,6 +524,36 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_chatgpt_login_cli_selects_private_record_and_loopback_port() {
+        let cli = super::Cli::try_parse_from([
+            "exomonad",
+            "auth",
+            "login",
+            "--credential-file",
+            "/private/exomonad.json",
+            "--port",
+            "54321",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, super::Command::Auth { action: super::AuthCommand::Login { credential_file: Some(path), port: 54321 } } if path == std::path::PathBuf::from("/private/exomonad.json"))
+        );
+        let cli = super::Cli::try_parse_from(["exomonad", "auth", "login"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            super::Command::Auth {
+                action: super::AuthCommand::Login {
+                    credential_file: None,
+                    port: 1455
+                }
+            }
+        ));
+        assert!(
+            super::Cli::try_parse_from(["exomonad", "auth", "login", "--port", "65536"]).is_err()
+        );
+    }
+
     use super::*;
 
     #[test]
