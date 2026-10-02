@@ -531,11 +531,11 @@ impl DeclLog {
             .keys()
             .filter_map(|generation| self.joined_context_at(*generation))
             .flat_map(|context| context.value_interfaces())
-            .filter(|interface| interface.owner().unit == "main")
+            .filter(|interface| interface.interface().unit() == "main")
             .filter_map(|interface| {
                 interface
-                    .owner()
-                    .module
+                    .interface()
+                    .module()
                     .strip_prefix("Tidepool.Session.Val.G")?
                     .parse::<u64>()
                     .ok()
