@@ -389,15 +389,21 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
     let rejected =
         dispatch_haskell_script(root.as_ref(), include_str!("notebook_nominal_rejected.hs")).await;
     assert_eq!(rejected["status"], "rejected", "{rejected:?}");
-    assert_eq!(
-        rejected["items"].as_array().unwrap().len(),
-        3,
+    let rejection = &rejected["items"][0];
+    assert_eq!(rejection["failureLayer"], "compile", "{rejected:?}");
+    assert!(
+        rejection["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| {
+                diagnostic["location"]["startLine"] == 6
+                    && diagnostic["message"].as_str().is_some_and(|message| {
+                        message.contains("IsString Int") && message.contains("bad")
+                    })
+            }),
         "{rejected:?}"
     );
-    assert_eq!(rejected["items"][0]["status"], "notRun", "{rejected:?}");
-    assert_eq!(rejected["items"][1]["status"], "notRun", "{rejected:?}");
-    assert_eq!(rejected["items"][2]["status"], "rejected", "{rejected:?}");
-    assert_eq!(rejected["items"][2]["span"]["startLine"], 6, "{rejected:?}");
 
     let missing_declaration = dispatch_haskell_script(
         root.as_ref(),
@@ -430,6 +436,10 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
     assert_eq!(rejected["status"], "rejected", "{rejected}");
     assert_eq!(
         rejected["items"][0]["failureLayer"], "compile",
+        "{rejected}"
+    );
+    assert!(
+        rejected.to_string().contains("prefixIdentifierMissing"),
         "{rejected}"
     );
     for binding in ["actorsBeforeFailure", "prefixValue", "tailValue"] {
