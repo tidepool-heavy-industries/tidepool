@@ -85,7 +85,7 @@ async fn next_round(rounds: &mut mpsc::UnboundedReceiver<RequestedRound>) -> Req
         .expect("scripted provider closed")
 }
 
-fn successful_output(request: &ResponsesRequest, call_id: &str) -> Value {
+fn retained_output(request: &ResponsesRequest, call_id: &str) -> Value {
     let item = request
         .input
         .iter()
@@ -96,7 +96,11 @@ fn successful_output(request: &ResponsesRequest, call_id: &str) -> Value {
             ) && item.0["call_id"] == call_id
         })
         .unwrap_or_else(|| panic!("next inference omitted terminal output for {call_id}"));
-    let output: Value = serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap();
+    serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap()
+}
+
+fn successful_output(request: &ResponsesRequest, call_id: &str) -> Value {
+    let output = retained_output(request, call_id);
     assert!(
         matches!(output["status"].as_str(), Some("completed" | "committed")),
         "{output}"
@@ -110,6 +114,25 @@ fn successful_output(request: &ResponsesRequest, call_id: &str) -> Value {
         "{output}"
     );
     output
+}
+
+fn context_operations(output: &Value) -> Vec<&Value> {
+    output["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|item| item["operations"].as_array().into_iter().flatten())
+        .filter(|operation| operation["effect"] == "context transformation")
+        .collect()
+}
+
+fn assert_context_operations_uncommitted(output: &Value) {
+    let committed =
+        serde_json::to_value(tidepool_runtime::session::WorkbenchOperationDisposition::Committed)
+            .unwrap();
+    for operation in context_operations(output) {
+        assert_ne!(operation["disposition"], committed, "{output}");
+    }
 }
 
 fn settings() -> (tempfile::TempDir, crate::exomonad::EmbeddedLaunchConfig) {
@@ -374,18 +397,20 @@ async fn resident_sync_context_failure_keeps_prefix_model_and_defers_children() 
     let after = root_context_state(&fixture);
     assert_eq!(after.generation, before.generation);
     assert_eq!(after.model, before.model);
-    let terminal = successor
-        .request
-        .input
-        .iter()
-        .find(|item| {
-            item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == "context-failure"
-        })
-        .expect("failed synchronous cell retains its actual terminal output");
+    let terminal = retained_output(&successor.request, "context-failure");
     assert!(terminal
-        .0
         .to_string()
         .contains("intentional context transaction failure"));
+    let staged =
+        serde_json::to_value(tidepool_runtime::session::WorkbenchOperationDisposition::Staged)
+            .unwrap();
+    assert!(
+        context_operations(&terminal)
+            .iter()
+            .any(|operation| operation["disposition"] == staged),
+        "{terminal}"
+    );
+    assert_context_operations_uncommitted(&terminal);
     successor.finish();
     assert!(
         tokio::time::timeout(Duration::from_millis(200), rounds.recv())
@@ -476,6 +501,8 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
     assert_eq!(successor.request.model, "test-model");
     assert!(has_user_text(&successor.request, "parent-original"));
     assert!(!has_user_text(&successor.request, "must-not-publish"));
+    let terminal = retained_output(&successor.request, "context-cancel");
+    assert_context_operations_uncommitted(&terminal);
     let after = root_context_state(&fixture);
     assert_eq!(after.generation, before.generation);
     assert_eq!(after.model, before.model);
