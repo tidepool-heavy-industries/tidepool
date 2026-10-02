@@ -3867,9 +3867,15 @@ where
             // Setup uses the existing public scope while the bootstrap owner
             // retains publication authority. The checked program seals its
             // captured interfaces and protected templates before native execution.
-            let (checked, prepared) = installer
-                .prepare_checked_cell(compile_context.clone(), block.source, authority, None, None)
-                .await?;
+            // Box compiler state separately from the tool-preparation future.
+            let (checked, prepared) = Box::pin(installer.prepare_checked_cell(
+                compile_context.clone(),
+                block.source,
+                authority,
+                None,
+                None,
+            ))
+            .await?;
             if checked.items.len() != 1
                 || checked.items[0].verdict.kind != TurnKind::Bind
                 || !checked.items[0].verdict.binders.is_empty()
@@ -3897,8 +3903,14 @@ where
                 total: 1,
                 source: checked.items[0].source.clone(),
             };
+            // Execution stays inside the registration while its state is boxed.
             let step = registration
-                .scope(installer.begin_prepared_cell_item(compile_context.clone(), block, item, 0))
+                .scope(Box::pin(installer.begin_prepared_cell_item(
+                    compile_context.clone(),
+                    block,
+                    item,
+                    0,
+                )))
                 .await?;
             let ResidentWorkbenchStep::Running { outcome, .. } = step else {
                 let detail = match step {

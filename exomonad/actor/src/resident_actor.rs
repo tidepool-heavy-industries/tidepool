@@ -7059,8 +7059,9 @@ where
         let workbench = self.environment.runner.application_workbench();
         let guard = workbench.actor_initialization_cleanup(context.clone());
         let registration = guard.registration();
+        // Keep initialization state out of the enclosing task-local scope future.
         let result = registration
-            .scope(self.initialize_inner(kernel, context, boot))
+            .scope(Box::pin(self.initialize_inner(kernel, context, boot)))
             .await;
         if result.is_ok() {
             workbench
