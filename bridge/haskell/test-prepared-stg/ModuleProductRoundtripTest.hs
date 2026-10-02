@@ -192,8 +192,10 @@ verifyModuleProductInterfaceRoundtrip work = do
         <> encodeString (T.pack packagePath) <> encodeString (T.pack packageHash)
         <> encodeString (T.pack productPath)
       manifestBytes = toLazyByteString
-        (encodeListLen 3 <> encodeString "TPMCAN" <> encodeString "6"
-          <> encodeListLen 1 <> candidate)
+        (encodeListLen 6 <> encodeString "TPMCAN" <> encodeString "8"
+          <> encodeListLen 0 <> encodeListLen 0
+          <> encodeListLen 1 <> candidate
+          <> encodeListLen 2 <> encodeListLen 0 <> encodeListLen 0)
   BS.writeFile packagePath packageBytes
   BS.writeFile productPath BS.empty
   BS.writeFile manifest (BL.toStrict manifestBytes)

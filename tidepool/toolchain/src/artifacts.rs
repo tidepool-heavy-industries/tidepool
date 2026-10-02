@@ -2774,6 +2774,11 @@ fn retain_failed_compiler_artifacts(
     std::fs::create_dir_all(&retained_root)?;
     let retained = TempDir::new_in(&retained_root)?;
     if let Some(offer) = offer {
+        if let Some(selected) = &offer.selected {
+            if let Err(failure) = selected.retain_evidence_diagnostics(retained.path()) {
+                tracing::warn!(%failure, "could not retain original selected candidate evidence");
+            }
+        }
         if let Err(failure) = offer.retain_checked_inputs(retained.path()) {
             tracing::warn!(%failure, "could not retain selected checked input diagnostics");
         }
