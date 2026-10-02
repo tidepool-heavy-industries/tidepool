@@ -9,7 +9,7 @@ use std::{any::Any, future::Future, pin::Pin, sync::Arc};
 use exomonad_tool::{HostedTool, ToolInvocation, ToolInvocationContext};
 use tidepool_runtime::session::{
     PublicationCancellation, PublicationDecision, PublicationPhase, ResidentHole,
-    WorkbenchExecutionId, WorkbenchRequest,
+    WorkbenchExecutionId, WorkbenchRequest, WorkbenchResponse,
 };
 use tokio::sync::oneshot;
 
@@ -65,6 +65,7 @@ pub struct WorkbenchExecutionControl {
     execution: std::sync::OnceLock<WorkbenchExecutionId>,
     context_binding: std::sync::OnceLock<Arc<dyn crate::HostedContextBinding>>,
     context_cancel_requested: std::sync::atomic::AtomicBool,
+    cell_terminal: parking_lot::Mutex<Option<crate::CellExit>>,
     publication_waited: std::sync::atomic::AtomicBool,
     phase: std::sync::atomic::AtomicU8,
     sleep_outcome: std::sync::atomic::AtomicU8,
@@ -108,6 +109,7 @@ impl WorkbenchExecutionControl {
             execution: std::sync::OnceLock::new(),
             context_binding: std::sync::OnceLock::new(),
             context_cancel_requested: std::sync::atomic::AtomicBool::new(false),
+            cell_terminal: parking_lot::Mutex::new(None),
             publication_waited: std::sync::atomic::AtomicBool::new(false),
             phase: std::sync::atomic::AtomicU8::new(WORKBENCH_IDLE),
             sleep_outcome: std::sync::atomic::AtomicU8::new(SLEEP_NONE),
@@ -171,6 +173,33 @@ impl WorkbenchExecutionControl {
     pub(crate) fn context_cancellation_requested(&self) -> bool {
         self.context_cancel_requested
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Whole-cell completion and operation cancellation share this cutoff.
+    /// The ordinary reply remains delivered by LocalActor after finalization.
+    pub(crate) fn finish_cell(
+        &self,
+        execution: WorkbenchExecutionId,
+        result: &Result<crate::KernelStep<WorkbenchResponse>, crate::KernelInvocationFailure>,
+        cleanup_confirmed: bool,
+    ) -> crate::CellExit {
+        let mut terminal = self.cell_terminal.lock();
+        if let Some(exit) = terminal.as_ref() {
+            assert_eq!(exit.execution, execution);
+            return exit.clone();
+        }
+        let exit = crate::CellExit::from_reply(
+            execution,
+            result,
+            cleanup_confirmed,
+            self.cancellation_requested() || self.context_cancellation_requested(),
+        );
+        *terminal = Some(exit.clone());
+        exit
+    }
+
+    fn cell_finished(&self) -> bool {
+        self.cell_terminal.lock().is_some()
     }
 
     pub(crate) fn arm_sleep(&self) {
@@ -247,6 +276,7 @@ impl WorkbenchExecutionControl {
     /// The actor publishes the first terminal reply; transport failure may
     /// fill the slot only when no actor-owned reply arrived.
     pub(crate) fn settle(&self, reply: crate::KernelWorkbenchReply) {
+        let _terminal = self.cell_terminal.lock();
         if self.settlement.send_if_modified(|current| {
             if current.is_some() {
                 return false;
@@ -259,6 +289,10 @@ impl WorkbenchExecutionControl {
     }
 
     fn admit_cancellation(&self) -> (bool, Option<PublicationCancellation>) {
+        let terminal = self.cell_terminal.lock();
+        if terminal.is_some() || self.terminal_reply().is_some() {
+            return (false, None);
+        }
         self.context_cancel_requested
             .store(true, std::sync::atomic::Ordering::Release);
         if let Some(binding) = self.context_binding.get() {
@@ -351,6 +385,17 @@ impl WorkbenchExecutionControl {
     ) -> WorkbenchCancellationOutcome {
         // The first terminal owner reply wins over a later transport result.
         let reply = self.terminal_reply().unwrap_or(reply);
+        if let Some(exit) = self.cell_terminal.lock().as_ref() {
+            if !exit.cleanup_confirmed {
+                return WorkbenchCancellationOutcome::Unconfirmed { execution };
+            }
+            return match exit.cause {
+                crate::CellExitCause::Cancelled => {
+                    WorkbenchCancellationOutcome::Cancelled { execution, reply }
+                }
+                _ => WorkbenchCancellationOutcome::PublicationSettled { execution, reply },
+            };
+        }
         if matches!(
             &reply,
             Err(crate::KernelInvocationFailure::CleanupUnconfirmed { .. })
@@ -814,6 +859,7 @@ impl ResidentToolClient {
         let (claimed, publication) = control.admit_cancellation();
         let phase = control.phase.load(std::sync::atomic::Ordering::Acquire);
         if !claimed
+            && !control.cell_finished()
             && !matches!(
                 publication,
                 Some(
@@ -1485,6 +1531,134 @@ mod tests {
         assert_eq!(binding.0.load(std::sync::atomic::Ordering::Acquire), 1);
         control.request_cancellation();
         assert_eq!(binding.0.load(std::sync::atomic::Ordering::Acquire), 2);
+    }
+
+    struct FinishingContext {
+        cancelled: std::sync::atomic::AtomicUsize,
+        exit: parking_lot::Mutex<Option<crate::CellExit>>,
+        entered: std::sync::Barrier,
+        release: std::sync::Barrier,
+    }
+
+    impl crate::HostedContextBinding for FinishingContext {
+        fn admit(
+            &self,
+            _: &WorkbenchExecutionId,
+            _: &ToolInvocationContext,
+            _: tidepool_repr::PrincipalId,
+        ) -> Result<(), tidepool_effect::error::EffectError> {
+            Ok(())
+        }
+        fn prepare(
+            &self,
+            _: crate::ContextReq,
+            _: tidepool_repr::PrincipalId,
+            _: tidepool_repr::DataConTable,
+        ) -> tidepool_effect::DeferredEffect {
+            panic!("cutoff test does not evaluate effects")
+        }
+        fn cancel(&self) {
+            self.cancelled
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        fn finish(&self, exit: crate::CellExit) {
+            *self.exit.lock() = Some(exit);
+            self.entered.wait();
+            self.release.wait();
+        }
+    }
+
+    #[test]
+    fn whole_cell_cutoff_prevents_cancellation_during_binding_finish_before_reply_delivery() {
+        let control = WorkbenchExecutionControl::untracked();
+        let binding = Arc::new(FinishingContext {
+            cancelled: std::sync::atomic::AtomicUsize::new(0),
+            exit: parking_lot::Mutex::new(None),
+            entered: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+        });
+        control.bind_context(binding.clone());
+        let execution = WorkbenchExecutionId::from_digest([24; 16]);
+        let response = WorkbenchResponse {
+            status: WorkbenchRunStatus::Committed,
+            summary: None,
+            items: Vec::new(),
+            next_index: 1,
+            total: 1,
+        };
+        let finishing = {
+            let control = control.clone();
+            let binding = binding.clone();
+            let execution = execution.clone();
+            let response = response.clone();
+            std::thread::spawn(move || {
+                let result = Ok(crate::KernelStep::Continue(response));
+                let exit = control.finish_cell(execution, &result, true);
+                crate::HostedContextBinding::finish(binding.as_ref(), exit.clone());
+                exit
+            })
+        };
+        binding.entered.wait();
+        assert!(
+            control.terminal_reply().is_none(),
+            "LocalActor has not delivered its reply"
+        );
+        assert!(!control.request_cancellation());
+        assert!(!control.context_cancellation_requested());
+        assert!(!control.cancellation_requested());
+        assert_eq!(
+            binding.cancelled.load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+        let retained = binding.exit.lock().clone().unwrap();
+        assert!(retained.permits_context_commit());
+        binding.release.wait();
+        assert_eq!(finishing.join().unwrap(), retained);
+        control.settle(Ok(response.clone()));
+        assert!(matches!(
+            control.cancellation_outcome(execution, Ok(response.clone())),
+            WorkbenchCancellationOutcome::PublicationSettled { reply, .. } if reply == Ok(response)
+        ));
+    }
+
+    #[test]
+    fn cancellation_before_whole_cell_cutoff_vetoes_published_native_value_and_stays_cancelled() {
+        let control = WorkbenchExecutionControl::untracked();
+        let binding = Arc::new(ContextCancellation(std::sync::atomic::AtomicUsize::new(0)));
+        control.bind_context(binding.clone());
+        control
+            .publication_decision()
+            .claim_commit()
+            .unwrap()
+            .published();
+        assert!(
+            !control.request_cancellation(),
+            "native publication is already complete"
+        );
+        let execution = WorkbenchExecutionId::from_digest([25; 16]);
+        let response = WorkbenchResponse {
+            status: WorkbenchRunStatus::Committed,
+            summary: None,
+            items: Vec::new(),
+            next_index: 1,
+            total: 1,
+        };
+        let result = Ok(crate::KernelStep::Continue(response.clone()));
+        let exit = control.finish_cell(execution.clone(), &result, true);
+        assert_eq!(exit.cause, crate::CellExitCause::Cancelled);
+        assert!(!exit.permits_context_commit());
+        control.settle(Ok(response.clone()));
+        assert!(!control.request_cancellation());
+        assert_eq!(binding.0.load(std::sync::atomic::Ordering::Acquire), 1);
+        assert!(matches!(
+            control.cancellation_outcome(execution.clone(), Ok(response.clone())),
+            WorkbenchCancellationOutcome::Cancelled { reply, .. } if reply == Ok(response)
+        ));
+        assert_eq!(
+            control.finish_cell(execution, &result, false),
+            exit,
+            "terminal evidence is immutable"
+        );
     }
 
     #[test]

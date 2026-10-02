@@ -9230,27 +9230,20 @@ where
         } = finalized;
         let execution = execution_state.request.execution_id().cloned();
         if let Some(execution) = execution.as_ref() {
-            let cancelled = execution_state
-                .effects
-                .control
-                .as_ref()
-                .is_some_and(|control| {
-                    control.cancellation_requested() || control.context_cancellation_requested()
-                });
-            let exit = crate::CellExit::from_reply(
-                execution.clone(),
-                &result,
-                cleanup_confirmed,
-                cancelled,
+            let exit = match execution_state.effects.control.as_ref() {
+                Some(control) => control.finish_cell(execution.clone(), &result, cleanup_confirmed),
+                None => crate::CellExit::from_reply(
+                    execution.clone(),
+                    &result,
+                    cleanup_confirmed,
+                    false,
+                ),
+            };
+            self.workbench_executions.lock().retain_cell_terminal(
+                execution,
+                execution_state.invocation.as_ref(),
+                exit.clone(),
             );
-            if let Some(control) = execution_state.effects.control.clone() {
-                self.workbench_executions.lock().retain_cell_terminal(
-                    execution,
-                    execution_state.invocation.as_ref(),
-                    exit.clone(),
-                    control,
-                );
-            }
             if let Some(binding) = execution_state.effects.context_binding.take() {
                 binding.finish(exit);
             }

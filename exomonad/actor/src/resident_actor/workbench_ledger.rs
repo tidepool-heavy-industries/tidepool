@@ -5,7 +5,7 @@ struct WorkbenchExecutionRecord {
     request: WorkbenchRequest,
     state: WorkbenchExecutionState,
     invocation_work: Option<Arc<InvocationWork>>,
-    cell_terminal: Option<(crate::CellExit, Arc<crate::WorkbenchExecutionControl>)>,
+    cell_terminal: Option<crate::CellExit>,
     boundary_abort: Option<BoundaryAbortCleanup>,
 }
 
@@ -235,13 +235,12 @@ impl WorkbenchExecutions {
         execution: &WorkbenchExecutionId,
         invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
         exit: crate::CellExit,
-        control: Arc<crate::WorkbenchExecutionControl>,
     ) {
         let record = self
             .0
             .get_mut(&WorkbenchReplayKey::new(execution, invocation))
             .expect("cell terminal follows admitted execution");
-        record.cell_terminal = Some((exit, control));
+        record.cell_terminal = Some(exit);
     }
 
     pub(super) fn cell_allows_publication(
@@ -258,9 +257,7 @@ impl WorkbenchExecutions {
                 record
                     .cell_terminal
                     .as_ref()
-                    .is_some_and(|(exit, control)| {
-                        exit.permits_context_commit() && !control.context_cancellation_requested()
-                    })
+                    .is_some_and(crate::CellExit::permits_context_commit)
             })
     }
 
@@ -436,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn cell_terminal_gates_deferred_publication_and_late_cancellation() {
+    fn cell_terminal_gates_deferred_publication_until_confirmed_full_return() {
         let invocation = crate::resident_tools::WorkbenchCallKey::from(
             exomonad_tool::ToolInvocationContext::external(
                 "thread".into(),
@@ -460,20 +457,16 @@ mod tests {
             !journal.cell_allows_publication(&boundary),
             "admitted call has no terminal yet"
         );
-        let control = crate::WorkbenchExecutionControl::untracked();
         let mut exit = crate::CellExit {
             execution: execution.clone(),
             cause: crate::CellExitCause::FullReturn,
             cleanup_confirmed: false,
         };
-        journal.retain_cell_terminal(&execution, Some(&invocation), exit.clone(), control.clone());
+        journal.retain_cell_terminal(&execution, Some(&invocation), exit.clone());
         assert!(!journal.cell_allows_publication(&boundary));
         exit.cleanup_confirmed = true;
-        journal.retain_cell_terminal(&execution, Some(&invocation), exit, control.clone());
+        journal.retain_cell_terminal(&execution, Some(&invocation), exit);
         assert!(journal.cell_allows_publication(&boundary));
-        control.publication_decision().claim_commit().unwrap();
-        assert!(!control.request_cancellation());
-        assert!(!journal.cell_allows_publication(&boundary));
         let sibling = tidepool_runtime::session::WorkbenchForkBoundary::external(
             "thread".into(),
             "turn".into(),
@@ -534,7 +527,7 @@ mod tests {
             let mut journal = WorkbenchExecutions::default();
             journal.begin(&execution, request.clone(), Some(&invocation));
             let exit = crate::CellExit::from_reply(execution.clone(), &reply, cleanup, cancelled);
-            journal.retain_cell_terminal(&execution, Some(&invocation), exit, control);
+            journal.retain_cell_terminal(&execution, Some(&invocation), exit);
             // Recording the ordinary reply must retain the publication decision.
             let reply = reply.map(|step| match step {
                 crate::KernelStep::Continue(response) => response,
@@ -550,6 +543,90 @@ mod tests {
                 Some(&invocation),
             );
             assert_eq!(journal.cell_allows_publication(&boundary), permits);
+        }
+    }
+
+    struct CutoffBinding(parking_lot::Mutex<Option<crate::CellExit>>);
+
+    impl crate::HostedContextBinding for CutoffBinding {
+        fn admit(
+            &self,
+            _: &WorkbenchExecutionId,
+            _: &exomonad_tool::ToolInvocationContext,
+            _: tidepool_repr::PrincipalId,
+        ) -> Result<(), tidepool_effect::error::EffectError> {
+            Ok(())
+        }
+        fn prepare(
+            &self,
+            _: crate::ContextReq,
+            _: tidepool_repr::PrincipalId,
+            _: tidepool_repr::DataConTable,
+        ) -> tidepool_effect::DeferredEffect {
+            panic!("cutoff test does not evaluate effects")
+        }
+        fn cancel(&self) {}
+        fn finish(&self, exit: crate::CellExit) {
+            *self.0.lock() = Some(exit);
+        }
+    }
+
+    #[test]
+    fn context_binding_and_deferred_ledger_share_the_same_sealed_cell_exit() {
+        use crate::HostedContextBinding;
+        let invocation = crate::resident_tools::WorkbenchCallKey::from(
+            exomonad_tool::ToolInvocationContext::external(
+                "thread".into(),
+                "turn".into(),
+                "call".into(),
+                Some("call".into()),
+                None,
+            ),
+        );
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "thread".into(),
+            "turn".into(),
+            "call".into(),
+        );
+        let execution = WorkbenchExecutionId::from_digest([26; 16]);
+        for cancelled_before_finish in [false, true] {
+            let control = crate::WorkbenchExecutionControl::untracked();
+            let binding = Arc::new(CutoffBinding(parking_lot::Mutex::new(None)));
+            control.bind_context(binding.clone());
+            if cancelled_before_finish {
+                assert!(control.request_cancellation());
+            }
+            let result = Ok(crate::KernelStep::Continue(WorkbenchResponse {
+                status: WorkbenchRunStatus::Committed,
+                summary: None,
+                items: Vec::new(),
+                next_index: 1,
+                total: 1,
+            }));
+            let exit = control.finish_cell(execution.clone(), &result, true);
+            let request =
+                WorkbenchRequest::from_cell_input("pure True").with_execution_id(execution.clone());
+            let mut journal = WorkbenchExecutions::default();
+            journal.begin(&execution, request, Some(&invocation));
+            journal.retain_cell_terminal(&execution, Some(&invocation), exit.clone());
+            binding.finish(exit.clone());
+            assert!(
+                !control.request_cancellation(),
+                "the whole-cell cutoff is already sealed"
+            );
+            assert_eq!(*binding.0.lock(), Some(exit.clone()));
+            assert_eq!(
+                journal
+                    .0
+                    .get(&WorkbenchReplayKey::new(&execution, Some(&invocation)))
+                    .unwrap()
+                    .cell_terminal,
+                Some(exit),
+            );
+            assert_eq!(
+                journal.cell_allows_publication(&boundary),
+                !cancelled_before_finish
+            );
         }
     }
 
