@@ -3403,8 +3403,7 @@ mod tests {
     #[test]
     fn source_selected_original_receipt_preserves_native_custody_and_requires_current_reproof() {
         let directory = tempfile::tempdir().unwrap();
-        let (mut request, context, receipt) =
-            source_selected_receipt(directory.path(), true, None);
+        let (mut request, context, receipt) = source_selected_receipt(directory.path(), true, None);
         let admission = request.validate_receipt(&receipt, None, &context).unwrap();
         assert_eq!(admission.selected_originals.len(), 2);
         assert_eq!(
@@ -3418,11 +3417,13 @@ mod tests {
         let originals = context
             .artifact_view()
             .entries_for_owners([identity("main", "A"), identity("main", "B")].into_iter());
-        let products = ["A", "B"]
-            .map(|module| match &originals[&identity("main", module)].payload {
-                ArtifactPayload::Original(product) => product.clone(),
-                _ => panic!("original fixture"),
-            });
+        let products =
+            ["A", "B"].map(
+                |module| match &originals[&identity("main", module)].payload {
+                    ArtifactPayload::Original(product) => product.clone(),
+                    _ => panic!("original fixture"),
+                },
+            );
         let effective = request
             .admit_program_support(Arc::clone(&context), &products, &[admission])
             .unwrap();
