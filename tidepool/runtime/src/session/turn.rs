@@ -5634,6 +5634,148 @@ mod tests {
         );
     }
 
+    #[test]
+    fn checked_fold_retains_fresh_home_type_owners_after_source_removal() {
+        use crate::session::{
+            resident_cell_check_template, resident_workbench_templates, ModuleEnv,
+            PersistentSession, SessionLib,
+        };
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::SessionId;
+        use tidepool_testing::effect_surface::TestEffectSurface;
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let support = root.path().join("CheckedHomeValue.hs");
+        std::fs::write(&support, include_str!("fixtures/checked-home-value.hs")).unwrap();
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let lib = SessionLib::open(
+            SessionId(1005),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(effects.include_paths().to_vec());
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let execution = Arc::new(session.begin_private_execution(public).unwrap());
+        let view = execution.view();
+        let imports = view.turn_imports(&crate::session::SourceImports::from_specs([
+            "qualified CheckedHomeValue",
+        ]));
+        let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
+        let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+        let source = "let home = CheckedHomeValue.homeValue";
+        let specification = CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: source.into(),
+            template_source: template.clone(),
+            turn_templates: templates
+                .iter()
+                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                .collect(),
+            injected_modules: vec![],
+            reserved_declaration_modules: vec![],
+        };
+        let mut roots = effects.include_paths().to_vec();
+        roots.insert(0, root.path().to_owned());
+        let admitted_include = view.include_paths(&roots);
+        let admission = session
+            .admit_cell_for_execution(
+                execution,
+                0,
+                Arc::new(specification.clone()),
+                specification.specification_digest(),
+                [1; 32],
+                admitted_include,
+            )
+            .unwrap();
+        let view = admission.view();
+        let include = admission
+            .include_paths()
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let (_, folded) = check_cell_admitted(
+            CellCheckRequest {
+                exact_context: view.exact_declaration_context().cloned(),
+                session_id: Some(view.session()),
+                cell_text: source,
+                template: &template,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &[],
+                compile_generation: admission.initial_value_generation().0,
+                compile_view_evidence: "",
+            },
+            admission.clone(),
+            &templates,
+            Some(CellFoldTurn {
+                templates: &templates,
+                gen: admission.initial_value_generation().0,
+                retained_imports: &[],
+            }),
+        )
+        .unwrap();
+        let Some(TurnResult::Bind { compiled, .. }) = folded else {
+            panic!("home value must use the same-check fold")
+        };
+        let artifact = compiled
+            .certification
+            .unwrap()
+            .checked_execution
+            .unwrap()
+            .value_interface_certificate()
+            .unwrap();
+        assert!(artifact
+            .certified_interface()
+            .unwrap()
+            .requirements()
+            .iter()
+            .any(|owner| owner.unit == "main" && owner.module == "CheckedHomeValue"));
+        std::fs::remove_file(support).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let endpoint = extract_cmd().unwrap().bind().unwrap();
+        let following = CheckedCellSpecification {
+            admission_digest: [2; 32],
+            cell_source: "let alias = home".into(),
+            template_source: template,
+            turn_templates: vec![],
+            injected_modules: vec![artifact.owner().module_name()],
+            reserved_declaration_modules: vec![],
+        };
+        let offer = ModuleCandidateOffer::select_checked_cell(
+            endpoint.identity().producer_bytes(),
+            admission.include_paths(),
+            scratch.path(),
+            None,
+            following,
+            vec![(artifact.owner(), artifact.bytes_owned().clone())],
+            std::slice::from_ref(&artifact),
+        )
+        .unwrap();
+        assert!(offer.exact_scope_path().unwrap().is_file());
+        assert!(
+            ModuleCandidateOffer::select_checked_cell(
+                endpoint.identity().producer_bytes(),
+                admission.include_paths(),
+                scratch.path(),
+                None,
+                CheckedCellSpecification {
+                    admission_digest: [3; 32],
+                    cell_source: "let alias = home".into(),
+                    template_source: "module Next where".into(),
+                    turn_templates: vec![],
+                    injected_modules: vec![artifact.owner().module_name()],
+                    reserved_declaration_modules: vec![]
+                },
+                vec![(artifact.owner(), Arc::from(&b"changed interface"[..]))],
+                std::slice::from_ref(&artifact),
+            )
+            .is_err(),
+            "another interface cannot borrow the retained certificate"
+        );
+    }
+
     fn compile_public_checked_offer(
         admission: &Arc<crate::session::RuntimeCellAdmission>,
         specification: CheckedCellSpecification,

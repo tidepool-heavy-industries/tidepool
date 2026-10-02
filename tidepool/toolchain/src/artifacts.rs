@@ -1063,7 +1063,6 @@ impl ModuleCandidateOffer {
             })?,
             BTreeMap::new(),
             None,
-            None,
         )
     }
 
@@ -1256,7 +1255,6 @@ impl ModuleCandidateOffer {
             values.clone(),
             declarations,
             Some(planned),
-            Some(context),
         )?;
         let mut prefix = if cell.item_count() == 0 {
             None
@@ -1309,6 +1307,7 @@ impl ModuleCandidateOffer {
                 &initial.request_sha256,
                 &output.source,
                 &output.target,
+                &context,
             )?;
             let mut next = completed.append(native.clone())?;
             let display =
@@ -1331,6 +1330,7 @@ impl ModuleCandidateOffer {
                         &initial.request_sha256,
                         &output.source,
                         &output.target,
+                        &context,
                     )?;
                     next = next.append_display(proof.clone())?;
                     Some(proof)
@@ -1602,6 +1602,33 @@ impl ModuleCandidateOffer {
             .exact
             .as_ref()
             .ok_or_else(|| CompileError::ExtractFailed("checked fold lacks exact scope".into()))?;
+        let sealed = seal_turn_outputs(
+            self,
+            root,
+            &root.join(format!(
+                "{}.hs",
+                extract_module_name(source).ok_or_else(|| CompileError::ExtractFailed(
+                    "checked fold source has no module".into()
+                ))?
+            )),
+            source,
+            target,
+            "__prepared",
+        )?
+        .ok_or_else(|| {
+            CompileError::ExtractFailed("checked fold lacks certified products".into())
+        })?;
+        let source_path = root.join(format!(
+            "{}.hs",
+            extract_module_name(source).expect("validated module")
+        ));
+        let admitted_source = exact.admit_source(
+            &source_path,
+            source,
+            &crate::checked_cell::read(root.join("dependencies.json"), 32 << 20)?,
+        )?;
+        let context =
+            checked_output_context(self, &sealed.recovery_products, &admitted_source, source)?;
         crate::checked_cell::seal_checked_fold(
             root,
             &self.producer,
@@ -1611,6 +1638,7 @@ impl ModuleCandidateOffer {
             generation,
             source,
             target,
+            &context,
         )
     }
 
@@ -2039,6 +2067,18 @@ fn seal_turn_outputs_inner(
         } else {
             None
         };
+    let checked_context = if offer.checked_item.is_some() || offer.checked_display.is_some() {
+        Some(checked_output_context(
+            offer,
+            &certified.recovery_products,
+            exact_source
+                .as_ref()
+                .expect("checked output has exact source"),
+            source,
+        )?)
+    } else {
+        None
+    };
     Ok(Some(SealedTurnProducts {
         compile_input_identity,
         checked_display: offer
@@ -2054,6 +2094,7 @@ fn seal_turn_outputs_inner(
                         .request_sha256,
                     source,
                     prepared,
+                    checked_context.as_ref().expect("checked output context"),
                 )
             })
             .transpose()?,
@@ -2070,6 +2111,7 @@ fn seal_turn_outputs_inner(
                         .request_sha256,
                     source,
                     prepared,
+                    checked_context.as_ref().expect("checked output context"),
                 )
             })
             .transpose()?,
@@ -2078,6 +2120,35 @@ fn seal_turn_outputs_inner(
         recovery_products: certified.recovery_products,
         package_interfaces,
     }))
+}
+
+fn checked_output_context(
+    offer: &ModuleCandidateOffer,
+    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    source_admission: &crate::declaration_context::ExactSourceAdmission,
+    source: &str,
+) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
+    let exact = offer.exact.as_ref().ok_or_else(|| {
+        CompileError::ExtractFailed("checked output lacks current exact context".into())
+    })?;
+    let module = extract_module_name(source).ok_or_else(|| {
+        CompileError::ExtractFailed("checked output lacks original source module".into())
+    })?;
+    let support = products
+        .iter()
+        .filter(|product| product.owner().module != module)
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(Arc::new(
+        (*exact.context).clone().extend_checked_original_products(
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                &offer.producer,
+            )
+            .sha256(),
+            &support,
+            &source_admission.exact_imports,
+        )?,
+    ))
 }
 
 fn merge_package_closure(

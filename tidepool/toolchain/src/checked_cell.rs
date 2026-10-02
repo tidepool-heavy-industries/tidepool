@@ -139,7 +139,6 @@ pub struct ExactCheckedCell {
     producer: [u8; 32],
     context: [u8; 32],
     declaration_context: Arc<crate::declaration_context::ExactDeclarationContext>,
-    program_context: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
     receipt_digest: [u8; 32],
     checked_source: String,
     evidence: Vec<(String, crate::cache::DependencyEvidence)>,
@@ -579,16 +578,13 @@ impl CheckedValueInputs {
         &self,
         generation: u64,
         cell: &ExactCheckedCell,
+        context: &Arc<crate::declaration_context::ExactDeclarationContext>,
     ) -> Result<Arc<CheckedValueArtifact>, CompileError> {
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation));
         let path = self.root().join(owner.relative_hi_path());
         let bytes: Arc<[u8]> = read(&path, 32 * 1024 * 1024)?.into();
         let digest = hash(&bytes);
         let certificate = certify_value_interface(cell.producer, owner, &path, &bytes)?;
-        let context = cell
-            .program_context
-            .as_ref()
-            .unwrap_or(&cell.declaration_context);
         let context = (**context).clone().extend_with_value_interfaces(
             std::slice::from_ref(&certificate),
             context.lexical_graph().to_vec(),
@@ -1163,6 +1159,7 @@ impl CheckedDisplayOffer {
         request: &str,
         source: &str,
         target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
+        artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
     ) -> Result<Arc<ExactCompiledDisplay>, CompileError> {
         let receipt = decode(&read(root.join("checked-display.cbor"), 4 * 1024 * 1024)?)?;
         let fields = row(&receipt, 8)?;
@@ -1212,12 +1209,11 @@ impl CheckedDisplayOffer {
                 return Err(failure("display binder has another reserved native owner"));
             }
         }
-        let interface = self
-            .capture
-            .item
-            .cell
-            .value_inputs
-            .capture_output(self.generation, &self.capture.item.cell)?;
+        let interface = self.capture.item.cell.value_inputs.capture_output(
+            self.generation,
+            &self.capture.item.cell,
+            artifact_context,
+        )?;
         Ok(Arc::new(ExactCompiledDisplay {
             capture: self.capture.clone(),
             target: target.clone(),
@@ -1925,6 +1921,7 @@ pub(crate) fn seal_checked_fold(
     generation: u64,
     source: &str,
     target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
+    artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
 ) -> Result<Arc<ExactCompiledItem>, CompileError> {
     cell.revalidate(producer, &context)?;
     if cell.items.len() != 1
@@ -1947,7 +1944,7 @@ pub(crate) fn seal_checked_fold(
         is_program: false,
         settled_values: CheckedSettledValues::default(),
     }
-    .seal(root, request, source, target)
+    .seal(root, request, source, target, artifact_context)
 }
 
 #[derive(Clone, Debug)]
@@ -2063,6 +2060,7 @@ impl CheckedItemOffer {
         request: &str,
         source: &str,
         target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
+        artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
     ) -> Result<Arc<ExactCompiledItem>, CompileError> {
         let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
         let fields = row(&receipt, 8)?;
@@ -2124,12 +2122,11 @@ impl CheckedItemOffer {
             _ => return Err(failure("compiled turn kind differs from checked item")),
         };
         let value_interface = if !expected_binders.is_empty() {
-            Some(
-                self.item
-                    .cell
-                    .value_inputs
-                    .capture_output(self.generation, &self.item.cell)?,
-            )
+            Some(self.item.cell.value_inputs.capture_output(
+                self.generation,
+                &self.item.cell,
+                artifact_context,
+            )?)
         } else {
             None
         };
@@ -2229,7 +2226,6 @@ pub(crate) fn admit_checked_cell(
     value_inputs: Arc<CheckedValueInputs>,
     planned_declarations: BTreeMap<usize, PlannedCheckedDeclaration>,
     program: Option<&CheckedPlannedCellSpecification>,
-    program_context: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
 ) -> Result<Arc<ExactCheckedCell>, CompileError> {
     let receipt = read(root.join("checked-cell.cbor"), 8 * 1024 * 1024)?;
     let value = decode(&receipt)?;
@@ -2445,7 +2441,6 @@ pub(crate) fn admit_checked_cell(
         .sha256(),
         context,
         declaration_context,
-        program_context,
         receipt_digest: Sha256::digest(&receipt).into(),
         evidence,
         checked_source,
