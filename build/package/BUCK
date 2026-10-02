@@ -62,6 +62,38 @@ cp "$PWD/$(location root//:embedded_web_provenance_script)" "$SOURCE/scripts/emb
     visibility = ["PUBLIC"],
 )
 
+# Native compiler bytes travel with the host; the selected final bundle path
+# supplies deployment provenance when its frontend generates the manifest.
+genrule(
+    name = "native_runtime_bundle",
+    srcs = [
+        "//bridge/facade:exomonad",
+        "//bridge/facade:exomonad-view-helper",
+        "//tidepool/extract-cmd:tidepool-extract",
+        "//bridge/haskell:tidepool_extract_bin",
+        "//bridge/haskell:facade_embedded_sources",
+        "//web:dist",
+        ":embedded_web_provenance",
+    ],
+    out = ".",
+    env = {
+        "PACKAGE_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
+    },
+    bash = """set -euo pipefail
+OUTPUT="$PWD/$OUT"
+mkdir -p "$OUTPUT/bin" "$OUTPUT/share/exomonad/web" "$OUTPUT/share/exomonad/stdlib"
+cp -L "$PWD/$(location //bridge/facade:exomonad)" "$OUTPUT/bin/exomonad"
+cp -L "$PWD/$(location //bridge/facade:exomonad-view-helper)" "$OUTPUT/bin/exomonad-view-helper"
+cp -L "$PWD/$(location //tidepool/extract-cmd:tidepool-extract)" "$OUTPUT/bin/tidepool-extract"
+cp -L "$PWD/$(location //bridge/haskell:tidepool_extract_bin)" "$OUTPUT/bin/tidepool-extract-bin"
+cp -a "$PWD/$(location //bridge/haskell:facade_embedded_sources)/lib/." "$OUTPUT/share/exomonad/stdlib/"
+cp -a "$PWD/$(location //web:dist)/web/." "$OUTPUT/share/exomonad/web/"
+cp -L "$PWD/$(location :embedded_web_provenance)" "$OUTPUT/share/exomonad/harness-source-revision.txt"
+printf '%s\\n' "$PACKAGE_GHC_LIBDIR" > "$OUTPUT/share/exomonad/ghc-libdir.txt"
+""",
+    visibility = ["PUBLIC"],
+)
+
 # Assemble the Buck host and browser with one immutable Nix compiler deployment.
 # Nix remains the installed closure owner; Buck's native compiler pair is kept
 # separately by :compiler_deployment for development and focused tests.
