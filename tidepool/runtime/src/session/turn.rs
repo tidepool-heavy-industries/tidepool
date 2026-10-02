@@ -5906,6 +5906,119 @@ mod tests {
             .requirements()
             .iter()
             .any(|owner| owner.unit == "main" && owner.module == "CheckedHomeValue"));
+        let check_original_source = |source: &str,
+                                     template: &str,
+                                     include_paths: &[PathBuf]|
+         -> Result<
+            (
+                TempDir,
+                Arc<tidepool_toolchain::checked_cell::ExactCheckedCell>,
+            ),
+            CompileError,
+        > {
+            let scratch = tempfile::tempdir()?;
+            let endpoint = extract_cmd()?.bind().map_err(map_notfound)?;
+            let specification = CheckedCellSpecification {
+                admission_digest: [6; 32],
+                cell_source: source.into(),
+                template_source: template.into(),
+                turn_templates: vec![],
+                injected_modules: vec![artifact.owner().module_name()],
+                reserved_declaration_modules: vec![],
+            };
+            let offer = ModuleCandidateOffer::select_checked_cell(
+                endpoint.identity().producer_bytes(),
+                include_paths,
+                scratch.path(),
+                None,
+                specification,
+                vec![(artifact.owner(), artifact.bytes_owned().clone())],
+                std::slice::from_ref(&artifact),
+            )?;
+            let source_path = scratch.path().join("cell.txt");
+            let template_path = scratch.path().join("CellCheckTemplate.hs");
+            std::fs::write(&source_path, source)?;
+            std::fs::write(&template_path, template)?;
+            let includes = include_paths
+                .iter()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>();
+            let mut command = extract_cmd()?;
+            command
+                .input(&source_path)
+                .cell()
+                .cell_template(&template_path)
+                .cell_out(scratch.path().join("cell.cbor"))
+                .output_dir(scratch.path())
+                .includes(&includes)
+                .inject_vals(&[artifact.owner().module_name()])
+                .session_root(offer.checked_value_root().unwrap());
+            offer.apply_to(&mut command)?;
+            let run = endpoint.execute(&command).map_err(map_notfound)?;
+            crate::diag::decode_extract_result(
+                run.success(),
+                &run.output.stdout,
+                &run.output.stderr,
+            )
+            .map_err(|error| offer.retain_failure(scratch.path(), &run.output.stderr, error))?;
+            let cell = offer.admit_checked_cell(scratch.path())?;
+            Ok((scratch, cell))
+        };
+        let (_, current_original) = check_original_source(
+            "let originalAgain = CheckedHomeValue.homeValue",
+            &template,
+            admission.include_paths(),
+        )
+        .expect("current import must select the unchanged exact original source");
+        assert_eq!(
+            current_original.item(0).unwrap().binders(),
+            &["originalAgain"]
+        );
+        let relay = root.path().join("CheckedHomeRelay.hs");
+        std::fs::write(&relay, include_str!("fixtures/checked-home-relay.hs")).unwrap();
+        let relay_template = template.replace(
+            "import qualified CheckedHomeValue",
+            "import qualified CheckedHomeRelay",
+        );
+        let (_, current_relay) = check_original_source(
+            "let relayAgain = CheckedHomeRelay.homeValue",
+            &relay_template,
+            admission.include_paths(),
+        )
+        .expect("fresh helper import must select its unchanged exact original dependency");
+        assert_eq!(current_relay.item(0).unwrap().binders(), &["relayAgain"]);
+        std::fs::write(
+            &support,
+            include_str!("fixtures/checked-home-value.hs").replace("41", "42"),
+        )
+        .unwrap();
+        assert!(matches!(
+            check_original_source(
+                "let changed = CheckedHomeValue.homeValue",
+                &template,
+                admission.include_paths()
+            ),
+            Err(CompileError::InputRejected(_))
+        ));
+        std::fs::write(&support, include_str!("fixtures/checked-home-value.hs")).unwrap();
+        let shadow = root.path().join("shadow");
+        std::fs::create_dir(&shadow).unwrap();
+        std::fs::write(
+            shadow.join("CheckedHomeValue.hs"),
+            include_str!("fixtures/checked-home-value.hs"),
+        )
+        .unwrap();
+        let mut shadow_include = admission.include_paths().to_vec();
+        shadow_include.insert(0, shadow);
+        assert!(matches!(
+            check_original_source(
+                "let shadowed = CheckedHomeValue.homeValue",
+                &template,
+                &shadow_include
+            ),
+            Err(CompileError::InputRejected(_))
+        ));
+        std::fs::remove_file(relay).unwrap();
         std::fs::remove_file(support).unwrap();
         let scratch = tempfile::tempdir().unwrap();
         let endpoint = extract_cmd().unwrap().bind().unwrap();

@@ -1,11 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Tidepool.ExactScope
-  ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..)
+  ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..)
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..)
   , PlannedCellAdmission(..), PlannedCellSlot(..)
   , readExactScope, revalidateExactScope, scopeValueInterfaces
-  , writeExactCompilation
+  , writeExactCompilation, extendSourceSelectedOriginals
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeExecutionNativeOwners
   ) where
@@ -27,7 +27,7 @@ import qualified Data.Set as Set
 import GHC.Driver.Env (HscEnv)
 import Data.Word (Word64)
 import Numeric (showHex)
-import System.Directory (getFileSize, createDirectory, createDirectoryIfMissing, makeAbsolute)
+import System.Directory (getFileSize, createDirectory, createDirectoryIfMissing, makeAbsolute, doesFileExist)
 import System.FilePath (isAbsolute, takeDirectory, (</>))
 import System.IO (IOMode(ReadMode), withBinaryFile)
 import System.IO.Error (isAlreadyExistsError)
@@ -44,7 +44,7 @@ import Tidepool.ExecutionSource
 import Tidepool.PackageWitness
   ( PackageImportEvidence(..), readPackageImports, validatePackageImportRoot )
 import Tidepool.DependencyEvidence
-  ( DependencyEvidence(..), DependencySource(..), renderDependencyEvidence
+  ( DependencyEvidence(..), DependencySource(..), DependencyModule(..), DependencyImport(..), DependencyResolution(..), renderDependencyEvidence
   , revalidateDependencyEvidence )
 
 data ExactScope = ExactScope
@@ -61,6 +61,9 @@ data ExactScope = ExactScope
   , scopeCheckedItem :: Maybe CheckedItemAdmission
   , scopeCheckedDisplay :: Maybe CheckedDisplayAdmission
   , scopeIncludePaths :: Maybe [FilePath]
+  -- Request-local source proof roots are revalidated by subsequent stages;
+  -- they are never serialized as baseline lexical authority.
+  , scopeSourceSelectedOwners :: Set.Set (String,String)
   } deriving (Eq, Show)
 
 data CheckedDisplayAdmission = CheckedDisplayAdmission
@@ -236,11 +239,63 @@ scopeExecutionNativeOwners scope =
   , any (\(iface,_,_) -> (exactUnit iface,exactModule iface) == (originalUnit product',originalModule product')
       && exactSha256 iface == originalIfaceSha256 product') (scopeInterfaces scope)]
 
+-- Current source-import authority is separate from retained native ownership.
+-- Each row names the ultimate fresh recipe authenticated by that original.
+data SourceSelectedOriginals = SourceSelectedOriginals
+  { selectedOriginalRows :: [(ExecutionSourceIdentity,String)]
+  , selectedOriginalEvidence :: DependencyEvidence
+  }
+
+instance Eq SourceSelectedOriginals where
+  left == right = selectedOriginalRows left == selectedOriginalRows right
+    && renderDependencyEvidence (selectedOriginalEvidence left)
+      == renderDependencyEvidence (selectedOriginalEvidence right)
+
+instance Show SourceSelectedOriginals where
+  show selected = "SourceSelectedOriginals " ++ show (selectedOriginalRows selected)
+
+extendSourceSelectedOriginals :: Maybe SourceSelectedOriginals -> ExactScope -> Either String ExactScope
+extendSourceSelectedOriginals Nothing scope = Right scope
+extendSourceSelectedOriginals (Just selected) scope = do
+  let rows = selectedOriginalRows selected
+      selectedKeys = Set.fromList (map (executionIdentityKey . fst) rows)
+      nodes = dependencyModules (selectedOriginalEvidence selected)
+      byKey = Map.fromList [((dependencyModuleUnit node,dependencyModuleName node),node) | node <- nodes]
+      available = Map.fromList [((exactUnit artifact,exactModule artifact),artifact) | (artifact,_,_) <- scopeInterfaces scope]
+      existing = Map.fromList (scopeLexical scope)
+      adjacency node = Set.toAscList (Set.fromList
+        [(dependencyModuleUnit node,dependencyImportName edge)
+        | edge <- dependencyModuleImports node, dependencyImportSelected edge /= Nothing])
+  unless (length rows == Set.size selectedKeys && Map.keysSet byKey == selectedKeys)
+    (Left "source selection owner rows differ from their matched sources")
+  lexical <- forM rows $ \(original,_) -> do
+    let key = executionIdentityKey original
+    artifact <- maybe (Left "source-selected original lacks exact interface") Right (Map.lookup key available)
+    let native = [originalProduct | originalProduct <- scopeProducts scope
+          , (originalUnit originalProduct,originalModule originalProduct) == key
+          , originalVersion originalProduct == executionVersion original
+          , originalIfaceSha256 originalProduct == executionIfaceSha256 original
+          , originalProductSha256 originalProduct == executionNativeSha256 original]
+    unless (exactSha256 artifact == executionIfaceSha256 original
+        && not ("Tidepool.Session." `isPrefixOf` snd key) && length native == 1)
+      (Left "source-selected original has another exact interface/native owner")
+    node <- maybe (Left "source-selected original lacks source adjacency") Right (Map.lookup key byKey)
+    let imports = adjacency node
+    unless (all (`Set.member` Set.union selectedKeys (Map.keysSet existing)) imports)
+      (Left "source-selected adjacency leaves its admitted source graph")
+    forM_ (Map.lookup key existing) $ \old -> unless (old == imports)
+      (Left "source-selected original changed inherited lexical adjacency")
+    pure (key,imports)
+  pure scope
+    { scopeLexical=Map.toAscList (Map.union (Map.fromList lexical) existing)
+    , scopeSourceSelectedOwners=Set.union selectedKeys (scopeSourceSelectedOwners scope) }
+
 data ExactCompilation = ExactCompilation
   { compilationScope :: ExactScope
   , compilationTransaction :: Word64
   , compilationSource :: FilePath
   , compilationImports :: [((String, String, Bool), [(String, String, Bool, String)])]
+  , compilationSourceSelection :: Maybe SourceSelectedOriginals
   } deriving (Eq, Show)
 
 scopeValueInterfaces :: ExactScope -> [ExactIfaceArtifact]
@@ -343,6 +398,15 @@ writeExactCompilation compilation evidence = do
     (fail "exact compile source differs from consumed source")
   unchanged <- revalidateDependencyEvidence evidence
   unless unchanged (fail "exact compile consumed source changed before receipt")
+  forM_ (compilationSourceSelection compilation) $ \selected -> do
+    unchangedSelection <- revalidateDependencyEvidence (selectedOriginalEvidence selected)
+    negativeSelection <- and <$> forM (dependencyResolutions (selectedOriginalEvidence selected)) (\resolution -> do
+      let absent = case dependencyResolutionSelected resolution of
+            Nothing -> dependencyResolutionCandidates resolution
+            Just chosen -> takeWhile (/= chosen) (dependencyResolutionCandidates resolution)
+      and <$> mapM (fmap not . doesFileExist) absent)
+    unless (unchangedSelection && negativeSelection)
+      (fail "current original source selection changed before receipt")
   let parent = takeDirectory path </> ".exact-compilations"
   createDirectoryIfMissing True parent
   directory <- reserveCompilationDirectory parent transaction
@@ -354,10 +418,18 @@ writeExactCompilation compilation evidence = do
       moduleRow ((unit, name, boot), edges) = encodeArray
         [text unit, text name, E.encodeBool boot, encodeArray (map importRow edges)]
       receipt = encodeArray
-        [text "TPEXACTCOMPILE", text "1", text (scopeRequestSha256 scope)
+        [text "TPEXACTCOMPILE", text "2", text (scopeRequestSha256 scope)
         , text (scopeSemanticSha256 scope), text path, text (digest bytes)
         , text snapshot, text (renderDependencyEvidence evidence)
-        , encodeArray (map moduleRow imports)]
+        , encodeArray (map moduleRow imports)
+        , case compilationSourceSelection compilation of
+            Nothing -> encodeArray [encodeArray [], E.encodeNull]
+            Just selected -> encodeArray
+              [ encodeArray [encodeArray [text (executionUnit original),text (executionModule original)
+                    ,text (executionVersion original),text (executionIfaceSha256 original)
+                    ,text (executionNativeSha256 original),text graph]
+                  | (original,graph) <- selectedOriginalRows selected]
+              , text (renderDependencyEvidence (selectedOriginalEvidence selected))]]
   BS.writeFile snapshot bytes
   BS.writeFile (directory </> "receipt.cbor") (toStrictByteString receipt)
 
@@ -556,7 +628,7 @@ decodeScope = do
         pure (Nothing,Nothing,Just admission,Just paths)
       _ -> fail "unsupported exact compile purpose"
   pure (ExactScope "" "" producer semantic interfaces lexical products [] executionOwners
-    checked checkedItem checkedDisplay includes, descriptors)
+    checked checkedItem checkedDisplay includes Set.empty, descriptors)
   where
     includePaths = bounded 4096 $ do
       path <- absolute

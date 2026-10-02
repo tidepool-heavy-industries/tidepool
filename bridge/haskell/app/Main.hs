@@ -102,7 +102,7 @@ import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, ru
 import Tidepool.ExactScope
   ( ExactCompilation(..), ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
-  , readExactScope, revalidateExactScope, writeExactCompilation, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
+  , readExactScope, revalidateExactScope, writeExactCompilation, extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import GHC.Core.Type (splitFunTy_maybe)
 import Tidepool.CheckedCell (CheckedSignature(..), encodeCheckedSignature
@@ -1788,7 +1788,9 @@ retainProgramProducts
   :: [FilePath] -> FilePath -> PreparedPipelineResult
   -> CertifiedOriginalProducts -> String -> ExactScope -> IO ExactScope
 retainProgramProducts includes directory prepared certified target initial = do
-  cached <- foldM retainCached initial (zip [0::Int ..] (pprAcceptedCandidates prepared))
+  selected <- either fail pure (extendSourceSelectedOriginals
+    (pprExactCompilation prepared >>= compilationSourceSelection) initial)
+  cached <- foldM retainCached selected (zip [0::Int ..] (pprAcceptedCandidates prepared))
   promoted <- foldM retain cached (zip [0::Int ..] products)
   let parcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates prepared)
   inherited <- either throwIO pure

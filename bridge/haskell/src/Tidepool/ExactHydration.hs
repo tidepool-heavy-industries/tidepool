@@ -18,6 +18,7 @@ module Tidepool.ExactHydration
   , selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
+  , permitsGeneratedScaffoldImport
   , GeneratedScaffoldImportAuthority, noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority
   , installExactLexicalGraphWithScaffold
   , installExactLexicalGraph
@@ -60,7 +61,7 @@ import GHC.Unit.Module.Location
 import GHC.Unit.Module.ModSummary (ModSummary(..))
 import GHC.Types.SourceFile (HscSource(..))
 import GHC.Types.PkgQual (PkgQual(..), RawPkgQual(..))
-import GHC.Types.SrcLoc (unLoc, getLoc, SrcSpan(..), srcSpanStartLine)
+import GHC.Types.SrcLoc (Located, unLoc, getLoc, SrcSpan(..), srcSpanStartLine)
 import GHC.Types.Avail (availNames)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -226,6 +227,14 @@ data GeneratedScaffoldImportAuthority = GeneratedScaffoldImportAuthority
 
 noGeneratedScaffoldImports :: GeneratedScaffoldImportAuthority
 noGeneratedScaffoldImports = GeneratedScaffoldImportAuthority []
+
+permitsGeneratedScaffoldImport
+  :: GeneratedScaffoldImportAuthority -> ModSummary -> (String,String)
+  -> (PkgQual, Located ModuleName) -> Bool
+permitsGeneratedScaffoldImport (GeneratedScaffoldImportAuthority scaffold) summary requested (qualifier,imported) =
+  qualifier == NoPkgQual && any
+    (\(target,fingerprint,native,span',_) -> ms_mod summary == target && ms_hs_hash summary == fingerprint
+      && requested == (executionUnit native,executionModule native) && getLoc imported == span') scaffold
 
 readGeneratedScaffoldImportAuthority :: VerifiedExactIfaceClosure -> [ExecutionSourceIdentity]
   -> GeneratedScaffoldRecipe -> ParsedModule -> ModuleGraph -> HscEnv
@@ -556,9 +565,8 @@ installExactLexicalGraphWithScaffold sourceGraph lexical (CheckedValueImportAuth
           ([owner | edge <- edges, Just owner <- [missing summary edge]]
            ++ [owner | imported <- ms_textual_imps summary ++ ms_srcimps summary
               , Just owner <- [hiddenImport summary imported]]))]
-    permitted summary requested qualifier imported = qualifier == NoPkgQual && any
-      (\(target,fingerprint,native,span',_) -> ms_mod summary == target && ms_hs_hash summary == fingerprint
-        && requested == (executionUnit native,executionModule native) && getLoc imported == span') scaffold
+    permitted summary requested qualifier imported = permitsGeneratedScaffoldImport
+      (GeneratedScaffoldImportAuthority scaffold) summary requested (qualifier,imported)
     hiddenImport summary (qualifier, imported) =
       let name = unLoc imported
           local = case qualifier of

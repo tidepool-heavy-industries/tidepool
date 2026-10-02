@@ -497,6 +497,8 @@ pub(crate) struct ExactCompilationRequest {
     pub(crate) groups: Arc<[PendingCertifiedGroup]>,
     // Only current-program source-selected support can add these roots.
     program_support: Option<ArtifactView>,
+    source_selected_support: BTreeSet<ExactModuleIdentity>,
+    source_search_include: Option<Arc<[PathBuf]>>,
     checked_value_imports: crate::checked_cell::CheckedValueImportAuthority,
     generated_scaffold_imports: Option<GeneratedScaffoldImportAuthority>,
 }
@@ -584,6 +586,8 @@ pub(crate) struct ExactSourceAdmission {
     pub(crate) evidence: crate::cache::DependencyEvidence,
     pub(crate) evidence_bytes: Vec<u8>,
     pub(crate) exact_imports: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+    pub(crate) selected_originals:
+        BTreeMap<ExactModuleIdentity, crate::execution_source::SourceSelectedOriginal>,
 }
 
 pub(crate) struct ExactProductAdmission<'a> {
@@ -652,6 +656,16 @@ impl ExactSourceAdmission {
                 .is_some()
             {
                 return Err(failure("duplicate original source import owner"));
+            }
+        }
+        for (owner, original) in &self.selected_originals {
+            if imports
+                .insert(owner.clone(), original.imports().to_vec())
+                .is_some()
+            {
+                return Err(failure(
+                    "fresh source collides with a source-selected original",
+                ));
             }
         }
         Ok(imports)
@@ -760,6 +774,11 @@ impl ExactCompilationRequest {
         let mut encoded = BoundedBytes(Vec::new());
         serde_json::to_writer_pretty(&mut encoded, &facts).map_err(std::io::Error::other)?;
         std::fs::write(directory.join("facts.json"), encoded.0)
+    }
+
+    pub(crate) fn with_source_search_context(mut self, include: &[PathBuf]) -> Self {
+        self.source_search_include = Some(Arc::from(include));
+        self
     }
 
     pub(crate) fn apply_to(
@@ -927,6 +946,8 @@ impl ExactCompilationRequest {
             artifacts: materialized.artifacts,
             groups: groups.into(),
             program_support: self.program_support.clone(),
+            source_selected_support: self.source_selected_support.clone(),
+            source_search_include: self.source_search_include.clone(),
             checked_value_imports: self.checked_value_imports.clone(),
             generated_scaffold_imports: self.generated_scaffold_imports.clone(),
         })
@@ -939,7 +960,23 @@ impl ExactCompilationRequest {
         admissions: &[ExactSourceAdmission],
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         let mut imports = BTreeMap::new();
+        let mut selected_originals = BTreeMap::new();
         for admission in admissions {
+            for (owner, original) in &admission.selected_originals {
+                if selected_originals
+                    .insert(owner.clone(), original.clone())
+                    .is_some_and(
+                        |previous: crate::execution_source::SourceSelectedOriginal| {
+                            previous.owner() != original.owner()
+                                || previous.local_recipe_sha256() != original.local_recipe_sha256()
+                        },
+                    )
+                {
+                    return Err(failure(
+                        "program support changed a source-selected original",
+                    ));
+                }
+            }
             for (owner, requirements) in admission.home_imports()? {
                 if imports
                     .insert(owner, requirements.clone())
@@ -959,13 +996,27 @@ impl ExactCompilationRequest {
         let fresh = products
             .iter()
             .filter(|product| {
-                imports.contains_key(&identity(&product.owner().unit, &product.owner().module))
+                let owner = identity(&product.owner().unit, &product.owner().module);
+                imports.contains_key(&owner) && !selected_originals.contains_key(&owner)
             })
             .collect::<Vec<_>>();
         for product in products {
             let owner = identity(&product.owner().unit, &product.owner().module);
             if imports.contains_key(&owner) {
-                if retained.contains_key(&owner) {
+                if let Some(selected) = selected_originals.get(&owner) {
+                    let Some(entry) = retained.get(&owner) else {
+                        return Err(failure(
+                            "source-selected support is not an existing original",
+                        ));
+                    };
+                    if !matches!(&entry.payload, ArtifactPayload::Original(original)
+                        if original.owner() == selected.owner() && product.owner() == selected.owner())
+                    {
+                        return Err(failure(
+                            "source-selected support has another original owner",
+                        ));
+                    }
+                } else if retained.contains_key(&owner) {
                     return Err(failure(
                         "program support cannot select a retained hidden owner",
                     ));
@@ -987,14 +1038,28 @@ impl ExactCompilationRequest {
             extend_start.elapsed(),
             0,
         );
-        if fresh.is_empty() {
+        if fresh.is_empty() && selected_originals.is_empty() {
             return Ok(context);
         }
         let entries = context.artifact_view().entries_for_owners(
             fresh
                 .iter()
-                .map(|product| identity(&product.owner().unit, &product.owner().module)),
+                .map(|product| identity(&product.owner().unit, &product.owner().module))
+                .chain(selected_originals.keys().cloned()),
         );
+        for (owner, selected) in &selected_originals {
+            let Some(entry) = entries.get(owner) else {
+                return Err(failure(
+                    "source-selected support lacks its original inventory entry",
+                ));
+            };
+            if !matches!(&entry.payload, ArtifactPayload::Original(original) if original.owner() == selected.owner())
+            {
+                return Err(failure(
+                    "source-selected support cannot replace an original",
+                ));
+            }
+        }
         let fresh = context
             .artifact_view()
             .select_roots(entries.values().map(|entry| entry.descriptor.id).collect())?;
@@ -1002,6 +1067,8 @@ impl ExactCompilationRequest {
             Some(previous) => previous.merge(&fresh)?,
             None => fresh,
         });
+        self.source_selected_support
+            .extend(selected_originals.into_keys());
         Ok(context)
     }
 
@@ -1051,9 +1118,15 @@ impl ExactCompilationRequest {
         // The worker checks the remaining cell against these same-request
         // fresh originals. Retained hidden dependencies are not selected roots.
         let view = planned.artifact_view();
+        let retained = self.context.artifact_view().entries_for_owners(
+            planned
+                .original_home_imports()
+                .map(|(owner, _)| owner.clone()),
+        );
         let entries = view.entries_for_owners(
             planned
                 .original_home_imports()
+                .filter(|(owner, _)| !retained.contains_key(*owner))
                 .map(|(owner, _)| owner.clone()),
         );
         let support =
@@ -1145,9 +1218,9 @@ impl ExactCompilationRequest {
         if cursor.position() != bytes.len() as u64 {
             return Err(failure("compile receipt has trailing bytes"));
         }
-        let header = row(&value, 9)?;
+        let header = row(&value, 10)?;
         if string(&header[0])? != "TPEXACTCOMPILE"
-            || string(&header[1])? != "1"
+            || string(&header[1])? != "2"
             || string(&header[2])? != self.request_sha256
             || string(&header[3])? != hex(&self.semantic_sha256)
         {
@@ -1214,17 +1287,102 @@ impl ExactCompilationRequest {
             .as_ref()
             .map(ArtifactView::root_entries)
             .unwrap_or_default();
-        selected.extend(support_entries.iter().map(|entry| {
-            (
-                entry.descriptor.owner.unit.as_str(),
-                entry.descriptor.owner.module.as_str(),
-            )
-        }));
+        selected.extend(
+            support_entries
+                .iter()
+                .filter(|entry| {
+                    !self
+                        .source_selected_support
+                        .contains(&entry.descriptor.owner)
+                })
+                .map(|entry| {
+                    (
+                        entry.descriptor.owner.unit.as_str(),
+                        entry.descriptor.owner.module.as_str(),
+                    )
+                }),
+        );
         selected.extend(self.checked_value_imports.owners());
         if let Some(planned) = planned {
             selected.insert((planned.unit.as_str(), planned.module.as_str()));
         }
         let edges = list(&header[8], 4096)?;
+        let mut source_selection_roots = Vec::new();
+        for module in edges {
+            let module = row(module, 4)?;
+            let source_owner = identity(string(&module[0])?, string(&module[1])?);
+            for edge in list(&module[3], 4096)? {
+                let edge = row(edge, 4)?;
+                if !boolean(&edge[2])? {
+                    let qualifier =
+                        crate::cache::ImportQualifier::try_from(string(&edge[0])?.to_owned())
+                            .map_err(failure)?;
+                    source_selection_roots.push((
+                        source_owner.clone(),
+                        qualifier,
+                        identity(string(&edge[3])?, string(&edge[1])?),
+                    ));
+                }
+            }
+        }
+        let source_selection = row(&header[9], 2)?;
+        let claims = list(&source_selection[0], 4096)?;
+        let selected_originals = if claims.is_empty() {
+            if source_selection[1] != Value::Null {
+                return Err(failure(
+                    "empty original selection has nonempty source evidence",
+                ));
+            }
+            BTreeMap::new()
+        } else {
+            let include = self.source_search_include.as_deref().ok_or_else(|| {
+                failure("source-selected originals lack trusted current import roots")
+            })?;
+            let claims = claims
+                .iter()
+                .map(|claim| {
+                    let claim = row(claim, 6)?;
+                    Ok(crate::execution_source::SourceSelectedOriginalClaim {
+                        owner: tidepool_repr::execution_schema::CachedHomeOwner {
+                            unit: string(&claim[0])?.to_owned(),
+                            module: string(&claim[1])?.to_owned(),
+                            module_version: tidepool_repr::execution_schema::ModuleVersion(
+                                crate::execution_source::parse_digest(string(&claim[2])?)?,
+                            ),
+                            skinny_iface_sha256: crate::execution_source::parse_digest(string(
+                                &claim[3],
+                            )?)?,
+                            product_sha256: crate::execution_source::parse_digest(string(
+                                &claim[4],
+                            )?)?,
+                        },
+                        local_recipe_sha256: crate::execution_source::parse_digest(string(
+                            &claim[5],
+                        )?)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, CompileError>>()?;
+            let selection_evidence: crate::cache::DependencyEvidence =
+                serde_json::from_str(string(&source_selection[1])?).map_err(failure)?;
+            let entries = context.artifact_view().entries();
+            let originals = original_products(&entries);
+            let independent = selected
+                .iter()
+                .map(|(unit, module)| identity(unit, module))
+                .collect();
+            crate::execution_source::validate_source_selected_originals(
+                claims,
+                &selection_evidence,
+                crate::execution_source::SourceSelectionContext {
+                    producer: self.producer_sha256,
+                    originals: &originals,
+                    include,
+                    fresh: &evidence,
+                    roots: &source_selection_roots,
+                    independent: &independent,
+                },
+            )?
+        };
         let mut seen = BTreeSet::new();
         let mut exact_imports = BTreeMap::new();
         for module in edges {
@@ -1282,7 +1440,9 @@ impl ExactCompilationRequest {
                                 })
                         });
                 if boot
-                    || !(selected.contains(&(unit, name)) || scaffold_import)
+                    || !(selected.contains(&(unit, name))
+                        || scaffold_import
+                        || selected_originals.contains_key(&identity(unit, name)))
                     || (qualifier != "none" && qualifier != format!("this:{unit}"))
                     || !imported.insert((qualifier, name, boot, unit))
                 {
@@ -1306,6 +1466,7 @@ impl ExactCompilationRequest {
             evidence,
             evidence_bytes,
             exact_imports,
+            selected_originals,
         })
     }
 }
@@ -2285,6 +2446,8 @@ impl ExactDeclarationContext {
             artifacts: materialized.artifacts,
             groups: groups.into(),
             program_support: None,
+            source_selected_support: BTreeSet::new(),
+            source_search_include: None,
             checked_value_imports: Default::default(),
             generated_scaffold_imports: None,
         })
@@ -2623,6 +2786,7 @@ mod tests {
             evidence_bytes: serde_json::to_vec(&evidence).unwrap(),
             evidence,
             exact_imports: BTreeMap::new(),
+            selected_originals: BTreeMap::new(),
         }
     }
 
@@ -2857,6 +3021,8 @@ mod tests {
             artifacts: vec![],
             groups: Arc::from([]),
             program_support: None,
+            source_selected_support: BTreeSet::new(),
+            source_search_include: None,
             checked_value_imports: Default::default(),
             generated_scaffold_imports: None,
         }
@@ -2921,7 +3087,7 @@ mod tests {
         };
         let value = Value::Array(vec![
             text("TPEXACTCOMPILE"),
-            text("1"),
+            text("2"),
             text(&request.request_sha256),
             text(hex(&request.semantic_sha256)),
             path_value(&path).unwrap(),
@@ -2939,12 +3105,526 @@ mod tests {
                     text(unit),
                 ])]),
             ])]),
+            Value::Array(vec![Value::Array(vec![]), Value::Null]),
         ]);
         let receipt = directory.join("receipt.cbor");
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&value, &mut bytes).unwrap();
         std::fs::write(&receipt, bytes).unwrap();
         receipt
+    }
+
+    fn write_receipt(path: &Path, value: &Value) {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(value, &mut bytes).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn read_receipt(path: &Path) -> Value {
+        ciborium::de::from_reader(std::fs::read(path).unwrap().as_slice()).unwrap()
+    }
+
+    fn source_selected_receipt(
+        root: &Path,
+        dependency: bool,
+        shadow: Option<&Path>,
+    ) -> (
+        ExactCompilationRequest,
+        Arc<ExactDeclarationContext>,
+        PathBuf,
+    ) {
+        let (graph, owners) = if dependency {
+            crate::execution_source::test_graph_with_local_source_dependency(root)
+        } else {
+            crate::execution_source::test_graph(root)
+        };
+        source_selected_receipt_with_graph(root, dependency, shadow, graph, owners)
+    }
+
+    fn source_selected_receipt_with_graph(
+        root: &Path,
+        dependency: bool,
+        shadow: Option<&Path>,
+        graph: Arc<crate::execution_source::CertifiedExecutionSourceGraph>,
+        owners: Vec<CachedHomeOwner>,
+    ) -> (
+        ExactCompilationRequest,
+        Arc<ExactDeclarationContext>,
+        PathBuf,
+    ) {
+        let inventory = ArtifactInventory::default();
+        let context = Arc::new(ExactDeclarationContext {
+            producer: [7; 32],
+            inventory: inventory
+                .admit_shared(
+                    &inventory.empty_view(),
+                    vec![
+                        execution_entry(owners[0].clone(), Arc::clone(&graph)),
+                        execution_entry(owners[1].clone(), Arc::clone(&graph)),
+                    ],
+                )
+                .unwrap(),
+            lexical: vec![],
+        });
+        let include = shadow
+            .into_iter()
+            .map(Path::to_path_buf)
+            .chain(std::iter::once(root.to_path_buf()))
+            .collect::<Vec<_>>();
+        let mut request =
+            program_request(root, Arc::clone(&context)).with_source_search_context(&include);
+        request.producer_sha256 = [7; 32];
+        let receipt = import_receipt_source_owner(
+            root,
+            &request,
+            "main",
+            "A",
+            "none",
+            false,
+            "module Consumer where\nimport A\n",
+        );
+        let mut value = read_receipt(&receipt);
+        let fields = value.as_array_mut().unwrap();
+        let mut fresh: crate::cache::DependencyEvidence =
+            serde_json::from_str(fields[7].as_text().unwrap()).unwrap();
+        fresh.modules[0].unit = "main".into();
+        fields[7] = text(serde_json::to_string(&fresh).unwrap());
+        fields[8].as_array_mut().unwrap()[0].as_array_mut().unwrap()[0] = text("main");
+        let count = if dependency { 2 } else { 1 };
+        let mut sources = Vec::new();
+        let mut modules = Vec::new();
+        let mut claims = Vec::new();
+        for owner in &owners[..count] {
+            let source = root.join(format!("{}.hs", owner.module));
+            sources.push(crate::cache::SourceEvidence {
+                path: source.clone(),
+                sha256: sha256(&std::fs::read(&source).unwrap()),
+            });
+            modules.push(crate::cache::ModuleEvidence {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                boot: false,
+                source,
+                product: crate::cache::ProductAvailability::InterfaceOnly,
+                imports: if dependency && owner.module == "A" {
+                    vec![crate::cache::ModuleImportEvidence {
+                        qualifier: crate::cache::ImportQualifier::Unqualified,
+                        module: "B".into(),
+                        boot: false,
+                        selected: Some(root.join("B.hs")),
+                    }]
+                } else {
+                    vec![]
+                },
+            });
+            claims.push(Value::Array(vec![
+                text(&owner.unit),
+                text(&owner.module),
+                text(hex(&owner.module_version.0)),
+                text(hex(&owner.skinny_iface_sha256)),
+                text(hex(&owner.product_sha256)),
+                text(hex(&graph.digest())),
+            ]));
+        }
+        let mut a_candidates = if let Some(shadow) = shadow {
+            vec![
+                shadow.join("A.hs"),
+                shadow.join("A.lhs"),
+                shadow.join("A.hsig"),
+                shadow.join("A.lhsig"),
+            ]
+        } else {
+            vec![]
+        };
+        a_candidates.push(root.join("A.hs"));
+        let mut resolutions = vec![crate::cache::ResolutionEvidence {
+            qualifier: crate::cache::ImportQualifier::Unqualified,
+            module: "A".into(),
+            boot: false,
+            selected: Some(root.join("A.hs")),
+            candidates: a_candidates,
+        }];
+        if dependency {
+            resolutions.push(crate::cache::ResolutionEvidence {
+                qualifier: crate::cache::ImportQualifier::Unqualified,
+                module: "B".into(),
+                boot: false,
+                selected: Some(root.join("B.hs")),
+                candidates: vec![root.join("B.hs")],
+            });
+        }
+        let evidence = crate::cache::DependencyEvidence {
+            version: 4,
+            cache_safe: true,
+            selection_complete: true,
+            sources,
+            modules,
+            resolutions,
+            packages: vec![],
+        };
+        fields[9] = Value::Array(vec![
+            Value::Array(claims),
+            text(serde_json::to_string(&evidence).unwrap()),
+        ]);
+        write_receipt(&receipt, &value);
+        (request, context, receipt)
+    }
+
+    #[test]
+    fn source_selected_original_receipt_preserves_native_custody_and_requires_current_reproof() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut request, context, receipt) =
+            source_selected_receipt(directory.path(), false, None);
+        let admission = request.validate_receipt(&receipt, None, &context).unwrap();
+        assert_eq!(admission.selected_originals.len(), 1);
+        assert_eq!(
+            admission.home_imports().unwrap()[&identity("main", "Consumer")],
+            vec![identity("main", "A")]
+        );
+        let originals = context
+            .artifact_view()
+            .entries_for_owners([identity("main", "A"), identity("main", "B")].into_iter());
+        let ArtifactPayload::Original(product) = &originals[&identity("main", "A")].payload else {
+            panic!("original fixture");
+        };
+        let effective = request
+            .admit_program_support(Arc::clone(&context), &[product.clone()], &[admission])
+            .unwrap();
+        let after = effective
+            .artifact_view()
+            .entries_for_owners([identity("main", "A")].into_iter());
+        assert!(Arc::ptr_eq(
+            &originals[&identity("main", "A")],
+            &after[&identity("main", "A")]
+        ));
+        assert!(effective.lexical_graph().is_empty());
+        assert!(context.lexical_graph().is_empty());
+        assert_eq!(
+            request
+                .program_support
+                .as_ref()
+                .unwrap()
+                .root_entries()
+                .iter()
+                .map(|entry| entry.descriptor.owner.clone())
+                .collect::<Vec<_>>(),
+            vec![identity("main", "A")]
+        );
+        request
+            .validate_receipt(&receipt, None, &effective)
+            .unwrap();
+        let mut without_proof = read_receipt(&receipt);
+        without_proof.as_array_mut().unwrap()[9] =
+            Value::Array(vec![Value::Array(vec![]), Value::Null]);
+        write_receipt(&receipt, &without_proof);
+        assert!(
+            request
+                .validate_receipt(&receipt, None, &effective)
+                .is_err(),
+            "prior source-selected support must not become blanket import authority"
+        );
+        let (_, _, receipt) = source_selected_receipt(directory.path(), false, None);
+        std::fs::write(directory.path().join("A.hs"), "module A where\nvalue = 2\n").unwrap();
+        assert!(
+            request
+                .validate_receipt(&receipt, None, &effective)
+                .is_err(),
+            "a later stage must recheck current source bytes"
+        );
+    }
+
+    #[test]
+    fn source_selected_original_receipt_refuses_owner_recipe_version_and_unreachable_claims() {
+        let directory = tempfile::tempdir().unwrap();
+        let (request, context, receipt) = source_selected_receipt(directory.path(), false, None);
+        let valid = read_receipt(&receipt);
+        for index in 2..6 {
+            let mut forged = valid.clone();
+            forged.as_array_mut().unwrap()[9].as_array_mut().unwrap()[0]
+                .as_array_mut()
+                .unwrap()[0]
+                .as_array_mut()
+                .unwrap()[index] = text(hex(&[99; 32]));
+            write_receipt(&receipt, &forged);
+            assert!(
+                request.validate_receipt(&receipt, None, &context).is_err(),
+                "forged original digest {index}"
+            );
+        }
+        for version in ["1", "3"] {
+            let mut forged = valid.clone();
+            forged.as_array_mut().unwrap()[1] = text(version);
+            write_receipt(&receipt, &forged);
+            assert!(request.validate_receipt(&receipt, None, &context).is_err());
+        }
+        let mut duplicate = valid.clone();
+        let claims = duplicate.as_array_mut().unwrap()[9].as_array_mut().unwrap()[0]
+            .as_array_mut()
+            .unwrap();
+        claims.push(claims[0].clone());
+        write_receipt(&receipt, &duplicate);
+        assert!(request.validate_receipt(&receipt, None, &context).is_err());
+        write_receipt(&receipt, &valid);
+        let mut unbound = request.clone();
+        unbound.source_search_include = None;
+        assert!(unbound.validate_receipt(&receipt, None, &context).is_err());
+        let mut wrong_producer = request.clone();
+        wrong_producer.producer_sha256 = [99; 32];
+        assert!(wrong_producer
+            .validate_receipt(&receipt, None, &context)
+            .is_err());
+        let mut unused = valid.clone();
+        unused.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
+            .as_array_mut()
+            .unwrap()[3] = Value::Array(vec![]);
+        write_receipt(&receipt, &unused);
+        assert!(
+            request.validate_receipt(&receipt, None, &context).is_err(),
+            "retained custody alone cannot select an unused source"
+        );
+    }
+
+    #[test]
+    fn source_selected_original_receipt_refuses_shadow_shortened_search_and_alternate_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let shadow = directory.path().join("earlier");
+        std::fs::create_dir(&shadow).unwrap();
+        let (request, context, receipt) =
+            source_selected_receipt(directory.path(), false, Some(&shadow));
+        request.validate_receipt(&receipt, None, &context).unwrap();
+        let valid = read_receipt(&receipt);
+        for reordered in [false, true] {
+            let mut forged = valid.clone();
+            let fields = forged.as_array_mut().unwrap();
+            let mut evidence: crate::cache::DependencyEvidence =
+                serde_json::from_str(fields[9].as_array().unwrap()[1].as_text().unwrap()).unwrap();
+            if reordered {
+                evidence.resolutions[0].candidates.swap(0, 1);
+            } else {
+                evidence.resolutions[0].candidates.remove(0);
+            }
+            fields[9].as_array_mut().unwrap()[1] = text(serde_json::to_string(&evidence).unwrap());
+            write_receipt(&receipt, &forged);
+            assert!(request.validate_receipt(&receipt, None, &context).is_err());
+        }
+        write_receipt(&receipt, &valid);
+        std::fs::write(shadow.join("A.hsig"), "signature A where\n").unwrap();
+        assert!(
+            request.validate_receipt(&receipt, None, &context).is_err(),
+            "an earlier signature candidate also shadows the original source"
+        );
+        std::fs::remove_file(shadow.join("A.hsig")).unwrap();
+        let mut alternate = valid;
+        let fields = alternate.as_array_mut().unwrap();
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(fields[9].as_array().unwrap()[1].as_text().unwrap()).unwrap();
+        let alias = directory.path().join("SameBytes.hs");
+        std::fs::copy(directory.path().join("A.hs"), &alias).unwrap();
+        evidence.sources[0].path = alias.clone();
+        evidence.modules[0].source = alias;
+        fields[9].as_array_mut().unwrap()[1] = text(serde_json::to_string(&evidence).unwrap());
+        write_receipt(&receipt, &alternate);
+        assert!(
+            request.validate_receipt(&receipt, None, &context).is_err(),
+            "equal bytes at another source path do not replace the original"
+        );
+    }
+
+    #[test]
+    fn source_selected_original_receipt_requires_complete_current_source_import_closure() {
+        let directory = tempfile::tempdir().unwrap();
+        let (request, context, receipt) = source_selected_receipt(directory.path(), true, None);
+        let admission = request.validate_receipt(&receipt, None, &context).unwrap();
+        assert_eq!(
+            admission.home_imports().unwrap()[&identity("main", "A")],
+            vec![identity("main", "B")]
+        );
+        assert_eq!(admission.selected_originals.len(), 2);
+        let valid = read_receipt(&receipt);
+        let mut missing = valid.clone();
+        let fields = missing.as_array_mut().unwrap();
+        let selection = fields[9].as_array_mut().unwrap();
+        selection[0].as_array_mut().unwrap().pop();
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(selection[1].as_text().unwrap()).unwrap();
+        evidence.sources.pop();
+        evidence.modules.pop();
+        selection[1] = text(serde_json::to_string(&evidence).unwrap());
+        write_receipt(&receipt, &missing);
+        assert!(request.validate_receipt(&receipt, None, &context).is_err());
+        let mut changed = valid;
+        let selection = changed.as_array_mut().unwrap()[9].as_array_mut().unwrap();
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(selection[1].as_text().unwrap()).unwrap();
+        evidence.modules[0].imports.clear();
+        selection[1] = text(serde_json::to_string(&evidence).unwrap());
+        write_receipt(&receipt, &changed);
+        assert!(
+            request.validate_receipt(&receipt, None, &context).is_err(),
+            "a receipt cannot omit an original source import"
+        );
+    }
+
+    #[test]
+    fn source_selected_original_receipt_revalidates_original_package_interface_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let package = directory.path().join("package.hi");
+        std::fs::write(&package, b"original package interface").unwrap();
+        let (graph, owners) = crate::execution_source::test_graph(directory.path());
+        let graph = crate::execution_source::test_graph_with_package_witness(&graph, &package);
+        let (request, context, receipt) =
+            source_selected_receipt_with_graph(directory.path(), false, None, graph, owners);
+        request.validate_receipt(&receipt, None, &context).unwrap();
+        std::fs::write(package, b"changed package interface").unwrap();
+        assert!(request.validate_receipt(&receipt, None, &context).is_err());
+    }
+
+    #[test]
+    fn source_selected_original_receipt_authenticates_ultimate_fresh_recipe_in_original_chain() {
+        let directory = tempfile::tempdir().unwrap();
+        let (graph, owners) = crate::execution_source::test_graph(directory.path());
+        let forwarded = crate::execution_source::test_graph_requiring_original(
+            &graph,
+            &owners[1],
+            graph.digest(),
+        );
+        let (mut request, _, receipt) = source_selected_receipt_with_graph(
+            directory.path(),
+            true,
+            None,
+            Arc::clone(&graph),
+            owners.clone(),
+        );
+        let inventory = ArtifactInventory::default();
+        let context = Arc::new(ExactDeclarationContext {
+            producer: [7; 32],
+            inventory: inventory
+                .admit_shared(
+                    &inventory.empty_view(),
+                    vec![
+                        execution_entry(owners[0].clone(), Arc::clone(&forwarded)),
+                        execution_entry(owners[1].clone(), Arc::clone(&graph)),
+                    ],
+                )
+                .unwrap(),
+            lexical: vec![],
+        });
+        request.context = Arc::clone(&context);
+        let mut valid = read_receipt(&receipt);
+        let selection = valid.as_array_mut().unwrap()[9].as_array_mut().unwrap();
+        selection[0].as_array_mut().unwrap()[0]
+            .as_array_mut()
+            .unwrap()[5] = text(hex(&forwarded.digest()));
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(selection[1].as_text().unwrap()).unwrap();
+        selection[1] = text(serde_json::to_string(&evidence).unwrap());
+        write_receipt(&receipt, &valid);
+        request.validate_receipt(&receipt, None, &context).unwrap();
+        let mut omitted = valid.clone();
+        evidence.modules[0].imports.clear();
+        evidence.resolutions.retain(|row| row.module != "B");
+        omitted.as_array_mut().unwrap()[9].as_array_mut().unwrap()[1] =
+            text(serde_json::to_string(&evidence).unwrap());
+        write_receipt(&receipt, &omitted);
+        assert!(
+            request.validate_receipt(&receipt, None, &context).is_err(),
+            "current source must report the authenticated original exact import"
+        );
+        let mut extra = valid.clone();
+        let mut evidence: crate::cache::DependencyEvidence = serde_json::from_str(
+            extra.as_array().unwrap()[9].as_array().unwrap()[1]
+                .as_text()
+                .unwrap(),
+        )
+        .unwrap();
+        evidence.modules[0]
+            .imports
+            .push(crate::cache::ModuleImportEvidence {
+                qualifier: crate::cache::ImportQualifier::Unqualified,
+                module: "Unadmitted".into(),
+                boot: false,
+                selected: None,
+            });
+        extra.as_array_mut().unwrap()[9].as_array_mut().unwrap()[1] =
+            text(serde_json::to_string(&evidence).unwrap());
+        write_receipt(&receipt, &extra);
+        assert!(
+            request.validate_receipt(&receipt, None, &context).is_err(),
+            "a retained exact edge cannot authorize another ordinary import"
+        );
+        let mut wrong = valid;
+        wrong.as_array_mut().unwrap()[9].as_array_mut().unwrap()[0]
+            .as_array_mut()
+            .unwrap()[1]
+            .as_array_mut()
+            .unwrap()[5] = text(hex(&forwarded.digest()));
+        write_receipt(&receipt, &wrong);
+        assert!(request.validate_receipt(&receipt, None, &context).is_err(),
+            "a consumer's graph digest cannot replace the dependency's ultimate fresh source recipe");
+    }
+
+    #[test]
+    fn source_selected_original_receipt_distinguishes_equivalent_available_and_causal_recipes() {
+        let directory = tempfile::tempdir().unwrap();
+        let (original, owners) = crate::execution_source::test_graph(directory.path());
+        let (parent, _) =
+            crate::execution_source::test_graph_with_local_source_dependency(directory.path());
+        let (mut request, _, receipt) = source_selected_receipt_with_graph(
+            directory.path(),
+            true,
+            None,
+            Arc::clone(&parent),
+            owners.clone(),
+        );
+        let inventory = ArtifactInventory::default();
+        let context = Arc::new(ExactDeclarationContext {
+            producer: [7; 32],
+            inventory: inventory
+                .admit_shared(
+                    &inventory.empty_view(),
+                    vec![
+                        execution_entry(owners[0].clone(), Arc::clone(&parent)),
+                        execution_entry(owners[1].clone(), Arc::clone(&original)),
+                    ],
+                )
+                .unwrap(),
+            lexical: vec![],
+        });
+        request.context = Arc::clone(&context);
+        request.validate_receipt(&receipt, None, &context).unwrap();
+        let mut equivalent = read_receipt(&receipt);
+        equivalent.as_array_mut().unwrap()[9]
+            .as_array_mut()
+            .unwrap()[0]
+            .as_array_mut()
+            .unwrap()[1]
+            .as_array_mut()
+            .unwrap()[5] = text(hex(&original.digest()));
+        write_receipt(&receipt, &equivalent);
+        assert!(
+            request.validate_receipt(&receipt, None, &context).is_err(),
+            "an equivalent B recipe merely available in custody was not reached from A"
+        );
+        let fields = equivalent.as_array_mut().unwrap();
+        fields[8].as_array_mut().unwrap()[0].as_array_mut().unwrap()[3]
+            .as_array_mut()
+            .unwrap()
+            .push(Value::Array(vec![
+                text("none"),
+                text("B"),
+                Value::Bool(false),
+                text("main"),
+            ]));
+        let mut fresh: crate::cache::DependencyEvidence =
+            serde_json::from_str(fields[7].as_text().unwrap()).unwrap();
+        let source = "module Consumer where\nimport A\nimport B\n";
+        std::fs::write(Path::new(fields[4].as_text().unwrap()), source).unwrap();
+        std::fs::write(Path::new(fields[6].as_text().unwrap()), source).unwrap();
+        fields[5] = text(sha256(source.as_bytes()));
+        fresh.sources[0].sha256 = sha256(source.as_bytes());
+        fields[7] = text(serde_json::to_string(&fresh).unwrap());
+        write_receipt(&receipt, &equivalent);
+        request.validate_receipt(&receipt, None, &context).unwrap();
     }
 
     #[test]
@@ -3490,6 +4170,8 @@ mod tests {
             artifacts: vec![],
             groups: Arc::from([]),
             program_support: None,
+            source_selected_support: BTreeSet::new(),
+            source_search_include: None,
             checked_value_imports: Default::default(),
             generated_scaffold_imports: None,
         };
@@ -3557,6 +4239,8 @@ mod tests {
             artifacts,
             groups: Arc::from([]),
             program_support: None,
+            source_selected_support: BTreeSet::new(),
+            source_search_include: None,
             checked_value_imports: Default::default(),
             generated_scaffold_imports: None,
         };

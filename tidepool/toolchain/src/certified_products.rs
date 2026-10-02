@@ -5597,7 +5597,7 @@ mod tests {
             std::fs::write(&snapshot, source).unwrap();
             let exact_receipt = Value::Array(vec![
                 Value::Text("TPEXACTCOMPILE".into()),
-                Value::Text("1".into()),
+                Value::Text("2".into()),
                 Value::Text(request.request_sha256.clone()),
                 Value::Text(hex(&request.semantic_sha256)),
                 Value::Text(input.to_string_lossy().into_owned()),
@@ -5610,6 +5610,7 @@ mod tests {
                     Value::Bool(false),
                     Value::Array(vec![]),
                 ])]),
+                Value::Array(vec![Value::Array(vec![]), Value::Null]),
             ]);
             let mut encoded = Vec::new();
             ciborium::ser::into_writer(&exact_receipt, &mut encoded).unwrap();
@@ -5683,10 +5684,10 @@ mod tests {
         else {
             panic!("manifest");
         };
-        assert_eq!(fields[1].as_text(), Some("7"));
-        let parcel = fields[3].as_array().unwrap();
-        assert_eq!(parcel[0].as_array().unwrap().len(), 1);
-        assert_eq!(parcel[1].as_array().unwrap().len(), 1);
+        assert_eq!(fields[1].as_text(), Some("8"));
+        let execution = fields[5].as_array().unwrap();
+        assert_eq!(execution[0].as_array().unwrap().len(), 1);
+        assert_eq!(execution[1].as_array().unwrap().len(), 1);
         if recompile_fresh {
             // A new transaction can produce the exact same native owner. Its
             // source recipe belongs to that transaction, not the offered record.

@@ -729,7 +729,11 @@ impl ModuleCandidateOffer {
             selected: None,
             producer: producer.to_vec(),
             include: include.to_vec(),
-            exact: Some(context.prepare_compilation(&scratch.join("exact-scope"), producer)?),
+            exact: Some(
+                context
+                    .prepare_compilation(&scratch.join("exact-scope"), producer)?
+                    .with_source_search_context(include),
+            ),
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
@@ -787,6 +791,7 @@ impl ModuleCandidateOffer {
                         producer,
                         Some(authorization),
                     )?
+                    .with_source_search_context(include)
                     .with_checked_value_imports(checked_values.import_authority())
                     .with_generated_scaffold_imports(
                         std::iter::once(specification.template_source.as_str()).chain(
@@ -864,6 +869,7 @@ impl ModuleCandidateOffer {
                         producer,
                         Some(authorization),
                     )?
+                    .with_source_search_context(include)
                     .with_checked_value_imports(inputs.import_authority())
                     .with_generated_scaffold_imports(
                         std::iter::once(specification.template_source.as_str()).chain(
@@ -1033,6 +1039,7 @@ impl ModuleCandidateOffer {
             include: include.to_vec(),
             exact: Some(
                 exact
+                    .with_source_search_context(include)
                     .with_checked_value_imports(checked_item.prefix.import_authority()?)
                     .with_generated_scaffold_imports(
                         checked_item
@@ -1126,6 +1133,7 @@ impl ModuleCandidateOffer {
             include: include.to_vec(),
             exact: Some(
                 exact
+                    .with_source_search_context(include)
                     .with_checked_value_imports(display.prefix.import_authority()?)
                     .with_generated_scaffold_imports(
                         display
@@ -1554,7 +1562,7 @@ impl ModuleCandidateOffer {
             selected: self.selected.clone(),
             producer: self.producer.clone(),
             include: self.include.clone(),
-            exact: Some(exact),
+            exact: Some(exact.with_source_search_context(&self.include)),
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
@@ -2546,10 +2554,17 @@ fn compile_invocation_inner(
             .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
         crate::toolchain::admit_bound_endpoint(&endpoint)
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        let request = context.prepare_compilation(
-            &temp_dir.path().join("exact-scope"),
-            endpoint.identity().producer_bytes(),
-        )?;
+        let request = context
+            .prepare_compilation(
+                &temp_dir.path().join("exact-scope"),
+                endpoint.identity().producer_bytes(),
+            )?
+            .with_source_search_context(
+                &inv.include
+                    .iter()
+                    .map(|path| path.to_path_buf())
+                    .collect::<Vec<_>>(),
+            );
         request.apply_to(&mut cmd)?;
         Some(request)
     } else {

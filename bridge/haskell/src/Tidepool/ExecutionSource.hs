@@ -182,6 +182,10 @@ data ExecutionSourceFailure
   | ExecutionSourceIncomplete (String, String)
   | ExecutionSourceChanged (String, String)
   | ExecutionSourceResolutionChanged (String, String)
+  | ExecutionSourceImportResolutionChanged (String, String)
+      [(String,String,Bool,Maybe FilePath)] [(String,String,Bool,Maybe FilePath)]
+  | ExecutionSourceSearchChanged (String, String) [FilePath]
+  | ExecutionSourcePackageChanged (String, String)
   | ExecutionSourceLinkableMissing (String, String)
   | ExecutionSourceUnavailable (String, String)
   deriving (Eq, Show)
