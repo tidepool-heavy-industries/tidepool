@@ -14832,10 +14832,12 @@ mod request_tests {
         workbench
             .access
             .with_machine(context, move |session, context, _| {
-                let _next = session.begin_durable_private_execution(
-                    &cleanup_owner,
-                    context.placement.lexical_scope,
-                )?;
+                let _next = session
+                    .begin_durable_private_execution(
+                        &cleanup_owner,
+                        context.placement.lexical_scope,
+                    )
+                    .map_err(ResidentError::Session)?;
                 assert!(session
                     .public_visibility_snapshot_in(installation_scope)
                     .is_none());
