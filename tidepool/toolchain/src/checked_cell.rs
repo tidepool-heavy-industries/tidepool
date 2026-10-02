@@ -2417,8 +2417,7 @@ impl CheckedItemOffer {
         } else {
             self.item.binders().to_vec()
         };
-        let mut authenticated_sites = None;
-        let bound_binders = match (self.item.kind(), string(&turn[0])?) {
+        let (bound_binders, authenticated_sites) = match (self.item.kind(), string(&turn[0])?) {
             (CheckedItemKind::Bind | CheckedItemKind::Expression, "Bind") => {
                 let fields = row(&turn[1], 5)?;
                 if fields[0] != Value::Array(expected_binders.iter().map(text).collect())
@@ -2428,9 +2427,9 @@ impl CheckedItemOffer {
                         "compiled bind has another authored verdict or wrapper",
                     ));
                 }
-                authenticated_sites = Some(crate::artifacts::yield_sites_metadata_digest(
+                let authenticated_sites = crate::artifacts::yield_sites_metadata_digest(
                     &crate::turn_observations::decode_turn_yield_sites(&fields[3])?,
-                )?);
+                )?;
                 let bound = list(&fields[2], 65536)?.to_vec();
                 if bound.len() != expected_binders.len() {
                     return Err(failure("compiled binder inventory differs"));
@@ -2449,7 +2448,7 @@ impl CheckedItemOffer {
                         ));
                     }
                 }
-                bound
+                (bound, authenticated_sites)
             }
             _ => return Err(failure("compiled turn kind differs from checked item")),
         };
@@ -2468,8 +2467,7 @@ impl CheckedItemOffer {
                 item: self.item.clone(),
                 target: target.clone(),
                 table: read_table(root)?,
-                yield_sites_digest: authenticated_sites
-                    .ok_or_else(|| failure("checked turn has no authenticated sites"))?,
+                yield_sites_digest: authenticated_sites,
                 value_interface,
                 generation: self.generation,
                 bound_binders,
@@ -2972,10 +2970,55 @@ mod tests {
         assert_ne!(forward, swapped);
         assert_ne!(forward, changed_interface);
         assert_ne!(forward.commitment(), changed_interface.commitment());
-        let mut presentation = same.clone();
-        presentation.signature.source = "different parser presentation".into();
+        let mut presentation_wire =
+            decode(&witness_bytes(fun(con("A"), con("B")), &"a".repeat(64))).unwrap();
+        let Value::Array(fields) = &mut presentation_wire else {
+            unreachable!()
+        };
+        let Value::Array(signature) = &mut fields[2] else {
+            unreachable!()
+        };
+        signature[1] = text("different parser presentation");
+        let mut presentation_bytes = Vec::new();
+        ciborium::into_writer(&presentation_wire, &mut presentation_bytes).unwrap();
+        let presentation = CanonicalInputTypeWitness::from_bytes(&presentation_bytes).unwrap();
         assert_eq!(forward, presentation);
         assert_eq!(forward.commitment(), presentation.commitment());
+        assert_ne!(forward.metadata_digest(), presentation.metadata_digest());
+        let site = crate::YieldSite {
+            site: 1,
+            origin: "original".into(),
+            ordinal: 0,
+            ty: "Int".into(),
+            modules: Vec::new(),
+            heads: Vec::new(),
+            inputs: vec![crate::SiteType {
+                ty: "A -> B".into(),
+                modules: vec!["Owner".into()],
+                heads: Vec::new(),
+            }],
+            input_type_witnesses: vec![Some(forward.clone())],
+            reply_declaration: None,
+        };
+        let mut edited = site.clone();
+        edited.input_type_witnesses[0] = Some(presentation);
+        assert_eq!(site, edited);
+        assert!(!site.same_metadata(&edited));
+        assert!(crate::artifacts::yield_sites_metadata_digest(&[site.clone(), edited]).is_err());
+        let original_digest =
+            crate::artifacts::yield_sites_metadata_digest(&[site.clone()]).unwrap();
+        let mut absent = site.clone();
+        absent.input_type_witnesses.clear();
+        let mut input_changed = site.clone();
+        input_changed.inputs[0].ty = "B -> A".into();
+        let mut origin_changed = site.clone();
+        origin_changed.origin = "another owner".into();
+        for altered in [absent, input_changed, origin_changed] {
+            assert_ne!(
+                original_digest,
+                crate::artifacts::yield_sites_metadata_digest(&[altered]).unwrap()
+            );
+        }
         for shape in [
             array([text("bound"), Value::Integer(0.into())]),
             array([
