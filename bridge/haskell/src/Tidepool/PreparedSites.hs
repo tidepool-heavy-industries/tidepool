@@ -8,6 +8,7 @@ module Tidepool.PreparedSites
   , elaboratePreparedSites
   , lookupPreparedVerb
   , resolvePreparedSiblings
+  , resolvePreparedInterfaceSiblings
   , syntheticSiteId
   , syntheticSiteBit
   , requestReplyIndex
@@ -54,7 +55,9 @@ import GHC.Iface.Load (importDecl)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), eltsHpt)
 import GHC.Unit.Finder (FindResult(Found), findImportedModule)
 import GHC.Unit.Module (mkModuleName, moduleName, moduleNameString)
-import GHC.Unit.Module.ModDetails (md_insts)
+import GHC.Unit.Module.ModDetails (md_insts, md_types)
+import GHC.Unit.Module.ModIface (mi_module)
+import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Unit.External (ExternalPackageState(eps_inst_env))
 import GHC.Tc.Utils.Monad (initIfaceLoad)
 import GHC.Types.Unique (getKey)
@@ -310,14 +313,26 @@ siteWireType authority spec answer = case vsWireSource spec of
       (responseResultTyCon authority)
     Right (mkTyConApp response [answer])
 
--- | Exact generated siblings present in one tidied home module. Merging these
--- maps in dependency order gives later modules the real imported Ids without
--- consulting interface unfoldings or reconstructing names.
+-- | Exact generated siblings present in one tidied home module.
 resolvePreparedSiblings :: [CoreBind] -> Map String Id
-resolvePreparedSiblings bindings = Map.fromList
+resolvePreparedSiblings = resolveSiblingIds . concatMap bindersOf
+
+-- | Recover nominal sibling Ids from an already-admitted defining interface.
+-- Captured originals and certified candidates have no fresh Core in this
+-- request. Their interface still supplies the same typed Id; no unfolding is
+-- loaded and no source or executable authority is added here.
+resolvePreparedInterfaceSiblings :: HomeModInfo -> Map String Id
+resolvePreparedInterfaceSiblings hmi = resolveSiblingIds
+  [ binder
+  | binder <- typeEnvIds (md_types (hm_details hmi))
+  , nameModule_maybe (idName binder) == Just (mi_module (hm_iface hmi))
+  ]
+
+resolveSiblingIds :: [Id] -> Map String Id
+resolveSiblingIds identifiers = Map.fromList
   [ (vsName spec, binder)
   | spec <- sitedVerbs
-  , binder : _ <- [filter (isSibling spec) (concatMap bindersOf bindings)]
+  , binder : _ <- [filter (isSibling spec) identifiers]
   ]
   where
     isSibling spec binder =

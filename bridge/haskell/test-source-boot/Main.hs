@@ -107,6 +107,8 @@ main = getArgs >>= \case
   ["--original-projection-products"] -> originalProjectionProducts
   ["--candidate-manifest-products", path] -> candidateManifestProducts path
   ["--candidate-ghc-load"] -> candidateGhcLoad
+  ["--candidate-sited-siblings"] -> candidateSitedSiblings
+  ["--candidate-sited-siblings", work] -> candidateSitedSiblingsAt work
   ["--generated-scaffold-imports"] -> generatedScaffoldImports
   ["--candidate-execution-sources"] -> candidateExecutionSourcesTest
   ["--candidate-execution-wire", path] -> candidateExecutionWire path
@@ -142,6 +144,7 @@ main = getArgs >>= \case
       fail "cold SOURCE graph lacks final source/package evidence"
     writeManifest work cold
     verifyHydration work cold
+    candidateSitedSiblings
     partial <- runPipelineSelected (PreparedProducts (Just (manifest work)))
       (work </> "CacheEven.hs") [work]
     requireRefused "SCC containing the fresh target" partial
@@ -1129,6 +1132,72 @@ candidateManifestProducts path = withScratch $ \work -> do
     unless (case refused of Left _ -> True; Right _ -> False) $
       fail "candidate reader accepted trailing or oversized bytes"
   putStrLn "candidate manifest products: actual Rust Core6037, group/digest/trailing/byte refusal bounds passed"
+
+candidateSitedSiblings :: IO ()
+candidateSitedSiblings = withScratch candidateSitedSiblingsAt
+
+candidateSitedSiblingsAt :: FilePath -> IO ()
+candidateSitedSiblingsAt work = do
+  let unfoldDir = work </> "Tidepool" </> "Actors"
+      replyDir = work </> "Tidepool" </> "Agent" </> "Reply"
+      owner = unfoldDir </> "Unfold.hs"
+      target = work </> "HydratedChildTarget.hs"
+      scopePath = work </> "exact-scope.cbor"
+      scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath }
+      owners = ["Tidepool.Agent.Reply.Internal", "Tidepool.Actors.Unfold"]
+  createDirectoryIfMissing True unfoldDir
+  createDirectoryIfMissing True replyDir
+  copyFile "test-source-boot/fixtures/HydratedChildOwner.hs" owner
+  copyFile "test-source-boot/fixtures/HydratedReplyOwner.hs" (replyDir </> "Internal.hs")
+  copyFile "test-source-boot/fixtures/HydratedChildTarget.hs" target
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing owner [work] Nothing
+  writeManifestFor owners work original
+  writeExactMetadataScope scopePath []
+  -- A fresh compiler admits the source/interface candidates without preparing
+  -- their bodies. This must not accidentally rely on a previous worker memo.
+  reused <- runPipelineSessionSelected (PreparedProducts (Just (manifest work)))
+    Set.empty GeneralCompile (Just scope) target [work] Nothing
+  unless (Set.fromList (map candidateModule (pprAcceptedCandidates reused)) == Set.fromList owners
+      && preparedNames reused == ["HydratedChildTarget"]) $
+    fail "typed sibling regression did not exercise the hydrated candidate path"
+  forM_ (pprAcceptedCandidates reused) $ \candidate -> do
+    bytes <- BS.readFile (candidateInterface candidate)
+    unless (candidateUnit candidate == "main"
+        && candidateInterface candidate == work </> (candidateModule candidate ++ ".candidate.hi")
+        && candidateInterfaceSha256 candidate == digest bytes) $
+      fail "typed sibling candidate changed its exact original interface custody"
+  case pprModules reused of
+    [prepared] | null (pmSiteRejections prepared), length (pmYieldSites prepared) == 1 -> pure ()
+    _ -> fail "hydrated child surface lost its exact typed sibling or site identity"
+  originals <- forM owners $ \name -> do
+    iface <- maybe (fail "typed sibling owner lacks its original interface") pure
+      (Map.lookup (mkModuleName name) (pprProductInterfaces original))
+    let interfacePath = work </> (name ++ ".original.hi")
+    writeBinIface (targetProfile (hsc_dflags (prHscEnv (pprPipelineResult original))))
+      QuietBinIFace NormalCompression interfacePath iface
+    bytes <- BS.readFile interfacePath
+    requirements <- either fail pure (selectedHomeRequirements (pprDependencies original) "main" name)
+    let artifact = ExactIfaceArtifact "main" name interfacePath (digest bytes) requirements
+        packagePath = interfacePath ++ ".packages"
+        packages = encodePackageImports artifact
+          (Map.findWithDefault emptyPackageImports (mkModuleName name) (pprPackageImports original))
+    BS.writeFile packagePath packages
+    pure (artifact, packagePath, digest packages)
+  writeExactMetadataScopeWithLexical scopePath originals
+    [(artifact, exactRequirements artifact) | (artifact, _, _) <- originals]
+  removeFile owner
+  removeFile (replyDir </> "Internal.hs")
+  captured <- runPipelineSessionSelected (PreparedProducts Nothing)
+    Set.empty GeneralCompile (Just scope) target [work] Nothing
+  unless (null (pprAcceptedCandidates captured)
+      && preparedNames captured == ["HydratedChildTarget"]
+      && all ((`notElem` owners) . dependencyModuleName) (dependencyModules (pprDependencies captured))) $
+    fail "typed sibling regression did not exclude captured originals from downsweep"
+  case pprModules captured of
+    [prepared] | null (pmSiteRejections prepared), length (pmYieldSites prepared) == 1 -> pure ()
+    _ -> fail "source-free exact child surface lost its typed sibling or site identity"
+  putStrLn "candidate typed siblings: certified candidates and source-free exact owners retain childSited and typed sites without dependency recompilation"
 
 candidateGhcLoad :: IO ()
 candidateGhcLoad = withTiming $ withScratch $ \work -> do
