@@ -3073,7 +3073,7 @@ mod tests {
                         imports: vec![selected.clone()],
                     },
                     ExactLexicalNode {
-                        owner: selected,
+                        owner: selected.clone(),
                         imports: Vec::new(),
                     },
                 ],
