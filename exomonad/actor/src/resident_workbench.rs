@@ -14763,14 +14763,20 @@ mod request_tests {
         session
             .initialize_durable_public_scope(owner.clone(), context.placement.lexical_scope)
             .unwrap();
-        let before = session
-            .public_visibility_snapshot_in(context.placement.lexical_scope)
-            .unwrap();
-        let manifest_before = std::fs::read(&manifest).unwrap();
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
         let workbench =
             ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+        let before = workbench
+            .access
+            .with_machine(context.clone(), |session, context, _| {
+                Ok(session
+                    .public_visibility_snapshot_in(context.placement.lexical_scope)
+                    .expect("registered child public surface"))
+            })
+            .await
+            .expect("public baseline after machine registry admission");
+        let manifest_before = std::fs::read(&manifest).unwrap();
         let tools = workbench
             .prepare_tools(context.clone(), 1, vec![])
             .await
