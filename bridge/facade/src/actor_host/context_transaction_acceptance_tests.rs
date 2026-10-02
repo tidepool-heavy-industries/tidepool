@@ -142,8 +142,8 @@ fn settings() -> (tempfile::TempDir, crate::exomonad::EmbeddedLaunchConfig) {
     std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
     let session_secret_file = files.path().join("secret");
     std::fs::write(&session_secret_file, SECRET).unwrap();
-    let codex_auth_file = files.path().join("unused-auth.json");
-    std::fs::write(&codex_auth_file, "{}").unwrap();
+    let credential_file = files.path().join("unused-auth.json");
+    std::fs::write(&credential_file, "{}").unwrap();
     (
         files,
         crate::exomonad::EmbeddedLaunchConfig {
@@ -153,7 +153,8 @@ fn settings() -> (tempfile::TempDir, crate::exomonad::EmbeddedLaunchConfig) {
             asset_root: assets,
             browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
             session_secret_file: Some(session_secret_file),
-            codex_auth_file,
+            provider: crate::exomonad::EmbeddedModelProvider::Codex,
+            credential_file,
             context_capacity_tokens: 200_000,
             concurrent_jobs: 3,
         },
@@ -237,12 +238,17 @@ async fn start_with_spec(
 }
 
 fn has_user_text(request: &ResponsesRequest, expected: &str) -> bool {
+    // Edited text is projected with an attribution line before its authored body.
+    let has_line = |text: &Value| {
+        text.as_str()
+            .is_some_and(|text| text.lines().any(|line| line == expected))
+    };
     request.input.iter().any(|item| {
         item.0["role"] == "user"
-            && (item.0["content"] == expected
+            && (has_line(&item.0["content"])
                 || item.0["content"]
                     .as_array()
-                    .is_some_and(|parts| parts.iter().any(|part| part["text"] == expected)))
+                    .is_some_and(|parts| parts.iter().any(|part| has_line(&part["text"]))))
     })
 }
 
@@ -336,6 +342,11 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
     let actor = fixture.campaign.actor.identity();
     let first = next_round(&mut rounds).await;
     assert!(first.is_root());
+    assert!(
+        has_user_text(&first.request, "parent-original"),
+        "initial input: {:?}",
+        first.request.input
+    );
     assert!(first
         .request
         .tools
@@ -357,11 +368,16 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
     );
     assert_eq!(successor.request.session_id, session);
     assert_eq!(successor.request.model, "gpt-6.1-sol");
-    assert!(has_user_text(
-        &successor.request,
-        "compiled-handler-curated"
-    ));
-    assert!(!has_user_text(&successor.request, "parent-original"));
+    assert!(
+        has_user_text(&successor.request, "compiled-handler-curated"),
+        "committed input: {:?}",
+        successor.request.input
+    );
+    assert!(
+        !has_user_text(&successor.request, "parent-original"),
+        "committed input: {:?}",
+        successor.request.input
+    );
     let after = root_context_state(&fixture);
     assert_eq!(after.generation, 1);
     assert_eq!(after.model.as_deref(), Some("gpt-6.1-sol"));
