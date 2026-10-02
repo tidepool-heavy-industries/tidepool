@@ -10,6 +10,9 @@ work, awaits terminal completion and presents output once. `background: true`
 starts actor-owned work with a completion notice. Explicit `yield_time_ms` selects
 bounded presentation and detaches a still-live job before returning; it installs
 no automatic completion notice. Command options are validated before execution.
+The direct background path also captures starting source for the notice, using
+a separate admitted probe. `Cmd.background` does not request that probe unless
+its command is wrapped in `Cmd.withSource`.
 
 `Cmd.observe` and its completion-notifying variants never detach. When authoring
 a bounded tool, explicitly transfer unfinished work before returning it.
