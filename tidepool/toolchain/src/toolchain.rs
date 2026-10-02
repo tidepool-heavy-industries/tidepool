@@ -180,7 +180,7 @@ impl DevelopmentExtractPair {
                 )]
                 let output = Command::new("cabal")
                     .args(["list-bin", "tidepool-extract-bin"])
-                    .current_dir(repo_root.join("haskell"))
+                    .current_dir(repo_root.join("bridge/haskell"))
                     .output()
                     .map_err(DevelopmentExtractError::LocateWorker)?;
                 if !output.status.success() {
