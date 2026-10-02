@@ -40,7 +40,6 @@ import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult(..)
   , PipelineResult(prHscEnv), runPipelineSelected )
 import Tidepool.PreparedRecovery (RecoveredClosure(closureModules), recoverPreparedClosure)
-import Tidepool.PreparedFacts (extractPreparedFacts)
 import Tidepool.PreparedStg
   ( PreparedModule(..), RecoveredModuleFailure(..), newPreparedBodyCache, prepareModule
   , prepareRecoveredBodies, unelaboratedModule )
@@ -597,8 +596,6 @@ assertBottomingApplications root = do
     -- so projection is tested at the unsaturated call boundary.
     preservePartialCall prepared = prepared
       { pmBindings = bindings
-      , pmFacts = extractPreparedFacts (pmModule prepared) (pmTagSigs prepared)
-          (map fst bindings)
       }
       where
         bindings = map restore (pmBindings prepared)

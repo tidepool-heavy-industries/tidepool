@@ -85,7 +85,7 @@ import GHC.Driver.Env (hsc_home_unit)
 import GHC.Unit.Home (isHomeUnit)
 import GHC.Core.DataCon (dataConWorkId, dataConTyCon)
 import GHC.Core.TyCon (tyConDataCons)
-import Tidepool.PreparedFacts (PreparedFacts(..))
+import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import GHC.Types.Name (nameModule_maybe)
 import GHC.Types.Var (varName)
 import Tidepool.CompileInput (writeCompileInputProof)
@@ -1121,7 +1121,8 @@ originalPackageProjection = withScratch $ \work -> do
         , references <- Map.elems (preparedModuleReferenceFacts context prepared)
         , reference <- references]
         ++ [dataConWorkId member | prepared <- modules
-           , (constructor, _) <- preparedConstructors (pmFacts prepared)
+           , (constructor, _) <- preparedConstructors
+               (extractPreparedFacts (pmModule prepared) (map fst (pmBindings prepared)))
            , member <- tyConDataCons (dataConTyCon constructor)]
       packages = [preparedRootIdentity binder | binder <- imported
         , Just owner <- [nameModule_maybe (varName binder)]
@@ -1224,7 +1225,8 @@ originalPackageCohort coreRoot output = do
         , references <- Map.elems (preparedModuleReferenceFacts context prepared)
         , reference <- references]
         ++ [dataConWorkId member | prepared <- modules
-           , (constructor, _) <- preparedConstructors (pmFacts prepared)
+           , (constructor, _) <- preparedConstructors
+               (extractPreparedFacts (pmModule prepared) (map fst (pmBindings prepared)))
            , member <- tyConDataCons (dataConTyCon constructor)]
       packages = Set.fromList [preparedRootIdentity binder | binder <- imported
         , Just owner <- [nameModule_maybe (varName binder)]

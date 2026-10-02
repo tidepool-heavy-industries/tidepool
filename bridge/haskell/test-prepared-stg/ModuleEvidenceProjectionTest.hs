@@ -16,13 +16,12 @@ import GHC.Types.SrcLoc (noSrcSpan)
 import GHC.Types.Unique (mkUnique)
 import GHC.Types.Var.Set (emptyVarSet)
 import GHC.Unit.Module (mkModule, mkModuleName)
-import GHC.Unit.Module.Location (pattern ModLocation)
 import GHC.Unit.Types (stringToUnit)
 import Tidepool.EffectSchema qualified as Effect
 import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
 import Tidepool.PreparedSites (PreparedSite(..), SiteRejection(..))
-import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..), PreparedPassProfile(..))
+import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
 import Tidepool.TypePolicy qualified as TypePolicy
 
 -- Pure projection checks use compiler-owned Ids and graphs, without compiling
@@ -104,8 +103,6 @@ verifyModuleEvidenceProjection = do
   prepared = PreparedModule
     { pmModule = owner
     , pmCoverage = CompleteSourceModule
-    , pmLocation = ModLocation Nothing "" "" "" "" ""
-    , pmPassProfile = PreparedPassProfile False False [] False
     , pmBindings = [(StgTopStringLit binder_ "fixture", emptyVarSet)
                    | binder_ <- [alpha, beta, gamma]]
     , pmTagSigs = emptyNameEnv
@@ -120,7 +117,6 @@ verifyModuleEvidenceProjection = do
         , TypePolicy.UnconstructibleG "third" "C" ]
     , pmSiteRejections = []
     , pmEffectRequestTypeIds = Set.empty
-    , pmFacts = mempty
     }
   context = ProjectionContext
     { projectionProfile = "ghc-9.12-prepared-stg"

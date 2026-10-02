@@ -20,7 +20,6 @@ import Data.Text qualified as Text
 import GHC.Builtin.PrimOps (primOpOcc)
 import GHC.Data.FastString (unpackFS)
 import GHC.Stg.Syntax
-import GHC.Stg.Pipeline (StgCgInfos)
 import GHC.Types.Literal (Literal(..))
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Unique (Unique)
@@ -73,8 +72,8 @@ inventoryRecoveredTarget _context target closure =
       (closureFailures closure) failure
     Right selected ->
       let facts =
-            [ (modul, extractPreparedFacts modul tags bindings)
-            | (modul, tags, bindings) <- selected
+            [ (modul, extractPreparedFacts modul bindings)
+            | (modul, bindings) <- selected
             ]
           operations = concatMap (uncurry operationOccurrences) facts
           labels = concatMap (uncurry labelOccurrences) facts
@@ -162,15 +161,15 @@ renderSymbol identity = intercalate ":" $ case symbolRecordParent identity of
 
 reachableBindings
   :: SymbolIdentity -> [PreparedModule]
-  -> Either String [(Module, StgCgInfos, [CgStgTopBinding])]
+  -> Either String [(Module, [CgStgTopBinding])]
 reachableBindings target modules = do
   identities <- either (Left . show) Right (preparedTopIdentities modules)
   let allBindings =
-        [ (pmModule prepared, pmTagSigs prepared, binding)
+        [ (pmModule prepared, binding)
         | prepared <- modules
         , (binding, _) <- pmBindings prepared
         ]
-      binders = concatMap (topBinders . third) allBindings
+      binders = concatMap (topBinders . snd) allBindings
   if length binders /= length identities
     then Left "prepared identity/binder cardinality mismatch"
     else do
@@ -178,13 +177,13 @@ reachableBindings target modules = do
           topLevel = mkUniqSet (map varUnique binders)
           dependencies = Map.fromListWith Set.union
             [ (identity, referencedTopIdentities identityByUnique modul topLevel single)
-            | (modul, _, binding) <- allBindings
+            | (modul, binding) <- allBindings
             , (binder, single) <- individualTops binding
             , Just identity <- [lookupUFM identityByUnique (varUnique binder)]
             ]
           reachable = close dependencies Set.empty [target]
           selected =
-            [ (pmModule prepared, pmTagSigs prepared,
+            [ (pmModule prepared,
                 [ binding
                 | (binding, _) <- pmBindings prepared
                 , any (binderIsReachable identityByUnique reachable) (topBinders binding)
@@ -192,10 +191,8 @@ reachableBindings target modules = do
             | prepared <- modules
             ]
       if target `Set.member` Set.fromList identities
-        then Right [row | row@(_, _, bindings') <- selected, not (null bindings')]
+        then Right [row | row@(_, bindings') <- selected, not (null bindings')]
         else Left "target identity is absent from recovered closure"
- where
-  third (_, _, value) = value
 
 referencedTopIdentities
   :: UniqFM Unique SymbolIdentity -> Module -> UniqSet Unique -> CgStgTopBinding

@@ -7,7 +7,6 @@ module Tidepool.PreparedStg
   ( PreparedModule(..)
   , PreparedCoverage(..)
   , PreparedElaboration(..)
-  , PreparedPassProfile(..)
   , unelaboratedModule
   , prepareModule
   , RecoveredModuleInput(..)
@@ -42,7 +41,7 @@ import GHC.Driver.Env (HscEnv(..))
 import GHC.Driver.Session
   (GeneralFlag(..), gopt_set, gopt_unset)
 import GHC.IfaceToCore (typecheckIface)
-import GHC.Stg.Pipeline (StgCgInfos, StgPipelineOpts(..), StgToDo(..), stg2stg)
+import GHC.Stg.Pipeline (StgCgInfos, stg2stg)
 import GHC.Stg.Syntax (CgStgTopBinding)
 import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Types.Var.Set (IdSet, elemVarSet, mkVarSet, unionVarSets)
@@ -64,7 +63,6 @@ import Tidepool.TypePolicy (TypeGraph(..))
 import Tidepool.FatIface
   ( ExactInterfaceFailure(..), readExactInterface
   , OwnerInterfaceContext(..), OwnerInterfaceCache, lookupOwnerInterface, cacheOwnerInterface )
-import Tidepool.PreparedFacts (PreparedFacts, extractPreparedFacts)
 
 -- | Typed, pre-CorePrep input to the prepared pipeline.
 --
@@ -101,30 +99,16 @@ unelaboratedModule guts = PreparedElaboration
   , peEffectRequestTypeIds = mempty
   }
 
--- | An executable record of the selected GHC 9.12 preparation policy.
--- The concrete phase list comes from GHC's native pipeline initializer after
--- Tidepool pins linting, CSE, lambda lifting, and bytecode preparation.
-data PreparedPassProfile = PreparedPassProfile
-  { pppCoreLint :: Bool
-  , pppStgLint :: Bool
-  , pppStgPhases :: [StgToDo]
-  , pppForBytecode :: Bool
-  }
-
--- | Prepared output for one defining module.  Module identity and location
--- remain attached while GHC performs dependency sorting, capture annotation,
--- tag inference, and rewriting.
 -- | A missing top in a complete source module is a producer defect. A package
 -- body subset can still reference unavailable package bodies; those remain
 -- explicit globals with recovery diagnostics, not fabricated home definitions.
 data PreparedCoverage = CompleteSourceModule | ExactBodySubset
   deriving (Eq, Show)
 
+-- | Prepared output and projection evidence for one defining module.
 data PreparedModule = PreparedModule
   { pmModule :: Module
   , pmCoverage :: PreparedCoverage
-  , pmLocation :: ModLocation
-  , pmPassProfile :: PreparedPassProfile
   , pmBindings :: [(CgStgTopBinding, IdSet)]
   , pmTagSigs :: StgCgInfos
   -- | Defining-module sibling Ids only, replayed after memo validity checks.
@@ -136,7 +120,6 @@ data PreparedModule = PreparedModule
   -- reaches their top binder. Empty for recovered package bodies.
   , pmSiteRejections :: [SiteRejection]
   , pmEffectRequestTypeIds :: Set Word64
-  , pmFacts :: PreparedFacts
   }
 
 -- | Run the same CorePrep/Core-to-STG/STG pipeline shape as GHC's native
@@ -345,12 +328,6 @@ prepareBindingsWithScope subsetScope hscEnv thisModule location tycons optimized
       interactiveVars = subsetScope ++ interactiveInScope (hsc_IC hscEnv)
       coreLint = lintCoreBindings preparedFlags CorePrep [] optimizedCore
       stgOptions = initStgPipelineOpts preparedFlags False
-      profile = PreparedPassProfile
-        { pppCoreLint = True
-        , pppStgLint = True
-        , pppStgPhases = stgPipeline_phases stgOptions
-        , pppForBytecode = stgPipeline_forBytecode stgOptions
-        }
 
   displayLintResults logger False (text "Tidepool prepared-STG pre-CorePrep")
     (text "optimized Core") coreLint
@@ -366,8 +343,6 @@ prepareBindingsWithScope subsetScope hscEnv thisModule location tycons optimized
   pure PreparedModule
     { pmModule = thisModule
     , pmCoverage = CompleteSourceModule
-    , pmLocation = location
-    , pmPassProfile = profile
     , pmBindings = preparedBindings
     , pmTagSigs = tagSigs
     , pmSitedSiblings = siblings
@@ -376,5 +351,4 @@ prepareBindingsWithScope subsetScope hscEnv thisModule location tycons optimized
     , pmTypeGraph = TypeGraph []
     , pmSiteRejections = []
     , pmEffectRequestTypeIds = mempty
-    , pmFacts = extractPreparedFacts thisModule tagSigs (map fst preparedBindings)
     }

@@ -33,7 +33,7 @@ import GHC.Stg.Syntax
 import System.Directory (getCurrentDirectory)
 import System.FilePath ((</>))
 import Tidepool.PreparedStg (PreparedModule(..))
-import Tidepool.PreparedFacts (PreparedFacts(..))
+import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
@@ -307,7 +307,8 @@ verifyNullaryWorkerProjection = do
   let nonNullaryConstructors =
         [ occNameString (nameOccName (dataConName constructor))
         | module_ <- pprModules prepared
-        , (constructor, _) <- preparedConstructors (pmFacts module_)
+        , (constructor, _) <- preparedConstructors
+            (extractPreparedFacts (pmModule module_) (map fst (pmBindings module_)))
         , dataConRepArity constructor > 0
         ]
       implicit =
@@ -350,7 +351,8 @@ assertNullaryWorkerReferences prepared = do
   let occurrences =
         [ occNameString (nameOccName (varName binder))
         | module_ <- pprModules prepared
-        , binder <- preparedReferencedIds (pmFacts module_)
+        , binder <- preparedReferencedIds
+            (extractPreparedFacts (pmModule module_) (map fst (pmBindings module_)))
         , Just _ <- [isDataConWorkId_maybe binder]
         ]
   unless (all (`elem` occurrences) ["[]", "True", "Nothing"])

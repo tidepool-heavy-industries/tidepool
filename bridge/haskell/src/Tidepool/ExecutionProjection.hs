@@ -514,7 +514,7 @@ preparedModuleReferenceFacts context prepared = Map.fromList
   , let entryReferences =
           [ ReferenceFact binder (idSymbol "value" binder)
           | binder <- preparedReferencedIds (extractPreparedFacts
-              (pmModule prepared) (pmTagSigs prepared) (recoveryReferences context binding))
+              (pmModule prepared) (recoveryReferences context binding))
           , isExternalName (varName binder)
           , isNothing (nullaryWorkerConstructor binder) ]
   ]
