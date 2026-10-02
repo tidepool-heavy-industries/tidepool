@@ -936,7 +936,7 @@ runTurnMode compiler caches args path = do
   timing <- readTimingEnabled
   hPutStrLn stderr $ "Processing (turn): " ++ path
   lastAttempt <- newIORef Nothing
-  res <- timePhase timing "total" $ try $ do
+  res <- timePhase timing "total" $ trySynchronous $ do
     turnSrc   <- readFile path
     let templates = requestTurnTemplates args
     mVerdict  <- traverse parseTurnVerdictArg (requestTurnVerdict args)
@@ -1296,7 +1296,7 @@ runLegacyCellMode :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> 
 runLegacyCellMode compiler caches args cellPath = do
   timing <- readTimingEnabled
   provisionalOutput <- newIORef Nothing
-  res <- try $ do
+  res <- trySynchronous $ do
     cellSource <- readFile cellPath
     templatePath <- requireArg "--cell-template" (requestCellTemplate args)
     template <- readFile templatePath
