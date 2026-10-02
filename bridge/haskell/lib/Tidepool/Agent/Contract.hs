@@ -122,7 +122,7 @@ import Tidepool.Aeson.Value (Value (..), ToJSON (..), encodeValue, object, (.=))
 import Tidepool.Aeson.FromJSON (FromJSON (..), Result (..), fromJSON, withObject, (.:), (.:?), (.!=))
 import Tidepool.Aeson.Schema (JsonSchema (..))
 import Control.Monad.Freer (Eff, Member, raise, send)
-import Tidepool.Effects.Core (AgentTools (..), ContextReadWrite)
+import Tidepool.Effects.Core (AgentTools (..))
 import Tidepool.Agent.ToolEffects
 
 -- ---------------------------------------------------------------------------
@@ -416,29 +416,38 @@ data ToolEntry m result = ToolEntry
 -- schema and the description/handler from the 'Tool' value found at that
 -- leaf, and produce ONE entry carrying everything both the declaration and
 -- the dispatcher need.
-class LiftTool source target where
-  liftTool :: source value -> target value
+-- Installation certifies the source row independently of the dispatcher row.
+-- A concrete sync-row Tool cannot masquerade as an ordinary async endpoint.
+data InRow
+data Installed (base :: [Type -> Type])
 
-instance LiftTool m m where liftTool = id
-instance LiftTool (Eff effects) (Eff (ContextReadWrite ': effects)) where liftTool = raise
+type family ToolSource policy (target :: Type -> Type) :: Type -> Type where
+  ToolSource InRow target = target
+  ToolSource (Installed base) target = Eff base
 
-class GCompileTools (f :: Type -> Type) m result where
-  gCompileEntries :: f a -> [ToolEntry m result]
+class LiftTool policy source target where
+  liftTool :: Proxy policy -> source value -> target value
 
-instance (Datatype d, GCompileTools f m result) => GCompileTools (M1 D d f) m result where
-  gCompileEntries (M1 x) = map setRecordName (gCompileEntries x)
+instance LiftTool InRow m m where liftTool _ = id
+instance LiftTool (Installed base) (Eff base) (Eff (SyncEffects base)) where liftTool _ = raise
+
+class GCompileTools policy (f :: Type -> Type) m result where
+  gCompileEntries :: Proxy policy -> f a -> [ToolEntry m result]
+
+instance (Datatype d, GCompileTools policy f m result) => GCompileTools policy (M1 D d f) m result where
+  gCompileEntries policy (M1 x) = map setRecordName (gCompileEntries policy x)
     where
       setRecordName e = e {entryRecordName = recName}
       recName = T.pack (datatypeName (M1 Proxy :: M1 D d Proxy ()))
 
-instance GCompileTools f m result => GCompileTools (M1 C c f) m result where
-  gCompileEntries (M1 x) = gCompileEntries x
+instance GCompileTools policy f m result => GCompileTools policy (M1 C c f) m result where
+  gCompileEntries policy (M1 x) = gCompileEntries policy x
 
-instance (GCompileTools a m result, GCompileTools b m result) => GCompileTools (a :*: b) m result where
-  gCompileEntries (a :*: b) = gCompileEntries a ++ gCompileEntries b
+instance (GCompileTools policy a m result, GCompileTools policy b m result) => GCompileTools policy (a :*: b) m result where
+  gCompileEntries policy (a :*: b) = gCompileEntries policy a ++ gCompileEntries policy b
 
-instance GCompileTools U1 m result where
-  gCompileEntries U1 = []
+instance GCompileTools policy U1 m result where
+  gCompileEntries _ U1 = []
 
 -- | An agent tools record itself must be a single-constructor product of
 -- endpoints — the same restriction the endpoint schema places on tool
@@ -448,17 +457,17 @@ instance
     ( 'Text "an agent tools record must be a single-constructor record of endpoints; "
         ':<>: 'Text "this type has multiple constructors."
     ) =>
-  GCompileTools (a :+: b) m result
+  GCompileTools policy (a :+: b) m result
   where
-  gCompileEntries _ = error "unreachable: multi-constructor tools record is a compile-time TypeError"
+  gCompileEntries _ _ = error "unreachable: multi-constructor tools record is a compile-time TypeError"
 
 -- | Every record leaf is exactly @Tool m input output@; unit-output tools use
 -- the same instance as request/response tools.
 instance
-  (Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output, Functor source, LiftTool source m) =>
-  GCompileTools (M1 S s (K1 R (Tool source input output))) m StructuralValue
+  (Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output, Functor source, LiftTool policy source m) =>
+  GCompileTools policy (M1 S s (K1 R (Tool source input output))) m StructuralValue
   where
-  gCompileEntries (M1 (K1 (Tool kind desc h))) =
+  gCompileEntries policy (M1 (K1 (Tool kind desc h))) =
     [ ToolEntry
         { entryRecordName = T.empty
         , entrySelector = fieldName
@@ -469,7 +478,7 @@ instance
         , entryKind = kind
         , entrySchedule = Asynchronous
         , entryBody = HandlerBody $ \sv -> case fromJSON sv of
-            Success input' -> Right (liftTool (toJSON <$> h input'))
+            Success input' -> Right (liftTool policy (toJSON <$> h input'))
             Error msg -> Left (InvalidToolInput (toSnakeCase fieldName) (T.pack msg))
         }
     ]
@@ -477,10 +486,10 @@ instance
       fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
 
 instance
-  (Selector s, Display output, Functor source, LiftTool source m) =>
-  GCompileTools (M1 S s (K1 R (RawTool source output))) m StructuralValue
+  (Selector s, Display output, Functor source, LiftTool policy source m) =>
+  GCompileTools policy (M1 S s (K1 R (RawTool source output))) m StructuralValue
   where
-  gCompileEntries (M1 (K1 (RawTool desc h))) =
+  gCompileEntries policy (M1 (K1 (RawTool desc h))) =
     [ ToolEntry
         { entryRecordName = T.empty
         , entrySelector = fieldName
@@ -491,7 +500,7 @@ instance
         , entryKind = RawKind
         , entrySchedule = Asynchronous
         , entryBody = HandlerBody $ \value -> case fromJSON value of
-            Success input -> Right (liftTool (toJSON . renderToolOutput <$> h input))
+            Success input -> Right (liftTool policy (toJSON . renderToolOutput <$> h input))
             Error message -> Left (InvalidToolInput (toSnakeCase fieldName) (T.pack message))
         }
     ]
@@ -500,9 +509,9 @@ instance
 
 instance
   (Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output) =>
-  GCompileTools (M1 S s (K1 R (SyncTool base input output))) (Eff (SyncEffects base)) StructuralValue
+  GCompileTools (Installed base) (M1 S s (K1 R (SyncTool base input output))) (Eff (SyncEffects base)) StructuralValue
   where
-  gCompileEntries (M1 (K1 (SyncTool kind desc run))) =
+  gCompileEntries _ (M1 (K1 (SyncTool kind desc run))) =
     [ (actorEntry fieldName kind desc (jsonSchema (Proxy @output)) (fmap toJSON . run))
         { entrySchedule = BeforeNextInference }
     ]
@@ -510,18 +519,18 @@ instance
 
 instance
   (Selector s, Display output) =>
-  GCompileTools (M1 S s (K1 R (SyncRawTool base output))) (Eff (SyncEffects base)) StructuralValue
+  GCompileTools (Installed base) (M1 S s (K1 R (SyncRawTool base output))) (Eff (SyncEffects base)) StructuralValue
   where
-  gCompileEntries (M1 (K1 (SyncRawTool desc run))) =
+  gCompileEntries _ (M1 (K1 (SyncRawTool desc run))) =
     [ (actorEntry fieldName RawKind desc (jsonSchema (Proxy @Text)) (fmap (toJSON . renderToolOutput) . run))
         { entrySchedule = BeforeNextInference }
     ]
     where fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
 
-instance Selector s =>
-  GCompileTools (M1 S s (K1 R (HaskellTool schedule effects base))) m result
+instance (Selector s, ToolSource policy m ~ Eff base) =>
+  GCompileTools policy (M1 S s (K1 R (HaskellTool schedule effects base))) m result
   where
-  gCompileEntries (M1 (K1 (HaskellTool desc schedule keys))) =
+  gCompileEntries _ (M1 (K1 (HaskellTool desc schedule keys))) =
     [ ToolEntry
         { entryRecordName = T.empty
         , entrySelector = fieldName
@@ -542,11 +551,11 @@ mapToolBody _ (HaskellBody keys) = HaskellBody keys
 
 instance
   (Selector s, Display output, Functor m) =>
-  GCompileTools (M1 S s (K1 R (RawTool m output))) m (ActorToolStep state exit)
+  GCompileTools InRow (M1 S s (K1 R (RawTool m output))) m (ActorToolStep state exit)
   where
-  gCompileEntries leaf =
+  gCompileEntries policy leaf =
     [ entry { entryBody = mapToolBody ActorToolStay (entryBody entry) }
-    | entry <- (gCompileEntries leaf :: [ToolEntry m StructuralValue])
+    | entry <- (gCompileEntries policy leaf :: [ToolEntry m StructuralValue])
     ]
 
 data ActorToolStep state exit
@@ -556,12 +565,12 @@ data ActorToolStep state exit
 
 instance
   (Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output, Functor m) =>
-  GCompileTools
+  GCompileTools InRow
     (M1 S s (K1 R (Tool m input output)))
     m
     (ActorToolStep state exit)
   where
-  gCompileEntries (M1 (K1 (Tool kind desc h))) =
+  gCompileEntries _ (M1 (K1 (Tool kind desc h))) =
     [ actorEntry fieldName kind desc (jsonSchema (Proxy :: Proxy output)) $ \input ->
         ActorToolStay . toJSON <$> h input
     ]
@@ -570,12 +579,12 @@ instance
 
 instance
   (Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output, Functor m) =>
-  GCompileTools
+  GCompileTools InRow
     (M1 S s (K1 R (UpdateTool m state input output)))
     m
     (ActorToolStep state exit)
   where
-  gCompileEntries (M1 (K1 (UpdateTool desc h))) =
+  gCompileEntries _ (M1 (K1 (UpdateTool desc h))) =
     [ actorEntry fieldName UpdateKind desc (jsonSchema (Proxy :: Proxy output)) $ \input ->
         (\(output, state) -> ActorToolUpdate (toJSON output) state) <$> h input
     ]
@@ -584,12 +593,12 @@ instance
 
 instance
   (Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output, Functor m) =>
-  GCompileTools
+  GCompileTools InRow
     (M1 S s (K1 R (FinishTool m exit input output)))
     m
     (ActorToolStep state exit)
   where
-  gCompileEntries (M1 (K1 (FinishTool desc h))) =
+  gCompileEntries _ (M1 (K1 (FinishTool desc h))) =
     [ actorEntry fieldName FinishKind desc (jsonSchema (Proxy :: Proxy output)) $ \input ->
         (\(output, exit) -> ActorToolFinish (toJSON output) exit) <$> h input
     ]
@@ -622,11 +631,11 @@ instance
 instance
   {-# OVERLAPPABLE #-}
   ( Generic (inner (AsServerT source))
-  , GCompileTools (Rep (inner (AsServerT source))) m result
+  , GCompileTools policy (Rep (inner (AsServerT source))) m result
   ) =>
-  GCompileTools (M1 S s (K1 R (inner (AsServerT source)))) m result
+  GCompileTools policy (M1 S s (K1 R (inner (AsServerT source)))) m result
   where
-  gCompileEntries (M1 (K1 nested)) = gCompileEntries (from nested)
+  gCompileEntries policy (M1 (K1 nested)) = gCompileEntries policy (from nested)
 
 actorEntry
   :: forall input m result
@@ -663,14 +672,14 @@ actorEntry fieldName kind desc outputSchema run =
 type HasAgentApi tools m =
   ( Applicative m
   , Generic (tools (AsServerT m))
-  , GCompileTools (Rep (tools (AsServerT m))) m StructuralValue
+  , GCompileTools InRow (Rep (tools (AsServerT m))) m StructuralValue
   )
 
 -- The authored record stays in the base row; only its installed dispatcher
 -- runs in the superset so async handlers can be raised and sync handlers reused.
 type HasInstalledAgentApi tools effects =
   ( Generic (tools (AsServerT (Eff effects)))
-  , GCompileTools (Rep (tools (AsServerT (Eff effects)))) (Eff (SyncEffects effects)) StructuralValue
+  , GCompileTools (Installed effects) (Rep (tools (AsServerT (Eff effects)))) (Eff (SyncEffects effects)) StructuralValue
   )
 
 compileInstalledTools
@@ -678,12 +687,12 @@ compileInstalledTools
   => tools (AsServerT (Eff effects))
   -> Either ToolCompileError (CompiledTools (Eff (SyncEffects effects)))
 compileInstalledTools value = toCompiledTools <$> compileEntrySet
-  (gCompileEntries (from value) :: [ToolEntry (Eff (SyncEffects effects)) StructuralValue])
+  (gCompileEntries (Proxy @(Installed effects)) (from value) :: [ToolEntry (Eff (SyncEffects effects)) StructuralValue])
 
 type HasActorApi tools m state exit =
   ( Applicative m
   , Generic (tools (AsActorT m state exit))
-  , GCompileTools
+  , GCompileTools InRow
       (Rep (tools (AsActorT m state exit)))
       m
       (ActorToolStep state exit)
@@ -699,7 +708,7 @@ compileTools ::
 compileTools v =
   toCompiledTools
     <$> compileEntrySet
-      (gCompileEntries (from v) :: [ToolEntry m StructuralValue])
+      (gCompileEntries (Proxy @InRow) (from v) :: [ToolEntry m StructuralValue])
 
 data CompiledEntrySet m result = CompiledEntrySet
   { entryDeclarations :: [ToolDeclaration]
@@ -1060,7 +1069,7 @@ compileActorTools ::
   Either ToolCompileError (CompiledEntrySet m (ActorToolStep state exit))
 compileActorTools v =
   compileEntrySet
-    (gCompileEntries (from v) :: [ToolEntry m (ActorToolStep state exit)])
+    (gCompileEntries (Proxy @InRow) (from v) :: [ToolEntry m (ActorToolStep state exit)])
 
 checkNames :: [ToolEntry m result] -> Either ToolCompileError ()
 checkNames named = do
