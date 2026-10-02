@@ -1696,6 +1696,14 @@ impl ForkGroupRegistry {
         self.abort_pending(owner, true, None, ForkGroupBoundary::Any)
     }
 
+    pub(crate) fn abort_unpublished_at_boundary(
+        &self,
+        owner: ActorRef,
+        boundary: &WorkbenchForkBoundary,
+    ) -> Vec<ActorRef> {
+        self.abort_pending(owner, true, None, ForkGroupBoundary::At(boundary))
+    }
+
     pub(crate) fn abort_incomplete_at_boundary(
         &self,
         owner: ActorRef,

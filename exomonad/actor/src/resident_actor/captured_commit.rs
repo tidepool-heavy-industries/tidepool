@@ -92,6 +92,12 @@ where
             return Err("captured fork group belongs to another execution boundary".into());
         }
         owns_group = true;
+        if control
+            .as_ref()
+            .is_some_and(|control| control.has_context_binding())
+        {
+            return Err("captured fork commit requires settled context; use unfoldDeferred".into());
+        }
         group_descriptors(environment, context.actor, group)?;
         environment
             .fork_groups

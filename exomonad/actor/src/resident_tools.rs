@@ -164,6 +164,10 @@ impl WorkbenchExecutionControl {
         }
     }
 
+    pub(crate) fn has_context_binding(&self) -> bool {
+        self.context_binding.get().is_some()
+    }
+
     pub(crate) fn context_cancellation_requested(&self) -> bool {
         self.context_cancel_requested
             .load(std::sync::atomic::Ordering::Acquire)
@@ -655,6 +659,13 @@ pub trait ResidentToolEndpoint: Send + Sync {
     fn reattach_boxed(&self) -> ResidentToolFuture {
         Box::pin(async { Ok(serde_json::Value::Null) })
     }
+    /// Discard an exact call's deferred publication after failed Store settlement.
+    fn abort_boxed(
+        &self,
+        _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> ResidentToolFuture {
+        Box::pin(async { Err(ResidentToolError::CancellationUnsupported) })
+    }
     /// Acknowledge the real, durable result of an enclosing model-visible call.
     fn complete_boxed(
         &self,
@@ -679,6 +690,10 @@ impl From<ToolInvocationContext> for WorkbenchCallKey {
 }
 
 impl WorkbenchCallKey {
+    pub(crate) fn invocation(&self) -> &ToolInvocationContext {
+        &self.0
+    }
+
     pub(crate) fn is_original_invocation(&self) -> bool {
         self.0.namespace.is_none()
             && self
@@ -912,6 +927,26 @@ impl ResidentToolClient {
                 "actor stopped during exact workbench reconciliation".into(),
             )
         })
+    }
+
+    pub(crate) async fn abort(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> Result<serde_json::Value, ResidentToolError> {
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .address()
+            .send_message(crate::KernelMessage::ToolAborted {
+                boundary,
+                reply: reply.into(),
+            })
+            .map_err(|_| ResidentToolError::Unavailable("the owning actor has stopped".into()))?;
+        receive
+            .await
+            .map_err(|_| {
+                ResidentToolError::Unavailable("actor stopped before output abort".into())
+            })?
+            .map_err(ResidentToolError::Invocation)
     }
 
     pub(crate) async fn complete(

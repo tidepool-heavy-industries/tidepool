@@ -317,6 +317,10 @@ pub enum KernelMessage {
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,
         reply: RpcReplyPort<KernelInvocationReply>,
     },
+    ToolAborted {
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        reply: RpcReplyPort<KernelInvocationReply>,
+    },
     ReleaseFork {
         release: crate::ForkChildRelease,
     },
@@ -361,6 +365,7 @@ impl KernelMessage {
             Self::ReconcileWorkbenchCancellation { .. } => "ReconcileWorkbenchCancellation",
             Self::ReconcileWorkbenchBoundary { .. } => "ReconcileWorkbenchBoundary",
             Self::ToolCompleted { .. } => "ToolCompleted",
+            Self::ToolAborted { .. } => "ToolAborted",
             Self::ReleaseFork { .. } => "ReleaseFork",
             Self::DrainMailbox => "DrainMailbox",
             Self::Resume { .. } => "Resume",
@@ -428,6 +433,10 @@ impl std::fmt::Debug for KernelMessage {
                 .finish(),
             Self::ToolCompleted { boundary, .. } => formatter
                 .debug_tuple("ToolCompleted")
+                .field(boundary)
+                .finish(),
+            Self::ToolAborted { boundary, .. } => formatter
+                .debug_tuple("ToolAborted")
                 .field(boundary)
                 .finish(),
             Self::ReleaseFork { release } => {

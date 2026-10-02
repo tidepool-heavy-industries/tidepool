@@ -2167,16 +2167,38 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             })
         });
         if let Some(selected) = &selected_tool {
-            let retained = installed_tools
-                .as_ref()
-                .and_then(|lease| lease.tools())
-                .and_then(|tools| {
-                    tools
-                        .declarations
-                        .iter()
-                        .find(|tool| tool.name() == selected.name())
-                });
-            if retained != Some(selected) {
+            let builtin = if current_builtin {
+                request
+                    .tool_call()
+                    .and_then(|call| match call.name.as_str() {
+                        crate::status_tool::STATUS_TOOL => Some(crate::status_tool::declaration()),
+                        crate::reload_spec_tool::RELOAD_SPEC_TOOL => {
+                            Some(crate::reload_spec_tool::declaration())
+                        }
+                        crate::reload_helpers_tool::RELOAD_HELPERS_TOOL => {
+                            Some(crate::reload_helpers_tool::declaration())
+                        }
+                        _ => None,
+                    })
+            } else {
+                None
+            };
+            let retained = builtin.as_ref().or_else(|| {
+                installed_tools
+                    .as_ref()
+                    .and_then(|lease| lease.tools())
+                    .and_then(|tools| {
+                        tools
+                            .declarations
+                            .iter()
+                            .find(|tool| tool.name() == selected.name())
+                    })
+            });
+            if retained != Some(selected)
+                || request
+                    .tool_call()
+                    .is_some_and(|call| call.name != selected.name())
+            {
                 return Err(KernelInvocationFailure::Rejected {
                     actor,
                     detail: "selected notebook contract differs from the issued installation"
@@ -2198,26 +2220,28 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                         .into(),
                 });
             }
-            context.haskell_effects_alias = match selected.implementation() {
-                exomonad_tool::ToolImplementation::HaskellCell => format!(
-                    "'[{}]",
-                    keys.iter()
-                        .map(|key| key.haskell_name())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                ),
-                exomonad_tool::ToolImplementation::ResidentHandler => format!(
-                    "(ContextReadWrite ': {})",
-                    self.descriptor.effective_role().haskell_effects_type(),
-                ),
-            };
+            if !current_builtin {
+                context.haskell_effects_alias = match selected.implementation() {
+                    exomonad_tool::ToolImplementation::HaskellCell => format!(
+                        "'[{}]",
+                        keys.iter()
+                            .map(|key| key.haskell_name())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                    exomonad_tool::ToolImplementation::ResidentHandler => format!(
+                        "(ContextReadWrite ': {})",
+                        self.descriptor.effective_role().haskell_effects_type(),
+                    ),
+                };
+            }
         }
         if invocation.context_binding.is_some()
             && (selected_tool.as_ref().is_none_or(|tool| {
                 tool.scheduling() != exomonad_tool::ToolScheduling::BeforeNextInference
             }) || invocation_key
                 .as_ref()
-                .is_none_or(|key| key.0.model_operation().is_none()))
+                .is_none_or(|key| key.invocation().model_operation().is_none()))
         {
             return Err(KernelInvocationFailure::Rejected {
                 actor,
@@ -2317,7 +2341,10 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             binding
                 .admit(
                     request.execution_id().expect("workbench execution issued"),
-                    &invocation_key.as_ref().expect("exact invocation checked").0,
+                    invocation_key
+                        .as_ref()
+                        .expect("exact invocation checked")
+                        .invocation(),
                     tidepool_repr::PrincipalId::from(actor),
                 )
                 .map_err(|error| KernelInvocationFailure::Rejected {
@@ -9119,12 +9146,21 @@ where
                 .is_some_and(|control| {
                     control.cancellation_requested() || control.context_cancellation_requested()
                 });
-            binding.finish(crate::CellExit::from_reply(
+            let exit = crate::CellExit::from_reply(
                 execution.clone(),
                 &result,
                 cleanup_confirmed,
                 cancelled,
-            ));
+            );
+            if let Some(control) = execution_state.effects.control.clone() {
+                self.workbench_executions.lock().retain_context_terminal(
+                    execution,
+                    execution_state.invocation.as_ref(),
+                    exit.clone(),
+                    control,
+                );
+            }
+            binding.finish(exit);
         }
         if let (Some(execution), Some(request)) = (execution, execution_state.replay_request.take())
         {
@@ -9774,12 +9810,66 @@ where
         })
     }
 
+    fn tool_aborted<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
+        Box::pin(async move {
+            if self.settled_fork_boundaries.contains(&boundary) {
+                return Ok(());
+            }
+            let context = self.context(kernel.identity());
+            let retired =
+                self.environment
+                    .fork_groups
+                    .settle_checkpoints(context.actor, &boundary, false);
+            let children = self
+                .environment
+                .fork_groups
+                .abort_unpublished_at_boundary(context.actor, &boundary);
+            for child in children {
+                if let Some(child) = kernel.resolve(child) {
+                    child
+                        .shutdown(ActorTerminal {
+                            kind: ActorExitKind::Cancelled,
+                            summary: "enclosing tool output was aborted".into(),
+                        })
+                        .await
+                        .map_err(Self::failure)?;
+                }
+            }
+            self.environment
+                .runner
+                .retire_fork_scopes(
+                    context.clone(),
+                    retired
+                        .into_iter()
+                        .filter_map(|(session, scope)| {
+                            (session == context.placement.session).then_some(scope)
+                        })
+                        .collect(),
+                )
+                .await
+                .map_err(Self::failure)?;
+            self.settled_fork_boundaries.push(boundary);
+            Ok(())
+        })
+    }
+
     fn tool_completed<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
+            if !self
+                .workbench_executions
+                .lock()
+                .context_allows_publication(&boundary)
+            {
+                return self.tool_aborted(kernel, boundary).await;
+            }
             let context = self.context(kernel.identity());
             self.environment
                 .fork_groups
@@ -10316,6 +10406,7 @@ where
                 public_owner: _public_owner,
                 current_builtin,
                 capture,
+                context_binding,
                 control,
                 invocation,
             } = match admitted {
@@ -10367,7 +10458,7 @@ where
                     public_visibility,
                     control,
                     model: None,
-                    context_binding: None,
+                    context_binding,
                     installed_tools,
                     admitted_source,
                     reservation_owner,

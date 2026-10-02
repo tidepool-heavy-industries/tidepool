@@ -5472,7 +5472,9 @@ where
         let spawn = {
             let _entered = inspection_span.enter();
             spawn_blocking_in_span(move || {
-                let prepared = compiler_source.prepare_effectful(&compile_view, &effects)?;
+                let prepared = compiler_source
+                    .prepare_effectful(&compile_view, &effects)
+                    .map_err(|error| error.to_string())?;
                 let include = prepared
                     .include
                     .iter()
@@ -11991,7 +11993,7 @@ fn compile_block_off_checkout(
             .map(|module| format!("qualified {module}")),
     );
     let compile_view = compile_view.with_workbench_imports(&expression_imports);
-    let mut prepared = source.prepare_effectful(&compile_view, effects)?;
+    let mut prepared = source.prepare_effectful(&compile_view, effect_stack)?;
     if let Some(prologue) = prologue {
         prepared.preamble = prepared.preamble.replacen(
             "\nmodule ",

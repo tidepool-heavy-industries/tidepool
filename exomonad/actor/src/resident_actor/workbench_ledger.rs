@@ -5,6 +5,7 @@ struct WorkbenchExecutionRecord {
     request: WorkbenchRequest,
     state: WorkbenchExecutionState,
     invocation_work: Option<Arc<InvocationWork>>,
+    context_terminal: Option<(crate::CellExit, Arc<crate::WorkbenchExecutionControl>)>,
 }
 
 #[derive(Clone)]
@@ -141,6 +142,7 @@ impl WorkbenchExecutions {
                 request,
                 state: WorkbenchExecutionState::Unconfirmed,
                 invocation_work: None,
+                context_terminal: None,
             },
         );
     }
@@ -158,6 +160,10 @@ impl WorkbenchExecutions {
             .0
             .get(&key)
             .and_then(|record| record.invocation_work.clone());
+        let context_terminal = self
+            .0
+            .get(&key)
+            .and_then(|record| record.context_terminal.clone());
         self.0.insert(
             key,
             WorkbenchExecutionRecord {
@@ -167,8 +173,43 @@ impl WorkbenchExecutions {
                     cancellation,
                 },
                 invocation_work,
+                context_terminal,
             },
         );
+    }
+
+    pub(super) fn retain_context_terminal(
+        &mut self,
+        execution: &WorkbenchExecutionId,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+        exit: crate::CellExit,
+        control: Arc<crate::WorkbenchExecutionControl>,
+    ) {
+        let record = self
+            .0
+            .get_mut(&WorkbenchReplayKey::new(execution, invocation))
+            .expect("context terminal follows admitted execution");
+        record.context_terminal = Some((exit, control));
+    }
+
+    pub(super) fn context_allows_publication(
+        &self,
+        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> bool {
+        self.0
+            .iter()
+            .filter(|(key, _)| {
+                matches!(key,
+            WorkbenchReplayKey::Hosted(invocation) if invocation.matches_boundary(boundary))
+            })
+            .all(|(_, record)| {
+                record
+                    .context_terminal
+                    .as_ref()
+                    .is_none_or(|(exit, control)| {
+                        exit.permits_context_commit() && !control.context_cancellation_requested()
+                    })
+            })
     }
 
     pub(super) fn cancellation(

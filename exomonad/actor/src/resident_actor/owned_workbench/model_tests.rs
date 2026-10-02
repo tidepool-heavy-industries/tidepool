@@ -458,7 +458,7 @@ async fn context_authority_cannot_escape_to_after_tool_or_actor_callbacks() {
     let mut execution = execution(Arc::new(ModelOwner::default()));
     execution.state.effects.context_binding = Some(binding.clone());
     let boundary = || ResidentActorBoundary::Context {
-        continuation: ResidentHole::plain("context-owned".into()),
+        continuation: ResidentHole::plain("context-owned"),
         request: crate::ContextReq::GetContextWith,
         table: tidepool_repr::DataConTable::new(),
     };
@@ -487,7 +487,7 @@ async fn context_authority_cannot_escape_to_after_tool_or_actor_callbacks() {
         let tidepool_effect::DeferredEffect::Blocking(start) = work else {
             panic!("context authority denial must not start asynchronous work")
         };
-        assert!(start().is_err());
+        assert!(start.into_inner().unwrap()().is_err());
     }
     assert_eq!(binding.prepared.load(Ordering::SeqCst), 1);
     drop(execution);
