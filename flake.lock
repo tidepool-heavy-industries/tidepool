@@ -52,17 +52,17 @@
     "harnessWeb": {
       "flake": false,
       "locked": {
-        "lastModified": 1790904533,
+        "lastModified": 1790912660,
         "owner": "tidepool-heavy-industries",
         "repo": "exomonad-harness",
-        "rev": "9d7bb2c3c7b6e63298e4253cb28f1285d1308049",
+        "rev": "143eebd4cf7e84c6bc4d9c3e46f37eb6544f00f3",
         "type": "github",
-        "narHash": "sha256-56STZ0hqHTr4LagWkRz7jzebE939LyJS61pnrTObRXU="
+        "narHash": "sha256-j0uzOZsmvnr4LdWwFbPGJsbTRTykxqapuMfS/LdFLaM="
       },
       "original": {
         "owner": "tidepool-heavy-industries",
         "repo": "exomonad-harness",
-        "rev": "9d7bb2c3c7b6e63298e4253cb28f1285d1308049",
+        "rev": "143eebd4cf7e84c6bc4d9c3e46f37eb6544f00f3",
         "type": "github"
       }
     },

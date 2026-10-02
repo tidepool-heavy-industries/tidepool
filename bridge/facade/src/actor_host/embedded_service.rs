@@ -7,7 +7,10 @@ use harness::{
     engine::EngineConfig,
     model::{AgentPath, Effort},
     server::{QueuedCommand, ServerConfig, ServerControl, SessionSecret},
-    transport::{auth::CodexFileAuth, ResponsesClient, ResponsesProtocol},
+    transport::{
+        auth::{ChatGptPlanAuth, CodexFileAuth},
+        Auth, AuthCredentials, ResponsesClient, ResponsesProtocol, ResponsesRoute, TransportError,
+    },
 };
 use tokio::{
     net::TcpListener,
@@ -20,7 +23,7 @@ use super::{
     embedded_policy::EmbeddedPolicyInstallation,
     embedded_projection::LifecyclePublisher,
 };
-use crate::exomonad::{EmbeddedBrowserAuth, EmbeddedLaunchConfig};
+use crate::exomonad::{EmbeddedBrowserAuth, EmbeddedLaunchConfig, EmbeddedModelProvider};
 
 struct TailscaleBrowserAuth(exomonad_node::network::TailscalePeerVerifier);
 
@@ -44,9 +47,44 @@ impl harness::server::BrowserPeerAuthenticator for TailscaleBrowserAuth {
     }
 }
 
-pub(super) fn responses_client(auth_file: &Path) -> ResponsesClient<CodexFileAuth> {
-    ResponsesClient::new(CodexFileAuth::new(auth_file.to_path_buf()))
-        .with_protocol(ResponsesProtocol::Lite)
+#[derive(Clone)]
+pub(super) enum EmbeddedAuth {
+    Codex(CodexFileAuth),
+    ChatGptPlan(ChatGptPlanAuth),
+}
+
+impl Auth for EmbeddedAuth {
+    fn access(&self) -> Result<(String, String), TransportError> {
+        match self {
+            Self::Codex(auth) => auth.access(),
+            Self::ChatGptPlan(auth) => auth.access(),
+        }
+    }
+    fn credentials(&self) -> Result<AuthCredentials, TransportError> {
+        match self {
+            Self::Codex(auth) => auth.credentials(),
+            Self::ChatGptPlan(auth) => auth.credentials(),
+        }
+    }
+    fn route(&self) -> ResponsesRoute {
+        match self {
+            Self::Codex(auth) => auth.route(),
+            Self::ChatGptPlan(auth) => auth.route(),
+        }
+    }
+}
+
+pub(super) fn responses_client(settings: &EmbeddedLaunchConfig) -> ResponsesClient<EmbeddedAuth> {
+    let auth_file = settings.credential_file.clone();
+    match settings.provider {
+        EmbeddedModelProvider::Codex => {
+            ResponsesClient::new(EmbeddedAuth::Codex(CodexFileAuth::new(auth_file)))
+                .with_protocol(ResponsesProtocol::Lite)
+        }
+        EmbeddedModelProvider::ChatGptPlan => {
+            ResponsesClient::new(EmbeddedAuth::ChatGptPlan(ChatGptPlanAuth::new(auth_file)))
+        }
+    }
 }
 
 pub(super) struct EmbeddedService {
@@ -472,7 +510,7 @@ pub(super) async fn drive_conversation(
     lifecycle: impl LifecyclePublisher,
     actor_ref: exomonad_actor::ActorRef,
 ) -> Result<(), EmbeddedDriverError> {
-    drive_conversation_with_transport::<CodexFileAuth, _>(
+    drive_conversation_with_transport::<EmbeddedAuth, _>(
         embedded,
         runtime,
         settings,
@@ -482,7 +520,7 @@ pub(super) async fn drive_conversation(
         cancellation,
         lifecycle,
         actor_ref,
-        responses_client(&settings.codex_auth_file),
+        responses_client(settings),
     )
     .await
 }
@@ -711,6 +749,21 @@ pub(super) async fn submit_browser_command(
 mod shutdown_tests {
     use super::*;
     use harness::{engine::EngineError, model::RequestId};
+
+    #[test]
+    fn embedded_provider_choice_routes_actor_and_cell_clients() {
+        let source = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\nprovider = 'chatgpt_plan'\ncredential_file = '/tmp/exomonad-auth'\ncontext_capacity_tokens = 4096\n";
+        let mut settings: EmbeddedLaunchConfig = toml::from_str(source).unwrap();
+        assert_eq!(
+            responses_client(&settings).auth.route(),
+            ResponsesRoute::ChatGptPlan
+        );
+        settings.provider = EmbeddedModelProvider::Codex;
+        assert_eq!(
+            responses_client(&settings).auth.route(),
+            ResponsesRoute::Codex
+        );
+    }
 
     #[test]
     fn cancellation_retains_durable_head_and_distinguishes_cleanup_failure() {

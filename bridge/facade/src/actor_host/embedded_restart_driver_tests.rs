@@ -152,7 +152,8 @@ async fn driver_reopens_delivered_pending_round_without_wake_then_waits_for_expl
         asset_root: files.path().join("unused-assets"),
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(files.path().join("unused-secret")),
-        codex_auth_file: files.path().join("unused-auth"),
+        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        credential_file: files.path().join("unused-auth"),
         context_capacity_tokens: 200_000,
         concurrent_jobs: 1,
     };

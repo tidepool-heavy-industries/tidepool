@@ -145,12 +145,41 @@ Select the embedded backend in the project's `.exomonad/config.toml`:
 backend = "embedded"
 ```
 
-Configure `[launch.embedded]` with `listen`,
-`codex_auth_file`, and the model's `context_capacity_tokens`. The listener must
+For native ChatGPT plan authentication, sign in with a separate Exomonad record:
+
+```bash
+exomonad auth login --credential-file /absolute/private/path/chatgpt.json
+```
+
+Open the displayed authorization URL in a browser on the same host. The callback
+listens on `127.0.0.1:1455/auth/callback`; `--port` selects another port. On a
+self-hosted VM, the [official VM guidance](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)
+describes signing in locally and securely transferring the selected credentials
+while preserving the VM's separate host ID. An SSH loopback port forward is a
+possible alternative for this CLI, but has not been qualified here.
+
+Select the native public Responses route explicitly:
+
+```toml
+[launch.embedded]
+provider = "chatgpt_plan"
+credential_file = "/absolute/private/path/chatgpt.json"
+```
+
+This uses `https://api.openai.com/v1/responses`, with full request history,
+`store = false`, and `stream = true`. The credential record belongs to Exomonad;
+existing Codex credentials do not grant this flow's ChatGPT plan permission.
+Async declarations are preserved on the public route; account-specific live
+async behavior still needs an authenticated trial.
+
+Configure `[launch.embedded]` with `listen`, `credential_file`, and the model's
+`context_capacity_tokens`. The listener must
 use loopback or a local Tailscale address. File paths must be absolute;
 `asset_root` must contain the browser's `index.html`, or be supplied by the
-package through `EXOMONAD_EMBEDDED_ASSET_ROOT`. The Codex credential file supplies
-read-only provider authentication, independently of browser access.
+package through `EXOMONAD_EMBEDDED_ASSET_ROOT`. Provider authentication is
+independent of browser access. `provider = "codex"` retains the read-only Codex
+credential bridge; the old `codex_auth_file` spelling remains an alias for
+`credential_file`. Omitting `provider` selects that existing bridge.
 For automatic browser access from your Tailscale devices, pin the browser URL
 and configure an explicit numeric Tailscale user allowlist:
 

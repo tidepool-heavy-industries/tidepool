@@ -299,8 +299,8 @@ async fn production_engine_carries_raw_and_typed_pending_calls_through_compactio
         "embedded-compaction-secret-is-long-enough",
     )
     .unwrap();
-    let codex_auth_file = files.path().join("codex-auth.json");
-    std::fs::write(&codex_auth_file, "{}").unwrap();
+    let credential_file = files.path().join("codex-auth.json");
+    std::fs::write(&credential_file, "{}").unwrap();
     let settings = crate::exomonad::EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
@@ -308,7 +308,8 @@ async fn production_engine_carries_raw_and_typed_pending_calls_through_compactio
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(session_secret_file),
-        codex_auth_file,
+        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        credential_file,
         context_capacity_tokens: 200_000,
         concurrent_jobs: 2,
     };
@@ -525,8 +526,8 @@ async fn production_engine_compaction_failure_continues_once_then_cleans_pending
         "embedded-compaction-secret-is-long-enough",
     )
     .unwrap();
-    let codex_auth_file = files.path().join("codex-auth.json");
-    std::fs::write(&codex_auth_file, "{}").unwrap();
+    let credential_file = files.path().join("codex-auth.json");
+    std::fs::write(&credential_file, "{}").unwrap();
     let settings = crate::exomonad::EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
@@ -534,7 +535,8 @@ async fn production_engine_compaction_failure_continues_once_then_cleans_pending
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(session_secret_file),
-        codex_auth_file,
+        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        credential_file,
         context_capacity_tokens: 200_000,
         concurrent_jobs: 2,
     };
@@ -651,7 +653,8 @@ async fn browser_interrupt_cancels_one_engine_round_and_driver_accepts_later_inp
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret),
-        codex_auth_file: auth,
+        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        credential_file: auth,
         context_capacity_tokens: 200_000,
         concurrent_jobs: 1,
     };
