@@ -502,7 +502,12 @@ impl Driver {
                                 &session.worktrees,
                                 &self.config.workspace,
                                 request.owner,
-                            ),
+                            )
+                            .map_err(|error| {
+                                tidepool_bridge_effects::CommandError::CommandUnavailable(format!(
+                                    "cannot resolve recipe command authority: {error}"
+                                ))
+                            })?,
                             bubblewrap,
                         ))
                             as Arc<dyn exomonad_actor::command_jobs::CommandBackend>)
