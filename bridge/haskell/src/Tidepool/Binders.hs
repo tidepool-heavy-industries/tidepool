@@ -356,10 +356,14 @@ cellInferenceSegments :: CellSourcePlan -> [CellSourcePlan]
 cellInferenceSegments plan = map makeSegment (runs (cellPlanItems plan))
   where
     runs [] = []
-    runs (item : rest) =
-      let declarationRun = sbKind (cellAnalysisVerdict item) == KDecl
-          (same, remaining) = span ((== declarationRun) . isDeclaration) rest
-       in (declarationRun, item : same) : runs remaining
+    -- The parser already groups adjacent authored declarations. A prologue
+    -- has its own reserved original owner and must not be combined with the
+    -- next declaration: rendering each item would repeat that declaration.
+    runs (item : rest)
+      | isDeclaration item = (True, [item]) : runs rest
+      | otherwise =
+          let (same, remaining) = span (not . isDeclaration) rest
+           in (False, item : same) : runs remaining
     isDeclaration = (== KDecl) . sbKind . cellAnalysisVerdict
 
     makeSegment (declarations, items) =
