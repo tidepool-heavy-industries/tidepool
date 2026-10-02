@@ -189,6 +189,6 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
         );
         // Preparation must retain authority without creating authored bindings
         // or executing the quoted command's contents.
-        assert!(session.visible_binding_ids_in(public).is_empty());
+        assert_eq!(session.scope_binding_count(public), 0);
     }
 }
