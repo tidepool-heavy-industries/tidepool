@@ -1205,6 +1205,11 @@ mod tests {
     use std::{sync::Mutex, time::Duration};
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
+    // These semantic checks include cold whole-cell compilation in a debug
+    // worker. Keep that budget bounded, while leaving provider and cleanup
+    // waits short because they do not include native compilation.
+    const COLD_NATIVE_CELL_SETTLEMENT_BUDGET: Duration = Duration::from_secs(300);
+
     #[test]
     fn m1_only_accepts_fresh_root_and_rejects_inherited_or_child_attachments() {
         let root = exomonad_actor::ActorRef::first(exomonad_actor::ActorId(1));
@@ -1493,8 +1498,14 @@ mod tests {
         });
         tokio::select! {
             result = &mut running => panic!("Engine stopped before completing its Haskell call: {result:?}"),
-            ready = tokio::time::timeout(Duration::from_secs(30), transport.entered.notified()) => {
-                ready.expect("resident Haskell call did not settle before the next model request");
+            ready = tokio::time::timeout(COLD_NATIVE_CELL_SETTLEMENT_BUDGET, transport.entered.notified()) => {
+                if let Err(elapsed) = ready {
+                    panic!(
+                        "first native Haskell cell did not settle before provider round two within {elapsed:?}; provider_rounds={}, compactions={}, expected_call=raw-cell-1",
+                        transport.requests.lock().unwrap().len(),
+                        transport.compactions.load(Ordering::Relaxed),
+                    );
+                }
             }
         }
         let origin = format!("https://{}", service.address);
@@ -1547,11 +1558,19 @@ mod tests {
             .find(|claim| claim.operation.origin == embedded_origin)
             .expect("the real Engine call must retain its exact embedded operation");
         let output = tokio::time::timeout(
-            Duration::from_secs(30),
+            COLD_NATIVE_CELL_SETTLEMENT_BUDGET,
             service.runtime.scheduler().wait(&claim.operation),
         )
         .await
-        .expect("real Haskell output did not settle while the scripted round was held")
+        .unwrap_or_else(|_| {
+            panic!(
+                "real Haskell operation {:?} did not settle while the scripted provider round was held within {:?}; provider_rounds={}, compactions={}",
+                claim.operation,
+                COLD_NATIVE_CELL_SETTLEMENT_BUDGET,
+                transport.requests.lock().unwrap().len(),
+                transport.compactions.load(Ordering::Relaxed),
+            )
+        })
         .unwrap();
         assert!(
             matches!(output, harness::turn::JobOutput::Completed(Ok(_))),
@@ -1569,14 +1588,22 @@ mod tests {
             .find(|claim| claim.operation.origin == embedded_origin)
             .expect("the real Engine checkpoint call must retain its exact operation");
         let checkpoint_output = tokio::time::timeout(
-            Duration::from_secs(30),
+            COLD_NATIVE_CELL_SETTLEMENT_BUDGET,
             service
                 .runtime
                 .scheduler()
                 .wait(&checkpoint_claim.operation),
         )
         .await
-        .expect("real Haskell checkpoint effect did not settle")
+        .unwrap_or_else(|_| {
+            panic!(
+                "real Haskell checkpoint operation {:?} did not settle within {:?}; provider_rounds={}, compactions={}",
+                checkpoint_claim.operation,
+                COLD_NATIVE_CELL_SETTLEMENT_BUDGET,
+                transport.requests.lock().unwrap().len(),
+                transport.compactions.load(Ordering::Relaxed),
+            )
+        })
         .unwrap();
         let checkpoint_response = match checkpoint_output {
             harness::turn::JobOutput::Completed(Ok(response)) => response,
