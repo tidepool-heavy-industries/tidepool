@@ -1503,15 +1503,6 @@ impl ForkGroupRegistry {
         Ok(group.children)
     }
 
-    pub(crate) fn is_pending_child(&self, actor: ActorRef) -> bool {
-        self.state.lock().groups.values().any(|group| {
-            matches!(
-                *group.phase.borrow(),
-                ForkGroupPhase::Staging | ForkGroupPhase::Ready
-            ) && group.children.contains(&actor)
-        })
-    }
-
     pub(crate) fn pending_children_at_boundary(
         &self,
         owner: ActorRef,
