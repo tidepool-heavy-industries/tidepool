@@ -437,3 +437,46 @@ pub(super) async fn dispatch_haskell_script_result(
         .expect("recorded tool completion");
     result
 }
+
+pub(super) async fn dispatch_structured_tool(
+    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
+    name: &str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    let call_id = uuid::Uuid::new_v4().simple().to_string();
+    let result = endpoint
+        .dispatch_boxed(ToolInvocation {
+            context: Some(ToolInvocationContext::external(
+                "actor-host-vertical".into(),
+                call_id.clone(),
+                call_id.clone(),
+                Some(call_id.clone()),
+                Some(name.into()),
+            )),
+            name: name.into(),
+            arguments: ToolArguments::Structured(arguments),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{name} tool failed: {error}"));
+    endpoint
+        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "actor-host-vertical".into(),
+            call_id.clone(),
+            call_id,
+        ))
+        .await
+        .expect("recorded tool completion");
+    result
+}
+
+pub(super) async fn dispatch_lookup(
+    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
+    queries: &[&str],
+) -> serde_json::Value {
+    dispatch_structured_tool(
+        endpoint,
+        "lookup",
+        serde_json::json!({ "queries": queries }),
+    )
+    .await
+}

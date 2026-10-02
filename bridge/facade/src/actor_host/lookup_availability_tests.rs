@@ -1,9 +1,13 @@
-use super::test_campaign::TestCampaign;
-use super::tests::{dispatch_haskell_script, dispatch_lookup};
+use super::test_campaign::{dispatch_haskell_script, dispatch_lookup, TestCampaign};
 
 #[tokio::test]
 async fn hosted_lookup_uses_actual_actor_row_for_constraint_availability() {
-    let campaign = TestCampaign::start().await;
+    let campaign = TestCampaign::start_with_config(
+        exomonad_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| config.backend = crate::exomonad::HostBackendOptions::Embedded,
+    )
+    .await;
     let policy = campaign.root_installation.policy.as_ref();
 
     let setup = dispatch_haskell_script(policy, include_str!("lookup_availability_setup.hs")).await;
