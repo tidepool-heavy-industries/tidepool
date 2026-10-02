@@ -113,6 +113,9 @@ async fn assert_pending(host: &RunningBrowserHost, operation: &OperationId, phas
                 "metadata":error.metadata(),
             }),
             JobOutput::Cancelled => json!({"kind":"cancelled"}),
+            JobOutput::CancelledWithReceipt(receipt) => {
+                json!({"kind":"cancelled", "receipt":receipt})
+            }
             JobOutput::Interrupted => json!({"kind":"interrupted"}),
             JobOutput::CancellationUnconfirmed(error) => json!({
                 "kind":"cancellation_unconfirmed", "message":error.chars().take(512).collect::<String>(),
@@ -296,11 +299,13 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
 
     let first = issued(&mut receiver).await;
     let original_request = first.id.clone().expect("normal Engine request identity");
-    assert!(first
-        .request
-        .tools
-        .iter()
-        .any(|tool| tool["name"] == "probe"));
+    assert!(
+        first
+            .request
+            .tools
+            .iter()
+            .any(|tool| tool["name"] == "probe")
+    );
     let declared = first.request.tools.clone();
     // The transport already owns the request. Reload before its call is emitted.
     std::fs::write(
@@ -371,11 +376,13 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     before_compaction.reply.send(trigger).unwrap();
 
     let compact = issued(&mut receiver).await;
-    assert!(compact
-        .request
-        .tools_allowed
-        .as_ref()
-        .is_some_and(Vec::is_empty));
+    assert!(
+        compact
+            .request
+            .tools_allowed
+            .as_ref()
+            .is_some_and(Vec::is_empty)
+    );
     assert_pending(&host, &old, "compaction-issued").await;
     compact
         .reply
@@ -389,11 +396,13 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     let successor_request = successor.id.clone().expect("compacted successor identity");
     assert_ne!(successor_request, original_request);
     assert_eq!(successor.request.tools, declared);
-    assert!(successor
-        .request
-        .input
-        .iter()
-        .any(|item| { item.0["type"] == "function_call" && item.0["call_id"] == OLD_CALL }));
+    assert!(
+        successor
+            .request
+            .input
+            .iter()
+            .any(|item| { item.0["type"] == "function_call" && item.0["call_id"] == OLD_CALL })
+    );
     assert_eq!(outputs(&successor.request, OLD_CALL).count(), 0);
     assert_eq!(
         real_host_late_output_tests::assert_applied_compaction(&host, &old),
@@ -401,12 +410,16 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     );
     let inherited = host.runtime.store().claims_for_operation(&old).unwrap();
     assert_eq!(inherited.len(), 2, "original and compacted claimant only");
-    assert!(inherited
-        .iter()
-        .any(|claim| claim.request == successor_request));
-    assert!(inherited
-        .iter()
-        .all(|claim| claim.operation == old && claim.state == ClaimState::Pending));
+    assert!(
+        inherited
+            .iter()
+            .any(|claim| claim.request == successor_request)
+    );
+    assert!(
+        inherited
+            .iter()
+            .all(|claim| claim.operation == old && claim.state == ClaimState::Pending)
+    );
     successor
         .reply
         .send(probe_turn("new-installed-handler", NEW_CALL, 0))
