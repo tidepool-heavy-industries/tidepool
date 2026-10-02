@@ -117,7 +117,13 @@ impl InputFixture {
         let view = PersistentSession::new(Some(library), crate::DEFAULT_NURSERY_SIZE)
             .compile_view_in(ScopeId::ROOT)
             .unwrap();
-        let producer = compiled(compile_turn(&view, &recipe, source, &[]));
+        let producer = compiled(compile_turn(
+            &view,
+            &recipe,
+            source,
+            &[],
+            FixtureCompilation::Startup,
+        ));
         let TurnResult::Bind {
             compiled: receiver,
             bound,
@@ -127,6 +133,7 @@ impl InputFixture {
             &recipe,
             include_str!("fixtures/activation-input-receiver.hs"),
             &[],
+            FixtureCompilation::Startup,
         )
         else {
             panic!("native protocol receiver is a real retained Haskell binding");
@@ -229,11 +236,17 @@ impl InputFixture {
     }
 }
 
+enum FixtureCompilation {
+    Startup,
+    Scoped,
+}
+
 fn compile_turn(
     view: &SessionCompileView,
     recipe: &InputRecipe,
     source: &str,
     retained: &[(tidepool_repr::execution_schema::SymbolIdentity, u64)],
+    purpose: FixtureCompilation,
 ) -> TurnResult {
     let imports = view.turn_imports(&SourceImports::new());
     let templates = resident_workbench_templates(&recipe.preamble, &recipe.row, &imports);
@@ -241,7 +254,14 @@ fn compile_turn(
     let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let injected = view.injected_module_names();
     run_turn(TurnRequest {
-        exact_context: view.exact_declaration_context().cloned(),
+        exact_context: match purpose {
+            FixtureCompilation::Startup => {
+                assert!(injected.is_empty(), "startup has no retained environment");
+                assert!(retained.is_empty(), "startup has no retained native inputs");
+                None
+            }
+            FixtureCompilation::Scoped => view.exact_declaration_context().cloned(),
+        },
         session_id: Some(view.session()),
         turn_text: source,
         templates: &templates,
@@ -361,6 +381,7 @@ fn original_value_probe(
         recipe,
         source,
         &resident.prepared_retained(),
+        FixtureCompilation::Scoped,
     ));
     let ResidentOutcome::Completed { result, .. } = resident
         .run_with_sites("originalInputProbe", compiled.code())
