@@ -545,10 +545,18 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
     .await
     .unwrap()
     .unwrap();
-    assert!(
-        matches!(settled, harness::turn::JobOutput::Cancelled),
-        "{settled:?}"
-    );
+    match &settled {
+        harness::turn::JobOutput::Cancelled => {}
+        harness::turn::JobOutput::CancelledWithReceipt(Ok(receipt)) => {
+            assert_context_operations_uncommitted(receipt);
+        }
+        harness::turn::JobOutput::CancelledWithReceipt(Err(failure)) => {
+            if let Some(metadata) = failure.metadata() {
+                assert_context_operations_uncommitted(metadata);
+            }
+        }
+        _ => panic!("expected confirmed cancellation, received {settled:?}"),
+    }
     let successor = next_round(&mut rounds).await;
     assert!(
         successor.is_root(),
@@ -559,6 +567,9 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
     assert!(!has_user_text(&successor.request, "must-not-publish"));
     let terminal = retained_output(&successor.request, "context-cancel");
     assert_context_operations_uncommitted(&terminal);
+    if let Some(receipt) = terminal.get("receipt") {
+        assert_context_operations_uncommitted(receipt);
+    }
     let after = root_context_state(&fixture);
     assert_eq!(after.generation, before.generation);
     assert_eq!(after.model, before.model);
