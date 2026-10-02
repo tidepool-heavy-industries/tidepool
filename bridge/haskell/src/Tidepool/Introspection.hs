@@ -55,6 +55,7 @@ import GHC.Core.Multiplicity (scaledThing)
 import GHC.Core.TyCon (isAlgTyCon)
 import GHC.Core.Unify (tcMatchTy)
 import GHC.Iface.Type (AltPpr (..), ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
+import GHC.Types.Id (idName)
 import GHC.Types.Name (nameIsLocalOrFrom, nameModule_maybe, nameOccName)
 import GHC.Types.TypeEnv (lookupTypeEnv)
 import GHC.Types.Name (isDataConName, isTyConName, isVarName)
@@ -530,7 +531,7 @@ runInspection hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
         result <- inspectModule context moduleName expanded
         pure (typeIndex, results ++ [result])
       InspectTypeSearch query -> do
-        result <- inspectTypeSearch context rdrEnv query
+        result <- inspectTypeSearch context rdrEnv inspectionProbes query
         pure (typeIndex, results ++ [result])
       InspectStructuredInfoOf query -> do
         result <- inspectStructured rdrEnv StructuredInfo query
@@ -540,25 +541,15 @@ runInspection hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
         pure (typeIndex, results ++ [result])
     missing binder = liftIO (ioError (userError ("inspection module did not expose " ++ binder)))
 
-inspectTypeSearch :: (GhcMonad m) => AvailabilityContext -> GlobalRdrEnv -> String -> m InspectionResult
-inspectTypeSearch context rdrEnv query = do
-  let binderName = "__tidepool_lookup_query"
-      binders =
-        [ greName gre
-        | gre <- globalRdrEnvElts rdrEnv,
-          any (matchesQuery binderName) (greRdrNames gre)
-        ]
-  case nubBy (==) binders of
-    [binder] -> do
-      found <- lookupName binder
-      case found of
-        Just (AnId identifier) ->
-          InspectionTypeMatches query <$> searchTypeMatchesWithContext context rdrEnv binder (idType identifier)
-        _ -> missing binderName
-    _ -> missing binderName
+inspectTypeSearch :: (GhcMonad m) => AvailabilityContext -> GlobalRdrEnv -> Map.Map String Id -> String -> m InspectionResult
+inspectTypeSearch context rdrEnv inspectionProbes query =
+  case Map.lookup binderName inspectionProbes of
+    Just identifier ->
+      InspectionTypeMatches query <$> searchTypeMatchesWithContext context rdrEnv
+        (idName identifier) (idType identifier)
+    Nothing -> liftIO (ioError (userError ("lookup module did not expose " ++ binderName)))
   where
-    missing binder =
-      liftIO (ioError (userError ("lookup module did not expose " ++ binder)))
+    binderName = "__tidepool_lookup_query"
 
 data StructuredMode = StructuredInfo | StructuredType
 

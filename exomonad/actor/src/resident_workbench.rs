@@ -1168,11 +1168,19 @@ impl ParkedHoleAbortGuard {
 
     /// The owning checkout is in hand: the hole's fate is now decided
     /// synchronously within it, so no background cleanup is needed.
-    fn disarm(self) {
+    pub(crate) fn disarm(self) {
         let mut state = self.shared.state.lock();
         *state = ParkedHoleState::Settled;
         drop(state);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContinuationHandoffFailure {
+    WrongOwner,
+    Abandoned,
+    Settled,
+    NotOwned,
 }
 
 impl Drop for ParkedHoleAbortGuard {
@@ -3041,8 +3049,34 @@ impl<H, O> ResidentActorWorkbench<H, O> {
     }
 }
 
+/// The owning boundary that refused a whole-cell public publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivatePublicationPhase {
+    Freeze,
+    Restage,
+    CertifyAndStage,
+    Publish,
+    RevalidateRejection,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
+    #[error(
+        "actor {actor:?} public scope {scope:?} publication failed during {phase:?}: {source}"
+    )]
+    PrivatePublication {
+        actor: crate::ActorRef,
+        scope: ScopeId,
+        phase: PrivatePublicationPhase,
+        source: Box<ResidentActorWorkbenchError>,
+    },
+    #[error("actor continuation handoff refused: actor {actor:?}, placement {placement:?}, continuation {continuation}, reason {reason:?}")]
+    ContinuationHandoff {
+        actor: crate::ActorRef,
+        placement: crate::ActorPlacement,
+        continuation: String,
+        reason: ContinuationHandoffFailure,
+    },
     #[error("actor retired before machine admission: {0:?}")]
     RetiredBeforeAdmission(crate::ActorTerminal),
     #[error(transparent)]
@@ -3115,6 +3149,7 @@ impl ResidentActorWorkbenchError {
         &self,
     ) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
         match self {
+            Self::PrivatePublication { source, .. } => source.failure_diagnostic(),
             Self::Compile(error) => Some(classify_compile(error)),
             Self::CellCheck(failure) => Some(classify_compile(&failure.error)),
             Self::CompileInfrastructure(diagnostic) => Some(diagnostic.clone()),
@@ -3483,6 +3518,54 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    pub(crate) fn actor_initialization_cleanup(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> ParkedHoleAbortGuard {
+        // Inline actor admission must never borrow the creating cell's observer.
+        ParkedHoleAbortGuard::with_retained_latest(
+            &self.access,
+            context,
+            None,
+            "actor initialization abandoned before standing custody".into(),
+            None,
+        )
+    }
+
+    pub(crate) async fn settle_initialization_custody(
+        &self,
+        context: crate::ActorSessionContext,
+        registration: ParkedHoleAbortRegistration,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                if registration.0.owner != Some((context.actor, context.placement)) {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "initialization custody differs from its original actor placement".into(),
+                    ));
+                }
+                let mut state = registration.0.state.lock();
+                let ParkedHoleState::Owned(current) = &*state else {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "actor initialization lost its continuation custody".into(),
+                    ));
+                };
+                for cont_id in current {
+                    if session.parked_realm_named(cont_id) != Some(context.placement.resource_scope)
+                    {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "actor initialization frame {cont_id} differs from owning realm {:?}",
+                            context.placement.resource_scope,
+                        )));
+                    }
+                }
+                // The registered standing and actor shutdown now own this exact realm.
+                *state = ParkedHoleState::Settled;
+                Ok(())
+            })
+            .await
+    }
+
     pub(crate) fn continuation_cleanup_owner(
         &self,
         context: crate::ActorSessionContext,
@@ -3610,28 +3693,58 @@ where
                     "_ <- Tidepool.Agent.Contract.installSpec @({authored_effects}) {entry}"
                 ),
             };
-            let verdict = TurnClassification {
-                kind: TurnKind::Bind,
-                binders: Vec::new(),
-                items: Vec::new(),
+            let authority = self.compilation_authority.clone().ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "tool installation requires its admitted source authority".into(),
+                )
+            })?;
+            let mut installer = ResidentActorWorkbench {
+                access: self.access.sharing(),
+                response: None,
+                request: None,
+                type_modules: Arc::from([]),
+                json_input: None,
+                compilation_authority: Some(authority.clone()),
+                private_execution: None,
             };
+            installer.access.source = source;
             let publication_resolved = resolved;
-            // Compile with the resident machine checked out only for the
-            // snapshot and the install-and-run step (`begin_fragment_split`),
-            // released for the GHC compile in between. The suspension this
-            // fragment produces is plain session-held data, so reading it back
-            // out below is an ordinary later checkout, the same shape every
-            // `resume_*` method already uses against a held hole.
-            // Keep the large split-compile state out of this preparation
-            // future while preserving its cancellation and drop guards.
-            let fragment = Box::pin(self.begin_fragment_split(
-                compile_context.clone(),
-                source,
-                Vec::new(),
-                block,
-                Some(verdict),
-            ));
-            let step = fragment.await?;
+            // Setup uses the existing public scope while the bootstrap owner
+            // retains publication authority. The checked program seals its
+            // captured interfaces and protected templates before native execution.
+            let (checked, prepared) = installer
+                .prepare_checked_cell(compile_context.clone(), block.source, authority, None, None)
+                .await?;
+            if checked.items.len() != 1
+                || checked.items[0].verdict.kind != TurnKind::Bind
+                || !checked.items[0].verdict.binders.is_empty()
+            {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "tool installer must be one checked bind without public binders".into(),
+                ));
+            }
+            let PreparedCell::Ready {
+                mut items,
+                dependencies,
+            } = prepared
+            else {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "tool installer checked program was rejected before execution".into(),
+                ));
+            };
+            let item = items.pop().ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "tool installer checked program has no executable item".into(),
+                )
+            })?;
+            let block = ParsedBlock {
+                ordinal: 1,
+                total: 1,
+                source: checked.items[0].source.clone(),
+            };
+            let step = installer
+                .begin_prepared_cell_item(compile_context.clone(), block, item, 0)
+                .await?;
             let ResidentWorkbenchStep::Running { outcome, .. } = step else {
                 let detail = match step {
                     ResidentWorkbenchStep::Rejected(detail) => detail.output,
@@ -3751,6 +3864,7 @@ where
             if publication.is_ok() {
                 abort_guard.disarm();
             }
+            drop(dependencies);
             publication
         })
     }
@@ -3933,8 +4047,7 @@ where
     pub(crate) async fn mount_activation_input(
         &self,
         context: crate::ActorSessionContext,
-        input_type: String,
-        input: RootCustody,
+        input: tidepool_runtime::session::RuntimeActivationInput,
         reply_type: String,
         reply_declaration: Option<String>,
         reply_declaration_modules: Vec<String>,
@@ -3952,70 +4065,52 @@ where
         }
         source.preamble = actor_preamble(&source.preamble, &context).into();
         let type_modules = self.type_modules.clone();
+        let authority = self.compilation_authority.clone().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "activation requires its original source authority".into(),
+            )
+        })?;
         let preview = self
             .access
             .with_machine(context, move |session, context, _| {
-                use tidepool_runtime::session::turn::{
-                    assemble_activation_module, run_activation_turn,
-                };
-                use tidepool_runtime::session::{TemplateSelector, TurnTemplate};
+                use tidepool_runtime::session::turn::{check_activation_input, compile_activation_input};
                 let view = actor_compile_view(session, context, &source, &type_modules)?;
-                let generation = view.next_value_generation();
                 let prepared = source.prepare(&view);
                 let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
-                let templates = [TurnTemplate {
-                    kind: TemplateSelector::Bind,
-                    source: assemble_activation_module(
-                        &preamble,
-                        &context.haskell_effects_alias,
-                        &input_type,
-                        ACTIVATION_INPUT_LIMIT,
-                    ),
-                }];
-                let include: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
-                let retained = session.prepared_retained();
-                let result = run_activation_turn(TurnRequest {
-                exact_context: view.exact_declaration_context().cloned(),
-                session_id: Some(view.session_id()),
-                    turn_text: "sessionInput <- pure undefined",
-                    templates: &templates,
-                    include: &include,
-                    session_root: view.session_root(),
-                    inject_modules: &prepared.injected,
-                    gen: generation.0,
-                    verdict: Some(generated_bind_verdict("sessionInput")),
-                    target: None,
-                    retained_imports: &retained,
-                })
-                .map_err(|failure| {
+                let candidate = session.next_declaration_module().ok_or_else(|| {
+                    ResidentActorWorkbenchError::InputMount("activation has no declaration plane".into())
+                })?;
+                let check_preamble = cell_module_preamble(&prepared.preamble, &candidate.module_name())?;
+                let template = resident_cell_check_template(
+                    &check_preamble,
+                    &context.haskell_effects_alias,
+                    &prepared.imports,
+                );
+                let evidence = cell_check_evidence(&view, &template, &prepared);
+                let owner = session.admit_activation_input_in(
+                    context.placement.lexical_scope,
+                    input,
+                    &preamble,
+                    &context.haskell_effects_alias,
+                    ACTIVATION_INPUT_LIMIT,
+                    template,
+                    authority.clone(),
+                    authority.authority_digest(),
+                    prepared.include,
+                    evidence,
+                ).map_err(ResidentActorWorkbenchError::Resident)?;
+                let checked = check_activation_input(&owner).map_err(|failure| {
                     ResidentActorWorkbenchError::InputMount(failure.error.to_string())
                 })?;
-                let TurnResult::Bind {
-                    bound, compiled, ..
-                } = result
-                else {
-                    return Err(ResidentActorWorkbenchError::InputMount(
-                        "activation did not produce a bind".into(),
-                    ));
-                };
-                let [binder] = bound.as_slice() else {
-                    return Err(ResidentActorWorkbenchError::InputMount(
-                        "activation did not produce one input binder".into(),
-                    ));
-                };
-                session
-                    .mount_compiled_binding_in(
-                        context.placement.lexical_scope,
-                        binder,
-                        generation,
-                        &compiled.table,
-                        input,
-                    )
+                let item = session.admit_activation_input_item(&owner, &checked)
                     .map_err(ResidentActorWorkbenchError::Resident)?;
-                let preview = match session.run_mounted_inspection_with_sites(
-                    compiled.into_code(),
-                    tidepool_repr::SessionVarId::from_extract(binder.var_id),
-                ) {
+                let compiled = compile_activation_input(&owner, item).map_err(|failure| {
+                    ResidentActorWorkbenchError::InputMount(failure.error.to_string())
+                })?;
+                let mounted = session.mount_activation_input(owner, compiled)
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                let binding = mounted.binding();
+                let preview = match session.run_activation_preview(mounted) {
                     Ok(ResidentOutcome::Suspended { hole, .. } | ResidentOutcome::Deferred { hole, .. }) => {
                         if let Err(abort_error) = session
                             .abort(hole.cont_id(), "pure activation preview suspended".into())
@@ -4026,14 +4121,25 @@ where
                                 "failed to abort parked hole after pure activation preview suspended"
                             );
                         }
-                        Err(ResidentActorWorkbenchError::Inspection(
+                        return Err(ResidentActorWorkbenchError::Inspection(
                             "pure activation preview suspended".into(),
-                        ))
+                        ));
                     }
                     Ok(outcome) => decode_activation_observation(outcome),
-                    Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
+                    Err(error) if error.is_observation_budget_exhausted()
+                        || matches!(&error,
+                            ResidentError::Prepared(prepared)
+                                if matches!(prepared,
+                                    tidepool_runtime::session::PreparedRuntimeError::Run(
+                                        tidepool_codegen::prepared_program::ExecutionError::Runtime(_)
+                                    )) && prepared.kind()
+                                        == tidepool_runtime::session::PreparedFailureKind::Language
+                        ) => {
+                        Err(ResidentActorWorkbenchError::Resident(error))
+                    }
+                    Err(error) => return Err(ResidentActorWorkbenchError::Resident(error)),
                 };
-                Ok((preview, tidepool_repr::SessionVarId::from_extract(binder.var_id)))
+                Ok((preview, binding))
             })
             .await?;
         let (preview, input_binding) = preview;
@@ -4139,11 +4245,11 @@ where
         match (&self.compilation_authority, &self.private_execution) {
             (Some(authority), Some(execution)) => {
                 return self
-                    .prepare_admitted_cell(
+                    .prepare_checked_cell(
                         context,
                         cell_source,
                         authority.clone(),
-                        execution.clone(),
+                        Some(execution.clone()),
                         leased_input,
                     )
                     .await;
@@ -4474,19 +4580,21 @@ where
 
     /// Retain the admitted source and input owners while one compiler
     /// transaction prepares all items before native execution becomes possible.
-    async fn prepare_admitted_cell(
+    async fn prepare_checked_cell(
         &self,
         context: crate::ActorSessionContext,
         cell_source: String,
         authority: Arc<crate::resident_actor::WorkbenchCompilationAuthority>,
-        execution: Arc<ExecutionPrivateScope>,
+        execution: Option<Arc<ExecutionPrivateScope>>,
         leased_input: Option<HostInputRetirement>,
     ) -> Result<(CellCheck, PreparedCell), ResidentActorWorkbenchError> {
-        if context.placement.lexical_scope != execution.private_scope
+        if execution
+            .as_ref()
+            .is_some_and(|execution| context.placement.lexical_scope != execution.private_scope)
             || context.source_layer.as_ref() != authority.source().include_paths()
         {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "checked cell preparation requires its admitted private context and source revision".into(),
+                "checked cell preparation requires its admitted context and source revision".into(),
             ));
         }
         let admission_execution = execution.clone();
@@ -4509,7 +4617,11 @@ where
                     response.as_ref(),
                     request,
                     mounted_input.as_ref(),
-                    Some(execution.admission.as_ref()),
+                    execution
+                        .as_ref()
+                        .map_or(CellSnapshotAdmission::ProtectedSetup, |execution| {
+                            CellSnapshotAdmission::PrivateExecution(execution.admission.as_ref())
+                        }),
                 )?;
                 let prepared = source.prepare(&snapshot.view);
                 let preamble = cell_module_preamble(
@@ -4578,19 +4690,28 @@ where
         let reservation_specification = specification.clone();
         let admission = self
             .access
-            .with_machine(context.clone(), move |session, _, _| {
-                session
-                    .admit_planned_cell_for_execution(
-                        admission_execution.admission.clone(),
+            .with_machine(context.clone(), move |session, context, _| {
+                let admitted = match admission_execution {
+                    Some(execution) => session.admit_planned_cell_for_execution(
+                        execution.admission.clone(),
                         plan,
                         reservation_specification.clone(),
                         reservation_specification.cell.specification_digest(),
                         reservation_specification._authority.authority_digest(),
                         reservation_specification.include.clone(),
-                    )
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })
+                    ),
+                    None => session.admit_native_setup_cell_in(
+                        context.placement.lexical_scope,
+                        plan,
+                        reservation_specification.clone(),
+                        reservation_specification.cell.specification_digest(),
+                        reservation_specification._authority.authority_digest(),
+                        reservation_specification.include.clone(),
+                    ),
+                };
+                admitted.map_err(|error| {
+                    ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                })
             })
             .await?;
         let check_specification = specification.clone();
@@ -4953,7 +5074,7 @@ where
                             queries,
                             effects: Some(&context.haskell_effects_alias),
                         })
-                        .map_err(|error| error.to_string())
+                        .map_err(crate::lookup::LookupInspectionError::Compiler)
                     },
                 );
                 if !request_pending {
@@ -7344,6 +7465,69 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    /// Move only the returned actor-program successor out of a hosted cell's
+    /// cleanup set. The target guard is established before the source releases
+    /// its exact id; all other cell continuations remain owned by the cell.
+    pub(crate) fn handoff_actor_continuation(
+        &self,
+        context: crate::ActorSessionContext,
+        outcome: &ResidentOutcome,
+    ) -> Result<Option<ParkedHoleAbortGuard>, ResidentActorWorkbenchError> {
+        let Some(cont_id) = outcome_continuation_id(outcome) else {
+            return Ok(None);
+        };
+        let reason = "actor program abandoned before continuation settlement".to_owned();
+        let source = SLOT_CONTINUATION_OWNER.try_with(Clone::clone).ok();
+        let Some(source) = source else {
+            return Ok(Some(ParkedHoleAbortGuard::with_latest(
+                &self.access,
+                context,
+                Some(cont_id),
+                reason,
+            )));
+        };
+        let refusal = |reason| ResidentActorWorkbenchError::ContinuationHandoff {
+            actor: context.actor,
+            placement: context.placement,
+            continuation: cont_id.clone(),
+            reason,
+        };
+        let exact_owner = source.0.owner == Some((context.actor, context.placement));
+        let private_owner = source
+            .0
+            .retained_authority
+            .as_ref()
+            .and_then(|authority| {
+                authority.downcast_ref::<crate::resident_actor::ExecutionResourceOwners>()
+            })
+            .is_some_and(|resources| resources.authorizes_cleanup_context(&context));
+        if !exact_owner && !private_owner {
+            return Err(refusal(ContinuationHandoffFailure::WrongOwner));
+        }
+        let mut state = source.0.state.lock();
+        let current = match &mut *state {
+            ParkedHoleState::Owned(current) => current,
+            ParkedHoleState::Abandoned(_) => {
+                return Err(refusal(ContinuationHandoffFailure::Abandoned))
+            }
+            ParkedHoleState::Settled => return Err(refusal(ContinuationHandoffFailure::Settled)),
+        };
+        if !current.contains(&cont_id) {
+            return Err(refusal(ContinuationHandoffFailure::NotOwned));
+        }
+        let target = ParkedHoleAbortGuard::with_retained_latest(
+            &self.access,
+            context.clone(),
+            Some(cont_id.clone()),
+            reason,
+            source.0.retained_authority.clone(),
+        );
+        current.remove(&cont_id);
+        tracing::info!(actor = ?context.actor, continuation = %cont_id,
+            remaining_cell_holes = current.len(), "actor continuation custody transferred");
+        Ok(Some(target))
+    }
+
     /// Establish the exact durable public surface before root readiness.
     pub(crate) async fn bind_durable_root_public_owner(
         &self,
@@ -7385,6 +7569,70 @@ where
                 },
             )
             .await
+    }
+
+    pub(crate) async fn begin_public_bootstrap(
+        &self,
+        context: crate::ActorSessionContext,
+        owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
+    ) -> Result<
+        Option<tidepool_runtime::session::DurablePublicBootstrap>,
+        ResidentActorWorkbenchError,
+    > {
+        if !owner.matches_context(&context) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "bootstrap requires its original public owner".into(),
+            ));
+        }
+        let Some(durable) = owner.durable().cloned() else {
+            return Ok(None);
+        };
+        self.access
+            .with_machine(context, move |session, context, _| {
+                session
+                    .begin_durable_public_bootstrap(durable, context.placement.lexical_scope)
+                    .map(Some)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await
+    }
+
+    pub(crate) async fn publish_public_bootstrap(
+        &self,
+        context: crate::ActorSessionContext,
+        owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
+        bootstrap: Option<tidepool_runtime::session::DurablePublicBootstrap>,
+    ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
+        if !owner.matches_context(&context) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "bootstrap publication requires its original public owner".into(),
+            ));
+        }
+        let Some(bootstrap) = bootstrap else {
+            return Ok(tidepool_runtime::session::PublicManifestCommit::Durable);
+        };
+        let durable = owner.durable().cloned().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "durable bootstrap lost its original public owner".into(),
+            )
+        })?;
+        self.access.with_machine(context, move |session, context, _| {
+            let commit = session.publish_durable_public_bootstrap(bootstrap)
+                .map_err(ResidentError::Session)?;
+            match commit {
+                tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { detail } => {
+                    match session.confirm_durable_public_scope(&durable, context.placement.lexical_scope) {
+                        Ok(()) => Ok(tidepool_runtime::session::PublicManifestCommit::Durable),
+                        Err(error) => Ok(tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed {
+                            detail: format!("{detail}; confirmation failed: {error}"),
+                        }),
+                    }
+                }
+                other => Ok(other),
+            }
+        }).await
     }
 
     pub(crate) async fn validate_fork_child_scope(
@@ -7507,6 +7755,15 @@ where
                 "publication requires its original public owner".into(),
             ));
         }
+        let actor = context.actor;
+        let scope = execution.public_scope;
+        let publication_error =
+            move |phase, source| ResidentActorWorkbenchError::PrivatePublication {
+                actor,
+                scope,
+                phase,
+                source: Box::new(source),
+            };
         let admission = execution.admission.clone();
         let intent = self
             .access
@@ -7517,7 +7774,8 @@ where
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })
             })
-            .await?;
+            .await
+            .map_err(|error| publication_error(PrivatePublicationPhase::Freeze, error))?;
         let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
         loop {
@@ -7545,7 +7803,8 @@ where
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })
                 })
-                .await?;
+                .await
+                .map_err(|error| publication_error(PrivatePublicationPhase::Restage, error))?;
             let compile_cancellation = cancellation.clone();
             let prepared = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 tidepool_runtime::with_compiler_transaction_cancellable(
@@ -7568,8 +7827,8 @@ where
                 )
             }))
             .await
-            .map_err(ResidentActorWorkbenchError::Join)?
-            .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
+            .map_err(|error| publication_error(PrivatePublicationPhase::CertifyAndStage, ResidentActorWorkbenchError::Join(error)))?
+            .map_err(|error| publication_error(PrivatePublicationPhase::CertifyAndStage, ResidentActorWorkbenchError::Resident(ResidentError::Session(error))))?;
             match prepared {
                 PreparedExecutionPublication::Manifest(ticket) => {
                     let decision = execution.decision.clone();
@@ -7584,7 +7843,10 @@ where
                                     ))
                                 })
                         })
-                        .await?;
+                        .await
+                        .map_err(|error| {
+                            publication_error(PrivatePublicationPhase::Publish, error)
+                        })?;
                     if outcome == tidepool_runtime::session::PublicManifestCommit::Stale {
                         continue;
                     }
@@ -7603,7 +7865,10 @@ where
                                     ))
                                 })
                         })
-                        .await?;
+                        .await
+                        .map_err(|error| {
+                            publication_error(PrivatePublicationPhase::RevalidateRejection, error)
+                        })?;
                     match outcome {
                         tidepool_runtime::session::DeclarationPublicationRejection::Stale => {
                             continue
@@ -10481,9 +10746,9 @@ enum CompiledBlock {
 struct CellSplitSnapshot {
     view: crate::ActorCompileView,
     candidate_module: tidepool_repr::SessionModule,
-    /// Retained imports for the speculative single-item compile. `view` owns
-    /// a reserved value generation before the snapshot leaves its checkout.
-    /// Source freshness is checked again before installation.
+    /// Retained imports for the speculative single-item compile. Legacy fold
+    /// snapshots reserve a value generation; protected setup delegates its
+    /// ordered reservations to runtime admission. Installation rechecks source.
     retained: Vec<(SymbolIdentity, u64)>,
 }
 
@@ -10517,8 +10782,15 @@ where
         response,
         request,
         mounted_input,
-        None,
+        CellSnapshotAdmission::LegacyFold,
     )
+}
+
+#[derive(Clone, Copy)]
+enum CellSnapshotAdmission<'a> {
+    LegacyFold,
+    ProtectedSetup,
+    PrivateExecution(&'a tidepool_runtime::session::PrivateExecutionAdmission),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10530,7 +10802,7 @@ fn snapshot_cell_split_owned<H, O>(
     response: Option<&ResponseExpectation>,
     request: Option<crate::RequestId>,
     mounted_input: Option<&MountedHostInput>,
-    execution: Option<&tidepool_runtime::session::PrivateExecutionAdmission>,
+    admission: CellSnapshotAdmission<'_>,
 ) -> Result<(ActorWorkbenchSource, CellSplitSnapshot), ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -10565,7 +10837,7 @@ where
     }
     .into();
     source.preamble = actor_preamble(&source.preamble, context).into();
-    let view = if let Some(execution) = execution {
+    let view = if let CellSnapshotAdmission::PrivateExecution(execution) = admission {
         if execution.private_scope() != context.placement.lexical_scope {
             return Err(ResidentActorWorkbenchError::Resident(
                 ResidentError::Session(
@@ -10582,13 +10854,26 @@ where
             .compile_view(session_view)?
             .with_workbench_imports(&source.workbench_imports)
             .with_type_modules(type_modules)
+    } else if matches!(admission, CellSnapshotAdmission::ProtectedSetup) {
+        let session_view = session
+            .compile_view_in(context.placement.lexical_scope)
+            .ok_or(ResidentActorWorkbenchError::Resident(
+                ResidentError::Session(tidepool_runtime::session::SessionError::DeadScope(
+                    context.placement.lexical_scope,
+                )),
+            ))?
+            .with_scoped_injection();
+        context
+            .compile_view(session_view)?
+            .with_workbench_imports(&source.workbench_imports)
+            .with_type_modules(type_modules)
     } else {
         actor_compile_view(session, context, &source, type_modules)?
     };
     // The fold can write a Val interface during the whole-cell check. Claim
     // its identity before releasing checkout: rejecting a stale result later
     // cannot undo a compiler overwriting another actor's interface.
-    if execution.is_none() {
+    if matches!(admission, CellSnapshotAdmission::LegacyFold) {
         session.reserve_value_generations_through(view.next_value_generation());
     }
     let retained = session.prepared_retained();
@@ -16370,8 +16655,59 @@ mod request_tests {
         );
     }
 
+    /// Mount the source binding through the legacy typed host interface used
+    /// by these request-scope alias tests. The custody is retained from the
+    /// actual source binder and consumed by the ordinary compiled-binding
+    /// mount; these tests do not model activation-input admission.
+    async fn mount_request_scope_test_input(
+        workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        context: crate::ActorSessionContext,
+    ) -> Result<tidepool_repr::SessionVarId, ResidentActorWorkbenchError> {
+        let scope = context.placement.lexical_scope;
+        let source = workbench.access.source.clone();
+        let type_modules = workbench.type_modules.clone();
+        workbench
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let (source_id, ..) = session
+                    .current_binding_in(scope, "sourceValue")
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::InputMount(
+                            "sourceValue is not visible in the request scope test".into(),
+                        )
+                    })?;
+                let custody = session
+                    .retain_binding_custody_in(scope, "sourceValue", source_id)?
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::InputMount(
+                            "sourceValue has no retained custody".into(),
+                        )
+                    })?;
+                let (binder, compiled, generation) = compile_host_binding(
+                    session,
+                    context,
+                    &source,
+                    &type_modules,
+                    "sessionInput",
+                    "()",
+                    "sourceValue",
+                    SourceImports::default(),
+                    false,
+                )?;
+                session.mount_compiled_binding_in(
+                    scope,
+                    &binder,
+                    generation,
+                    &compiled.table,
+                    custody,
+                )?;
+                Ok(tidepool_repr::SessionVarId::from_extract(binder.var_id))
+            })
+            .await
+    }
+
     #[tokio::test]
-    async fn request_input_borrow_refuses_a_shadowed_mount() {
+    async fn request_scope_alias_borrow_refuses_a_shadowed_mount() {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
         let step = workbench
@@ -16395,42 +16731,12 @@ mod request_tests {
                 .expect("source value binds");
         }
         let scope = context.placement.lexical_scope;
-        let borrow_source = || async {
-            workbench
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    let (id, ..) = session
-                        .current_binding_in(scope, "sourceValue")
-                        .expect("source value remains visible");
-                    Ok(session
-                        .retain_binding_custody_in(scope, "sourceValue", id)
-                        .expect("retain source value")
-                        .expect("borrow source value"))
-                })
-                .await
-        };
-        let (_, _, first) = workbench
-            .mount_activation_input(
-                context.clone(),
-                "()".into(),
-                borrow_source().await.expect("source borrow"),
-                "()".into(),
-                None,
-                vec![],
-            )
+        let first = mount_request_scope_test_input(&workbench, context.clone())
             .await
-            .expect("first activation mount");
-        let (_, _, second) = workbench
-            .mount_activation_input(
-                context.clone(),
-                "()".into(),
-                borrow_source().await.expect("source borrow"),
-                "()".into(),
-                None,
-                vec![],
-            )
+            .expect("first request-scope alias mount");
+        let second = mount_request_scope_test_input(&workbench, context.clone())
             .await
-            .expect("second activation shadows the first");
+            .expect("second alias shadows the first");
         assert_ne!(first, second);
         workbench
             .access
@@ -16454,7 +16760,7 @@ mod request_tests {
     }
 
     #[tokio::test]
-    async fn current_request_private_cell_borrows_activation_input_without_extra_root() {
+    async fn current_request_private_cell_borrows_scope_alias_without_extra_root() {
         let (machines, mut context, mut source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Replies]".into();
         source
@@ -16491,27 +16797,7 @@ mod request_tests {
             _ => panic!("source binding did not complete"),
         }
         let original_scope = context.placement.lexical_scope;
-        let input = workbench
-            .access
-            .with_machine(context.clone(), move |session, _, _| {
-                let (id, ..) = session
-                    .current_binding_in(original_scope, "sourceValue")
-                    .unwrap();
-                Ok(session
-                    .retain_binding_custody_in(original_scope, "sourceValue", id)?
-                    .expect("owned input"))
-            })
-            .await
-            .unwrap();
-        let (_, _, binding) = workbench
-            .mount_activation_input(
-                context.clone(),
-                "()".into(),
-                input,
-                "()".into(),
-                None,
-                vec![],
-            )
+        let binding = mount_request_scope_test_input(&workbench, context.clone())
             .await
             .unwrap();
         let (private, before) = workbench
@@ -18049,6 +18335,157 @@ mod request_tests {
     }
 
     #[tokio::test]
+    async fn actor_continuation_handoff_preserves_successor_and_aborts_other_cell_holes() {
+        let (machines, mut context, source, _root) = actor_registry_fixture();
+        context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
+        let workbench =
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+        let runner = ResidentActorRunner::new(machines, source.clone());
+        let cell = ParkedHoleAbortGuard::with_latest(
+            &workbench.access,
+            context.clone(),
+            None,
+            "test cell abandoned".into(),
+        );
+        let registration = cell.registration();
+        let (successor, other) = registration
+            .scope(async {
+                let mut outcomes = Vec::new();
+                for _ in 0..2 {
+                    let (block, verdict) = suspending_fragment();
+                    let step = workbench
+                        .begin_fragment_split(
+                            context.clone(),
+                            source.clone(),
+                            vec![],
+                            block,
+                            Some(verdict),
+                        )
+                        .await
+                        .expect("real native fragment parks");
+                    let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+                        panic!("expected native suspension");
+                    };
+                    outcomes.push(*outcome);
+                }
+                let other = outcomes.pop().unwrap();
+                (outcomes.pop().unwrap(), other)
+            })
+            .await;
+        let successor_id = outcome_continuation_id(&successor).unwrap();
+        let other_id = outcome_continuation_id(&other).unwrap();
+        let actor = registration
+            .sync_scope(|| runner.handoff_actor_continuation(context.clone(), &successor))
+            .expect("actor accepts exact successor")
+            .expect("suspended successor has cleanup");
+        assert_eq!(
+            registration.awaiting_acknowledgement(),
+            vec![other_id.clone()]
+        );
+        let duplicate = registration
+            .sync_scope(|| runner.handoff_actor_continuation(context.clone(), &successor));
+        assert!(matches!(
+            duplicate,
+            Err(ResidentActorWorkbenchError::ContinuationHandoff {
+                reason: ContinuationHandoffFailure::NotOwned,
+                ..
+            })
+        ));
+        assert_eq!(
+            registration.awaiting_acknowledgement(),
+            vec![other_id.clone()]
+        );
+        drop(cell);
+        let inspect = |expected_actor: bool| {
+            let successor_id = successor_id.clone();
+            let other_id = other_id.clone();
+            let context = context.clone();
+            let workbench = &workbench;
+            async move {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let settled = workbench
+                            .access
+                            .with_machine(context.clone(), {
+                                let successor_id = successor_id.clone();
+                                let other_id = other_id.clone();
+                                move |session, _, _| {
+                                    let parked = session.parked_holes();
+                                    if expected_actor {
+                                        assert!(parked.contains(&successor_id.as_str()));
+                                    }
+                                    Ok(!parked.contains(&other_id.as_str())
+                                        && parked.contains(&successor_id.as_str())
+                                            == expected_actor)
+                                }
+                            })
+                            .await
+                            .expect("native cleanup checkout");
+                        if settled {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("exact cleanup settles");
+            }
+        };
+        inspect(true).await;
+        drop(actor);
+        inspect(false).await;
+    }
+
+    #[tokio::test]
+    async fn actor_continuation_handoff_refuses_abandoned_settled_and_foreign_owners() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let runner = ResidentActorRunner::new(machines, source);
+        let outcome = ResidentOutcome::Suspended {
+            output: vec![],
+            hole: ResidentHole::plain("successor"),
+            request: HaskellValue::Con(tidepool_repr::DataConId(0), vec![]),
+        };
+        for reason in [
+            ContinuationHandoffFailure::Abandoned,
+            ContinuationHandoffFailure::Settled,
+            ContinuationHandoffFailure::WrongOwner,
+        ] {
+            let state = match reason {
+                ContinuationHandoffFailure::Abandoned => {
+                    ParkedHoleState::Abandoned(["successor".into()].into_iter().collect())
+                }
+                ContinuationHandoffFailure::Settled => ParkedHoleState::Settled,
+                _ => ParkedHoleState::Owned(["successor".into()].into_iter().collect()),
+            };
+            let mut owner = context.placement;
+            if reason == ContinuationHandoffFailure::WrongOwner {
+                owner.lexical_scope = tidepool_codegen::scope::ScopeId(u64::MAX);
+            }
+            let guard = ParkedHoleAbortGuard {
+                shared: Arc::new(ParkedHoleAbortState {
+                    owner: Some((context.actor, owner)),
+                    abort: Arc::new(|_| {}),
+                    state: Mutex::new(state),
+                    reason: "test".into(),
+                    retained_authority: None,
+                }),
+            };
+            let registration = guard.registration();
+            let before = registration.awaiting_acknowledgement();
+            let error = registration
+                .sync_scope(|| runner.handoff_actor_continuation(context.clone(), &outcome))
+                .err()
+                .expect("refused handoff");
+            assert!(
+                matches!(error, ResidentActorWorkbenchError::ContinuationHandoff {
+                reason: actual, ..
+            } if actual == reason)
+            );
+            assert_eq!(registration.awaiting_acknowledgement(), before);
+        }
+    }
+
+    #[tokio::test]
     async fn late_parked_hole_registration_aborts_only_its_own_continuation() {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
@@ -18532,5 +18969,240 @@ mod request_tests {
         both_registration.observe(ResidentContinuationEvent::Parked("helper".into()));
         drop(both);
         assert_eq!(&*aborted.lock(), &["helper", "parent"]);
+    }
+    #[test]
+    fn native_setup_admission_refuses_other_parser_shapes_before_reservation() {
+        let (mut session, context, source, _root) = host_mount_fixture();
+        let mut sibling = context.clone();
+        sibling.actor = crate::ActorRef::first(crate::ActorId(2));
+        sibling.placement.lexical_scope = session.mint_isolated_scope();
+        let _foreign_input = mount_json_input(
+            &mut session,
+            &sibling,
+            &source,
+            &[],
+            &serde_json::json!(42),
+            None,
+        )
+        .expect("sibling owns a genuine compiled native value");
+        let raw_view = actor_compile_view(&session, &context, &source, &[]).unwrap();
+        let raw_injection = source.prepare(&raw_view).injected;
+        let before_snapshot = raw_view.next_value_generation();
+        let (scoped_source, snapshot) = snapshot_cell_split_owned(
+            &mut session,
+            &context,
+            source.clone(),
+            &[],
+            None,
+            None,
+            None,
+            CellSnapshotAdmission::ProtectedSetup,
+        )
+        .unwrap();
+        let prepared = scoped_source.prepare(&snapshot.view);
+        assert!(!raw_injection.is_empty());
+        assert!(
+            prepared.injected.is_empty(),
+            "sibling values are not selected by setup"
+        );
+        assert_eq!(snapshot.view.next_value_generation(), before_snapshot);
+        assert_eq!(
+            session
+                .compile_view_in(context.placement.lexical_scope)
+                .unwrap()
+                .next_value_generation(),
+            before_snapshot,
+            "protected snapshot must leave reservation to ordered admission"
+        );
+        let template = resident_cell_check_template(
+            &prepared.preamble,
+            &context.haskell_effects_alias,
+            &prepared.imports,
+        );
+        let templates = resident_workbench_templates(
+            &prepared.preamble,
+            &context.haskell_effects_alias,
+            &prepared.imports,
+        );
+        for text in [
+            "",
+            "pure ()",
+            "let named = 1",
+            "named <- pure ()",
+            "data Owned = Owned",
+            "_ <- pure ()\n_ <- pure ()",
+        ] {
+            let before = actor_compile_view(&session, &context, &source, &[])
+                .unwrap()
+                .next_value_generation();
+            let specification =
+                Arc::new(tidepool_toolchain::checked_cell::CheckedCellSpecification {
+                    admission_digest: [0; 32],
+                    cell_source: text.into(),
+                    template_source: template.clone(),
+                    turn_templates: templates
+                        .iter()
+                        .map(|template| {
+                            let kind = match template.kind {
+                                tidepool_runtime::session::TemplateSelector::Decl => "decl",
+                                tidepool_runtime::session::TemplateSelector::Bind => "bind",
+                                tidepool_runtime::session::TemplateSelector::BindDiscard => {
+                                    "binddiscard"
+                                }
+                                tidepool_runtime::session::TemplateSelector::Expr => "expr",
+                            };
+                            (kind.to_owned(), template.source.clone())
+                        })
+                        .collect(),
+                    injected_modules: prepared.injected.clone(),
+                    reserved_declaration_modules: Vec::new(),
+                });
+            let plan = tidepool_toolchain::artifacts::parse_cell_plan(
+                specification.clone(),
+                &prepared.include,
+            );
+            if let Ok(plan) = plan {
+                assert!(
+                    session
+                        .admit_native_setup_cell_in(
+                            context.placement.lexical_scope,
+                            plan,
+                            specification.clone(),
+                            specification.specification_digest(),
+                            [9; 32],
+                            prepared.include.clone()
+                        )
+                        .is_err(),
+                    "setup accepted {text:?}"
+                );
+            } else {
+                assert!(
+                    text.is_empty(),
+                    "nonempty negative parser fixture must produce a sealed plan: {text:?}"
+                );
+            }
+            assert_eq!(
+                actor_compile_view(&session, &context, &source, &[])
+                    .unwrap()
+                    .next_value_generation(),
+                before,
+                "refused setup reserved generation for {text:?}"
+            );
+        }
+        let specification = Arc::new(tidepool_toolchain::checked_cell::CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: "_ <- pure ()".into(),
+            template_source: template,
+            turn_templates: templates
+                .iter()
+                .map(|template| {
+                    let kind = match template.kind {
+                        tidepool_runtime::session::TemplateSelector::Decl => "decl",
+                        tidepool_runtime::session::TemplateSelector::Bind => "bind",
+                        tidepool_runtime::session::TemplateSelector::BindDiscard => "binddiscard",
+                        tidepool_runtime::session::TemplateSelector::Expr => "expr",
+                    };
+                    (kind.to_owned(), template.source.clone())
+                })
+                .collect(),
+            injected_modules: prepared.injected,
+            reserved_declaration_modules: Vec::new(),
+        });
+        let raw = session
+            .admit_cell_in(
+                context.placement.lexical_scope,
+                0,
+                specification.clone(),
+                specification.specification_digest(),
+                [9; 32],
+                prepared.include.clone(),
+            )
+            .unwrap();
+        let raw_view = raw.view().clone();
+        let include = prepared
+            .include
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let request = CellCheckRequest {
+            exact_context: raw_view.exact_declaration_context().cloned(),
+            session_id: Some(raw_view.session()),
+            cell_text: &specification.cell_source,
+            template: &specification.template_source,
+            include: &include,
+            session_root: raw_view.session_root(),
+            inject_modules: &specification.injected_modules,
+            compile_generation: raw_view.next_value_generation().0,
+            compile_view_evidence: "raw no-private refusal control",
+        };
+        assert!(
+            tidepool_runtime::session::turn::compile_cell_program_admitted(
+                request, raw, &templates
+            )
+            .is_err(),
+            "bare public cell admission must not acquire native setup authority"
+        );
+        let mut leaked = specification.as_ref().clone();
+        leaked.injected_modules = raw_injection;
+        let leaked = Arc::new(leaked);
+        let leaked_plan =
+            tidepool_toolchain::artifacts::parse_cell_plan(leaked.clone(), &prepared.include)
+                .unwrap();
+        let before_refusal = session
+            .compile_view_in(context.placement.lexical_scope)
+            .unwrap()
+            .next_value_generation();
+        let refusal = match session.admit_native_setup_cell_in(
+            context.placement.lexical_scope,
+            leaked_plan,
+            leaked.clone(),
+            leaked.specification_digest(),
+            [9; 32],
+            prepared.include.clone(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("setup accepted foreign injection"),
+        };
+        match refusal {
+            tidepool_runtime::session::SessionError::InvalidNativeSetupAdmission {
+                scope,
+                reason:
+                    tidepool_runtime::session::NativeSetupAdmissionFailure::InjectionInventory {
+                        planned,
+                        reachable,
+                    },
+                ..
+            } => {
+                assert_eq!(scope, context.placement.lexical_scope);
+                assert!(planned.count > 0);
+                assert_eq!(reachable.count, 0);
+                assert_ne!(planned.digest, reachable.digest);
+            }
+            other => panic!("expected exact injection refusal, got {other:?}"),
+        }
+        assert_eq!(
+            session
+                .compile_view_in(context.placement.lexical_scope)
+                .unwrap()
+                .next_value_generation(),
+            before_refusal
+        );
+        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
+            specification.clone(),
+            &prepared.include,
+        )
+        .unwrap();
+        let admitted = session
+            .admit_native_setup_cell_in(
+                context.placement.lexical_scope,
+                plan,
+                specification.clone(),
+                specification.specification_digest(),
+                [9; 32],
+                prepared.include,
+            )
+            .unwrap();
+        assert!(admitted.private_execution().is_none());
+        assert_eq!(admitted.plan_reservation().unwrap().items().len(), 1);
     }
 }

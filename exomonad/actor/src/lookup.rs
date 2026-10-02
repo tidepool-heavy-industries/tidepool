@@ -3,6 +3,72 @@ use crate::lookup_tool;
 use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 use tidepool_runtime::session::{InspectionQuery, InspectionResult};
 
+#[derive(Debug)]
+pub(crate) enum LookupInspectionError {
+    Compiler(tidepool_runtime::CompileError),
+    Message(String),
+}
+
+impl From<String> for LookupInspectionError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<&str> for LookupInspectionError {
+    fn from(message: &str) -> Self {
+        Self::Message(message.into())
+    }
+}
+
+fn render_lookup_inspection_error(error: &LookupInspectionError) -> String {
+    match error {
+        LookupInspectionError::Compiler(tidepool_runtime::CompileError::InputRejected(diags)) => {
+            render_lookup_diagnostics("lookup compiler input rejected", diags)
+        }
+        LookupInspectionError::Compiler(tidepool_runtime::CompileError::Diagnostics(diags)) => {
+            render_lookup_diagnostics("lookup Haskell query failed", diags)
+        }
+        LookupInspectionError::Compiler(tidepool_runtime::CompileError::WorkerFailure(diags)) => {
+            render_lookup_diagnostics("lookup compiler worker failed", diags)
+        }
+        LookupInspectionError::Compiler(error) => error.to_string(),
+        LookupInspectionError::Message(message) => message.clone(),
+    }
+}
+
+fn render_lookup_diagnostics(
+    heading: &str,
+    diagnostics: &[tidepool_toolchain::diag::ExtractDiag],
+) -> String {
+    let details = diagnostics
+        .iter()
+        .map(|diagnostic| match &diagnostic.span {
+            Some(span) if lookup_tool::is_generated_query_file(&span.file) => {
+                format!("{}: {}", diagnostic.severity, diagnostic.message)
+            }
+            Some(span) => format!(
+                "{}:{}:{}-{}:{}: {}: {}",
+                span.file,
+                span.start_line,
+                span.start_col,
+                span.end_line,
+                span.end_col,
+                diagnostic.severity,
+                diagnostic.message
+            ),
+            None => format!("{}: {}", diagnostic.severity, diagnostic.message),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let rendered = if details.is_empty() {
+        heading.to_owned()
+    } else {
+        format!("{heading}:\n{details}")
+    };
+    lookup_tool::strip_generated_query_locations(&rendered)
+}
+
 #[derive(FromHaskell)]
 #[haskell(name = "LookupRequest")]
 pub(crate) struct LookupRequest {
@@ -282,7 +348,7 @@ pub(crate) fn execute(
     live_modules: &[String],
     workspace_modules: &[String],
     usage: crate::UsagePointerTable,
-    inspect: impl Fn(&[InspectionQuery]) -> Result<Vec<InspectionResult>, String>,
+    inspect: impl Fn(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
 ) -> LookupBatch {
     let mut batch = LookupBatch {
         results: vec![],
@@ -426,6 +492,9 @@ pub(crate) fn execute(
                 })
                 .collect::<Vec<_>>(),
         )
+        .map_err(|error| {
+            bound_diagnostic(&render_lookup_inspection_error(&error), DIAGNOSTIC_BOUND)
+        })
     };
     for (index, reference) in request.references.iter().enumerate() {
         let query = if reference.module.is_empty() {
@@ -569,7 +638,13 @@ pub(crate) fn execute(
             match inspect(&discovery_queries) {
                 Ok(results) => results,
                 Err(error) => {
-                    batch.issue = Some(format!("lookup candidate discovery unavailable: {error}"));
+                    batch.issue = Some(bound_diagnostic(
+                        &format!(
+                            "lookup candidate discovery unavailable: {}",
+                            render_lookup_inspection_error(&error)
+                        ),
+                        DIAGNOSTIC_BOUND,
+                    ));
                     vec![]
                 }
             }
@@ -823,7 +898,7 @@ const DIAGNOSTIC_BOUND: usize = 2_000;
 fn isolate(
     prepared: &[lookup_tool::PreparedLookup],
     imports: &str,
-    inspect: &impl Fn(&[InspectionQuery]) -> Result<Vec<InspectionResult>, String>,
+    inspect: &impl Fn(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
 ) -> Vec<InspectionResult> {
     let mut results = Vec::new();
     for query in prepared {
@@ -840,9 +915,12 @@ fn isolate(
                     DIAGNOSTIC_BOUND,
                 ),
             })),
-            Err(error) => results.extend(own.iter().map(|_| InspectionResult::Rejected {
-                diagnostic: bound_diagnostic(&error, DIAGNOSTIC_BOUND),
-            })),
+            Err(error) => {
+                let diagnostic = render_lookup_inspection_error(&error);
+                results.extend(own.iter().map(|_| InspectionResult::Rejected {
+                    diagnostic: bound_diagnostic(&diagnostic, DIAGNOSTIC_BOUND),
+                }));
+            }
         }
     }
     results
@@ -855,6 +933,66 @@ mod tests {
     use tidepool_runtime::session::{
         IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability,
     };
+
+    #[test]
+    fn compiler_diagnostics_keep_details_until_lookup_outcome_rendering() {
+        let error =
+            LookupInspectionError::Compiler(tidepool_runtime::CompileError::WorkerFailure(vec![
+                tidepool_toolchain::diag::ExtractDiag {
+                    span: Some(tidepool_toolchain::diag::DiagSpan {
+                        file: "/tmp/query/Expr.hs".into(),
+                        start_line: 57,
+                        start_col: 9,
+                        end_line: 57,
+                        end_col: 21,
+                    }),
+                    severity: tidepool_toolchain::diag::DiagnosticSeverity::Error,
+                    message:
+                        "lookup module did not expose __tidepool_lookup_query\nsecondary detail"
+                            .into(),
+                },
+                tidepool_toolchain::diag::ExtractDiag {
+                    span: None,
+                    severity: tidepool_toolchain::diag::DiagnosticSeverity::Warning,
+                    message: "worker recovery detail".into(),
+                },
+            ]));
+
+        let rendered = render_lookup_inspection_error(&error);
+        assert!(
+            rendered.starts_with("lookup compiler worker failed:"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "error: lookup module did not expose __tidepool_lookup_query\nsecondary detail"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("warning: worker recovery detail"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("/tmp/query/Expr.hs"), "{rendered}");
+
+        let source_error =
+            LookupInspectionError::Compiler(tidepool_runtime::CompileError::Diagnostics(vec![
+                tidepool_toolchain::diag::ExtractDiag {
+                    span: Some(tidepool_toolchain::diag::DiagSpan {
+                        file: "src/Query.hs".into(),
+                        start_line: 57,
+                        start_col: 9,
+                        end_line: 57,
+                        end_col: 21,
+                    }),
+                    severity: tidepool_toolchain::diag::DiagnosticSeverity::Error,
+                    message: "source-level type error".into(),
+                },
+            ]));
+        assert!(render_lookup_inspection_error(&source_error)
+            .contains("src/Query.hs:57:9-57:21: error: source-level type error"));
+    }
+
     fn entry(name: &str) -> InfoEntry {
         InfoEntry {
             name: name.into(),

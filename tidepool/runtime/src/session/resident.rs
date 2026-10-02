@@ -62,6 +62,9 @@ enum ResidentResumeInput {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProgramProvenance {
     sites: BTreeMap<u64, YieldSite>,
+    // Authentication follows the original compiler bundle through owned roots.
+    // Public metadata construction alone cannot authorize a host input mount.
+    authenticated_inputs: std::collections::BTreeSet<u64>,
 }
 
 pub type ProgramProvenanceError = YieldSiteCollision;
@@ -76,7 +79,7 @@ impl ProgramProvenance {
     fn extend(&mut self, sites: &[YieldSite]) -> Result<(), ProgramProvenanceError> {
         for site in sites {
             if let Some(previous) = self.sites.get(&site.site) {
-                if previous != site {
+                if !previous.same_metadata(site) {
                     return Err(YieldSiteCollision {
                         site: site.site,
                         first: Box::new(previous.clone()),
@@ -94,6 +97,8 @@ impl ProgramProvenance {
         for site in other.sites.values() {
             self.extend(std::slice::from_ref(site))?;
         }
+        self.authenticated_inputs
+            .extend(other.authenticated_inputs.iter().copied());
         Ok(())
     }
 
@@ -366,6 +371,77 @@ pub struct RootCustody {
 
 // Custody must remain exclusive.
 static_assertions::assert_not_impl_any!(RootCustody: Clone, Copy);
+
+/// The original live activation input and its compiler-issued request type.
+/// It is captured from one parked request boundary, never assembled from an
+/// arbitrary type string and an unrelated value handle.
+#[derive(Debug)]
+pub struct RuntimeActivationInput {
+    custody: RootCustody,
+    site: u64,
+    input_type: String,
+    type_evidence: Arc<super::prepared::SiteTypeEvidence>,
+    input_type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+}
+
+static_assertions::assert_not_impl_any!(RuntimeActivationInput: Clone, Copy);
+
+impl RuntimeActivationInput {
+    pub fn input_type(&self) -> &str {
+        &self.input_type
+    }
+
+    pub fn type_evidence(&self) -> &Arc<super::prepared::SiteTypeEvidence> {
+        &self.type_evidence
+    }
+
+    pub fn placeholder_source(&self) -> String {
+        format!("sessionInput <- pure (undefined :: ({}))", self.input_type)
+    }
+}
+
+/// A host input compiler offer retaining the original affine value and the
+/// immutable installed source/tool owner. It cannot be executed as an
+/// authored cell; only its consuming host mount may use the compiled result.
+pub struct RuntimeActivationInputAdmission {
+    input: RuntimeActivationInput,
+    pub(super) admission: Arc<super::RuntimeCellAdmission>,
+    pub(super) specification: Arc<tidepool_toolchain::checked_cell::CheckedCellSpecification>,
+    pub(super) templates: Vec<super::TurnTemplate>,
+    pub(super) compile_view_evidence: String,
+}
+
+static_assertions::assert_not_impl_any!(RuntimeActivationInputAdmission: Clone, Copy);
+
+/// Compiler output branded for one host-input mount. Its native program is
+/// preview code; its placeholder binding has no authored completion claim.
+pub struct CompiledActivationInput {
+    pub(super) admission: Arc<super::RuntimeCheckedItemAdmission>,
+    pub(super) compiled: super::turn::CompiledTurn,
+    pub(super) binder: BoundBinder,
+    pub(super) proof: Arc<tidepool_toolchain::checked_cell::ExactCompiledActivationInput>,
+}
+
+static_assertions::assert_not_impl_any!(CompiledActivationInput: Clone, Copy);
+
+/// A committed host binding retaining its one preview and source owner.
+pub struct MountedActivationInput {
+    owner: Arc<super::RuntimeCellAdmission>,
+    compiled: super::turn::CompiledTurn,
+    proof: Arc<tidepool_toolchain::checked_cell::ExactCompiledActivationInput>,
+    binding: SessionVarId,
+    scope: ScopeId,
+    handle: PreparedHandle,
+    visibility: super::PublicVisibilitySnapshot,
+}
+
+impl MountedActivationInput {
+    pub fn binding(&self) -> SessionVarId {
+        self.binding
+    }
+}
+
+static_assertions::assert_not_impl_any!(MountedActivationInput: Clone, Copy);
 
 impl RootCustody {
     /// Wrap a handle minted by the resident session.
@@ -888,6 +964,32 @@ pub enum ResidentError {
     /// by numeric coincidence.
     #[error("root custody belongs to a different resident session")]
     ForeignCustody,
+    #[error("activation site {site} lacks its original live input/type evidence")]
+    InvalidActivationInput { site: u64 },
+    #[error("activation site {site} lacks its original canonical input type witness")]
+    MissingActivationInputWitness { site: u64 },
+    #[error("activation site {site} lacks compiler-authenticated original input metadata")]
+    UnauthenticatedActivationInputWitness { site: u64 },
+    #[error("activation site {site} canonical input type differs: original {original:?}, compiled {compiled:?}")]
+    ActivationInputTypeMismatch {
+        site: u64,
+        original: [u8; 32],
+        compiled: [u8; 32],
+    },
+    #[error("activation input {binding:?} was consumed before mount settlement failed: {source}")]
+    ActivationInputConsumed {
+        binding: SessionVarId,
+        #[source]
+        source: Box<ResidentError>,
+    },
+    #[error("activation input {binding:?} is mounted but its original interface retention failed: {source}")]
+    ActivationMountCommitted {
+        binding: SessionVarId,
+        #[source]
+        source: Box<ResidentError>,
+    },
+    #[error("activation preview {binding:?} no longer has its original mounted input and compiler owner")]
+    ActivationPreviewRefused { binding: SessionVarId },
     #[error("prepared startup entry no longer has its original native authority")]
     StaleStartupEntry,
     #[error("startup entry lacks its sealed compiler bundle identity")]
@@ -1160,6 +1262,11 @@ struct PreparedCheckedTurn {
     execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
 }
 
+enum PreparedExecutionPurpose {
+    Authored(Option<Arc<CheckedTurnCompletion>>),
+    HostActivationPreview,
+}
+
 fn checked_turn_plan(
     certification: &Option<super::turn::TurnCertification>,
     prepared: &PreparedProgram,
@@ -1169,6 +1276,9 @@ fn checked_turn_plan(
     let Some(certification) = certification else {
         return Ok(None);
     };
+    if certification.checked_activation_input.is_some() {
+        return Err(ResidentError::UnsupportedCheckedTurn);
+    }
     certification
         .validate_checked_table(table)
         .map_err(SessionError::Compile)?;
@@ -1233,6 +1343,7 @@ fn is_checked_turn(code: &TurnCode<'_>) -> bool {
         .as_ref()
         .is_some_and(|certification| {
             certification.checked_item().is_some()
+                || certification.checked_activation_input.is_some()
                 || certification.checked_execution().is_some()
                 || certification.checked_prefix().is_some()
                 || certification.checked_display().is_some()
@@ -2372,6 +2483,23 @@ where
         self.state.initialize_durable_public_scope(owner, scope)
     }
 
+    pub fn begin_durable_public_bootstrap(
+        &mut self,
+        owner: super::RecoveryPublicOwner,
+        scope: ScopeId,
+    ) -> Result<super::DurablePublicBootstrap, SessionError> {
+        self.settle_dropped_custody();
+        self.state.begin_durable_public_bootstrap(owner, scope)
+    }
+
+    pub fn publish_durable_public_bootstrap(
+        &mut self,
+        bootstrap: super::DurablePublicBootstrap,
+    ) -> Result<super::PublicManifestCommit, SessionError> {
+        self.settle_dropped_custody();
+        self.state.publish_durable_public_bootstrap(bootstrap)
+    }
+
     pub fn validate_recovered_public_owner(
         &self,
         owner: &super::RecoveryPublicOwner,
@@ -2432,6 +2560,119 @@ where
         )
     }
 
+    /// Seal one activation's original native input and protected compiler
+    /// recipe under its existing lexical scope. The source lease is retained
+    /// by the admission for the entire compile, mount and preview operation.
+    pub fn admit_activation_input_in(
+        &mut self,
+        scope: ScopeId,
+        input: RuntimeActivationInput,
+        preamble: &str,
+        effect_stack: &str,
+        preview_budget: usize,
+        cell_template: String,
+        retained_source: Arc<dyn std::any::Any + Send + Sync>,
+        authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
+        compile_view_evidence: String,
+    ) -> Result<RuntimeActivationInputAdmission, ResidentError> {
+        self.settle_dropped_custody();
+        if !Arc::ptr_eq(&input.custody.cleanup.0, &self.custody_cleanup) {
+            return Err(ResidentError::ForeignCustody);
+        }
+        let raw = input
+            .custody
+            .handle
+            .ok_or(ResidentError::InvalidActivationInput { site: input.site })?;
+        if self
+            .state
+            .prepared_mut()
+            .and_then(|engine| engine.prepared_handle_of(raw))
+            .is_none()
+        {
+            return Err(ResidentError::InvalidActivationInput { site: input.site });
+        }
+        let turn_template = super::turn::assemble_checked_activation_module(
+            preamble,
+            effect_stack,
+            input.input_type(),
+            preview_budget,
+        );
+        let injected_modules = self
+            .state
+            .compile_view_in(scope)
+            .ok_or(SessionError::DeadScope(scope))?
+            .with_scoped_injection()
+            .injected_module_names();
+        let specification = Arc::new(tidepool_toolchain::checked_cell::CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: input.placeholder_source(),
+            template_source: cell_template,
+            turn_templates: vec![("bind".into(), turn_template)],
+            injected_modules,
+            reserved_declaration_modules: Vec::new(),
+        });
+        let mut digest = blake3::Hasher::new();
+        let mut frame = |bytes: &[u8]| {
+            digest.update(&(bytes.len() as u64).to_le_bytes());
+            digest.update(bytes);
+        };
+        frame(b"TidepoolActivationInput1");
+        frame(&raw.0.to_le_bytes());
+        frame(&input.site.to_le_bytes());
+        frame(input.input_type.as_bytes());
+        frame(&input.type_evidence.commitment());
+        frame(&input.input_type_witness.commitment());
+        let input_commitment = *digest.finalize().as_bytes();
+        let admission = self.state.admit_host_activation_cell_in(
+            scope,
+            input_commitment,
+            retained_source,
+            specification.specification_digest(),
+            authority_digest,
+            include_paths,
+        )?;
+        let templates = vec![super::TurnTemplate {
+            kind: super::TemplateSelector::Bind,
+            source: specification.turn_templates[0].1.clone(),
+        }];
+        Ok(RuntimeActivationInputAdmission {
+            input,
+            admission,
+            specification,
+            templates,
+            compile_view_evidence,
+        })
+    }
+
+    pub fn admit_activation_input_item(
+        &mut self,
+        owner: &RuntimeActivationInputAdmission,
+        checked: &super::CellCheck,
+    ) -> Result<Arc<super::RuntimeCheckedItemAdmission>, ResidentError> {
+        let invalid = || ResidentError::InvalidActivationInput {
+            site: owner.input.site,
+        };
+        if checked
+            .admission()
+            .is_none_or(|admission| !Arc::ptr_eq(admission, &owner.admission))
+            || checked.items.len() != 1
+        {
+            return Err(invalid());
+        }
+        let item = checked.checked_item(0).map_err(SessionError::Compile)?;
+        if item.kind() != tidepool_toolchain::checked_cell::CheckedItemKind::Bind
+            || item.binders() != ["sessionInput"]
+            || item.source() != owner.input.placeholder_source()
+        {
+            return Err(invalid());
+        }
+        let prefix = self
+            .state
+            .begin_checked_prefix(owner.admission.clone(), item.clone())?;
+        Ok(self.state.admit_checked_item(prefix, item)?)
+    }
+
     pub fn begin_durable_private_execution(
         &mut self,
         owner: &super::RecoveryPublicOwner,
@@ -2456,6 +2697,26 @@ where
         program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
     ) -> Result<Option<Arc<super::RuntimeCheckedPrefix>>, SessionError> {
         self.state.begin_cell_program(admission, program)
+    }
+
+    pub fn admit_native_setup_cell_in(
+        &mut self,
+        scope: ScopeId,
+        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
+        specification: Arc<dyn std::any::Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.admit_native_setup_cell_in(
+            scope,
+            plan,
+            specification,
+            specification_digest,
+            authority_digest,
+            include_paths,
+        )
     }
 
     pub fn admit_planned_cell_for_execution(
@@ -3047,10 +3308,13 @@ where
     /// disposable workbench fragments without trusting request payload data.
     #[must_use]
     pub fn parked_realm(&self, hole: &ResidentHole) -> Option<RealmId> {
-        let entry = self
-            .parked
-            .iter()
-            .find(|entry| entry.name == hole.cont_id())?;
+        self.parked_realm_named(hole.cont_id())
+    }
+
+    /// Read the realm of an already registered frame without minting a resume token.
+    #[must_use]
+    pub fn parked_realm_named(&self, cont_id: &str) -> Option<RealmId> {
+        let entry = self.parked.iter().find(|entry| entry.name == cont_id)?;
         self.state.parked_realm(entry.id)
     }
 
@@ -3236,6 +3500,64 @@ where
             Arc::clone(&self.custody_cleanup),
             provenance,
         )))
+    }
+
+    /// Capture the live payload and its input type from the same original
+    /// parked request. The affine token retains the requesting program's
+    /// provenance independently of the actor that will mount the value.
+    pub fn capture_activation_input(
+        &mut self,
+        hole: &ResidentHole,
+        realm: RealmId,
+        site: u64,
+    ) -> Result<RuntimeActivationInput, ResidentError> {
+        let invalid = || ResidentError::InvalidActivationInput { site };
+        let entry = self
+            .parked
+            .iter()
+            .find(|entry| entry.name == hole.cont_id())
+            .ok_or_else(invalid)?;
+        let (_, evidence) = self
+            .state
+            .prepared_mut()
+            .and_then(|engine| engine.parked(entry.id))
+            .ok_or_else(invalid)?;
+        if evidence.site != site {
+            return Err(invalid());
+        }
+        let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
+        if !provenance.authenticated_inputs.contains(&site) {
+            return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
+        }
+        let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
+        let input_type = metadata
+            .inputs
+            .first()
+            .filter(|_| metadata.inputs.len() <= 2)
+            .ok_or_else(invalid)?
+            .ty
+            .clone();
+        let missing_witness = || ResidentError::MissingActivationInputWitness { site };
+        if metadata.input_type_witnesses.len() != metadata.inputs.len() {
+            return Err(missing_witness());
+        }
+        let input_type_witness = metadata
+            .input_type_witnesses
+            .first()
+            .and_then(Option::as_ref)
+            .ok_or_else(missing_witness)?
+            .clone();
+        let type_evidence = self.request_site_type_evidence(site).ok_or_else(invalid)?;
+        let custody = self
+            .live_payload_handle_owned_by(hole.cont_id(), realm)?
+            .ok_or_else(invalid)?;
+        Ok(RuntimeActivationInput {
+            custody,
+            site,
+            input_type,
+            type_evidence: Arc::new(type_evidence),
+            input_type_witness: Arc::new(input_type_witness),
+        })
     }
 
     /// Transfer a rooted value to another runtime resource scope.
@@ -3531,6 +3853,123 @@ where
     /// Validation and table merge happen before ownership transfers. On
     /// success ownership transfers from the handle registry to the scoped
     /// persistent binding store exactly once.
+    pub fn mount_activation_input(
+        &mut self,
+        owner: RuntimeActivationInputAdmission,
+        compiled: CompiledActivationInput,
+    ) -> Result<MountedActivationInput, ResidentError> {
+        self.settle_dropped_custody();
+        let scope = owner.admission.visibility().scope;
+        let generation = compiled.admission.generation();
+        let invalid = || ResidentError::InvalidActivationInput {
+            site: owner.input.site,
+        };
+        if !Arc::ptr_eq(&owner.input.custody.cleanup.0, &self.custody_cleanup) {
+            return Err(ResidentError::ForeignCustody);
+        }
+        if !owner.admission.belongs_to(&self.state)
+            || self.run_context.lexical_scope != scope
+            || !Arc::ptr_eq(compiled.admission.prefix().admission(), &owner.admission)
+            || compiled.proof.item() != compiled.admission.item()
+            || compiled.proof.generation() != generation.0
+            || !compiled.proof.matches_target(&compiled.compiled.prepared)
+            || compiled.binder.name != "sessionInput"
+            || compiled.binder.module != SessionModule::val(generation).module_name()
+        {
+            return Err(invalid());
+        }
+        let certification = compiled
+            .compiled
+            .certification
+            .as_ref()
+            .ok_or_else(invalid)?;
+        if certification
+            .checked_activation_input
+            .as_ref()
+            .is_none_or(|proof| !Arc::ptr_eq(proof, &compiled.proof))
+            || certification
+                .checked_prefix
+                .as_ref()
+                .is_none_or(|prefix| !Arc::ptr_eq(prefix, compiled.admission.prefix()))
+        {
+            return Err(invalid());
+        }
+        if owner.input.input_type_witness.as_ref() != compiled.proof.input_type_witness() {
+            return Err(ResidentError::ActivationInputTypeMismatch {
+                site: owner.input.site,
+                original: owner.input.input_type_witness.commitment(),
+                compiled: compiled.proof.input_type_witness().commitment(),
+            });
+        }
+        compiled
+            .proof
+            .validate_yield_sites(&compiled.compiled.asks)
+            .map_err(SessionError::Compile)?;
+        compiled
+            .proof
+            .validate_table(&compiled.compiled.table)
+            .map_err(SessionError::Compile)?;
+        compiled
+            .proof
+            .validate_bound_binders(&[super::turn::encode_bound_binder_authority(&compiled.binder)])
+            .map_err(SessionError::Compile)?;
+        let interface = compiled
+            .proof
+            .value_interface_certificate()
+            .ok_or_else(invalid)?;
+        if !interface.is_checked_output() || interface.owner() != SessionModule::val(generation) {
+            return Err(invalid());
+        }
+        let binding = SessionVarId::from_extract(compiled.binder.var_id);
+        self.state.validate_new_binding_ids([binding])?;
+        let raw = owner.input.custody.handle.ok_or_else(invalid)?;
+        let handle = self
+            .state
+            .require_prepared()?
+            .prepared_handle_of(raw)
+            .ok_or_else(invalid)?;
+        self.state
+            .merge_table(&compiled.compiled.table)
+            .map_err(ResidentError::TableCollision)?;
+        self.state
+            .consume_host_activation_reservation(&compiled.admission, &compiled.proof)?;
+        self.mount_compiled_binding_prepared(
+            scope,
+            &compiled.binder,
+            generation,
+            owner.input.custody,
+            ValueInterfaceSource::Checked,
+        )
+        .map_err(|source| ResidentError::ActivationInputConsumed {
+            binding,
+            source: Box::new(source),
+        })?;
+        self.state
+            .retain_checked_value_interface(interface)
+            .map_err(|source| ResidentError::ActivationMountCommitted {
+                binding,
+                source: Box::new(source.into()),
+            })?;
+        let visibility = self
+            .state
+            .public_visibility_snapshot_in(scope)
+            .ok_or_else(|| ResidentError::ActivationMountCommitted {
+                binding,
+                source: Box::new(SessionError::DeadScope(scope).into()),
+            })?;
+        Ok(MountedActivationInput {
+            owner: owner.admission,
+            compiled: compiled.compiled,
+            proof: compiled.proof,
+            binding,
+            scope,
+            handle,
+            visibility,
+        })
+    }
+
+    /// Legacy host mounts use filesystem interfaces. Activation inputs use
+    /// their dedicated affine compiler/mount owner above.
     pub fn mount_compiled_binding_in(
         &mut self,
         scope: ScopeId,
@@ -3564,7 +4003,13 @@ where
         self.state
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
-        self.mount_compiled_binding_prepared(scope, binder, gen, custody)
+        self.mount_compiled_binding_prepared(
+            scope,
+            binder,
+            gen,
+            custody,
+            ValueInterfaceSource::LegacyDisk,
+        )
     }
 
     /// Build and mount a compiler-typed JSON value without putting the
@@ -4144,6 +4589,7 @@ where
         binder: &BoundBinder,
         gen: Generation,
         custody: RootCustody,
+        interface_source: ValueInterfaceSource,
     ) -> Result<(), ResidentError> {
         let transfer = custody.into_transfer();
         let provenance = Arc::clone(&transfer.provenance);
@@ -4165,7 +4611,7 @@ where
             gen,
             &[(binder, handle)],
             None,
-            ValueInterfaceSource::LegacyDisk,
+            interface_source,
         )?;
         self.binding_provenance.insert(binder.var_id, provenance);
         Ok(())
@@ -4499,8 +4945,73 @@ where
         retirement
     }
 
-    fn provenance_for(&self, sites: &[YieldSite]) -> Result<Arc<ProgramProvenance>, ResidentError> {
-        Ok(Arc::new(ProgramProvenance::from_sites(sites)?))
+    fn provenance_for(&self, code: &TurnCode<'_>) -> Result<Arc<ProgramProvenance>, ResidentError> {
+        let mut provenance = ProgramProvenance::from_sites(&code.sites)?;
+        let authenticated = if let Some(certification) = code.certification.as_ref() {
+            if let Some(execution) = &certification.checked_execution {
+                if !execution.matches_target(&code.prepared) {
+                    return Err(ResidentError::UnsupportedCheckedTurn);
+                }
+                execution
+                    .validate_table(&code.table)
+                    .map_err(SessionError::Compile)?;
+                execution
+                    .validate_yield_sites(&code.sites)
+                    .map_err(SessionError::Compile)?;
+                true
+            } else if let Some(display) = &certification.checked_display {
+                if !display.matches_target(&code.prepared) {
+                    return Err(ResidentError::UnsupportedCheckedTurn);
+                }
+                display
+                    .validate_table(&code.table)
+                    .map_err(SessionError::Compile)?;
+                display
+                    .validate_yield_sites(&code.sites)
+                    .map_err(SessionError::Compile)?;
+                true
+            } else if let Some(activation) = &certification.checked_activation_input {
+                if !activation.matches_target(&code.prepared) {
+                    return Err(ResidentError::UnsupportedCheckedTurn);
+                }
+                activation
+                    .validate_table(&code.table)
+                    .map_err(SessionError::Compile)?;
+                activation
+                    .validate_yield_sites(&code.sites)
+                    .map_err(SessionError::Compile)?;
+                true
+            } else {
+                certification
+                    .compile_input_identity
+                    .as_ref()
+                    .is_some_and(|proof| {
+                        proof.matches_bundle(
+                            &code.prepared,
+                            &certification.groups,
+                            &certification.target_owners,
+                            &certification.package_interfaces,
+                            &code.table,
+                            &code.sites,
+                        )
+                    })
+            }
+        } else {
+            false
+        };
+        if authenticated {
+            provenance.authenticated_inputs.extend(
+                provenance
+                    .sites
+                    .values()
+                    .filter(|site| {
+                        site.input_type_witnesses.len() == site.inputs.len()
+                            && site.input_type_witnesses.iter().any(Option::is_some)
+                    })
+                    .map(|site| site.site),
+            );
+        }
+        Ok(Arc::new(provenance))
     }
 
     fn next_cont_id(&self) -> String {
@@ -4546,6 +5057,57 @@ where
         self.run_prepared_with_argument(code, PreparedTurnMode::Value, Some(*handle))
     }
 
+    /// Evaluate only the protected preview of this exact committed host input.
+    /// Its placeholder has no authored start or completion to settle.
+    pub fn run_activation_preview(
+        &mut self,
+        mounted: MountedActivationInput,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        if !mounted.owner.belongs_to(&self.state)
+            || !mounted.owner.is_host_activation()
+            || self.run_context.lexical_scope != mounted.scope
+            || self
+                .state
+                .public_visibility_snapshot_in(mounted.scope)
+                .as_ref()
+                != Some(&mounted.visibility)
+            || self
+                .state
+                .bindings()
+                .get(mounted.binding)
+                .is_none_or(|entry| {
+                    entry.scope != mounted.scope || entry.value.handle != mounted.handle
+                })
+            || !mounted.proof.matches_target(&mounted.compiled.prepared)
+            || mounted
+                .compiled
+                .certification
+                .as_ref()
+                .is_none_or(|certification| {
+                    certification
+                        .checked_activation_input
+                        .as_ref()
+                        .is_none_or(|proof| !Arc::ptr_eq(proof, &mounted.proof))
+                })
+        {
+            return Err(ResidentError::ActivationPreviewRefused {
+                binding: mounted.binding,
+            });
+        }
+        mounted
+            .proof
+            .validate_table(&mounted.compiled.table)
+            .map_err(SessionError::Compile)?;
+        let provenance = self.provenance_for(&mounted.compiled.code())?;
+        self.run_prepared_for_purpose(
+            mounted.compiled.into_code(),
+            PreparedTurnMode::Value,
+            Some(mounted.handle),
+            PreparedExecutionPurpose::HostActivationPreview,
+            provenance,
+        )
+    }
+
     /// The live prepared bindings a later turn compiles against
     /// ([`PersistentSession::prepared_retained`]).
     #[must_use]
@@ -4573,6 +5135,7 @@ where
         argument: Option<PreparedHandle>,
     ) -> Result<ResidentOutcome, ResidentError> {
         self.state.validate_new_binding_ids(binding_ids_of(&mode))?;
+        let provenance = self.provenance_for(&code)?;
         let checked = checked_turn_plan(
             code.certification.as_ref(),
             code.prepared.as_ref(),
@@ -4583,8 +5146,28 @@ where
         let checked = checked
             .map(|checked| checked.start(&self.state, lexical_scope))
             .transpose()?;
+        self.run_prepared_for_purpose(
+            code,
+            mode,
+            argument,
+            PreparedExecutionPurpose::Authored(checked),
+            provenance,
+        )
+    }
+
+    fn run_prepared_for_purpose(
+        &mut self,
+        code: TurnCode<'_>,
+        mode: PreparedTurnMode<'_>,
+        argument: Option<PreparedHandle>,
+        purpose: PreparedExecutionPurpose,
+        provenance: Arc<ProgramProvenance>,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        let checked = match purpose {
+            PreparedExecutionPurpose::Authored(checked) => checked,
+            PreparedExecutionPurpose::HostActivationPreview => None,
+        };
         let prepared = code.prepared.into_owned();
-        let provenance = self.provenance_for(&code.sites)?;
         self.state
             .merge_table(&code.table)
             .map_err(ResidentError::TableCollision)?;
@@ -4731,7 +5314,7 @@ where
         if self.state.public_visibility_snapshot_in(scope).is_none() {
             return Err(PreparedRuntimeError::SourceScopeAdmission.into());
         }
-        let provenance = self.provenance_for(&code.sites)?;
+        let provenance = self.provenance_for(&code)?;
         self.state
             .merge_table(&code.table)
             .map_err(ResidentError::TableCollision)?;
@@ -4869,8 +5452,8 @@ where
             &code.table,
             &mode.as_mode(),
         )?;
+        let provenance = self.provenance_for(&code)?;
         let prepared = code.prepared.into_owned();
-        let provenance = self.provenance_for(&code.sites)?;
         self.state
             .merge_table(&code.table)
             .map_err(ResidentError::TableCollision)?;
@@ -5219,7 +5802,10 @@ where
             engine.release_all(bound.iter().map(|(_, handle)| *handle));
             return Err(SessionError::DeadScope(scope).into());
         }
-        let unit = engine.entry_unit(program).unwrap_or_default();
+        let unit = match interface_source {
+            ValueInterfaceSource::Checked => "main".to_owned(),
+            ValueInterfaceSource::LegacyDisk => engine.entry_unit(program).unwrap_or_default(),
+        };
         let mut roots = Vec::with_capacity(bound.len());
         for (_, handle) in bound {
             match engine.adopt(*handle) {
@@ -5369,6 +5955,7 @@ where
         self.state.validate_new_binding_ids(
             [page, metadata, alias].map(|binder| SessionVarId::from_extract(binder.var_id)),
         )?;
+        let provenance = self.provenance_for(&code)?;
         let lexical_scope = self.run_context.lexical_scope;
         if let Some(plan) = &checked {
             plan.start(&self.state, lexical_scope)?;
@@ -5376,7 +5963,6 @@ where
         let mut installed_program = None;
         let result = (|| {
             let prepared = code.prepared.into_owned();
-            let provenance = self.provenance_for(&code.sites)?;
             self.state
                 .merge_table(&code.table)
                 .map_err(ResidentError::TableCollision)?;
@@ -5486,8 +6072,8 @@ where
         self.state.validate_new_binding_ids(
             [page, metadata, alias].map(|binder| SessionVarId::from_extract(binder.var_id)),
         )?;
+        let provenance = self.provenance_for(&code)?;
         let prepared = code.prepared.into_owned();
-        let provenance = self.provenance_for(&code.sites)?;
         self.state
             .merge_table(&code.table)
             .map_err(ResidentError::TableCollision)?;
@@ -8952,6 +9538,10 @@ fn panic_to_run_error(payload: Box<dyn std::any::Any + Send>) -> ResidentError {
         "resident turn panicked: {detail}"
     ))))
 }
+
+#[cfg(test)]
+#[path = "activation_input_tests.rs"]
+mod activation_input_tests;
 
 #[cfg(test)]
 mod preview_budget_tests {

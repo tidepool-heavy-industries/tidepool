@@ -2,7 +2,7 @@
 module Tidepool.PackageWitness
   ( PackageImportRoot(..), PackageImportEvidence(..), CompilerProvidedImport(..)
   , emptyPackageImports, encodeCompilerProvidedImport, packageImportRoot, validatePackageImportRoot
-  , sealPackageImports, readPackageImports, encodePackageImports
+  , sealPackageImports, readPackageImports, revalidatePackageImports, encodePackageImports
   , packageInputClosure ) where
 
 import Codec.CBOR.Decoding
@@ -108,6 +108,66 @@ readPackageImports
 readPackageImports path expectedDigest iface = do
   timing <- readTimingEnabled
   timeDetailPhase timing "package_imports" "read" $ do
+    authenticated <- readAuthenticatedPackageImports path expectedDigest iface
+    result <- case authenticated of
+      Left reason -> pure (Left reason)
+      Right roots -> do
+        packageBytes <- try (mapM (BS.readFile . packagePath) (packageInterfaces roots)) :: IO (Either IOException [BS.ByteString])
+        case packageBytes of
+          Left _ -> pure (Left "selected package interface bytes changed")
+          Right values -> do
+            hashes <- mapM (measuredDigest timing "package_selection") values
+            pure $ if hashes == map packageSha256 (packageInterfaces roots)
+              then Right roots else Left "selected package interface bytes changed"
+    if timing then evaluate result else pure result
+
+-- | One exact-scope proof authenticates every owning interface and sidecar,
+-- then observes each distinct package owner once through the current resolver.
+-- Matching the complete resolved witness proves both the expected path bytes
+-- and the current selection. Nothing is retained across proof barriers.
+revalidatePackageImports
+  :: HscEnv -> [(ExactIfaceArtifact, FilePath, String)] -> IO (Either String ())
+revalidatePackageImports env witnesses = do
+  selected <- foldM authenticate (Right (Map.empty, 0 :: Integer)) witnesses
+  case selected of
+    Left reason -> pure (Left reason)
+    Right (roots, references) -> do
+      timing <- readTimingEnabled
+      emitCount timing "package_proof.authenticated_sidecars" (fromIntegral (length witnesses))
+      emitCount timing "package_proof.staged_references" references
+      emitCount timing "package_proof.staged_full_witnesses" (fromIntegral (Map.size roots))
+      foldM validate (Right ()) (Map.elems roots)
+  where
+    authenticate (Left reason) _ = pure (Left reason)
+    authenticate (Right (selected, references)) (iface, path, sha) = do
+      authenticated <- readAuthenticatedPackageImports path sha iface
+      pure $ do
+        evidence <- authenticated
+        staged <- foldM insertRoot selected (packageInterfaces evidence)
+        let count = references + fromIntegral (length (packageInterfaces evidence))
+        count `seq` pure (staged, count)
+    insertRoot selected root = case Map.lookup (packageUnit root, packageModule root) selected of
+      Just previous
+        | previous /= root -> Left "conflicting package import witnesses for one owner"
+        | otherwise -> Right selected
+      Nothing -> let staged = Map.insert (packageUnit root, packageModule root) root selected
+                 in staged `seq` Right staged
+    validate (Left reason) _ = pure (Left reason)
+    validate (Right ()) expected = do
+      checked <- validatePackageImportRoot env expected
+      -- Force the validation verdict before returning a successful proof.
+      case checked of
+        Left reason -> pure (Left reason)
+        Right () -> pure (Right ())
+
+-- Private authentication deliberately grants no current package-byte proof.
+-- Standalone readers also check recorded paths; collective proofs resolve and
+-- authenticate the strict union before they return success.
+readAuthenticatedPackageImports
+  :: FilePath -> String -> ExactIfaceArtifact -> IO (Either String PackageImportEvidence)
+readAuthenticatedPackageImports path expectedDigest iface = do
+  timing <- readTimingEnabled
+  timeDetailPhase timing "package_imports" "authenticate" $ do
     result <- readEvidence timing
     -- A returned Either may defer its digest guards. Only diagnostics force
     -- this verdict here so its CPU is charged to the owning validation span.
@@ -131,14 +191,7 @@ readPackageImports path expectedDigest iface = do
               Right (remaining, (owner, roots))
                 | not (BL.null remaining) || owner /= (exactUnit iface, exactModule iface, exactSha256 iface)
                     || encodeRoots iface roots /= bytes -> pure (Left "package import evidence has a different owner or encoding")
-                | otherwise -> do
-                    packageBytes <- try (mapM (BS.readFile . packagePath) (packageInterfaces roots)) :: IO (Either IOException [BS.ByteString])
-                    case packageBytes of
-                      Left _ -> pure (Left "selected package interface bytes changed")
-                      Right values -> do
-                        hashes <- mapM (measuredDigest timing "package_selection") values
-                        pure $ if hashes == map packageSha256 (packageInterfaces roots)
-                          then Right roots else Left "selected package interface bytes changed"
+                | otherwise -> pure (Right roots)
 
 -- Only enabled diagnostics force the digest before reporting its bytes. The
 -- ordinary path retains the caller's lazy digest evaluation. No contents or

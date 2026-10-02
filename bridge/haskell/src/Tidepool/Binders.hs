@@ -92,6 +92,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word64)
 import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.CheckedCell (renderCheckedTypeWitness)
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 import Tidepool.HostBindingAuthority (HostBindingAuthority(..))
 import Tidepool.Json (jsonString)
@@ -1338,7 +1339,7 @@ data TurnOut
 -- now carries the general answer-plus-live-input contract; ordinary ask/fork
 -- sites simply have an empty @inputs@ list.
 renderAskJson :: YieldSite -> String
-renderAskJson (YieldSite site origin ordinal answer inputs declaration) =
+renderAskJson (YieldSite site origin ordinal answer inputs witnesses declaration) =
   "{\"site\":" ++ show site
     ++ ",\"origin\":" ++ jsonString (T.unpack origin)
     ++ ",\"ordinal\":" ++ show ordinal
@@ -1346,6 +1347,7 @@ renderAskJson (YieldSite site origin ordinal answer inputs declaration) =
     ++ ",\"modules\":" ++ renderModules (stModules answer)
     ++ ",\"heads\":" ++ renderHeads (stHeads answer)
     ++ ",\"inputs\":[" ++ intercalate "," (map renderSiteType inputs) ++ "]"
+    ++ ",\"input_type_witnesses\":[" ++ intercalate "," (map (maybe "null" (maybe "null" jsonString . renderCheckedTypeWitness)) witnesses) ++ "]"
     ++ ",\"reply_declaration\":" ++ maybe "null" (jsonString . T.unpack) declaration ++ "}"
   where
     renderSiteType (SiteType ty modules heads) =

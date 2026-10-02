@@ -6,7 +6,9 @@ use tidepool_bridge::FromHaskell;
 use tidepool_bridge::HaskellValue;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_repr::DataConTable;
-use tidepool_runtime::session::{OutputSink, ResidentHole, ResidentSession, RootCustody};
+use tidepool_runtime::session::{
+    OutputSink, ResidentHole, ResidentSession, RuntimeActivationInput,
+};
 
 use crate::typed_request::decode_typed_request_site;
 use crate::ResponseExpectation;
@@ -153,7 +155,7 @@ impl InteractiveSessionRequest {
 pub struct ResidentInteractiveSession {
     pub(crate) request: InteractiveSessionRequest,
     pub(crate) hole: ResidentHole,
-    pub(crate) input: RootCustody,
+    pub(crate) input: RuntimeActivationInput,
 }
 
 /// Parked fixed-program continuation after its authoritative input has been
@@ -172,16 +174,18 @@ pub enum InteractiveSessionCaptureError {
     Decode(#[from] tidepool_bridge::BridgeError),
     #[error(transparent)]
     Site(#[from] crate::RequestSignatureError),
-    #[error("interactive agent session suspended without its declared live input")]
-    MissingInput,
     #[error("interactive agent session carried invalid request id {0}")]
     InvalidRequestId(i64),
-    #[error("interactive agent session site {0} has no canonical type evidence")]
-    MissingTypeEvidence(u64),
 }
 
 impl ResidentInteractiveSession {
-    pub(crate) fn into_parts(self) -> (InteractiveSessionRequest, ResidentHole, RootCustody) {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        InteractiveSessionRequest,
+        ResidentHole,
+        RuntimeActivationInput,
+    ) {
         (self.request, self.hole, self.input)
     }
 
@@ -216,18 +220,14 @@ impl ResidentInteractiveSession {
             };
         let sites = session.parked_program_provenance(&hole).unwrap_or_default();
         let signature = decode_typed_request_site(site, &sites.sites())?;
-        let type_evidence = session.request_site_type_evidence(site as u64).ok_or(
-            InteractiveSessionCaptureError::MissingTypeEvidence(site as u64),
-        )?;
         let request = u64::try_from(request_id)
             .map(crate::RequestId)
             .map_err(|_| InteractiveSessionCaptureError::InvalidRequestId(request_id))?;
-        let input = session
-            .live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
-            .ok_or(InteractiveSessionCaptureError::MissingInput)?;
+        let input = session.capture_activation_input(&hole, actor_realm, site as u64)?;
+        let type_evidence = input.type_evidence().clone();
         Ok(Self {
             request: InteractiveSessionRequest {
-                type_evidence: Arc::new(type_evidence),
+                type_evidence,
                 request,
                 initial_user_message,
                 input_type: signature.input_type,

@@ -216,6 +216,36 @@ fn try_execute_cell_with_authority_checks(
     publication_target: &ScalePublication,
     authority_checks: AuthorityChecks,
 ) -> Result<Duration, ResidentError> {
+    try_execute_cell_with_template_imports(
+        resident,
+        public,
+        effects,
+        images,
+        scenario,
+        label,
+        source,
+        declarations,
+        expected_display,
+        publication_target,
+        authority_checks,
+        &SourceImports::new(),
+    )
+}
+
+fn try_execute_cell_with_template_imports(
+    resident: &mut ScaleSession,
+    public: ScopeId,
+    effects: &TestEffectSurface,
+    images: &ImageRegistry,
+    scenario: (usize, usize),
+    label: &str,
+    source: &str,
+    declarations: usize,
+    expected_display: Option<&str>,
+    publication_target: &ScalePublication,
+    authority_checks: AuthorityChecks,
+    template_imports: &SourceImports,
+) -> Result<Duration, ResidentError> {
     let cell_started = Instant::now();
     let mut expected_public_winners: std::collections::BTreeMap<_, _> = resident
         .public_visibility_snapshot_in(public)
@@ -225,7 +255,7 @@ fn try_execute_cell_with_authority_checks(
         .collect();
     let execution = Arc::new(resident.begin_private_execution(public).unwrap());
     let view = execution.view();
-    let imports = view.turn_imports(&SourceImports::new());
+    let imports = view.turn_imports(template_imports);
     let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
     let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
     let specification = CheckedCellSpecification {
@@ -1212,6 +1242,142 @@ fn following_declaration_retains_original_native_binding_inventory() {
         Some("1"),
         &ScalePublication::Ephemeral,
     );
+}
+
+#[test]
+fn following_declaration_publishes_current_source_selected_originals() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("CheckedHomeValue.hs"),
+        include_str!("fixtures/checked-home-value.hs"),
+    )
+    .unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let lib = SessionLib::open(
+        SessionId(1006),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    try_execute_cell_with_template_imports(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "retained_hidden_home",
+        "let home = CheckedHomeValue.homeValue",
+        0,
+        None,
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &SourceImports::from_specs(["qualified CheckedHomeValue"]),
+    )
+    .unwrap();
+    assert!(resident
+        .compile_view_in(public)
+        .unwrap()
+        .exact_declaration_context()
+        .is_none_or(|context| !context
+            .lexical_graph()
+            .iter()
+            .any(|node| node.owner.module == "CheckedHomeValue")));
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "source_selected_declaration",
+        include_str!("fixtures/compiled-cell-source-selected-declaration.hs"),
+        2,
+        Some("41"),
+        &ScalePublication::Ephemeral,
+    );
+    let view = resident.compile_view_in(public).unwrap();
+    let context = view.exact_declaration_context().unwrap();
+    assert!(context
+        .lexical_graph()
+        .iter()
+        .any(|node| node.owner.module == "CheckedHomeValue"));
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "source_selected_consumer",
+        "sourceSelected home",
+        0,
+        Some("41"),
+        &ScalePublication::Ephemeral,
+    );
+}
+
+#[test]
+fn following_cells_reprove_template_imports_of_retained_rich_originals() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let lib = SessionLib::open(
+        SessionId(1007),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    let imports = SourceImports::from_specs(["qualified Tidepool.Aeson as Aeson"]);
+    for (label, source, expected) in [
+        (
+            "original_rich_value",
+            "let originalJSON = Aeson.object []",
+            None,
+        ),
+        (
+            "following_rich_value",
+            "let nextJSON = Aeson.object []\n(42 :: Int)",
+            Some("42"),
+        ),
+        ("following_rich_consumer", "(42 :: Int)", Some("42")),
+    ] {
+        try_execute_cell_with_template_imports(
+            &mut resident,
+            public,
+            &effects,
+            &images,
+            (0, 0),
+            label,
+            source,
+            0,
+            expected,
+            &ScalePublication::Ephemeral,
+            AuthorityChecks::Configured,
+            &imports,
+        )
+        .unwrap();
+        assert!(resident
+            .compile_view_in(public)
+            .unwrap()
+            .exact_declaration_context()
+            .is_none_or(|context| !context
+                .lexical_graph()
+                .iter()
+                .any(|node| node.owner.module == "Tidepool.Aeson")));
+    }
 }
 
 #[test]

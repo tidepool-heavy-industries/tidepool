@@ -132,6 +132,14 @@ pub enum KernelInvocationFailure {
     Failed { actor: ActorRef, detail: String },
     #[error("actor {actor} invocation cleanup remains unconfirmed: {detail}")]
     CleanupUnconfirmed { actor: ActorRef, detail: String },
+    #[error(
+        "actor {actor} accepted request {request:?}, but its terminal transfer failed: {source}"
+    )]
+    TerminalTransferFailed {
+        actor: ActorRef,
+        request: crate::RequestId,
+        source: Box<KernelInvocationFailure>,
+    },
     #[error(transparent)]
     Workbench(#[from] KernelWorkbenchFailure),
 }
@@ -140,22 +148,46 @@ pub enum KernelInvocationFailure {
 pub struct KernelWorkbenchFailure {
     pub actor: ActorRef,
     pub receipts: Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
-    pub failed_index: usize,
+    pub point: tidepool_runtime::session::WorkbenchFailurePoint,
     pub total: usize,
+    pub publication: Option<tidepool_runtime::session::WorkbenchPublicationOutcome>,
     pub detail: String,
     pub diagnostic: Option<tidepool_toolchain::failclass::FailureEnvelope>,
 }
 
 impl std::fmt::Display for KernelWorkbenchFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "actor {} workbench input unit {} of {} failed: {}",
-            self.actor,
-            self.failed_index + 1,
-            self.total,
-            self.detail
-        )?;
+        match self.point {
+            tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index } => write!(
+                formatter,
+                "actor {} workbench input unit {} of {} failed: {}",
+                self.actor,
+                index + 1,
+                self.total,
+                self.detail
+            )?,
+            tidepool_runtime::session::WorkbenchFailurePoint::Publication {
+                completed_input_units,
+            } => match self.publication.as_ref() {
+                Some(tidepool_runtime::session::WorkbenchPublicationOutcome::DurabilityUnconfirmed { .. }) => write!(
+                    formatter,
+                    "actor {} workbench publication durability remains unconfirmed after {} completed input units: {}",
+                    self.actor, completed_input_units, self.detail
+                )?,
+                _ => write!(
+                    formatter,
+                    "actor {} workbench publication rejected after {} completed input units: {}",
+                    self.actor, completed_input_units, self.detail
+                )?,
+            },
+            tidepool_runtime::session::WorkbenchFailurePoint::Finalization {
+                completed_input_units,
+            } => write!(
+                formatter,
+                "actor {} workbench finalization failed after {} completed input units: {}",
+                self.actor, completed_input_units, self.detail
+            )?,
+        }
         if !self.receipts.is_empty() {
             formatter.write_str("\ninput receipts before failure:")?;
             for receipt in &self.receipts {
@@ -1018,8 +1050,9 @@ mod tests {
                 terminal_transfer: None,
                 failure_layer: None,
             }],
-            failed_index: 1,
+            point: tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index: 1 },
             total: 3,
+            publication: None,
             diagnostic: None,
             detail: "actor protocol violation: unsupported resident actor request `MissingEffect`"
                 .into(),
@@ -1027,6 +1060,72 @@ mod tests {
         assert_eq!(
             failure.to_string(),
             "actor 7@1 workbench input unit 2 of 3 failed: actor protocol violation: unsupported resident actor request `MissingEffect`\ninput receipts before failure:\ninput unit 1 (Committed): defined spotTaskText at generation 2"
+        );
+    }
+
+    #[test]
+    fn publication_failure_follows_all_completed_receipts() {
+        use tidepool_runtime::session::{
+            WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
+            WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+            WorkbenchPublicationOutcome,
+        };
+        let receipts = (0..3)
+            .map(|index| WorkbenchItemReceipt {
+                index,
+                kind: None,
+                span: None,
+                source_items: Vec::new(),
+                status: WorkbenchItemStatus::Committed,
+                output: format!("private result {index}"),
+                diagnostics: Vec::new(),
+                failure_layer: None,
+                warnings: Vec::new(),
+                installed_bindings: vec![format!("private{index}")],
+                operations: vec![WorkbenchOperationReceipt {
+                    id: WorkbenchOperationId {
+                        execution: tidepool_runtime::session::WorkbenchExecutionId::from_digest(
+                            [index as u8; 16],
+                        ),
+                        input_unit_index: index,
+                        effect_ordinal: 0,
+                    },
+                    effect: "receipt-bearing effect".into(),
+                    disposition: WorkbenchOperationDisposition::Committed,
+                }],
+                terminal_transfer: None,
+            })
+            .collect();
+        let failure = KernelWorkbenchFailure {
+            actor: ActorRef::first(crate::ActorId(8)),
+            receipts,
+            point: WorkbenchFailurePoint::Publication {
+                completed_input_units: 3,
+            },
+            total: 3,
+            publication: Some(WorkbenchPublicationOutcome::Rejected {
+                detail: "staged environment changed".into(),
+            }),
+            detail: "staged environment changed".into(),
+            diagnostic: None,
+        };
+        let rendered = failure.to_string();
+        assert!(rendered.contains("publication rejected after 3 completed input units"));
+        assert!(rendered.contains("private result 2"));
+        assert!(rendered.contains("receipt-bearing effect"));
+        assert!(!rendered.contains("input unit 3 of 3 failed"));
+        assert_eq!(failure.point.next_index(), 3);
+        let mut uncertain = failure;
+        uncertain.publication = Some(WorkbenchPublicationOutcome::DurabilityUnconfirmed {
+            bindings: vec!["visibleWrite".into()],
+            detail: "journal outcome unknown".into(),
+        });
+        assert!(uncertain
+            .to_string()
+            .contains("publication durability remains unconfirmed after 3 completed input units"));
+        assert_eq!(
+            uncertain.publication.as_ref().unwrap().public_bindings(),
+            &["visibleWrite".to_string()]
         );
     }
 }

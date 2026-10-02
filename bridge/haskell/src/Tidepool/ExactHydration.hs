@@ -2,7 +2,9 @@
 {-# LANGUAGE TypeApplications #-}
 
 module Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..)
+  ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts
+  , originalInterfaceBytes, originalInterfaceSha256
+  , ExactIfaceArtifact(..)
   , freshExactState
   , readExactIfaceArtifacts
   , hydrateExactScope
@@ -16,6 +18,7 @@ module Tidepool.ExactHydration
   , selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
+  , permitsGeneratedScaffoldImport
   , GeneratedScaffoldImportAuthority, noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority
   , installExactLexicalGraphWithScaffold
   , installExactLexicalGraph
@@ -31,10 +34,11 @@ import Data.Maybe (isJust)
 import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA256
 import GHC.Driver.Env
-  ( HscEnv(..), hscUpdateHPT_lazy, hsc_home_unit, hsc_HPT, discardIC )
+  ( HscEnv(..), hscUpdateHPT_lazy, hsc_home_unit, hsc_HPT, hscEPS, discardIC )
 import qualified GHC.Linker.Loader as Linker
 import GHC.Unit.Env (UnitEnv(..), HomeUnitEnv(..))
-import GHC.Unit.External (initExternalUnitCache)
+import GHC.Unit.External (initExternalUnitCache, ExternalPackageState(eps_PIT))
+import GHC.Unit.Module.Env (lookupModuleEnv)
 import GHC.Unit.Finder (initFinderCache)
 import GHC.Unit.Finder (addHomeModuleToFinder)
 import GHC.Driver.Env.KnotVars (emptyKnotVars)
@@ -42,9 +46,12 @@ import GHC.Unit.Home.ModInfo
   ( HomeModInfo(..), emptyHomeModInfoLinkable, emptyHomePackageTable, addToHpt
   , lookupHpt )
 import GHC.Iface.Load (readIface)
+import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
+import GHC.Driver.Session (targetProfile)
+import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
 import GHC.IfaceToCore (typecheckIface)
 import GHC.Tc.Utils.Monad (initIfaceCheck)
-import GHC.Unit.Module (Module, moduleName, moduleUnit, moduleNameString, mkModule, mkModuleName)
+import GHC.Unit.Module (Module, ModuleName, moduleName, moduleUnit, moduleNameString, mkModule, mkModuleName)
 import GHC.Unit.Module.Graph
   ( ModuleGraph, ModuleGraphNode(..), NodeKey(..), ModNodeKeyWithUid(..)
   , mgModSummaries', mkModuleGraph )
@@ -54,7 +61,7 @@ import GHC.Unit.Module.Location
 import GHC.Unit.Module.ModSummary (ModSummary(..))
 import GHC.Types.SourceFile (HscSource(..))
 import GHC.Types.PkgQual (PkgQual(..), RawPkgQual(..))
-import GHC.Types.SrcLoc (unLoc, getLoc, SrcSpan(..), srcSpanStartLine)
+import GHC.Types.SrcLoc (Located, unLoc, getLoc, SrcSpan(..), srcSpanStartLine)
 import GHC.Types.Avail (availNames)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -71,7 +78,9 @@ import GHC.Unit.Home (homeUnitId, isHomeUnit)
 import GHC.Unit.Types (GenWithIsBoot(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Utils.Fingerprint (fingerprintByteString)
-import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps)
+import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps, mi_iface_hash, mi_final_exts)
+import GHC.Builtin.Names (gHC_PRIM)
+import Tidepool.FatIface (readExactInterface)
 import GHC.Unit.Types (unitString, stringToUnit)
 import qualified GHC.Data.Maybe as MErr
 import GHC.Utils.Outputable (text)
@@ -218,6 +227,14 @@ data GeneratedScaffoldImportAuthority = GeneratedScaffoldImportAuthority
 
 noGeneratedScaffoldImports :: GeneratedScaffoldImportAuthority
 noGeneratedScaffoldImports = GeneratedScaffoldImportAuthority []
+
+permitsGeneratedScaffoldImport
+  :: GeneratedScaffoldImportAuthority -> ModSummary -> (String,String)
+  -> (PkgQual, Located ModuleName) -> Bool
+permitsGeneratedScaffoldImport (GeneratedScaffoldImportAuthority scaffold) summary requested (qualifier,imported) =
+  qualifier == NoPkgQual && any
+    (\(target,fingerprint,native,span',_) -> ms_mod summary == target && ms_hs_hash summary == fingerprint
+      && requested == (executionUnit native,executionModule native) && getLoc imported == span') scaffold
 
 readGeneratedScaffoldImportAuthority :: VerifiedExactIfaceClosure -> [ExecutionSourceIdentity]
   -> GeneratedScaffoldRecipe -> ParsedModule -> ModuleGraph -> HscEnv
@@ -377,6 +394,82 @@ readOne env artifact = do
                 Left ("interface contains defining Core: " ++ exactModule artifact)
             | otherwise -> Right (artifact, iface)
 
+-- Original product publication and type witnesses share the same serializer
+-- and immutable bytes. This cache belongs only to the completed transaction;
+-- it neither consults source nor survives in a worker-global map.
+data OriginalInterfaceArtifacts = OriginalInterfaceArtifacts
+  HscEnv (Map.Map ModuleName ModIface) FilePath
+  (IORef (Map.Map Module (Maybe (BS.ByteString, String))))
+
+newOriginalInterfaceArtifacts :: HscEnv -> Map.Map ModuleName ModIface -> FilePath
+  -> IO OriginalInterfaceArtifacts
+newOriginalInterfaceArtifacts env originals directory =
+  OriginalInterfaceArtifacts env originals directory <$> newIORef Map.empty
+
+originalInterfaceBytes :: OriginalInterfaceArtifacts -> Module -> IO (Maybe BS.ByteString)
+originalInterfaceBytes artifacts owner = fmap fst <$> originalInterfaceArtifact artifacts owner
+
+originalInterfaceSha256 :: OriginalInterfaceArtifacts -> Module -> IO (Maybe String)
+originalInterfaceSha256 artifacts owner = fmap snd <$> originalInterfaceArtifact artifacts owner
+
+originalInterfaceArtifact :: OriginalInterfaceArtifacts -> Module
+  -> IO (Maybe (BS.ByteString, String))
+originalInterfaceArtifact (OriginalInterfaceArtifacts env originals directory captured) owner = do
+  known <- Map.lookup owner <$> readIORef captured
+  case known of
+    Just artifact -> pure artifact
+    Nothing -> do
+      external <- hscEPS env
+      let matches interface = if mi_module interface == owner then Just interface else Nothing
+          productInterface = Map.lookup (moduleName owner) originals >>= matches
+          homeInterface = lookupHpt (hsc_HPT env) (moduleName owner) >>= matches . hm_iface
+          packageInterface = lookupModuleEnv (eps_PIT external) owner >>= matches
+          selected = case productInterface of
+            Just value -> Just value
+            Nothing -> homeInterface
+      artifact <- case selected of
+        Just interface -> serialize interface
+        Nothing | isHomeUnit (hsc_home_unit env) (moduleUnit owner) -> pure Nothing
+        Nothing -> packageArtifact packageInterface
+      modifyIORef' captured (Map.insert owner artifact)
+      pure artifact
+  where
+    seal bytes = Just (bytes, hexBytes (SHA256.hash bytes))
+    serialize interface = bracket (openBinaryTempFile directory "module-product.hi")
+      (\(path, handle) -> do
+        closed <- hIsClosed handle
+        unless closed (hClose handle)
+        removeFile path)
+      (\(path, handle) -> do
+        hClose handle
+        writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression path interface
+        seal <$> BS.readFile path)
+    sameOriginal selected actual = mi_module actual == owner
+      && mi_iface_hash (mi_final_exts actual) == mi_iface_hash (mi_final_exts selected)
+    packageArtifact selected
+      | owner /= gHC_PRIM, Nothing <- selected = pure Nothing
+      | otherwise = do
+          full <- readExactInterface env owner
+          case full of
+            Right (interface, location)
+              | mi_module interface == owner
+              , maybe (owner == gHC_PRIM) (`sameOriginal` interface) selected ->
+                  if owner == gHC_PRIM then serialize interface else do
+                    -- EPS interfaces contain panic-elided declarations. Read
+                    -- the installed artifact through the original owner and
+                    -- decode the same captured bytes before sealing them.
+                    capturedBytes <- try @IOException (BS.readFile (ml_hi_file location))
+                    case capturedBytes of
+                      Left _ -> pure Nothing
+                      Right bytes -> do
+                        decoded <- withCapturedIface False (moduleNameString (moduleName owner)) bytes $
+                          readIface (hsc_dflags env) (hsc_NC env) owner
+                        pure $ case decoded of
+                          MErr.Succeeded original
+                            | sameOriginal interface original -> seal bytes
+                          _ -> Nothing
+            _ -> pure Nothing
+
 withCapturedIface :: Bool -> String -> BS.ByteString -> (FilePath -> IO a) -> IO a
 withCapturedIface timing owner bytes consume = do
   directory <- getTemporaryDirectory
@@ -479,9 +572,8 @@ installExactLexicalGraphWithScaffold sourceGraph lexical (CheckedValueImportAuth
           ([owner | edge <- edges, Just owner <- [missing summary edge]]
            ++ [owner | imported <- ms_textual_imps summary ++ ms_srcimps summary
               , Just owner <- [hiddenImport summary imported]]))]
-    permitted summary requested qualifier imported = qualifier == NoPkgQual && any
-      (\(target,fingerprint,native,span',_) -> ms_mod summary == target && ms_hs_hash summary == fingerprint
-        && requested == (executionUnit native,executionModule native) && getLoc imported == span') scaffold
+    permitted summary requested qualifier imported = permitsGeneratedScaffoldImport
+      (GeneratedScaffoldImportAuthority scaffold) summary requested (qualifier,imported)
     hiddenImport summary (qualifier, imported) =
       let name = unLoc imported
           local = case qualifier of

@@ -11,6 +11,64 @@ use tidepool_repr::Generation;
 
 use super::{PersistentSession, PublicVisibilitySnapshot, SessionCompileView, SessionError};
 
+#[derive(Debug, thiserror::Error)]
+pub enum NativeSetupAdmissionFailure {
+    #[error("expected one binderless Bind, items={items}, first={first:?}, binders={binders}")]
+    Shape {
+        items: usize,
+        first: Option<tidepool_toolchain::cell_plan::ParsedCellPlanKind>,
+        binders: usize,
+    },
+    #[error("specification digest differs: planned={planned:?}, admitted={admitted:?}")]
+    SpecificationDigest {
+        planned: [u8; 32],
+        admitted: [u8; 32],
+    },
+    #[error("ordered include paths differ: planned={planned:?}, admitted={admitted:?}")]
+    IncludePaths {
+        planned: NativeSetupInputInventory,
+        admitted: NativeSetupInputInventory,
+    },
+    #[error("ordered injection differs: planned={planned:?}, reachable={reachable:?}")]
+    InjectionInventory {
+        planned: NativeSetupInputInventory,
+        reachable: NativeSetupInputInventory,
+    },
+    #[error("parser item index differs at {position}: observed={observed}")]
+    ItemOrder { position: usize, observed: usize },
+}
+
+/// A bounded diagnostic commitment to the complete ordered input inventory.
+#[derive(Debug)]
+pub struct NativeSetupInputInventory {
+    pub count: usize,
+    pub digest: [u8; 32],
+    pub first: Vec<String>,
+}
+
+impl NativeSetupInputInventory {
+    fn new<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Self {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"Tidepool.NativeSetupInputInventory.v1");
+        let mut count = 0;
+        let mut first = Vec::new();
+        for value in values {
+            count += 1;
+            hash.update(&(value.len() as u64).to_le_bytes());
+            hash.update(value);
+            if first.len() < 8 {
+                first.push(String::from_utf8_lossy(value).chars().take(128).collect());
+            }
+        }
+        hash.update(&(count as u64).to_le_bytes());
+        Self {
+            count,
+            digest: *hash.finalize().as_bytes(),
+            first,
+        }
+    }
+}
+
 /// A detached lexical owner captured in the same checkout as its public base.
 /// Its scope retains exact binding and native shares through the existing
 /// binding-store owner; completion must retire that scope once.
@@ -71,6 +129,7 @@ pub struct RuntimeCellAdmission {
     owner: Arc<RuntimeAdmissionOwner>,
     owner_epoch: u64,
     private_execution: Option<Arc<PrivateExecutionAdmission>>,
+    native_purpose: Option<NativeCellPurpose>,
     _retained_scope: Arc<RuntimeLexicalScopeLease>,
     prefix_started: std::sync::atomic::AtomicBool,
     view: SessionCompileView,
@@ -87,6 +146,13 @@ pub struct RuntimeCellAdmission {
     authority_digest: [u8; 32],
     include_paths: Vec<PathBuf>,
     digest: [u8; 32],
+}
+
+/// Runtime-issued purpose for one parser-certified binderless setup action.
+/// It never authorizes authored private writes or declarations.
+enum NativeCellPurpose {
+    Setup,
+    HostActivation([u8; 32]),
 }
 
 /// An admission lifetime exists before the lazy machine bootstrap and is
@@ -632,7 +698,8 @@ impl RuntimeCheckedPrefix {
         execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
     ) -> Result<Arc<CheckedTurnCompletion>, SessionError> {
         let mut state = self.state.lock();
-        if !self.admission.belongs_to(session)
+        if self.admission.is_host_activation()
+            || !self.admission.belongs_to(session)
             || self.admission.visibility.scope != scope
             || state.in_flight.is_some()
             || state.display_in_flight.is_some()
@@ -1166,6 +1233,16 @@ impl RuntimeCellAdmission {
     pub fn private_execution(&self) -> Option<&Arc<PrivateExecutionAdmission>> {
         self.private_execution.as_ref()
     }
+
+    pub(super) fn is_native_setup(&self) -> bool {
+        matches!(self.native_purpose, Some(NativeCellPurpose::Setup))
+    }
+    pub(super) fn is_host_activation(&self) -> bool {
+        matches!(
+            self.native_purpose,
+            Some(NativeCellPurpose::HostActivation(_))
+        )
+    }
     pub fn view(&self) -> &SessionCompileView {
         &self.view
     }
@@ -1215,6 +1292,38 @@ impl RuntimeCellAdmission {
 }
 
 impl PersistentSession {
+    pub(super) fn consume_host_activation_reservation(
+        &self,
+        admission: &Arc<RuntimeCheckedItemAdmission>,
+        execution: &tidepool_toolchain::checked_cell::ExactCompiledActivationInput,
+    ) -> Result<(), SessionError> {
+        let prefix = admission.prefix();
+        let mut state = prefix.state.lock();
+        let scope = prefix.admission.visibility.scope;
+        if !prefix.admission.is_host_activation()
+            || !prefix.admission.belongs_to(self)
+            || !Arc::ptr_eq(&state.snapshot, admission.snapshot())
+            || state.in_flight.is_some()
+            || state.display_in_flight.is_some()
+            || state.reservation.as_ref().is_none_or(|reservation| {
+                reservation.item != *execution.item()
+                    || reservation.generation.0 != execution.generation()
+                    || reservation.digest != admission.digest()
+            })
+            || self.public_visibility_snapshot_in(scope).as_ref()
+                != Some(&state.snapshot.visibility)
+            || self.compile_view_digest_in(scope) != Some(state.snapshot.view_digest)
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        execution.validate_runtime_admission(admission.digest(), prefix.admission.digest())?;
+        execution.validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
+        // The host transfers its original value. No placeholder was executed,
+        // and the authored compiler prefix must not claim such a completion.
+        state.reservation = None;
+        Ok(())
+    }
+
     /// Check exhaustion before the authoritative owner manifest rename.
     pub(crate) fn prepare_execution_admission_epoch_advance(&self) -> Result<u64, SessionError> {
         self.admission_owner()
@@ -1781,15 +1890,30 @@ impl PersistentSession {
         owner: &super::RecoveryPublicOwner,
         public_scope: ScopeId,
     ) -> Result<PrivateExecutionAdmission, SessionError> {
+        self.validate_durable_public_admission(owner, public_scope)?;
+        self.begin_private_execution(public_scope)
+    }
+
+    pub(super) fn validate_durable_public_admission(
+        &self,
+        owner: &super::RecoveryPublicOwner,
+        public_scope: ScopeId,
+    ) -> Result<PublicVisibilitySnapshot, SessionError> {
+        use super::DurablePublicAdmissionFailure as Failure;
+        let fail = |reason| SessionError::InvalidDurablePublicAdmission {
+            owner: owner.clone(),
+            scope: public_scope,
+            reason,
+        };
         let lib = self.lib();
         let state = lib
             .durable_graph
             .as_ref()
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
+            .ok_or_else(|| fail(Failure::MissingGraph))?;
         let retained = state
             .owner
             .as_ref()
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
+            .ok_or_else(|| fail(Failure::MissingRunOwner))?;
         retained.validate_owner()?;
         let snapshot = self
             .public_visibility_snapshot_in(public_scope)
@@ -1798,14 +1922,27 @@ impl PersistentSession {
             .graph
             .public_surfaces()
             .find(|surface| &surface.owner == owner)
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
-        if state.unconfirmed.is_some()
-            || lib.durable_public_scopes.get(owner) != Some(&public_scope)
-            || surface.declaration_root
-                != (snapshot.declaration_tip != Generation(0)).then_some(snapshot.declaration_tip)
-            || surface.epoch != snapshot.epoch
-        {
-            return Err(SessionError::WrongPublicManifestTicket);
+            .ok_or_else(|| fail(Failure::MissingSurface))?;
+        if state.unconfirmed.is_some() {
+            return Err(fail(Failure::Unconfirmed));
+        }
+        let mapped = lib.durable_public_scopes.get(owner).copied();
+        if mapped != Some(public_scope) {
+            return Err(fail(Failure::Scope { mapped }));
+        }
+        let current =
+            (snapshot.declaration_tip != Generation(0)).then_some(snapshot.declaration_tip);
+        if surface.declaration_root != current {
+            return Err(fail(Failure::DeclarationTip {
+                published: surface.declaration_root,
+                current,
+            }));
+        }
+        if surface.epoch != snapshot.epoch {
+            return Err(fail(Failure::Epoch {
+                published: surface.epoch,
+                current: snapshot.epoch,
+            }));
         }
         let bytes = std::fs::read(&state.path).map_err(|error| SessionError::RecoveryManifest {
             path: state.path.clone(),
@@ -1821,11 +1958,19 @@ impl PersistentSession {
             path: state.path.clone(),
             detail: error.to_string(),
         })?
-        .ok_or(SessionError::WrongPublicManifestTicket)?;
-        if !read.artifact_losses.is_empty() || read.graph.checksum() != state.graph.checksum() {
-            return Err(SessionError::WrongPublicManifestTicket);
+        .ok_or_else(|| fail(Failure::UnrecognizedManifest))?;
+        if !read.artifact_losses.is_empty() {
+            return Err(fail(Failure::ArtifactLoss {
+                count: read.artifact_losses.len(),
+            }));
         }
-        self.begin_private_execution(public_scope)
+        if read.graph.checksum() != state.graph.checksum() {
+            return Err(fail(Failure::ManifestChecksum {
+                published: read.graph.checksum().to_owned(),
+                current: state.graph.checksum().to_owned(),
+            }));
+        }
+        Ok(snapshot)
     }
 
     pub fn begin_private_execution(
@@ -1906,7 +2051,81 @@ impl PersistentSession {
             include_paths,
             None,
             None,
+            None,
         )
+    }
+
+    /// Admit trusted setup under its existing scope with the same ordered
+    /// parser and exact environment seals used by private authored execution.
+    pub fn admit_native_setup_cell_in(
+        &mut self,
+        scope: ScopeId,
+        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
+        specification: Arc<dyn Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
+    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
+        if plan.items().len() != 1
+            || plan.items()[0].kind() != Kind::Bind
+            || !plan.items()[0].binders().is_empty()
+        {
+            return Err(self.native_setup_refusal(
+                scope,
+                NativeSetupAdmissionFailure::Shape {
+                    items: plan.items().len(),
+                    first: plan.items().first().map(|item| item.kind()),
+                    binders: plan.items().first().map_or(0, |item| item.binders().len()),
+                },
+            ));
+        }
+        self.admit_cell_with_plan(
+            scope,
+            0,
+            specification,
+            specification_digest,
+            authority_digest,
+            include_paths,
+            Some(plan),
+            None,
+            Some(NativeCellPurpose::Setup),
+        )
+    }
+
+    pub(super) fn admit_host_activation_cell_in(
+        &mut self,
+        scope: ScopeId,
+        input_commitment: [u8; 32],
+        specification: Arc<dyn Any + Send + Sync>,
+        specification_digest: [u8; 32],
+        authority_digest: [u8; 32],
+        include_paths: Vec<PathBuf>,
+    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        self.admit_cell_with_plan(
+            scope,
+            0,
+            specification,
+            specification_digest,
+            authority_digest,
+            include_paths,
+            None,
+            None,
+            Some(NativeCellPurpose::HostActivation(input_commitment)),
+        )
+    }
+
+    fn native_setup_refusal(
+        &self,
+        scope: ScopeId,
+        reason: NativeSetupAdmissionFailure,
+    ) -> SessionError {
+        SessionError::InvalidNativeSetupAdmission {
+            owner: self.admission_owner().identity,
+            owner_epoch: self.admission_owner().epoch(),
+            scope,
+            reason,
+        }
     }
 
     fn admit_cell_with_plan(
@@ -1919,6 +2138,7 @@ impl PersistentSession {
         include_paths: Vec<PathBuf>,
         plan: Option<Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>>,
         private_execution: Option<Arc<PrivateExecutionAdmission>>,
+        native_purpose: Option<NativeCellPurpose>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.reap_admission_leases();
         let view = self
@@ -1926,26 +2146,64 @@ impl PersistentSession {
             .ok_or(SessionError::DeadScope(scope))?
             .with_scoped_injection();
         if let Some(plan) = &plan {
-            if plan.specification_digest() != specification_digest
-                || plan.include_paths().len() != include_paths.len()
+            let injected = view
+                .injected_values()
+                .iter()
+                .map(|module| module.module_name())
+                .collect::<Vec<_>>();
+            let refusal = if plan.specification_digest() != specification_digest {
+                Some(NativeSetupAdmissionFailure::SpecificationDigest {
+                    planned: plan.specification_digest(),
+                    admitted: specification_digest,
+                })
+            } else if plan.include_paths().len() != include_paths.len()
                 || !plan
                     .include_paths()
                     .iter()
                     .zip(&include_paths)
                     .all(|(a, b)| a.as_os_str() == b.as_os_str())
-                || plan.injected_modules()
-                    != view
-                        .injected_values()
-                        .iter()
-                        .map(|module| module.module_name())
-                        .collect::<Vec<_>>()
-                || plan
-                    .items()
+            {
+                Some(NativeSetupAdmissionFailure::IncludePaths {
+                    planned: NativeSetupInputInventory::new(
+                        plan.include_paths()
+                            .iter()
+                            .map(|path| path.as_os_str().as_encoded_bytes()),
+                    ),
+                    admitted: NativeSetupInputInventory::new(
+                        include_paths
+                            .iter()
+                            .map(|path| path.as_os_str().as_encoded_bytes()),
+                    ),
+                })
+            } else if plan.injected_modules() != injected {
+                Some(NativeSetupAdmissionFailure::InjectionInventory {
+                    planned: NativeSetupInputInventory::new(
+                        plan.injected_modules()
+                            .iter()
+                            .map(|module| module.as_bytes()),
+                    ),
+                    reachable: NativeSetupInputInventory::new(
+                        injected.iter().map(|module| module.as_bytes()),
+                    ),
+                })
+            } else {
+                plan.items()
                     .iter()
                     .enumerate()
-                    .any(|(index, item)| item.index() != index)
-            {
-                return Err(SessionError::StaleStagedDeclaration);
+                    .find(|(index, item)| item.index() != *index)
+                    .map(|(position, item)| NativeSetupAdmissionFailure::ItemOrder {
+                        position,
+                        observed: item.index(),
+                    })
+            };
+            if let Some(reason) = refusal {
+                return Err(
+                    if matches!(native_purpose, Some(NativeCellPurpose::Setup)) {
+                        self.native_setup_refusal(scope, reason)
+                    } else {
+                        SessionError::StaleStagedDeclaration
+                    },
+                );
             }
         }
         let view_digest = self
@@ -2194,6 +2452,14 @@ impl PersistentSession {
                 frame(parent.as_bytes());
             }
         }
+        match &native_purpose {
+            Some(NativeCellPurpose::Setup) => frame(b"TidepoolNativeSetupAdmission1"),
+            Some(NativeCellPurpose::HostActivation(input_commitment)) => {
+                frame(b"TidepoolHostActivationAdmission1");
+                frame(input_commitment);
+            }
+            None => {}
+        }
         let digest = *digest.finalize().as_bytes();
         let planned = planned.map(|mut planned| {
             Arc::get_mut(&mut planned)
@@ -2205,6 +2471,7 @@ impl PersistentSession {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
             private_execution,
+            native_purpose,
             _retained_scope: retained_scope,
             prefix_started: std::sync::atomic::AtomicBool::new(false),
             view,
@@ -2425,6 +2692,7 @@ impl PersistentSession {
             include_paths,
             Some(plan),
             Some(execution),
+            None,
         )
     }
 

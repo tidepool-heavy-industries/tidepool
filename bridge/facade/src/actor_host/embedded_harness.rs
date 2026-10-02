@@ -795,7 +795,8 @@ mod round_control_tests {
                 exomonad_actor::KernelWorkbenchFailure {
                     actor: ActorRef::first(exomonad_actor::ActorId(7)),
                     receipts: vec![],
-                    failed_index: 0,
+                    point: tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { index: 0 },
+                    publication: None,
                     total: 1,
                     detail: "retained owner missing".into(),
                     diagnostic: Some(diagnostic),

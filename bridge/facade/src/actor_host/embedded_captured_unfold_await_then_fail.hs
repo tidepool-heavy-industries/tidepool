@@ -21,12 +21,12 @@ do
   (alpha, beta) <- unfold (batch ("embedded-captured" :: CampaignLabel)
     ("reply-workers" :: ForkGroupLabel))
     ((,) <$>
-      child (withContext (fromCheckpoint seed)
+      child (withLifetime ActorOwned (withContext (fromCheckpoint seed)
         (researching @Int projectHead
-          (assignment [label|captured-alpha|] ("reply with the captured getter" :: Text))))
-      <*> child (withContext (fromCheckpoint seed)
+          (assignment [label|captured-alpha|] ("reply with the captured getter" :: Text)))))
+      <*> child (withLifetime ActorOwned (withContext (fromCheckpoint seed)
         (researching @Int projectHead
-          (assignment [label|captured-beta|] ("reply with the captured getter" :: Text)))))
+          (assignment [label|captured-beta|] ("reply with the captured getter" :: Text))))))
   R.send (storeSeed (R.client seedStore)) seed
   replies <- watch "same-cell-captured-replies" ((,) <$> awaitValue alpha <*> awaitValue beta)
   result <- awaitWatch replies

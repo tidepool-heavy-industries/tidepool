@@ -86,6 +86,218 @@ pub struct ExactCheckedSignature {
     names: Vec<ExactSignatureName>,
 }
 
+/// Independently issued canonical input type and its original owner interfaces.
+/// Parser presentation is retained, but never participates in type equality.
+#[derive(Clone, Debug)]
+pub struct CanonicalInputTypeWitness {
+    signature: ExactCheckedSignature,
+    structure: Arc<[u8]>,
+    interfaces: Vec<(String, String, String)>,
+    metadata_digest: [u8; 32],
+}
+
+impl PartialEq for CanonicalInputTypeWitness {
+    fn eq(&self, other: &Self) -> bool {
+        self.structure == other.structure && self.interfaces == other.interfaces
+    }
+}
+impl Eq for CanonicalInputTypeWitness {}
+
+impl CanonicalInputTypeWitness {
+    pub(crate) fn metadata_digest(&self) -> [u8; 32] {
+        self.metadata_digest
+    }
+    pub fn commitment(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"tidepool-canonical-input-type-1");
+        hasher.update((self.structure.len() as u64).to_le_bytes());
+        hasher.update(&self.structure);
+        for (unit, module, fingerprint) in &self.interfaces {
+            for value in [unit, module, fingerprint] {
+                hasher.update((value.len() as u64).to_le_bytes());
+                hasher.update(value.as_bytes());
+            }
+        }
+        hasher.finalize().into()
+    }
+    pub fn signature(&self) -> &ExactCheckedSignature {
+        &self.signature
+    }
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, CompileError> {
+        if bytes.len() > 4 * 1024 * 1024 {
+            return Err(failure("canonical input witness byte bound"));
+        }
+        let decoded = decode(bytes)?;
+        let fields = row(&decoded, 5)?;
+        if string(&fields[0])? != "TPCANONICALINPUTTYPE1" || string(&fields[1])? != "1" {
+            return Err(failure("canonical input witness version"));
+        }
+        let signature = decode_signature(&fields[2])?;
+        if signature.key() != "activation-input" {
+            return Err(failure("canonical input witness purpose"));
+        }
+        let Value::Bytes(structure) = &fields[3] else {
+            return Err(failure("canonical input witness structure"));
+        };
+        let mut names = BTreeSet::new();
+        let mut count = 0;
+        validate_input_type_shape(&decode(structure)?, 0, 0, &mut count, &mut names)?;
+        let interfaces = list(&fields[4], 65536)?
+            .iter()
+            .map(|value| {
+                let fields = row(value, 3)?;
+                let unit = string(&fields[0])?.to_owned();
+                let module = string(&fields[1])?.to_owned();
+                let fingerprint = string(&fields[2])?.to_owned();
+                if unit.is_empty()
+                    || module.is_empty()
+                    || fingerprint.len() != 64
+                    || !fingerprint
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                {
+                    return Err(failure("canonical input witness interface seal"));
+                }
+                Ok((unit, module, fingerprint))
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?;
+        if interfaces
+            .windows(2)
+            .any(|pair| (&pair[0].0, &pair[0].1) >= (&pair[1].0, &pair[1].1))
+            || interfaces
+                .iter()
+                .map(|(unit, module, _)| (unit.clone(), module.clone()))
+                .collect::<BTreeSet<_>>()
+                != names
+        {
+            return Err(failure("canonical input witness owner coverage"));
+        }
+        Ok(Self {
+            signature,
+            structure: structure.clone().into(),
+            interfaces,
+            metadata_digest: Sha256::digest(bytes).into(),
+        })
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CanonicalInputTypeWitness {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let encoded = <String as serde::Deserialize>::deserialize(deserializer)?;
+        if encoded.len() > 8 * 1024 * 1024 || encoded.len() % 2 != 0 {
+            return Err(serde::de::Error::custom(
+                "canonical input witness hex bound",
+            ));
+        }
+        let bytes = encoded
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digit = |byte: u8| match byte {
+                    b'0'..=b'9' => Some(byte - b'0'),
+                    b'a'..=b'f' => Some(byte - b'a' + 10),
+                    _ => None,
+                };
+                digit(pair[0])
+                    .zip(digit(pair[1]))
+                    .map(|(high, low)| high * 16 + low)
+                    .ok_or_else(|| serde::de::Error::custom("canonical input witness hex"))
+            })
+            .collect::<Result<Vec<_>, D::Error>>()?;
+        Self::from_bytes(&bytes).map_err(serde::de::Error::custom)
+    }
+}
+
+fn validate_input_type_shape(
+    value: &Value,
+    depth: usize,
+    binders: usize,
+    count: &mut usize,
+    owners: &mut BTreeSet<(String, String)>,
+) -> Result<(), CompileError> {
+    if depth > 128 || *count >= 65536 {
+        return Err(failure("canonical input type shape bound"));
+    }
+    *count += 1;
+    let fields = list(value, 65536)?;
+    let tag = fields
+        .first()
+        .ok_or_else(|| failure("canonical input type shape tag"))?;
+    let recurse = |value: &Value, count: &mut usize, owners: &mut BTreeSet<(String, String)>| {
+        validate_input_type_shape(value, depth + 1, binders, count, owners)
+    };
+    match string(tag)? {
+        "bound" => {
+            let fields = row(value, 2)?;
+            let Value::Integer(index) = fields[1] else {
+                return Err(failure("canonical input bound variable"));
+            };
+            if usize::try_from(index)
+                .ok()
+                .is_none_or(|index| index >= binders)
+            {
+                return Err(failure("canonical input free variable"));
+            }
+        }
+        "con" => {
+            let fields = row(value, 3)?;
+            let name = row(&fields[1], 4)?;
+            if !matches!(string(&name[2])?, "type" | "data") || string(&name[3])?.is_empty() {
+                return Err(failure("canonical input type Name"));
+            }
+            owners.insert((string(&name[0])?.to_owned(), string(&name[1])?.to_owned()));
+            for argument in list(&fields[2], 65536)? {
+                recurse(argument, count, owners)?;
+            }
+        }
+        "app" => {
+            let fields = row(value, 3)?;
+            recurse(&fields[1], count, owners)?;
+            recurse(&fields[2], count, owners)?;
+        }
+        "fun" => {
+            let fields = row(value, 5)?;
+            if !matches!(fields[1], Value::Integer(tag) if u64::try_from(tag).ok().is_some_and(|tag| tag < 4))
+            {
+                return Err(failure("canonical input function flag"));
+            }
+            for field in &fields[2..] {
+                recurse(field, count, owners)?;
+            }
+        }
+        "forall" => {
+            let fields = row(value, 4)?;
+            if !matches!(fields[1], Value::Integer(tag) if u64::try_from(tag).ok().is_some_and(|tag| tag < 3))
+            {
+                return Err(failure("canonical input forall visibility"));
+            }
+            recurse(&fields[2], count, owners)?;
+            validate_input_type_shape(&fields[3], depth + 1, binders + 1, count, owners)?;
+        }
+        "literal" => {
+            let fields = row(value, 3)?;
+            let valid = match (string(&fields[1])?, &fields[2]) {
+                ("nat", Value::Text(value)) => {
+                    !value.is_empty()
+                        && value.bytes().all(|byte| byte.is_ascii_digit())
+                        && (value == "0" || !value.starts_with('0'))
+                }
+                ("symbol", Value::Text(_)) => true,
+                ("char", Value::Integer(value)) => u32::try_from(*value)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .is_some(),
+                _ => false,
+            };
+            if !valid {
+                return Err(failure("canonical input type literal"));
+            }
+        }
+        _ => return Err(failure("canonical input type shape version")),
+    }
+    Ok(())
+}
+
 impl ExactCheckedSignature {
     pub fn key(&self) -> &str {
         &self.key
@@ -972,6 +1184,7 @@ enum CheckedExecutionAdmission {
     InitialFold([u8; 32]),
     RuntimeItem([u8; 32]),
     CellProgram([u8; 32]),
+    HostActivationInput([u8; 32]),
 }
 
 /// A checked recipe and its exact prepared target, issued together by the
@@ -981,6 +1194,7 @@ pub struct ExactCompiledItem {
     item: ExactCheckedItem,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
+    yield_sites_digest: [u8; 32],
     value_interface: Option<Arc<CheckedValueArtifact>>,
     generation: u64,
     bound_binders: Vec<Value>,
@@ -989,11 +1203,80 @@ pub struct ExactCompiledItem {
     settled_values: CheckedSettledValues,
 }
 
+/// A compiler-issued host input interface and preview target. It cannot enter
+/// an authored checked prefix or settle the placeholder used to infer its type.
+#[derive(Debug)]
+pub struct ExactCompiledActivationInput {
+    compiled: Arc<ExactCompiledItem>,
+    input_type_witness: CanonicalInputTypeWitness,
+}
+
+impl ExactCompiledActivationInput {
+    pub fn validate_yield_sites(&self, sites: &[crate::YieldSite]) -> Result<(), CompileError> {
+        self.compiled.validate_yield_sites(sites)
+    }
+    pub fn input_type_witness(&self) -> &CanonicalInputTypeWitness {
+        &self.input_type_witness
+    }
+    pub fn item(&self) -> &ExactCheckedItem {
+        self.compiled.item()
+    }
+    pub fn generation(&self) -> u64 {
+        self.compiled.generation()
+    }
+    pub fn target_owned(&self) -> Arc<tidepool_repr::execution_schema::PreparedProgram> {
+        self.compiled.target_owned()
+    }
+    pub fn matches_target(
+        &self,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+    ) -> bool {
+        self.compiled.matches_target(target)
+    }
+    pub fn validate_table(&self, table: &tidepool_repr::DataConTable) -> Result<(), CompileError> {
+        self.compiled.validate_table(table)
+    }
+    pub fn validate_bound_binders(&self, bound: &[Value]) -> Result<(), CompileError> {
+        self.compiled.validate_bound_binders(bound)
+    }
+    pub fn validate_runtime_admission(
+        &self,
+        item_digest: [u8; 32],
+        cell_digest: [u8; 32],
+    ) -> Result<(), CompileError> {
+        if !matches!(self.compiled.admission, CheckedExecutionAdmission::HostActivationInput(digest)
+            if digest == item_digest && self.item().admission_digest() == cell_digest)
+        {
+            return Err(failure(
+                "compiled activation input has another protected runtime admission",
+            ));
+        }
+        Ok(())
+    }
+    pub fn value_interface_certificate(&self) -> Option<Arc<CheckedValueArtifact>> {
+        self.compiled.value_interface_certificate()
+    }
+    pub fn validate_settled_native_bindings<'a>(
+        &self,
+        actual: impl IntoIterator<
+            Item = (
+                &'a str,
+                &'a tidepool_repr::execution_schema::SymbolIdentity,
+                u64,
+                u64,
+            ),
+        >,
+    ) -> Result<(), CompileError> {
+        self.compiled.validate_settled_native_bindings(actual)
+    }
+}
+
 #[derive(Debug)]
 pub struct ExactCompiledDisplay {
     capture: Arc<ExactCompiledItem>,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
+    yield_sites_digest: [u8; 32],
     generation: u64,
     admission_digest: [u8; 32],
     program_admission: bool,
@@ -1003,6 +1286,14 @@ pub struct ExactCompiledDisplay {
 }
 
 impl ExactCompiledDisplay {
+    pub fn validate_yield_sites(&self, sites: &[crate::YieldSite]) -> Result<(), CompileError> {
+        if crate::artifacts::yield_sites_metadata_digest(sites)? != self.yield_sites_digest {
+            return Err(failure(
+                "compiled typed-site metadata was edited before installation",
+            ));
+        }
+        Ok(())
+    }
     pub fn target_owned(&self) -> Arc<tidepool_repr::execution_schema::PreparedProgram> {
         self.target.clone()
     }
@@ -1197,6 +1488,9 @@ impl CheckedDisplayOffer {
         {
             return Err(failure("display bundle names or wrapper changed"));
         }
+        let yield_sites_digest = crate::artifacts::yield_sites_metadata_digest(
+            &crate::turn_observations::decode_turn_yield_sites(&fields[3])?,
+        )?;
         let bound = list(&fields[2], 3)?.to_vec();
         let module = tidepool_repr::SessionModule::val(tidepool_repr::Generation(self.generation))
             .module_name();
@@ -1218,6 +1512,7 @@ impl CheckedDisplayOffer {
             capture: self.capture.clone(),
             target: target.clone(),
             table: read_table(root)?,
+            yield_sites_digest,
             generation: self.generation,
             admission_digest: self.admission_digest,
             program_admission: self.is_program,
@@ -1229,6 +1524,14 @@ impl CheckedDisplayOffer {
 }
 
 impl ExactCompiledItem {
+    pub fn validate_yield_sites(&self, sites: &[crate::YieldSite]) -> Result<(), CompileError> {
+        if crate::artifacts::yield_sites_metadata_digest(sites)? != self.yield_sites_digest {
+            return Err(failure(
+                "compiled typed-site metadata was edited before installation",
+            ));
+        }
+        Ok(())
+    }
     pub fn target_owned(&self) -> Arc<tidepool_repr::execution_schema::PreparedProgram> {
         self.target.clone()
     }
@@ -1238,6 +1541,7 @@ impl ExactCompiledItem {
         cell_digest: [u8; 32],
     ) -> Result<(), CompileError> {
         let valid = match self.admission {
+            CheckedExecutionAdmission::HostActivationInput(_) => false,
             CheckedExecutionAdmission::RuntimeItem(digest) => digest == item_digest,
             CheckedExecutionAdmission::CellProgram(digest) => digest == cell_digest,
             CheckedExecutionAdmission::InitialFold(digest) => {
@@ -1339,6 +1643,22 @@ impl ExactCompiledItem {
 }
 
 impl ExactCompiledPrefix {
+    pub(crate) fn with_initial_value_context(
+        &self,
+        current: Arc<crate::declaration_context::ExactDeclarationContext>,
+    ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        Ok(Arc::new(
+            (*current).clone().extend_checked_value_input_context(
+                &self.cell.declaration_context,
+                self.cell
+                    .value_inputs
+                    .baseline
+                    .iter()
+                    .map(|artifact| (artifact.owner, artifact.bytes.as_ref())),
+            )?,
+        ))
+    }
+
     fn planned_authorization(&self) -> Value {
         self.completed_declaration(0)
             .and_then(|item| item.cell.planned_declaration.as_ref())
@@ -1897,6 +2217,7 @@ pub(crate) fn seal_checked_fold(
     }
     let item = cell.item(0)?;
     CheckedItemOffer {
+        purpose: CheckedItemPurpose::Authored,
         prefix: item.initial_prefix()?,
         item,
         runtime_prefix_digest: cell.admission_digest(),
@@ -1911,6 +2232,7 @@ pub(crate) fn seal_checked_fold(
 
 #[derive(Clone, Debug)]
 pub(crate) struct CheckedItemOffer {
+    pub(crate) purpose: CheckedItemPurpose,
     pub(crate) item: ExactCheckedItem,
     pub(crate) prefix: ExactCompiledPrefix,
     pub(crate) runtime_prefix_digest: [u8; 32],
@@ -1921,7 +2243,34 @@ pub(crate) struct CheckedItemOffer {
     pub(crate) settled_values: CheckedSettledValues,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CheckedItemPurpose {
+    Authored,
+    HostActivationInput,
+}
+
 impl CheckedItemOffer {
+    pub(crate) fn validate_activation_input(&self) -> Result<(), CompileError> {
+        if self.item.cell.item_count() != 1
+            || self.item.index() != 0
+            || self.item.kind() != CheckedItemKind::Bind
+            || self.item.binders() != ["sessionInput"]
+            || self.item.turn_templates().len() != 1
+            || self.item.turn_templates()[0].0 != "bind"
+            || self.item.signatures().len() != 1
+            || self.item.signatures()[0].key() != "__tidepool_cell_pin_0_sessionInput"
+            || self.item.admission_digest() == [0; 32]
+            || self.item.cell.receipt_digest == [0; 32]
+            || self.runtime_prefix_digest == [0; 32]
+            || self.observation_name.is_some()
+            || self.is_fold
+            || self.is_program
+            || self.generation == 0
+        {
+            return Err(failure("host activation input requires its one checked input binder and protected template"));
+        }
+        Ok(())
+    }
     pub(crate) fn authorization(
         &self,
         producer: &[u8],
@@ -2024,10 +2373,71 @@ impl CheckedItemOffer {
         target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
         artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
     ) -> Result<Arc<ExactCompiledItem>, CompileError> {
-        let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
-        let fields = row(&receipt, 8)?;
-        if string(&fields[0])? != "TPEXACTITEM"
-            || string(&fields[1])? != "1"
+        if self.purpose != CheckedItemPurpose::Authored {
+            return Err(failure(
+                "host activation input cannot issue authored execution authority",
+            ));
+        }
+        self.seal_recipe(root, request, source, target, artifact_context)
+            .map(|(compiled, _)| compiled)
+    }
+
+    pub(crate) fn seal_activation_input(
+        &self,
+        root: &Path,
+        request: &str,
+        source: &str,
+        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
+        artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
+    ) -> Result<Arc<ExactCompiledActivationInput>, CompileError> {
+        if self.purpose != CheckedItemPurpose::HostActivationInput {
+            return Err(failure(
+                "authored item cannot issue host activation authority",
+            ));
+        }
+        self.validate_activation_input()?;
+        let (compiled, witness) =
+            self.seal_recipe(root, request, source, target, artifact_context)?;
+        Ok(Arc::new(ExactCompiledActivationInput {
+            compiled,
+            input_type_witness: witness
+                .ok_or_else(|| failure("host input lacks canonical type witness"))?,
+        }))
+    }
+
+    fn seal_recipe(
+        &self,
+        root: &Path,
+        request: &str,
+        source: &str,
+        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
+        artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
+    ) -> Result<(Arc<ExactCompiledItem>, Option<CanonicalInputTypeWitness>), CompileError> {
+        let (file, magic, profile) = match self.purpose {
+            CheckedItemPurpose::Authored => (
+                "checked-item.cbor",
+                "TPEXACTITEM",
+                "tidepool-checked-recipe-2",
+            ),
+            CheckedItemPurpose::HostActivationInput => (
+                "activation-input.cbor",
+                "TPEXACTACTIVATIONINPUT2",
+                "tidepool-host-activation-input-2",
+            ),
+        };
+        let receipt = decode(&read(root.join(file), 4 * 1024 * 1024)?)?;
+        let host = self.purpose == CheckedItemPurpose::HostActivationInput;
+        let fields = row(&receipt, if host { 9 } else { 8 })?;
+        let input_witness = if host {
+            let Value::Bytes(bytes) = &fields[8] else {
+                return Err(failure("host input canonical type witness missing"));
+            };
+            Some(CanonicalInputTypeWitness::from_bytes(bytes)?)
+        } else {
+            None
+        };
+        if string(&fields[0])? != magic
+            || string(&fields[1])? != if host { "2" } else { "1" }
             || string(&fields[2])? != request
             || string(&fields[3])? != hex(&self.item.admission_digest())
             || string(&fields[4])?
@@ -2038,7 +2448,7 @@ impl CheckedItemOffer {
                 })
             || fields[5] != Value::Integer((self.item.index as u64).into())
             || string(&fields[6])? != hash(source.as_bytes())
-            || string(&fields[7])? != "tidepool-checked-recipe-2"
+            || string(&fields[7])? != profile
         {
             return Err(failure(
                 "checked-item recipe receipt differs from its same compiler offer",
@@ -2051,7 +2461,7 @@ impl CheckedItemOffer {
         } else {
             self.item.binders().to_vec()
         };
-        let bound_binders = match (self.item.kind(), string(&turn[0])?) {
+        let (bound_binders, authenticated_sites) = match (self.item.kind(), string(&turn[0])?) {
             (CheckedItemKind::Bind | CheckedItemKind::Expression, "Bind") => {
                 let fields = row(&turn[1], 5)?;
                 if fields[0] != Value::Array(expected_binders.iter().map(text).collect())
@@ -2061,6 +2471,9 @@ impl CheckedItemOffer {
                         "compiled bind has another authored verdict or wrapper",
                     ));
                 }
+                let authenticated_sites = crate::artifacts::yield_sites_metadata_digest(
+                    &crate::turn_observations::decode_turn_yield_sites(&fields[3])?,
+                )?;
                 let bound = list(&fields[2], 65536)?.to_vec();
                 if bound.len() != expected_binders.len() {
                     return Err(failure("compiled binder inventory differs"));
@@ -2079,7 +2492,7 @@ impl CheckedItemOffer {
                         ));
                     }
                 }
-                bound
+                (bound, authenticated_sites)
             }
             _ => return Err(failure("compiled turn kind differs from checked item")),
         };
@@ -2092,23 +2505,29 @@ impl CheckedItemOffer {
         } else {
             None
         };
-        Ok(Arc::new(ExactCompiledItem {
-            item: self.item.clone(),
-            target: target.clone(),
-            table: read_table(root)?,
-            value_interface,
-            generation: self.generation,
-            bound_binders,
-            observation_name: self.observation_name.clone(),
-            admission: if self.is_program {
-                CheckedExecutionAdmission::CellProgram(self.item.admission_digest())
-            } else if self.is_fold {
-                CheckedExecutionAdmission::InitialFold(self.runtime_prefix_digest)
-            } else {
-                CheckedExecutionAdmission::RuntimeItem(self.runtime_prefix_digest)
-            },
-            settled_values: self.settled_values.clone(),
-        }))
+        Ok((
+            Arc::new(ExactCompiledItem {
+                item: self.item.clone(),
+                target: target.clone(),
+                table: read_table(root)?,
+                yield_sites_digest: authenticated_sites,
+                value_interface,
+                generation: self.generation,
+                bound_binders,
+                observation_name: self.observation_name.clone(),
+                admission: if self.purpose == CheckedItemPurpose::HostActivationInput {
+                    CheckedExecutionAdmission::HostActivationInput(self.runtime_prefix_digest)
+                } else if self.is_program {
+                    CheckedExecutionAdmission::CellProgram(self.item.admission_digest())
+                } else if self.is_fold {
+                    CheckedExecutionAdmission::InitialFold(self.runtime_prefix_digest)
+                } else {
+                    CheckedExecutionAdmission::RuntimeItem(self.runtime_prefix_digest)
+                },
+                settled_values: self.settled_values.clone(),
+            }),
+            input_witness,
+        ))
     }
 }
 
@@ -2533,6 +2952,253 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    fn witness_bytes(shape: ciborium::Value, seal: &str) -> Vec<u8> {
+        use super::*;
+        let mut structure = Vec::new();
+        ciborium::into_writer(&shape, &mut structure).unwrap();
+        let wire = array([
+            text("TPCANONICALINPUTTYPE1"),
+            text("1"),
+            array([text("activation-input"), text("presentation"), array([])]),
+            Value::Bytes(structure),
+            array([array([text("main"), text("Owner"), text(seal)])]),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&wire, &mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn canonical_input_witness_preserves_shape_and_original_interface_seals() {
+        use super::*;
+        let con = |name: &str| {
+            array([
+                text("con"),
+                array([text("main"), text("Owner"), text("type"), text(name)]),
+                array([]),
+            ])
+        };
+        let fun = |argument, result| {
+            array([
+                text("fun"),
+                Value::Integer(0.into()),
+                con("Many"),
+                argument,
+                result,
+            ])
+        };
+        let forward = CanonicalInputTypeWitness::from_bytes(&witness_bytes(
+            fun(con("A"), con("B")),
+            &"a".repeat(64),
+        ))
+        .unwrap();
+        let same = CanonicalInputTypeWitness::from_bytes(&witness_bytes(
+            fun(con("A"), con("B")),
+            &"a".repeat(64),
+        ))
+        .unwrap();
+        let swapped = CanonicalInputTypeWitness::from_bytes(&witness_bytes(
+            fun(con("B"), con("A")),
+            &"a".repeat(64),
+        ))
+        .unwrap();
+        let changed_interface = CanonicalInputTypeWitness::from_bytes(&witness_bytes(
+            fun(con("A"), con("B")),
+            &"b".repeat(64),
+        ))
+        .unwrap();
+        assert_eq!(forward, same);
+        assert_eq!(forward.commitment(), same.commitment());
+        assert_ne!(forward, swapped);
+        assert_ne!(forward, changed_interface);
+        assert_ne!(forward.commitment(), changed_interface.commitment());
+        let mut presentation_wire =
+            decode(&witness_bytes(fun(con("A"), con("B")), &"a".repeat(64))).unwrap();
+        let Value::Array(fields) = &mut presentation_wire else {
+            unreachable!()
+        };
+        let Value::Array(signature) = &mut fields[2] else {
+            unreachable!()
+        };
+        signature[1] = text("different parser presentation");
+        let mut presentation_bytes = Vec::new();
+        ciborium::into_writer(&presentation_wire, &mut presentation_bytes).unwrap();
+        let presentation = CanonicalInputTypeWitness::from_bytes(&presentation_bytes).unwrap();
+        assert_eq!(forward, presentation);
+        assert_eq!(forward.commitment(), presentation.commitment());
+        assert_ne!(forward.metadata_digest(), presentation.metadata_digest());
+        let site = crate::YieldSite {
+            site: 1,
+            origin: "original".into(),
+            ordinal: 0,
+            ty: "Int".into(),
+            modules: Vec::new(),
+            heads: Vec::new(),
+            inputs: vec![crate::SiteType {
+                ty: "A -> B".into(),
+                modules: vec!["Owner".into()],
+                heads: Vec::new(),
+            }],
+            input_type_witnesses: vec![Some(forward.clone())],
+            reply_declaration: None,
+        };
+        let mut edited = site.clone();
+        edited.input_type_witnesses[0] = Some(presentation);
+        assert_eq!(site, edited);
+        assert!(!site.same_metadata(&edited));
+        assert!(crate::artifacts::yield_sites_metadata_digest(&[site.clone(), edited]).is_err());
+        let original_digest =
+            crate::artifacts::yield_sites_metadata_digest(&[site.clone()]).unwrap();
+        let mut absent = site.clone();
+        absent.input_type_witnesses.clear();
+        let mut input_changed = site.clone();
+        input_changed.inputs[0].ty = "B -> A".into();
+        let mut origin_changed = site.clone();
+        origin_changed.origin = "another owner".into();
+        for altered in [absent, input_changed, origin_changed] {
+            assert_ne!(
+                original_digest,
+                crate::artifacts::yield_sites_metadata_digest(&[altered]).unwrap()
+            );
+        }
+        for shape in [
+            array([text("bound"), Value::Integer(0.into())]),
+            array([
+                text("forall"),
+                Value::Integer(0.into()),
+                con("Type"),
+                array([text("bound"), Value::Integer(1.into())]),
+            ]),
+            array([text("unconstructible"), text("function"), text("A -> B")]),
+        ] {
+            assert!(
+                CanonicalInputTypeWitness::from_bytes(&witness_bytes(shape, &"a".repeat(64)))
+                    .is_err()
+            );
+        }
+        let mut wire = decode(&witness_bytes(con("A"), &"a".repeat(64))).unwrap();
+        let Value::Array(fields) = &mut wire else {
+            unreachable!()
+        };
+        fields[4] = array([]);
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&wire, &mut bytes).unwrap();
+        assert!(CanonicalInputTypeWitness::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires original Haskell canonical input producer vectors"]
+    fn canonical_input_witness_matches_haskell_original_and_preview() {
+        use super::*;
+        let root = std::env::var_os("TIDEPOOL_CANONICAL_INPUT_FIXTURE")
+            .expect("exact producer vector directory");
+        let root = std::path::Path::new(&root);
+        let witness = |name| {
+            CanonicalInputTypeWitness::from_bytes(&std::fs::read(root.join(name)).unwrap()).unwrap()
+        };
+        let original = witness("original-input.cbor");
+        let preview = witness("preview-input.cbor");
+        assert_eq!(original, preview);
+        assert_eq!(original.commitment(), preview.commitment());
+        assert_eq!(witness("alpha-first.cbor"), witness("alpha-second.cbor"));
+        assert_ne!(
+            witness("original-owner.cbor"),
+            witness("changed-owner.cbor")
+        );
+        assert_ne!(
+            witness("forward-function.cbor"),
+            witness("backward-function.cbor")
+        );
+    }
+
+    fn activation_offer(binder: &str) -> super::CheckedItemOffer {
+        use super::*;
+        let source = "sessionInput <- pure (undefined :: Int)";
+        let cell = Arc::new(ExactCheckedCell {
+            specification: CheckedCellSpecification {
+                admission_digest: [4; 32],
+                cell_source: source.into(),
+                template_source: String::new(),
+                turn_templates: vec![("bind".into(), "protected template".into())],
+                injected_modules: Vec::new(),
+                reserved_declaration_modules: Vec::new(),
+            },
+            producer: [7; 32],
+            context: [8; 32],
+            declaration_context: Arc::new(
+                crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
+                    .unwrap(),
+            ),
+            receipt_digest: [9; 32],
+            checked_source: source.into(),
+            evidence: Vec::new(),
+            observations: Vec::new(),
+            items: vec![CheckedItem {
+                kind: CheckedItemKind::Bind,
+                source: source.into(),
+                binders: vec![binder.into()],
+                pins: Vec::new(),
+                expression: None,
+                signatures: vec![ExactCheckedSignature {
+                    key: "__tidepool_cell_pin_0_sessionInput".into(),
+                    source: "Int".into(),
+                    names: Vec::new(),
+                }],
+            }],
+            include: Vec::new(),
+            planned_declaration: None,
+            planned_declarations: Default::default(),
+            value_inputs: CheckedValueInputs::capture(Vec::new()).unwrap(),
+        });
+        let item = cell.item(0).unwrap();
+        CheckedItemOffer {
+            purpose: CheckedItemPurpose::HostActivationInput,
+            prefix: item.initial_prefix().unwrap(),
+            item,
+            runtime_prefix_digest: [6; 32],
+            generation: 1,
+            observation_name: None,
+            is_fold: false,
+            is_program: false,
+            settled_values: Default::default(),
+        }
+    }
+
+    #[test]
+    fn activation_role_refuses_cross_sealing_before_reading_output_files() {
+        use super::*;
+        let offer = activation_offer("sessionInput");
+        offer.validate_activation_input().unwrap();
+        assert!(activation_offer("other")
+            .validate_activation_input()
+            .is_err());
+        let prepared = Arc::new(
+            tidepool_repr::execution_schema::parse_program(
+                include_bytes!(
+                    "../../../bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor"
+                ),
+                &crate::prepared_artifact::production_requirements().unwrap(),
+                tidepool_repr::execution_schema::DecodeLimits::default(),
+            )
+            .unwrap(),
+        );
+        let empty = tempfile::tempdir().unwrap();
+        assert!(offer
+            .seal(empty.path(), "request", "source", &prepared)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot issue authored execution authority"));
+        let authored = CheckedItemOffer {
+            purpose: CheckedItemPurpose::Authored,
+            ..offer
+        };
+        assert!(authored
+            .seal_activation_input(empty.path(), "request", "source", &prepared)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot issue host activation authority"));
+    }
 
     #[test]
     fn failed_checked_inputs_retain_sealed_and_observed_bytes_after_owner_drop() {
