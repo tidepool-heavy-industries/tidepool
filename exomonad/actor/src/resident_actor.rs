@@ -19,6 +19,8 @@ mod command_presentation;
 mod command_settlement;
 mod commands;
 mod drain_wait;
+#[cfg(test)]
+mod inherited_host_tests;
 mod inspection_wait;
 pub(crate) mod invocation_work;
 mod owned_workbench;
@@ -1214,6 +1216,7 @@ pub struct ResidentKernelBehavior<H, O> {
     shutdown_hook: Option<RootCustody>,
     checkpoint: Option<StateCheckpoint>,
     admitted_checkpoint: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
+    inherited_host_attachment: Option<HostedCheckpointAttachment>,
     child_scope_lease: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
     child_release: child_initialization::ForkChildReleaseState,
     pending_child_initialization: Option<child_initialization::PublishedChildInitialization>,
@@ -1876,6 +1879,34 @@ impl ForkPublication {
         }
     }
 
+    fn capture_inherited_child(
+        &self,
+        descriptor: &ActorDescriptor,
+    ) -> Result<Option<HostedCheckpointAttachment>, ResidentActorWorkbenchError> {
+        if descriptor.fork_group().is_none()
+            || descriptor.context_parent().is_none()
+            || descriptor.checkpoint_token().is_some()
+        {
+            return Ok(None);
+        }
+        let (Some(boundary), Some(capture)) = (self.hosted_boundary(), self.capture()) else {
+            return Ok(None);
+        };
+        if !boundary.is_complete() || descriptor.fork_boundary() != Some(boundary) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "inherited host attachment requires its exact admitted invocation".into(),
+            ));
+        }
+        capture
+            .capture(descriptor.label(), boundary)
+            .map(Some)
+            .map_err(|error| {
+                ResidentActorWorkbenchError::ActorProtocol(format!(
+                    "inherited host context capture failed: {error:?}"
+                ))
+            })
+    }
+
     fn capture(&self) -> Option<&Arc<dyn crate::HostedCheckpointCapture>> {
         match self {
             Self::Workbench { capture, .. } => capture.as_ref(),
@@ -2067,6 +2098,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             shutdown_hook: None,
             checkpoint: None,
             admitted_checkpoint: None,
+            inherited_host_attachment: None,
             child_scope_lease: None,
             child_release: Default::default(),
             pending_child_initialization: None,
@@ -3203,6 +3235,7 @@ where
         self.shutdown_hook.take();
         self.checkpoint.take();
         self.admitted_checkpoint.take();
+        self.inherited_host_attachment.take();
         self.child_scope_lease.take();
         self.pending_child_initialization.take();
         self.pending_checkpoint.take();
@@ -3524,6 +3557,11 @@ where
                     "context fork did not name an admission group".into(),
                 ));
             }
+            // The exact issuing claim is still pending here. The admitted child
+            // retains this host share across workspace waits and parent publication.
+            let inherited_host_attachment = effect_owner
+                .publication()
+                .capture_inherited_child(&descriptor)?;
             Ok(child_launch::ChildLaunchAdmission {
                 child: crate::start::CapturedChildLaunch {
                     lifetime,
@@ -3534,6 +3572,7 @@ where
                     seed,
                 },
                 checkpoint_admission,
+                inherited_host_attachment,
                 retained_checkpoint_scope,
                 child_session_startup,
                 invocation_work: invocation_work.clone(),
@@ -5938,6 +5977,8 @@ where
                             .map_or((None, None), |(lease, attachment)| {
                                 (Some(lease), attachment)
                             });
+                        let checkpoint_attachment =
+                            checkpoint_attachment.or_else(|| self.inherited_host_attachment.take());
                         let installation = LocalResidentInstallation {
                             actor,
                             label: self.descriptor.label().to_owned(),
@@ -6183,6 +6224,8 @@ where
             .map_or((None, None), |(lease, attachment)| {
                 (Some(lease), attachment)
             });
+        let checkpoint_attachment =
+            checkpoint_attachment.or_else(|| self.inherited_host_attachment.take());
         self.publish_installation(LocalResidentInstallation {
             actor,
             label: self.descriptor.label().to_owned(),
@@ -9186,10 +9229,7 @@ where
             cleanup_confirmed,
         } = finalized;
         let execution = execution_state.request.execution_id().cloned();
-        if let (Some(binding), Some(execution)) = (
-            execution_state.effects.context_binding.take(),
-            execution.as_ref(),
-        ) {
+        if let Some(execution) = execution.as_ref() {
             let cancelled = execution_state
                 .effects
                 .control
@@ -9204,14 +9244,16 @@ where
                 cancelled,
             );
             if let Some(control) = execution_state.effects.control.clone() {
-                self.workbench_executions.lock().retain_context_terminal(
+                self.workbench_executions.lock().retain_cell_terminal(
                     execution,
                     execution_state.invocation.as_ref(),
                     exit.clone(),
                     control,
                 );
             }
-            binding.finish(exit);
+            if let Some(binding) = execution_state.effects.context_binding.take() {
+                binding.finish(exit);
+            }
         }
         if let (Some(execution), Some(request)) = (execution, execution_state.replay_request.take())
         {
@@ -9929,7 +9971,7 @@ where
             if !self
                 .workbench_executions
                 .lock()
-                .context_allows_publication(&boundary)
+                .cell_allows_publication(&boundary)
             {
                 return self.tool_aborted(kernel, boundary).await;
             }

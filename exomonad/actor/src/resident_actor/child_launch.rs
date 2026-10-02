@@ -20,6 +20,7 @@ pub(super) struct ChildLaunchContinuation {
 pub(super) struct ChildLaunchAdmission {
     pub child: crate::start::CapturedChildLaunch,
     pub checkpoint_admission: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
+    pub inherited_host_attachment: Option<HostedCheckpointAttachment>,
     pub retained_checkpoint_scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
     pub child_session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
     pub invocation_work: Option<Arc<InvocationWork>>,
@@ -76,6 +77,7 @@ where
         let ChildLaunchAdmission {
             child,
             checkpoint_admission,
+            inherited_host_attachment,
             retained_checkpoint_scope,
             child_session_startup,
             invocation_work,
@@ -246,6 +248,7 @@ where
                 launch_worktrees,
             );
             behavior.admitted_checkpoint = checkpoint_admission.clone();
+            behavior.inherited_host_attachment = inherited_host_attachment;
             behavior.prepared_workspace = prepared_workspace;
             behavior.child_session_startup = child_session_startup;
             let startup_admission = match lifetime {

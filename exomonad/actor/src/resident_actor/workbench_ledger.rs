@@ -5,7 +5,7 @@ struct WorkbenchExecutionRecord {
     request: WorkbenchRequest,
     state: WorkbenchExecutionState,
     invocation_work: Option<Arc<InvocationWork>>,
-    context_terminal: Option<(crate::CellExit, Arc<crate::WorkbenchExecutionControl>)>,
+    cell_terminal: Option<(crate::CellExit, Arc<crate::WorkbenchExecutionControl>)>,
     boundary_abort: Option<BoundaryAbortCleanup>,
 }
 
@@ -149,7 +149,7 @@ impl WorkbenchExecutions {
                 request,
                 state: WorkbenchExecutionState::Unconfirmed,
                 invocation_work: None,
-                context_terminal: None,
+                cell_terminal: None,
                 boundary_abort: None,
             },
         );
@@ -172,10 +172,10 @@ impl WorkbenchExecutions {
             .0
             .get(&key)
             .and_then(|record| record.boundary_abort.clone());
-        let context_terminal = self
+        let cell_terminal = self
             .0
             .get(&key)
-            .and_then(|record| record.context_terminal.clone());
+            .and_then(|record| record.cell_terminal.clone());
         self.0.insert(
             key,
             WorkbenchExecutionRecord {
@@ -185,7 +185,7 @@ impl WorkbenchExecutions {
                     cancellation,
                 },
                 invocation_work,
-                context_terminal,
+                cell_terminal,
                 boundary_abort,
             },
         );
@@ -230,7 +230,7 @@ impl WorkbenchExecutions {
         })
     }
 
-    pub(super) fn retain_context_terminal(
+    pub(super) fn retain_cell_terminal(
         &mut self,
         execution: &WorkbenchExecutionId,
         invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
@@ -240,11 +240,11 @@ impl WorkbenchExecutions {
         let record = self
             .0
             .get_mut(&WorkbenchReplayKey::new(execution, invocation))
-            .expect("context terminal follows admitted execution");
-        record.context_terminal = Some((exit, control));
+            .expect("cell terminal follows admitted execution");
+        record.cell_terminal = Some((exit, control));
     }
 
-    pub(super) fn context_allows_publication(
+    pub(super) fn cell_allows_publication(
         &self,
         boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
     ) -> bool {
@@ -256,9 +256,9 @@ impl WorkbenchExecutions {
             })
             .all(|(_, record)| {
                 record
-                    .context_terminal
+                    .cell_terminal
                     .as_ref()
-                    .is_none_or(|(exit, control)| {
+                    .is_some_and(|(exit, control)| {
                         exit.permits_context_commit() && !control.context_cancellation_requested()
                     })
             })
@@ -436,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn context_terminal_gates_deferred_publication_and_late_cancellation() {
+    fn cell_terminal_gates_deferred_publication_and_late_cancellation() {
         let invocation = crate::resident_tools::WorkbenchCallKey::from(
             exomonad_tool::ToolInvocationContext::external(
                 "thread".into(),
@@ -456,31 +456,101 @@ mod tests {
             WorkbenchRequest::from_cell_input("pure ()").with_execution_id(execution.clone());
         let mut journal = WorkbenchExecutions::default();
         journal.begin(&execution, request, Some(&invocation));
+        assert!(
+            !journal.cell_allows_publication(&boundary),
+            "admitted call has no terminal yet"
+        );
         let control = crate::WorkbenchExecutionControl::untracked();
         let mut exit = crate::CellExit {
             execution: execution.clone(),
             cause: crate::CellExitCause::FullReturn,
             cleanup_confirmed: false,
         };
-        journal.retain_context_terminal(
-            &execution,
-            Some(&invocation),
-            exit.clone(),
-            control.clone(),
-        );
-        assert!(!journal.context_allows_publication(&boundary));
+        journal.retain_cell_terminal(&execution, Some(&invocation), exit.clone(), control.clone());
+        assert!(!journal.cell_allows_publication(&boundary));
         exit.cleanup_confirmed = true;
-        journal.retain_context_terminal(&execution, Some(&invocation), exit, control.clone());
-        assert!(journal.context_allows_publication(&boundary));
+        journal.retain_cell_terminal(&execution, Some(&invocation), exit, control.clone());
+        assert!(journal.cell_allows_publication(&boundary));
         control.publication_decision().claim_commit().unwrap();
         assert!(!control.request_cancellation());
-        assert!(!journal.context_allows_publication(&boundary));
+        assert!(!journal.cell_allows_publication(&boundary));
         let sibling = tidepool_runtime::session::WorkbenchForkBoundary::external(
             "thread".into(),
             "turn".into(),
             "sibling".into(),
         );
-        assert!(journal.context_allows_publication(&sibling));
+        assert!(journal.cell_allows_publication(&sibling));
+    }
+
+    #[test]
+    fn ordinary_hosted_cell_terminal_refuses_failure_cancellation_and_incomplete_returns() {
+        let invocation = crate::resident_tools::WorkbenchCallKey::from(
+            exomonad_tool::ToolInvocationContext::external(
+                "thread".into(),
+                "turn".into(),
+                "call".into(),
+                Some("call".into()),
+                None,
+            ),
+        );
+        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "thread".into(),
+            "turn".into(),
+            "call".into(),
+        );
+        let execution = WorkbenchExecutionId::from_digest([10; 16]);
+        let actor = crate::ActorRef::first(crate::ActorId(1));
+        let failed = Err(crate::KernelInvocationFailure::Failed {
+            actor,
+            detail: "intentional runtime failure".into(),
+        });
+        let success = || {
+            Ok(crate::KernelStep::Continue(WorkbenchResponse {
+                status: WorkbenchRunStatus::Committed,
+                summary: None,
+                items: Vec::new(),
+                next_index: 1,
+                total: 1,
+            }))
+        };
+        let partial = Ok(crate::KernelStep::Continue(WorkbenchResponse {
+            status: WorkbenchRunStatus::Committed,
+            summary: None,
+            items: Vec::new(),
+            next_index: 1,
+            total: 2,
+        }));
+        for (reply, cleanup, cancelled, permits) in [
+            (failed, true, false, false),
+            (success(), true, true, false),
+            (success(), false, false, false),
+            (partial, true, false, false),
+            (success(), true, false, true),
+        ] {
+            let control = crate::WorkbenchExecutionControl::untracked();
+            assert!(!control.has_context_binding());
+            let request = WorkbenchRequest::from_cell_input("unfoldDeferred group branches")
+                .with_execution_id(execution.clone());
+            let mut journal = WorkbenchExecutions::default();
+            journal.begin(&execution, request.clone(), Some(&invocation));
+            let exit = crate::CellExit::from_reply(execution.clone(), &reply, cleanup, cancelled);
+            journal.retain_cell_terminal(&execution, Some(&invocation), exit, control);
+            // Recording the ordinary reply must retain the publication decision.
+            let reply = reply.map(|step| match step {
+                crate::KernelStep::Continue(response) => response,
+                _ => unreachable!(),
+            });
+            journal.record(
+                execution.clone(),
+                request,
+                reply,
+                crate::WorkbenchCancellationOutcome::NotSleeping {
+                    execution: execution.clone(),
+                },
+                Some(&invocation),
+            );
+            assert_eq!(journal.cell_allows_publication(&boundary), permits);
+        }
     }
 
     #[test]
