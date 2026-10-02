@@ -273,15 +273,15 @@ executionSourceWire path = do
     TList [_,_,_,_,_,_,_,TList [TList [TList [TString sha,TString file]],_],_] -> pure (T.unpack sha,T.unpack file)
     _ -> fail "Rust scope6 descriptor layout differs"
   originalBytes <- BS.readFile graphPath
-  let refuse label action = do
+  let refuse label expected action = do
         action
         result <- readExactScope path
         BS.writeFile graphPath originalBytes
         unless (case result of Left reason -> expected `isInfixOf` reason; Right _ -> False) $
           fail ("scope6 failed to enforce " ++ label ++ " before execution")
-  refuse "missing graph" (removeFile graphPath)
-  refuse "truncated graph" (BS.writeFile graphPath (BS.take (BS.length originalBytes - 1) originalBytes))
-  refuse "tampered graph" (BS.writeFile graphPath (BS.cons 0 (BS.drop 1 originalBytes)))
+  refuse "missing graph" "does not exist" (removeFile graphPath)
+  refuse "truncated graph" "digest differs" (BS.writeFile graphPath (BS.take (BS.length originalBytes - 1) originalBytes))
+  refuse "tampered graph" "digest differs" (BS.writeFile graphPath (BS.cons 0 (BS.drop 1 originalBytes)))
   BS.writeFile graphPath (BS.replicate (4*1024*1024+1) 0)
   oversizedResult <- readExactScope path
   BS.writeFile graphPath originalBytes
