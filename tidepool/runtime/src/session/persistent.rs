@@ -267,6 +267,12 @@ impl PersistentSession {
     /// and the accumulating harness; `None` for a session with no persistent declarations). The
     /// machine is not bootstrapped until the first turn.
     pub fn new(lib: Option<SessionLib>, nursery_size: usize) -> Self {
+        // Recovery retains original type interfaces even when their heap
+        // values are lost. Their module identities cannot be issued again.
+        let val_gen = lib
+            .as_ref()
+            .map(|lib| lib.log.retained_value_generation_high_water())
+            .unwrap_or(Generation(0));
         PersistentSession {
             admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new()),
             machine: None,
@@ -282,7 +288,7 @@ impl PersistentSession {
             #[cfg(test)]
             compile_view_bytes_hashed: std::sync::atomic::AtomicUsize::new(0),
             binding_index: BindingIndex::new(),
-            val_gen: Generation(0),
+            val_gen,
             scopes: ScopeTree::new(),
             public_visibility_epochs: HashMap::new(),
             effect_policy: EffectRunPolicy::HandleOrSuspend,

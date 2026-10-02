@@ -1,6 +1,8 @@
 //! Owned execution intent and compiler receipts for paired publication.
 
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -252,109 +254,16 @@ fn paired_version(base: &PublicManifestBase) -> String {
     blake3::hash(&bytes).to_hex().to_string()
 }
 
-fn merge_surface(
-    path: &Path,
+fn extend_admitted_surface(
+    authored: &CertifiedAuthoredDeclaration,
     mut prior: AdmittedDeclarationSurface,
-    addition: &AdmittedDeclarationSurface,
 ) -> Result<AdmittedDeclarationSurface, SessionError> {
-    prior.roots.extend_from_slice(&addition.roots);
+    let addition = authored.shared_source_lexical_surface(&prior.lexical)?;
+    prior.roots.extend(addition.roots);
     prior.roots.sort();
     prior.roots.dedup();
-    let mut lexical = prior
-        .lexical
-        .into_iter()
-        .map(|node| (node.owner, node.imports))
-        .collect::<BTreeMap<_, _>>();
-    for node in &addition.lexical {
-        if lexical
-            .get(&node.owner)
-            .is_some_and(|edges| edges != &node.imports)
-        {
-            return Err(invalid_at(
-                path,
-                "admitted surface owner has conflicting original import edges",
-            ));
-        }
-        lexical.insert(node.owner.clone(), node.imports.clone());
-    }
-    prior.lexical = lexical
-        .into_iter()
-        .map(|(owner, imports)| ExactLexicalNode { owner, imports })
-        .collect();
+    prior.lexical = addition.lexical;
     Ok(prior)
-}
-
-fn extend_admitted_surface(
-    path: &Path,
-    authored: &CertifiedAuthoredDeclaration,
-    prior: AdmittedDeclarationSurface,
-) -> Result<AdmittedDeclarationSurface, SessionError> {
-    let imports = authored
-        .original_home_imports()
-        .map(|(owner, imports)| (owner.clone(), imports))
-        .collect::<BTreeMap<_, _>>();
-    let original = module_owner(authored);
-    let roots = imports.get(&original).ok_or_else(|| {
-        invalid_at(
-            path,
-            "authored declaration lacks exact original source import evidence",
-        )
-    })?;
-    // Session interfaces are implementation anchors. Only explicitly admitted
-    // shared source imports become roots of the virtual lexical graph.
-    let roots = roots
-        .iter()
-        .filter(|owner| !owner.module.starts_with("Tidepool.Session."))
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut pending = roots.clone();
-    let mut lexical = BTreeMap::new();
-    let inherited_edges = prior
-        .lexical
-        .iter()
-        .map(|node| (&node.owner, node.imports.as_slice()))
-        .collect::<BTreeMap<_, _>>();
-    while let Some(owner) = pending.pop() {
-        if lexical.contains_key(&owner) {
-            continue;
-        }
-        let edges = imports
-            .get(&owner)
-            .copied()
-            .or_else(|| inherited_edges.get(&owner).copied())
-            .ok_or_else(|| {
-                invalid_at(
-                    path,
-                    format!(
-                        "admitted surface root {}:{} lacks exact original source import evidence",
-                        owner.unit, owner.module
-                    ),
-                )
-            })?
-            .to_vec();
-        if edges
-            .iter()
-            .any(|edge| edge.module.starts_with("Tidepool.Session."))
-        {
-            return Err(invalid_at(
-                path,
-                "shared source surface depends on an unselected session module",
-            ));
-        }
-        pending.extend(edges.clone());
-        lexical.insert(owner, edges);
-    }
-    merge_surface(
-        path,
-        prior,
-        &AdmittedDeclarationSurface {
-            roots,
-            lexical: lexical
-                .into_iter()
-                .map(|(owner, imports)| ExactLexicalNode { owner, imports })
-                .collect(),
-        },
-    )
 }
 
 pub(super) fn authored_context(
@@ -364,7 +273,6 @@ pub(super) fn authored_context(
 ) -> Result<(Arc<ExactDeclarationContext>, AdmittedDeclarationSurface), SessionError> {
     let prior = tip(lib, parent)?;
     let surface = extend_admitted_surface(
-        &lib.root,
         certificate,
         prior
             .as_ref()
@@ -492,6 +400,11 @@ fn merge_instances(
 }
 
 impl FinalExecutionIntent {
+    #[cfg(test)]
+    pub(super) fn native_write_ids(&self) -> &[SessionVarId] {
+        &self.write_ids
+    }
+
     pub fn reserved_generation(&self) -> Generation {
         self.reserved
     }
@@ -811,7 +724,7 @@ impl PersistentSession {
             .map(|tip| tip.surface.clone())
             .unwrap_or_default();
         for write in &intent.writes {
-            surface = extend_admitted_surface(&public.path, &write.evidence, surface)?;
+            surface = extend_admitted_surface(&write.evidence, surface)?;
         }
         let expected_public_version = paired_version(&public);
         Ok(DeclarationPublicationBase {

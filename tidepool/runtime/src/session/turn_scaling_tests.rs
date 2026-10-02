@@ -217,6 +217,12 @@ fn try_execute_cell_with_authority_checks(
     authority_checks: AuthorityChecks,
 ) -> Result<Duration, ResidentError> {
     let cell_started = Instant::now();
+    let mut expected_public_winners: std::collections::BTreeMap<_, _> = resident
+        .public_visibility_snapshot_in(public)
+        .unwrap()
+        .bindings
+        .into_iter()
+        .collect();
     let execution = Arc::new(resident.begin_private_execution(public).unwrap());
     let view = execution.view();
     let imports = view.turn_imports(&SourceImports::new());
@@ -530,6 +536,13 @@ fn try_execute_cell_with_authority_checks(
         None,
         |resident| resident.freeze_private_execution(&execution).unwrap(),
     );
+    for id in intent.native_write_ids() {
+        let (name, _) = private_winners
+            .iter()
+            .find(|(_, winner)| winner == id)
+            .expect("sealed native write must be a final private winner");
+        expected_public_winners.insert(name.clone(), *id);
+    }
     let publication = match publication_target {
         ScalePublication::Ephemeral => resident.restage_ephemeral_execution_publication(intent),
         ScalePublication::Durable { owner, .. } => {
@@ -597,8 +610,8 @@ fn try_execute_cell_with_authority_checks(
             .public_visibility_snapshot_in(public)
             .unwrap()
             .bindings,
-        private_winners,
-        "publication must preserve the actual native winners"
+        expected_public_winners.into_iter().collect::<Vec<_>>(),
+        "publication must preserve prior public winners and publish sealed native writes"
     );
     // Retained snapshots and diagnostic reads do not belong to cell latency.
     let elapsed = cell_started.elapsed();
@@ -1130,6 +1143,75 @@ fn following_declaration_retains_original_native_binding_inventory() {
         &ScalePublication::Ephemeral,
     );
     assert_eq!(resident.current_binding_in(public, "x").unwrap(), original);
+    std::fs::write(
+        root.path().join("HiddenValSupport.hs"),
+        include_str!("fixtures/checked-native-support.hs"),
+    )
+    .unwrap();
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "following_support_declaration",
+        include_str!("fixtures/compiled-cell-native-binding-support.hs"),
+        2,
+        Some("1"),
+        &ScalePublication::Ephemeral,
+    );
+    assert_eq!(resident.current_binding_in(public, "x").unwrap(), original);
+    let public_view = resident.compile_view_in(public).unwrap();
+    let context = public_view.exact_declaration_context().unwrap();
+    assert!(context
+        .artifact_view()
+        .descriptors()
+        .iter()
+        .any(|descriptor| descriptor.owner.module == original.1.module_name()));
+    assert!(!context.lexical_graph().iter().any(|node| node.owner.module
+        == original.1.module_name()
+        || node
+            .imports
+            .iter()
+            .any(|owner| owner.module == original.1.module_name())));
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "following_support_consumer",
+        "dependentThroughSupport",
+        0,
+        Some("1"),
+        &ScalePublication::Ephemeral,
+    );
+    assert_eq!(resident.current_binding_in(public, "x").unwrap(), original);
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "support_rebind_x",
+        "let x = (2 :: Int)",
+        0,
+        None,
+        &ScalePublication::Ephemeral,
+    );
+    assert_ne!(resident.current_binding_in(public, "x").unwrap(), original);
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "support_original_after_rebind",
+        "dependentThroughSupport",
+        0,
+        Some("1"),
+        &ScalePublication::Ephemeral,
+    );
 }
 
 #[test]

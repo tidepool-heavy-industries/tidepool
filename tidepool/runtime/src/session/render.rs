@@ -526,6 +526,25 @@ impl DeclLog {
         }
     }
 
+    pub(crate) fn retained_value_generation_high_water(&self) -> Generation {
+        self.turns
+            .keys()
+            .filter_map(|generation| self.joined_context_at(*generation))
+            .flat_map(|context| context.value_interfaces())
+            .filter(|interface| interface.interface().unit() == "main")
+            .filter_map(|interface| {
+                interface
+                    .interface()
+                    .module()
+                    .strip_prefix("Tidepool.Session.Val.G")?
+                    .parse::<u64>()
+                    .ok()
+            })
+            .max()
+            .map(Generation)
+            .unwrap_or(Generation(0))
+    }
+
     pub(crate) fn admitted_surface_at(
         &self,
         generation: Generation,
