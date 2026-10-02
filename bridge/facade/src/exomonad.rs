@@ -2660,6 +2660,8 @@ fn pane_environment_from(
         "RUST_LOG",
         "EXOMONAD_TRACE",
         "TIDEPOOL_TIMING",
+        "TIDEPOOL_KEEP_TEST_LOGS",
+        "TIDEPOOL_TEST_ARTIFACT_ROOT",
     ];
     NAMES
         .iter()
@@ -3903,6 +3905,11 @@ mod tests {
             ),
             ("RUST_LOG".to_owned(), "warn".to_owned()),
             ("TIDEPOOL_TIMING".to_owned(), "1".to_owned()),
+            ("TIDEPOOL_KEEP_TEST_LOGS".to_owned(), "1".to_owned()),
+            (
+                "TIDEPOOL_TEST_ARTIFACT_ROOT".to_owned(),
+                "/tmp/owned-compiler-evidence".to_owned(),
+            ),
         ]);
         assert_eq!(
             pane_environment_from(|name| selected.get(name).cloned()),
