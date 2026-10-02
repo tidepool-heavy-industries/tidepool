@@ -42,19 +42,36 @@ literal model identifier. `C.setNextEffort C.High` changes the next request’s
 reasoning effort while preserving the model and existing context prefix.
 
 The editable context retains native evidence. For another model’s inference,
-completed reasoning exchanges become attributed readable notes with their
-visible summaries, calls, and results; the Store retains the originals.
-Incomplete or unauthenticated opaque exchanges and incompatible compaction
-prevent a model switch rather than silently discard evidence.
+completed reasoning exchanges can become attributed readable notes with their
+visible summaries, calls, and results when the provider context is compatible;
+the Store retains the originals. Incomplete or unauthenticated opaque exchanges
+and incompatible compaction prevent a model switch rather than silently discard
+evidence.
 
 Repeated context reads in one invocation see its staged edits. Saving a
 `Context` binding saves data, not edit authority: passing that value to
-`putContext` in a later synchronous invocation intentionally replaces that
-invocation's editable prefix. Its current call, completion and later arrivals
-remain protected. After completion, the editing exchange becomes eligible for
-curation by the next invocation. `editableTexts` skips native evidence; inspect
-`blockKind` and use `toNotes` to convert selected completed exchanges before
-editing their text.
+`putContext` in a later synchronous invocation can intentionally replace that
+invocation's editable visible prefix. The candidate must preserve current
+protected and opaque groups; a stale snapshot missing required groups is
+refused. This restores data, not authority. The current call, pending operation
+identities/pairing and later arrivals remain protected. Each visible body has
+its own editability flag, so an eligible result body can be edited without
+changing its group's protected structure. After completion, an editing
+exchange's admitted visible message/result bodies become eligible in a later
+cell. Native Haskell tool input/source and function arguments remain pinned;
+grouping stays protected while each visible body follows its own editable flag. Retained
+helpers make later calls shorter but do not make their source editable.
+`editableTexts` uses full visible text, never bounded previews. Use
+`C.trimText reason retainedText` to keep exact source beside an ordinary
+`[Trimmed: reason]` marker. `toNotes` preserves provenance for selected
+nonopaque completed exchanges; opaque group removal is refused.
+
+Same-model continuation forwards opaque reasoning unchanged, although edited
+facts may make earlier conclusions stale. Unsupported cross-model opaque history
+fails explicitly. Actor-owned background work may outlive successful settlement;
+deferred children inherit committed context and Haskell bindings, and cannot be
+awaited inside their creating cell. External effects already issued by a failed
+cell are not rolled back.
 
 Launching actor-owned background work does not prevent a normally completed
 cell from committing. The editing computation itself must finish successfully;

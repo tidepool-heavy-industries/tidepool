@@ -32,13 +32,60 @@ import Tidepool.Effects.Row (Subset)
 sharedFinding :: Text
 sharedFinding = "The cache key must include the selected transcript prefix."
 
+-- Keep the successful conclusion while replacing a verbose completed tool
+-- result. The returned suffix is copied from that exact source; the marker is
+-- ordinary authored text and has no runtime meaning.
+trimBuildOutput :: Text -> Text
+trimBuildOutput original
+  | "[Trimmed:" `T.isPrefixOf` original = original
+  | T.length original > 800 && "BUILD SUCCEEDED" `T.isInfixOf` original =
+      C.trimText "repetitive build output; final 800 characters retained"
+        (T.takeEnd 800 original)
+  | otherwise = original
+
+-- Select only an admitted full tool-result body. Message text can also be
+-- edited through `editableTexts`, but tool source/input and function arguments
+-- have no editable selector.
+trimToolResult :: ContextBlock -> ContextBlock
+trimToolResult native@Native {contextNativeTexts = visibleTexts} =
+  native {contextNativeTexts = map trimVisible visibleTexts}
+  where
+    trimVisible visibleText@C.ContextVisibleText
+      { contextVisibleTextSelector = C.ToolResultText
+      , contextVisibleTextEditable = True
+      , contextVisibleTextText = original
+      } = visibleText {contextVisibleTextText = trimBuildOutput original}
+    trimVisible visibleText = visibleText
+trimToolResult block = block
+
+-- Use the traversal only when the intended edit spans every eligible body;
+-- use the native selector above when the edit is limited to tool results.
+trimEveryLongVisibleText :: Int -> Text -> Context -> Context
+trimEveryLongVisibleText limit reason = over editableTexts trimLong
+  where
+    trimLong original
+      | T.length original > limit =
+          C.trimText reason (T.takeEnd limit original)
+      | otherwise = original
+
 -- Used as the body of a synchronous compiled tool or synchronous notebook
--- cell. New notes are ordinary editable user text with no inherited evidence.
+-- cell. Both the history edit and next-effort choice commit on whole-cell
+-- success. Same-model continuation keeps opaque reasoning unchanged.
 curateChild :: Member ContextReadWrite effects => Eff effects ()
 curateChild = do
-  modifyContext (over contextBlocks
-    (<> [Text Nothing User ("Child finding: " <> sharedFinding) []]))
-  setNextModel "executor"
+  modifyContext
+    ( over contextBlocks
+        (<> [Text Nothing User ("Child finding: " <> sharedFinding) []])
+        . over contextBlocks (map trimToolResult)
+    )
+  C.setNextEffort C.High
+
+-- Model and effort are staged by the same synchronous effect. Use a model
+-- change only for a context/model combination the runtime has qualified;
+-- incompatible opaque history must surface as an explicit refusal.
+stageNextModelAndEffort :: Member ContextReadWrite effects => Text -> Eff effects ()
+stageNextModelAndEffort alias = do
+  setNextModel alias
   C.setNextEffort C.High
 
 -- The caller can persist the returned responses or attach watches. The two
@@ -53,8 +100,7 @@ curateAndDelegate
      )
   => Eff effects (Response Text, Response Text)
 curateAndDelegate = do
-  modifyContext (over contextBlocks
-    (<> [Text Nothing User ("Parent-curated assignment. " <> sharedFinding) []]))
+  curateChild
   unfoldDeferred (batch "context-curation" "review") $
     (,) <$> child @Text @CodingEffects @Text
       (withLifetime ActorOwned
@@ -65,9 +111,9 @@ curateAndDelegate = do
         (coding projectHead (assignment [label|review-tests|]
           ("Review the tests against: " <> sharedFinding))))
 
--- Read the transcript as bounded structural data, convert all completed
--- exchanges to provenance-preserving notes, and then edit authored text with
--- the same optic used for an ordinary text value.
+-- Read the transcript as bounded structural data, trim eligible tool-result
+-- bodies, and convert selected nonopaque completed exchanges to notes with
+-- their provenance. The optic receives full eligible text, never a preview.
 inspectAndCurate
   :: Member ContextReadWrite effects
   => Eff effects Context
@@ -79,28 +125,26 @@ inspectAndCurate = do
         , NativeProvenance reference <- [blockProvenance block]
         , blockKind block == NativeEvidence CompletedExchange
         ]
-  modifyContext
-    ( over editableTexts (<> " Reviewed by the parent.")
-        . toNotes completed
-    )
+  modifyContext (toNotes completed . over contextBlocks (map trimToolResult))
 
 -- Jev judges each packet containing the original slice once. The returned
 -- values come from the original rows, never from model-written replacements.
 selectOriginalSlices
   :: Member Jev effects
-  => [(Int, Text)]
-  -> Eff effects [Text]
+  => [(ContextReference, Text)]
+  -> Eff effects [(ContextReference, Text)]
 selectOriginalSlices originalSlices = do
-  let packet = #selected J.:= J.each (\(offset, _) -> T.pack (show offset))
-        (\(offset, original) -> #keep J.:= J.noul
-          ("Keep this exact original slice at offset " <> T.pack (show offset) <> "?\n" <> original))
-        originalSlices
+  let indexed = zip [0 :: Int ..] originalSlices
+      packet = #selected J.:= J.each (\(index, _, _) -> T.pack (show index))
+        (\(index, _, original) -> #keep J.:= J.noul
+          ("Keep this exact original slice at index " <> T.pack (show index) <> "?\n" <> original))
+        [(index, reference, original) | (index, (reference, original)) <- indexed]
   result <- J.ask (J.state (#purpose J.:= ("Select relevant source slices." :: Text))) packet
   case result of
-    Left _ -> pure (map snd originalSlices)
+    Left _ -> pure originalSlices
     Right answer ->
       pure
-        [ original
-        | ((_, original), decision) <- answer.selected
+        [ (reference, original)
+        | ((_, reference, original), decision) <- answer.selected
         , J.holds J.careful decision.keep
         ]
