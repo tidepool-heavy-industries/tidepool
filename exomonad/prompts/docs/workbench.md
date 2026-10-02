@@ -22,10 +22,12 @@ not run. Inspect that receipt before deciding whether a new cell is new intent.
 
 The `haskell` tool schedules cells asynchronously by default, and an
 asynchronous-only host may expose no synchronous alternative. When a typed
-agent spec declares `haskell_sync`, that cell waits for completion before its
-caller continues to the next inference. The pause applies to that caller; it
-does not wait for actor-owned deferred children. Only the synchronous typed
-effect row includes `ContextReadWrite` and `setNextModel`.
+agent spec declares a synchronous notebook such as `haskell_sync`, that cell
+waits for completion before its caller continues to the next inference. The
+spec selects each notebook's scheduling and effect profile. The pause applies
+to that caller; it does not wait for actor-owned deferred children. Only a
+synchronous profile can include `ContextReadWrite`, which provides context
+editing and `setNextModel`.
 
 Context and next-model edits staged by a synchronous cell commit together only
 when the whole cell succeeds. A failed cell does not commit those edits, but it
