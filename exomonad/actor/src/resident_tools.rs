@@ -1907,6 +1907,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sealed_cell_cancellation_waits_for_exact_owner_reply_without_mutating_cutoff() {
+        let (send, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let (address, actor_task) = ractor::Actor::spawn(None, WorkbenchCollector, send)
+            .await
+            .unwrap();
+        let actor = crate::LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let client = ResidentToolClient::local(actor.clone());
+        let invocation = ToolInvocationContext::external(
+            "thread".into(),
+            "turn".into(),
+            "call".into(),
+            Some("call".into()),
+            None,
+        );
+        let running = {
+            let client = client.clone();
+            let invocation = invocation.clone();
+            tokio::spawn(async move {
+                client
+                    .dispatch_workbench(
+                        WorkbenchRequest::from_cell_input("pure True"),
+                        Some(invocation),
+                    )
+                    .await
+            })
+        };
+        let (control, reply) = received.recv().await.unwrap();
+        let control = control.unwrap();
+        let execution = control.execution_id(actor.identity());
+        let response = WorkbenchResponse {
+            status: WorkbenchRunStatus::Committed,
+            summary: None,
+            items: Vec::new(),
+            next_index: 1,
+            total: 1,
+        };
+        let result = Ok(crate::KernelStep::Continue(response.clone()));
+        assert!(control
+            .finish_cell(execution, &result, true)
+            .permits_context_commit());
+        assert!(control.terminal_reply().is_none());
+        let cancelled = client.cancel_workbench(invocation);
+        tokio::pin!(cancelled);
+        assert!(futures_util::poll!(&mut cancelled).is_pending());
+        assert!(!control.context_cancellation_requested());
+        control.settle(Ok(response.clone()));
+        assert!(matches!(cancelled.await.unwrap(),
+            WorkbenchCancellationOutcome::PublicationSettled { reply, .. } if reply == Ok(response.clone())));
+        actor.hosted_cell().complete(&control);
+        reply.send(Ok(response)).unwrap();
+        running.await.unwrap().unwrap();
+        address.stop(None);
+        actor_task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn a_dispatched_hosted_cell_is_visible_on_its_actor_until_it_ends() {
         let (send, mut received) = tokio::sync::mpsc::unbounded_channel();
         let (address, task) = ractor::Actor::spawn(None, WorkbenchCollector, send)
