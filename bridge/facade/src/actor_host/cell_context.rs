@@ -5,7 +5,8 @@ use exomonad_actor::{CellExit, ContextReq, HostedContextBinding};
 use exomonad_tool::ToolInvocationContext;
 use harness::{
     context::{ContextDraft, ContextSnapshot},
-    provider::ContextDisposition,
+    provider::{ContextDisposition, InvocationCompletionSource, ProviderCompletion},
+    turn::JobOutput,
 };
 use parking_lot::Mutex;
 use tidepool_effect::{error::EffectError, DeferredEffect, Response};
@@ -58,19 +59,49 @@ impl EmbeddedContextBinding {
         }
     }
 
-    pub(super) fn completion(&self) -> (Option<CellExit>, ContextDisposition) {
+    #[cfg(test)]
+    fn terminal(&self) -> Option<CellExit> {
         let state = self.state.lock();
-        let exit = match &state.lifecycle {
+        match &state.lifecycle {
             DraftLifecycle::Finished(exit) => Some(exit.clone()),
             _ => None,
+        }
+    }
+}
+
+impl InvocationCompletionSource for EmbeddedContextBinding {
+    fn completion(&self, output: JobOutput) -> Option<ProviderCompletion> {
+        let state = self.state.lock();
+        let DraftLifecycle::Finished(exit) = &state.lifecycle else {
+            return None;
         };
-        let eligible = exit.as_ref().is_some_and(CellExit::permits_context_commit);
-        let disposition = if eligible && state.changed {
+        // Native finalization seals this exact exit before delivering the
+        // owner reply. Both result waiters therefore read the same draft and
+        // eligibility even when cancellation observes the reply first.
+        let output = match output {
+            JobOutput::Completed(receipt)
+                if exit.cause == exomonad_actor::CellExitCause::Cancelled =>
+            {
+                if exit.cleanup_confirmed {
+                    JobOutput::CancelledWithReceipt(receipt)
+                } else {
+                    JobOutput::CancellationUnconfirmed("native cell cleanup unconfirmed".into())
+                }
+            }
+            output => output,
+        };
+        let full_success =
+            exit.permits_context_commit() && matches!(&output, JobOutput::Completed(Ok(_)));
+        let context = if full_success && state.changed {
             ContextDisposition::Draft(state.draft.clone())
         } else {
             ContextDisposition::Unedited
         };
-        (exit, disposition)
+        Some(ProviderCompletion {
+            output,
+            full_success,
+            context,
+        })
     }
 }
 
@@ -226,10 +257,13 @@ mod tests {
             execution: WorkbenchExecutionId::from_digest([4; 16]),
             ..exit.clone()
         });
-        assert!(binding.completion().0.is_none());
+        assert!(binding.terminal().is_none());
         binding.finish(exit.clone());
-        let (retained, disposition) = binding.completion();
-        assert_eq!(retained, Some(exit));
+        assert_eq!(binding.terminal(), Some(exit));
+        let completion = binding
+            .completion(JobOutput::Completed(Ok(serde_json::json!(true))))
+            .unwrap();
+        let disposition = completion.context;
         assert!(matches!(disposition, ContextDisposition::Unedited));
         assert!(prepare_result(
             &binding,
@@ -253,8 +287,139 @@ mod tests {
         };
         binding.finish(exit.clone());
         binding.cancel();
-        let (retained, disposition) = binding.completion();
-        assert_eq!(retained, Some(exit));
+        assert_eq!(binding.terminal(), Some(exit));
+        let completion = binding
+            .completion(JobOutput::Completed(Ok(serde_json::json!(true))))
+            .unwrap();
+        let disposition = completion.context;
         assert!(matches!(disposition, ContextDisposition::Draft(_)));
+    }
+
+    #[test]
+    fn completion_source_exposes_sealed_draft_before_the_provider_waiter() {
+        let binding = Arc::new(binding());
+        let source: Arc<dyn InvocationCompletionSource> = binding.clone();
+        let output = JobOutput::Completed(Ok(serde_json::json!({"exact": "owner receipt"})));
+        assert!(source.completion(output.clone()).is_none());
+        let execution = WorkbenchExecutionId::from_digest([8; 16]);
+        let principal = PrincipalId::new(1, 1);
+        binding
+            .admit(&execution, &binding.invocation, principal)
+            .unwrap();
+        assert!(source.completion(output.clone()).is_none());
+        prepare_result(
+            &binding,
+            ContextReq::SetNextModelWith("resolved-model".into()),
+            principal,
+        )
+        .unwrap();
+        binding.finish(CellExit {
+            execution: execution.clone(),
+            cause: CellExitCause::FullReturn,
+            cleanup_confirmed: true,
+        });
+        // The cancellation owner has the native receipt before the ordinary
+        // provider future resumes; no result waiter populates this metadata.
+        let owner = source.completion(output.clone()).unwrap();
+        assert!(owner.full_success);
+        assert_eq!(owner.output, output);
+        let ContextDisposition::Draft(draft) = &owner.context else {
+            panic!("sealed draft required");
+        };
+        assert_eq!(draft.next_model.as_deref(), Some("resolved-model"));
+        binding.cancel();
+        binding.finish(CellExit {
+            execution,
+            cause: CellExitCause::Cancelled,
+            cleanup_confirmed: true,
+        });
+        assert!(prepare_result(
+            &binding,
+            ContextReq::SetNextModelWith("late".into()),
+            principal
+        )
+        .is_err());
+        assert_eq!(source.completion(output), Some(owner));
+    }
+
+    #[test]
+    fn completion_source_refuses_drafts_for_partial_failed_or_unclean_cells() {
+        for (cause, cleanup_confirmed) in [
+            (CellExitCause::ReplyTransfer, true),
+            (CellExitCause::Backgrounded, true),
+            (CellExitCause::Rejected, true),
+            (CellExitCause::Failed, true),
+            (CellExitCause::FullReturn, false),
+        ] {
+            let binding = binding();
+            let execution = WorkbenchExecutionId::from_digest([9; 16]);
+            binding
+                .admit(&execution, &binding.invocation, PrincipalId::new(1, 1))
+                .unwrap();
+            binding.finish(CellExit {
+                execution,
+                cause,
+                cleanup_confirmed,
+            });
+            let output = JobOutput::Completed(Ok(serde_json::json!({"rendered": "success"})));
+            let completion = binding.completion(output.clone()).unwrap();
+            assert_eq!(completion.output, output);
+            assert!(!completion.full_success);
+            assert_eq!(completion.context, ContextDisposition::Unedited);
+        }
+    }
+
+    #[test]
+    fn completion_source_preserves_cancelled_receipts_and_denies_failed_results() {
+        for cleanup_confirmed in [true, false] {
+            let binding = binding();
+            let execution = WorkbenchExecutionId::from_digest([10; 16]);
+            binding
+                .admit(&execution, &binding.invocation, PrincipalId::new(1, 1))
+                .unwrap();
+            binding.cancel();
+            assert!(binding
+                .completion(JobOutput::Completed(Ok(serde_json::json!(true))))
+                .is_none());
+            binding.finish(CellExit {
+                execution,
+                cause: CellExitCause::Cancelled,
+                cleanup_confirmed,
+            });
+            let receipt = Err("exact retained prefix error".into());
+            let completion = binding
+                .completion(JobOutput::Completed(receipt.clone()))
+                .unwrap();
+            if cleanup_confirmed {
+                assert_eq!(completion.output, JobOutput::CancelledWithReceipt(receipt));
+            } else {
+                assert!(matches!(
+                    completion.output,
+                    JobOutput::CancellationUnconfirmed(_)
+                ));
+            }
+            assert!(!completion.full_success);
+            assert_eq!(completion.context, ContextDisposition::Unedited);
+        }
+        let binding = binding();
+        let execution = WorkbenchExecutionId::from_digest([11; 16]);
+        binding
+            .admit(&execution, &binding.invocation, PrincipalId::new(1, 1))
+            .unwrap();
+        binding.finish(CellExit {
+            execution,
+            cause: CellExitCause::FullReturn,
+            cleanup_confirmed: true,
+        });
+        for output in [
+            JobOutput::Completed(Err("exact failure".into())),
+            JobOutput::Cancelled,
+            JobOutput::Interrupted,
+        ] {
+            let completion = binding.completion(output.clone()).unwrap();
+            assert_eq!(completion.output, output);
+            assert!(!completion.full_success);
+            assert_eq!(completion.context, ContextDisposition::Unedited);
+        }
     }
 }

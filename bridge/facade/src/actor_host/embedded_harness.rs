@@ -22,8 +22,8 @@ use harness::{
     mailbox::DurableMailboxWake,
     model::{AgentPath, ConversationIdentity, OperationId},
     provider::{
-        CallContext, CancellationAcknowledgment, CancellationOwner, JobHandle, Provider,
-        ProviderCompletion, ProviderError, ToolFailure,
+        CallContext, CancellationAcknowledgment, CancellationOwner, InvocationCompletionSource,
+        JobHandle, Provider, ProviderCompletion, ProviderError, ToolFailure,
     },
     store::Store,
     turn::{JobOutput, JobScheduler},
@@ -886,19 +886,21 @@ impl Provider for EmbeddedDispatcher {
         let binding = match context.context.as_ref() {
             Some(snapshot) => {
                 let Some(operation) = context.operation.as_ref() else {
-                    return ProviderCompletion::unedited(Err(
+                    return unavailable_context_completion(JobOutput::Completed(Err(
                         "context dispatch requires an exact operation".into(),
-                    ));
+                    )));
                 };
                 if &snapshot.operation != operation {
-                    return ProviderCompletion::unedited(Err(
+                    return unavailable_context_completion(JobOutput::Completed(Err(
                         "context snapshot belongs to another operation".into(),
-                    ));
+                    )));
                 }
                 let invocation = match self.context(operation) {
                     Ok(invocation) => invocation,
                     Err(error) => {
-                        return ProviderCompletion::unedited(Err(error.into_tool_failure()))
+                        return unavailable_context_completion(JobOutput::Completed(Err(
+                            error.into_tool_failure()
+                        )))
                     }
                 };
                 let resolver = self.context_models.get().cloned().unwrap_or_else(|| {
@@ -906,9 +908,13 @@ impl Provider for EmbeddedDispatcher {
                         Err("next-model selection requires admitted workspace policy".into())
                     })
                 });
-                Some(Arc::new(EmbeddedContextBinding::new(
-                    invocation, snapshot, resolver,
-                )))
+                let binding = Arc::new(EmbeddedContextBinding::new(invocation, snapshot, resolver));
+                if let Err(error) = context.completion.register(operation, binding.clone()) {
+                    return unavailable_context_completion(JobOutput::Completed(Err(error
+                        .to_string()
+                        .into())));
+                }
+                Some(binding)
             }
             None => None,
         };
@@ -925,30 +931,19 @@ impl Provider for EmbeddedDispatcher {
             .dispatch(name, arguments, context, authority)
             .await
             .map_err(ProviderError::into_tool_failure);
-        let (exit, disposition) = match binding.as_ref() {
-            Some(binding) => binding.completion(),
-            None => (None, harness::provider::ContextDisposition::Unedited),
-        };
+        if let Some(binding) = binding {
+            let output = JobOutput::Completed(result);
+            return binding
+                .completion(output.clone())
+                .unwrap_or_else(|| unavailable_context_completion(output));
+        }
         // A signalled cancellation asks the same exact native owner to
         // arbitrate its retained terminal. The ordinary result waiter and
         // the scheduler's cancellation waiter may observe that reply in
         // either order; both must project the same typed cancellation.
         // Dispatch has already released the native reply, so this cannot
         // depend on completion of the provider future or Store publication.
-        let output = if exit
-            .as_ref()
-            .is_some_and(|exit| exit.cause == exomonad_actor::CellExitCause::Cancelled)
-        {
-            if exit
-                .as_ref()
-                .expect("cancelled cell exit")
-                .cleanup_confirmed
-            {
-                JobOutput::CancelledWithReceipt(result)
-            } else {
-                JobOutput::CancellationUnconfirmed("native cell cleanup unconfirmed".into())
-            }
-        } else if cancellation.is_cancelled() {
+        let output = if cancellation.is_cancelled() {
             let terminal = match operation.as_ref().map(|operation| self.context(operation)) {
                 Some(Ok(invocation)) => self.snapshot.cancel(invocation).await,
                 Some(Err(error)) => {
@@ -972,23 +967,10 @@ impl Provider for EmbeddedDispatcher {
         } else {
             JobOutput::Completed(result)
         };
-        match binding {
-            Some(_) => {
-                let full_success = exit
-                    .as_ref()
-                    .is_some_and(exomonad_actor::CellExit::permits_context_commit)
-                    && matches!(&output, JobOutput::Completed(Ok(_)));
-                ProviderCompletion {
-                    output,
-                    full_success,
-                    context: disposition,
-                }
-            }
-            None => ProviderCompletion {
-                full_success: matches!(&output, JobOutput::Completed(Ok(_))),
-                output,
-                context: harness::provider::ContextDisposition::Unedited,
-            },
+        ProviderCompletion {
+            full_success: matches!(&output, JobOutput::Completed(Ok(_))),
+            output,
+            context: harness::provider::ContextDisposition::Unedited,
         }
     }
 
@@ -1044,6 +1026,14 @@ impl CancellationOwner for EmbeddedDispatcher {
     }
 }
 
+fn unavailable_context_completion(output: JobOutput) -> ProviderCompletion {
+    ProviderCompletion {
+        output,
+        full_success: false,
+        context: harness::provider::ContextDisposition::Unavailable,
+    }
+}
+
 fn workbench_reply_receipt(
     reply: exomonad_actor::KernelWorkbenchReply,
 ) -> Result<Value, ToolFailure> {
@@ -1079,6 +1069,18 @@ mod cancellation_receipt_tests;
 #[cfg(test)]
 mod round_control_tests {
     use super::*;
+
+    #[test]
+    fn missing_context_terminal_metadata_refuses_publication() {
+        let output = JobOutput::Completed(Ok(json!({"exact": "receipt"})));
+        let completion = unavailable_context_completion(output.clone());
+        assert_eq!(completion.output, output);
+        assert!(!completion.full_success);
+        assert_eq!(
+            completion.context,
+            harness::provider::ContextDisposition::Unavailable
+        );
+    }
 
     #[test]
     fn native_cancelled_owner_projects_a_cancelled_error_receipt() {
