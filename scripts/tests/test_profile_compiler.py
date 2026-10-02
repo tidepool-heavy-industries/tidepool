@@ -4,6 +4,7 @@ import tempfile
 import json
 import shutil
 import sys
+import subprocess
 import unittest
 
 spec = importlib.util.spec_from_file_location("profile_compiler", Path(__file__).parents[1] / "profile-compiler.py")
@@ -12,6 +13,55 @@ spec.loader.exec_module(profile)
 
 
 class ProfileCompilerTests(unittest.TestCase):
+    def test_early_sampling_exit_does_not_cancel_admitted_workload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            perf = base / "perf"
+            perf.write_text(f"#!{sys.executable}\n" + '''
+import json, os, sys, time
+from pathlib import Path
+args = sys.argv[1:]
+if args[0] == "version":
+    print("test perf")
+elif args[0] == "record":
+    control = args[args.index("--control") + 1]
+    read_fd, ack_fd = map(int, control.removeprefix("fd:").split(","))
+    os.read(read_fd, 128)
+    os.write(ack_fd, b"ack\\n")
+    output = Path(args[args.index("-o") + 1])
+    output.write_text(json.dumps({"pid": args[args.index("-p") + 1],
+                                  "time": time.monotonic()}))
+    time.sleep(.03)
+elif args[0] == "script":
+    data = json.loads(Path(args[args.index("-i") + 1]).read_text())
+    print(f"{data['pid']}/{data['pid']} {data['time']:.9f}: 100 leaf (/test-worker)")
+elif args[0] == "report":
+    print("test leaf report")
+''')
+            perf.chmod(0o700)
+            marker = base / "settled"
+            worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            try:
+                outcome = subprocess.run([
+                    sys.executable, str(Path(profile.__file__)), "--pid", str(worker.pid),
+                    "--perf", str(perf), "--output", str(base / "capture"), "--duration", "5",
+                    "--", sys.executable, "-c",
+                    "import sys,time; from pathlib import Path; time.sleep(.2); Path(sys.argv[1]).write_text('settled')",
+                    str(marker),
+                ], capture_output=True, text=True, timeout=15)
+                self.assertEqual(outcome.returncode, 1, outcome.stderr)
+                self.assertTrue(marker.exists(), outcome.stderr)
+                metadata = json.loads((base / "capture/capture.json").read_text())
+                summary = json.loads((base / "capture/summary.json").read_text())
+                self.assertEqual(metadata["command_exit"], 0)
+                self.assertTrue(metadata["sampling_ended_before_workload"])
+                self.assertTrue(metadata["capture_error"])
+                self.assertFalse(summary["capture_complete"])
+                self.assertTrue(summary["workload_success"])
+            finally:
+                worker.terminate()
+                worker.wait(timeout=5)
+
     def make_cgroup_tree(self, directory, worker_path="/parent/worker"):
         proc_root = Path(directory) / "proc"
         cgroup_root = Path(directory) / "sys" / "fs" / "cgroup"

@@ -59,8 +59,11 @@ demand for parallel captures; report lost samples rather than assuming that
 the smaller buffer is sufficient. An mmap allocation failure is a capture
 failure, not evidence that the compiler request failed.
 Pass no command to capture externally submitted work for a bounded duration.
-The script owns and terminates its request command on timeout or capture failure;
-it never terminates the selected worker or changes OS settings.
+The script owns and terminates its request command on timeout or output overflow.
+If sampling ends early, including when a worker rotates, the command can finish
+within its original deadline. The capture remains incomplete and no replacement
+worker is sampled. Startup failures prevent command launch. The script never
+terminates the selected worker or changes OS settings.
 
 Evidence is private (directory mode 0700 and files 0600). Perf data is bounded
 to 64 MiB and the capture to five minutes. Derived perf text is bounded to
