@@ -44,7 +44,7 @@ import GHC.Driver.Env.KnotVars (emptyKnotVars)
 import GHC.Unit.Home.ModInfo
   ( HomeModInfo(..), emptyHomeModInfoLinkable, emptyHomePackageTable, addToHpt
   , lookupHpt )
-import GHC.Iface.Load (readIface, loadInterface, WhereFrom(ImportBySystem))
+import GHC.Iface.Load (readIface)
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
 import GHC.Driver.Session (targetProfile)
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
@@ -77,7 +77,9 @@ import GHC.Unit.Home (homeUnitId, isHomeUnit)
 import GHC.Unit.Types (GenWithIsBoot(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Utils.Fingerprint (fingerprintByteString)
-import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps)
+import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps, mi_iface_hash, mi_final_exts)
+import GHC.Builtin.Names (gHC_PRIM)
+import Tidepool.FatIface (readExactInterface)
 import GHC.Unit.Types (unitString, stringToUnit)
 import qualified GHC.Data.Maybe as MErr
 import GHC.Utils.Outputable (text, ppr)
@@ -410,28 +412,49 @@ originalInterfaceArtifact (OriginalInterfaceArtifacts env originals directory ca
           packageInterface = lookupModuleEnv (eps_PIT external) owner >>= matches
           selected = case productInterface of
             Just value -> Just value
-            Nothing -> case homeInterface of Just value -> Just value; Nothing -> packageInterface
-      found <- case selected of
-        Just interface -> pure (Just interface)
+            Nothing -> homeInterface
+      artifact <- case selected of
+        Just interface -> serialize interface
         Nothing | isHomeUnit (hsc_home_unit env) (moduleUnit owner) -> pure Nothing
-        Nothing -> do
-          loaded <- initIfaceCheck (ppr (moduleName owner)) env
-            (loadInterface (ppr (moduleName owner)) owner ImportBySystem)
-          pure $ case loaded of MErr.Succeeded interface -> matches interface; MErr.Failed _ -> Nothing
-      artifact <- case found of
-        Nothing -> pure Nothing
-        Just interface -> bracket (openBinaryTempFile directory "module-product.hi")
-          (\(path, handle) -> do
-            closed <- hIsClosed handle
-            unless closed (hClose handle)
-            removeFile path)
-          (\(path, handle) -> do
-            hClose handle
-            writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression path interface
-            bytes <- BS.readFile path
-            pure (Just (bytes, hexBytes (SHA256.hash bytes))))
+        Nothing -> packageArtifact packageInterface
       modifyIORef' captured (Map.insert owner artifact)
       pure artifact
+  where
+    seal bytes = Just (bytes, hexBytes (SHA256.hash bytes))
+    serialize interface = bracket (openBinaryTempFile directory "module-product.hi")
+      (\(path, handle) -> do
+        closed <- hIsClosed handle
+        unless closed (hClose handle)
+        removeFile path)
+      (\(path, handle) -> do
+        hClose handle
+        writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression path interface
+        seal <$> BS.readFile path)
+    sameOriginal selected actual = mi_module actual == owner
+      && mi_iface_hash (mi_final_exts actual) == mi_iface_hash (mi_final_exts selected)
+    packageArtifact selected
+      | owner /= gHC_PRIM, Nothing <- selected = pure Nothing
+      | otherwise = do
+          full <- readExactInterface env owner
+          case full of
+            Right (interface, location)
+              | mi_module interface == owner
+              , maybe (owner == gHC_PRIM) (`sameOriginal` interface) selected ->
+                  if owner == gHC_PRIM then serialize interface else do
+                    -- EPS interfaces contain panic-elided declarations. Read
+                    -- the installed artifact through the original owner and
+                    -- decode the same captured bytes before sealing them.
+                    capturedBytes <- try @IOException (BS.readFile (ml_hi_file location))
+                    case capturedBytes of
+                      Left _ -> pure Nothing
+                      Right bytes -> do
+                        decoded <- withCapturedIface False (moduleNameString (moduleName owner)) bytes $
+                          readIface (hsc_dflags env) (hsc_NC env) owner
+                        pure $ case decoded of
+                          MErr.Succeeded original
+                            | sameOriginal interface original -> seal bytes
+                          _ -> Nothing
+            _ -> pure Nothing
 
 withCapturedIface :: Bool -> String -> BS.ByteString -> (FilePath -> IO a) -> IO a
 withCapturedIface timing owner bytes consume = do
