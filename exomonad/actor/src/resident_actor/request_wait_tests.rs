@@ -290,12 +290,12 @@ async fn settlement_before_or_after_subscription_claims_the_original_control() {
             WatchWaitEvent::Resume(Ok(WatchObservation::Ready(values))) if values.is_empty()
         ));
         assert!(
-            !fixture.control.request_cancellation(),
-            "ready won this execution's boundary"
-        );
-        assert!(
             !fixture.control.claim_expiry(),
             "the original control is claimed only once"
+        );
+        assert!(
+            fixture.control.request_cancellation(),
+            "readiness does not settle the still-active invocation"
         );
         assert!(fixture.registry.retains_watch(fixture.owner, fixture.watch));
     }
