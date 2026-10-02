@@ -155,7 +155,7 @@ exactCompilationCacheSafety expectedSource bytes = do
       | otherwise -> case fields of
           [_, _, TString source, _, _, TString facts, _, _]
             | source /= T.pack expectedSource -> Right Nothing
-            | otherwise -> Just <$> dependencyCacheSafe facts
+            | otherwise -> Just <$> dependencyCacheSafe (T.unpack facts)
           _ -> Left "exact compilation receipt v2 has invalid source or evidence fields"
     _ -> Left "exact compilation receipt has an invalid tag or outer record"
   where
@@ -2155,7 +2155,7 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
     receipts <- listDirectory (work </> ".exact-compilations")
     receiptSafety <- fmap catMaybes $ forM receipts $ \entry -> do
       bytes' <- BS.readFile (work </> ".exact-compilations" </> entry </> "receipt.cbor")
-      either (fail . ("invalid exact compilation receipt " ++ entry ++ ": ")) pure $
+      either (\reason -> fail ("invalid exact compilation receipt " ++ entry ++ ": " ++ reason)) pure $
         exactCompilationCacheSafety (work </> "MetadataUntrackedTarget.hs") bytes'
     case receiptSafety of
       [cacheSafe] -> do
