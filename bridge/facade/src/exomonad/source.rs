@@ -988,7 +988,15 @@ impl ExomonadSourceReload {
                 lower_modules.insert(module.clone());
             }
         }
-        if let Some(run) = self.layer.read_active().ok().flatten() {
+        let run = match self.layer.read_active() {
+            Ok(run) => run,
+            Err(error) => {
+                return SourceLayerReload::Unavailable(format!(
+                    "run source revision is unavailable: {error}"
+                ));
+            }
+        };
+        if let Some(run) = run {
             lower_modules.extend(
                 run.modules
                     .iter()
@@ -1356,7 +1364,7 @@ fn commit_captured_workspace_inner(
             return Ok(None);
         }
         let source = captured_workspace_sources(&scopes, capture_directory)?;
-        drift = workspace_source_drift(&workspace, &scopes, &source)?;
+        drift = workspace_source_drift(&scopes, &source)?;
 
         let message = match intent {
             Some(message) => {
@@ -1392,7 +1400,9 @@ fn commit_captured_workspace_inner(
         let mut affected: std::collections::BTreeSet<String> =
             source_paths.keys().cloned().collect();
         for path in indexed_modes.keys() {
-            if source_scopes_contain(&scopes, path) && is_haskell_source(path) {
+            if source_scopes_contain(&scopes, path)
+                && super::workspace::is_haskell_source(Path::new(path))
+            {
                 affected.insert(path.clone());
                 if !source_paths.contains_key(path) {
                     staged_git.try_run(&workspace, &["update-index", "--remove", "--", path])?;
@@ -1554,52 +1564,24 @@ fn source_scopes_contain(scopes: &[(usize, PathBuf, PathBuf, PathBuf)], path: &s
         .any(|(_, _, _, prefix)| path.starts_with(prefix))
 }
 
-fn is_haskell_source(path: &str) -> bool {
-    matches!(
-        Path::new(path)
-            .extension()
-            .and_then(|extension| extension.to_str()),
-        Some("hs" | "lhs" | "hs-boot" | "h")
-    )
-}
-
 fn workspace_source_drift(
-    workspace: &Path,
     scopes: &[(usize, PathBuf, PathBuf, PathBuf)],
     captured: &BTreeMap<String, PathBuf>,
 ) -> Result<Vec<String>> {
     let mut live = BTreeMap::new();
-    fn walk(
-        root: &Path,
-        current: &Path,
-        prefix: &Path,
-        live: &mut BTreeMap<String, PathBuf>,
-    ) -> Result<()> {
-        for entry in current.read_dir()? {
-            let entry = entry?;
-            let path = entry.path();
-            let kind = entry.file_type()?;
-            if kind.is_dir() {
-                if entry.file_name() != ".git" {
-                    walk(root, &path, prefix, live)?;
-                }
-            } else if kind.is_file() {
-                let relative = prefix.join(path.strip_prefix(root)?);
+    for (_, root, suffix, prefix) in scopes {
+        if root.is_dir() {
+            for (path, digest) in super::workspace::inspect_sources(root)? {
+                let Ok(path) = path.strip_prefix(suffix) else {
+                    continue;
+                };
+                let relative = prefix.join(path);
                 let name = relative
                     .to_str()
                     .ok_or("workspace source path is not valid UTF-8")?
                     .replace(std::path::MAIN_SEPARATOR, "/");
-                if is_haskell_source(&name) {
-                    live.insert(name, path);
-                }
+                live.insert(name, digest);
             }
-        }
-        Ok(())
-    }
-    for (_, _, _, prefix) in scopes {
-        let root = workspace.join(prefix);
-        if root.is_dir() {
-            walk(&root, &root, prefix, &mut live)?;
         }
     }
     let paths: std::collections::BTreeSet<_> =
@@ -1607,7 +1589,9 @@ fn workspace_source_drift(
     let mut drift = Vec::new();
     for path in paths {
         let same = match (captured.get(&path), live.get(&path)) {
-            (Some(snapshot), Some(current)) => std::fs::read(snapshot)? == std::fs::read(current)?,
+            (Some(snapshot), Some(current)) => {
+                blake3::hash(&std::fs::read(snapshot)?).to_hex().as_str() == current.as_str()
+            }
             _ => false,
         };
         if !same {
@@ -2329,6 +2313,41 @@ mod tests {
                 .modules
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn helper_reload_reports_corrupt_lower_run_record_without_publication() {
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let authored = project.path().join(".exomonad/helpers");
+        std::fs::create_dir_all(&authored).unwrap();
+        std::fs::write(
+            authored.join("SessionHelpers.hs"),
+            "module SessionHelpers where\nanswer = 42\n",
+        )
+        .unwrap();
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let reload = ExomonadSourceReload::new(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+        );
+        let lower = reload.layer.ensure_active(&reload.frozen).unwrap();
+        let helper = reload.ensure_helper_active("run").unwrap();
+        std::fs::write(reload.layer.active_record(), b"corrupt source record").unwrap();
+
+        let outcome = reload.reload_helper_branch("run", &[], None);
+
+        assert!(matches!(
+            outcome,
+            exomonad_actor::SourceLayerReload::Unavailable(detail)
+                if detail.contains("run source revision is unavailable")
+        ));
+        assert_eq!(
+            reload.helper_layer("run").read_active().unwrap(),
+            Some(helper)
+        );
+        assert!(reload.layer.revisions().join(lower.identity).is_dir());
     }
 
     #[test]
@@ -3137,6 +3156,12 @@ mod tests {
         )
         .unwrap();
         std::fs::write(workspace.join("FieldNotes.hs"), "module FieldNotes where\n").unwrap();
+        std::fs::create_dir(workspace.join("target")).unwrap();
+        std::fs::write(
+            workspace.join("target/Ignored.hs"),
+            "module Ignored where\n",
+        )
+        .unwrap();
         init_git_repo(&workspace);
         init_git_repo(project.path());
 
@@ -3186,6 +3211,48 @@ mod tests {
             .unwrap();
         assert!(parent_index.stdout.contains(&oid));
         assert!(parent_index.stdout.starts_with("160000 "));
+    }
+
+    #[test]
+    fn workspace_gitlink_commit_removes_a_tracked_lhs_boot_source() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = project.path().join(".exomonad/workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            project.path().join(".gitmodules"),
+            "[submodule \"workspace\"]\n\tpath = .exomonad/workspace\n\turl = ../exomonad-default-workspace.git\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join("L.lhs-boot"), "> module L where\n").unwrap();
+        init_git_repo(&workspace);
+        init_git_repo(project.path());
+
+        let capture = tempfile::tempdir().unwrap();
+        let captured_root = capture.path().join("0");
+        std::fs::create_dir_all(&captured_root).unwrap();
+        std::fs::remove_file(workspace.join("L.lhs-boot")).unwrap();
+
+        let outcome = commit_captured_workspace(
+            project.path(),
+            &[workspace.canonicalize().unwrap()],
+            capture.path(),
+            None,
+            &[],
+        );
+        let tidepool_bridge_effects::SrWorkspaceCommitOutcome::WorkspaceCommitted(oid, drift) =
+            outcome
+        else {
+            panic!("expected captured workspace commit, got {outcome:?}");
+        };
+        assert!(drift.is_empty());
+        assert!(
+            GitCli::new()
+                .try_run(
+                    &workspace,
+                    &["cat-file", "-e", &format!("{oid}:L.lhs-boot")]
+                )
+                .is_err()
+        );
     }
 
     #[test]

@@ -125,12 +125,14 @@ fn exec_contract_text_is_pinned() {
     assert_eq!(
         exec.type_def_texts(),
         vec![concat!(
-            "data ExecError = ExecSpawn Text | ExecBadDir Text | ExecTimeout Text deriving (Show, Eq)\n",
+            "data ExecError = ExecSpawn Text | ExecBadDir Text | ExecTimeout Text | ExecOutput Text | ExecWait Text deriving (Show, Eq)\n",
             "instance ToJSON ExecError where\n",
             "  toJSON e = case e of\n",
             "    ExecSpawn detail -> object [\"tag\" .= (\"ExecSpawn\" :: Text), \"detail\" .= detail]\n",
             "    ExecBadDir detail -> object [\"tag\" .= (\"ExecBadDir\" :: Text), \"detail\" .= detail]\n",
             "    ExecTimeout detail -> object [\"tag\" .= (\"ExecTimeout\" :: Text), \"detail\" .= detail]\n",
+            "    ExecOutput detail -> object [\"tag\" .= (\"ExecOutput\" :: Text), \"detail\" .= detail]\n",
+            "    ExecWait detail -> object [\"tag\" .= (\"ExecWait\" :: Text), \"detail\" .= detail]\n",
         )]
     );
 
@@ -142,8 +144,10 @@ fn exec_contract_text_is_pinned() {
                 "-- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left\n",
                 "-- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`\n",
                 "-- for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when\n",
-                "-- the command outran its timeout and was killed. A nonzero EXIT is NOT a\n",
-                "-- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.\n",
+                "-- execution or output draining outran its timeout, `Left (ExecOutput _)` for a read failure,\n",
+                "-- and `Left (ExecWait _)` if its exit status cannot be collected. A nonzero\n",
+                "-- EXIT is NOT a failure — inspect `p.exitCode`. Natural spelling:\n",
+                "-- `Right p <- run cmd`.\n",
                 "run :: forall effs. Member Exec effs => Text -> Eff effs (Either ExecError Proc)\n",
                 "run = send . Run",
             ),
@@ -203,11 +207,11 @@ fn journal_contract_text_is_pinned() {
         ),
             concat!(
             "-- | Append one observability entry to the run's sibling TRACE stream: ",
-            "decision narration and telemetry, never folded into resume. `stage` ",
+            "decision narration and telemetry. `stage` ",
             "names what kind of moment this is (e.g. \"resume-verdict\", \"park\"); ",
             "`key` is the branch or unit it concerns; `payload` is an opaque JSON ",
             "value whose shape may evolve freely. The handler stamps a timestamp ",
-            "on every line, so trace and journal merge into one timeline.\n",
+            "on every line, so trace timestamps can be correlated with journal entries.\n",
             "trace :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()\n",
             "trace stage key payload = send (TraceStep stage key payload)",
         )
@@ -217,21 +221,16 @@ fn journal_contract_text_is_pinned() {
     assert_eq!(
         journal.description_text(),
         "Durable append-only run journal: a resident harness records completed \
-         steps as it happens, mid-loop, so progress survives a crash and resume \
-         can fold the journal instead of redoing finished work. `record kind key \
+         steps as it happens, mid-loop, so progress survives a crash. `record kind key \
          payload` appends ONE entry — `kind` and `key` are caller-chosen labels \
          (e.g. a step kind and the branch or task it concerns), `payload` is an \
          opaque JSON value. Every append is flushed immediately; the journal is \
          append-only forever — there is no rewrite or compaction verb. \
          `trace stage key payload` appends ONE observability entry to the run's \
-         sibling TRACE stream instead: never folded into resume, timestamped at \
-         the handler, for decision narration and telemetry a reader merges into \
-         one timeline by ts."
+         sibling TRACE stream instead, timestamped at the handler for decision \
+         narration and telemetry; timestamps can be correlated with journal entries."
     );
-    assert_eq!(
-        journal.extra_imports,
-        &["import qualified Tidepool.Resume as Resume"]
-    );
+    assert!(journal.extra_imports.is_empty());
     assert!(journal.prompt_card.is_none());
     assert!(journal.type_params.is_empty());
     assert!(journal.default_row_args.is_empty());

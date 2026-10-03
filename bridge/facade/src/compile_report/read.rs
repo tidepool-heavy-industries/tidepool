@@ -108,8 +108,7 @@ fn parse_eval_failure(v: &Value) -> Option<EvalFailureRow> {
 ///
 /// `TailPolicy::Observe`: this reader never owns the file (it reads a
 /// harness's or a running server's live log), so a torn final line is
-/// reported-but-left-alone, exactly as `load_journal` already treats a
-/// segment file it doesn't own.
+/// reported-but-left-alone, matching the append-only log contract.
 pub fn read_evidence_file(path: &Path) -> Result<RunEvidence, EvidenceReadError> {
     let (rows, torn) = jsonl::read_tail(
         path,

@@ -578,11 +578,12 @@ data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)
 
 data Console a where
   Print :: Text -> Console ()
+data KvError = KvCorrupt Text | KvIo Text | KvDurabilityUnknown Text | KvDecode Text deriving (Show, Eq)
 data KV a where
-  KvGet :: Text -> KV (Maybe HaskellValue)
-  KvSet :: Text -> HaskellValue -> KV ()
-  KvDelete :: Text -> KV ()
-  KvKeys :: KV [Text]
+  KvGet :: Text -> KV (Either KvError (Maybe HaskellValue))
+  KvSet :: Text -> HaskellValue -> KV (Either KvError ())
+  KvDelete :: Text -> KV (Either KvError ())
+  KvKeys :: KV (Either KvError [Text])
 data FsRead a where
   FsRead :: Text -> FsRead Text
   FsListDir :: Text -> FsRead [Text]
@@ -674,19 +675,21 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
         type Request = KvReq;
         fn handle(&mut self, req: KvReq, cx: &EffectContext) -> Result<Response, EffectError> {
             match req {
-                KvReq::KvGet(key) => cx.respond(self.store.get(&key).cloned()),
+                KvReq::KvGet(key) => {
+                    cx.respond(Ok::<_, serde_json::Value>(self.store.get(&key).cloned()))
+                }
                 KvReq::KvSet(key, val) => {
                     let json_val = tidepool_runtime::value_to_json(&val, cx.table(), 0);
                     self.store.insert(key, json_val);
-                    cx.respond(())
+                    cx.respond(Ok::<_, serde_json::Value>(()))
                 }
                 KvReq::KvDelete(key) => {
                     self.store.remove(&key);
-                    cx.respond(())
+                    cx.respond(Ok::<_, serde_json::Value>(()))
                 }
                 KvReq::KvKeys => {
                     let keys: Vec<String> = self.store.keys().cloned().collect();
-                    cx.respond(keys)
+                    cx.respond(Ok::<_, serde_json::Value>(keys))
                 }
             }
         }

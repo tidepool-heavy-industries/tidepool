@@ -383,6 +383,7 @@ impl ActorWorkbenchSource {
                 "qualified Data.Set as Set",
                 "qualified Tidepool.Inspection as TidepoolInspection",
                 "Tidepool.Inspection (print, cellDisplay)",
+                "qualified Tidepool.Effects.Core",
             ]),
             spec: None,
             workspace_modules: Arc::from([]),
@@ -3787,15 +3788,6 @@ where
                 .into_iter()
                 .filter(|key| admitted_support.contains(&exomonad_tool::ToolEffectKey::Actor(*key)))
                 .collect();
-            let authored_effects = format!(
-                "'[{}]",
-                admitted_base
-                    .iter()
-                    .map(|key| key.haskell_name())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            let dispatcher_effects = format!("(Tidepool.Effects.Core.AgentTools ': Tidepool.Effects.Core.ContextReadWrite ': {authored_effects})");
             let resolved = self.resolve_spec(&context);
             let revision = resolved.source_revision();
             let entry = resolved.entry.clone().unwrap_or_else(|| {
@@ -3805,6 +3797,9 @@ where
                     "Tidepool.Agent.Contract.defaultAsyncWorkbenchSpec".into()
                 }
             });
+            let installation = crate::agent_spec::installation_expression(&entry, &admitted_base);
+            let authored_effects = installation.effect_row;
+            let dispatcher_effects = format!("(Tidepool.Effects.Core.AgentTools ': Tidepool.Effects.Core.ContextReadWrite ': {authored_effects})");
             let mut source = self.access.source.clone();
             // A spec found by convention is named by no configured key, so its
             // module is not in the shared workbench vocabulary; the fragment that
@@ -3841,9 +3836,7 @@ where
             let block = ParsedBlock {
                 ordinal: 1,
                 total: 1,
-                source: format!(
-                    "_ <- Tidepool.Agent.Contract.installSpec @({authored_effects}) {entry}"
-                ),
+                source: installation.expression,
             };
             let authority = self.compilation_authority.clone().ok_or_else(|| {
                 ResidentActorWorkbenchError::ActorProtocol(
@@ -3875,7 +3868,11 @@ where
                 None,
                 None,
             ))
-            .await?;
+            .await
+            .map_err(|error| {
+                tracing::error!(?error, "agent spec installation check failed");
+                error
+            })?;
             if checked.items.len() != 1
                 || checked.items[0].verdict.kind != TurnKind::Bind
                 || !checked.items[0].verdict.binders.is_empty()

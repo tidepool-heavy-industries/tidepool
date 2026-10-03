@@ -46,6 +46,77 @@ pub(crate) fn worktree_present(git: &GitCli, cwd: &Path) -> Result<bool, Worktre
     }
 }
 
+/// Resolve a possibly not-yet-created storage root and refuse any Git working
+/// tree before callers create it. Canonicalizing the nearest existing ancestor
+/// preserves symlink resolution without materializing the candidate first.
+pub(crate) fn validate_external_root(git: &GitCli, root: &Path) -> Result<PathBuf, WorktreeError> {
+    let absolute = if root.is_absolute() {
+        root.to_owned()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| storage_failure(root, error))?
+            .join(root)
+    };
+    let mut candidate = PathBuf::new();
+    let mut missing = Vec::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => candidate.push(prefix.as_os_str()),
+            std::path::Component::RootDir => candidate.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir if !missing.is_empty() => {
+                return Err(WorktreeError::StorageFailure {
+                    path: root.to_owned(),
+                    detail: "parent traversal after a missing storage-root component is ambiguous"
+                        .into(),
+                });
+            }
+            std::path::Component::ParentDir => {
+                candidate.pop();
+            }
+            std::path::Component::Normal(name) if missing.is_empty() => {
+                let next = candidate.join(name);
+                match fs::symlink_metadata(&next) {
+                    Ok(_) => {
+                        candidate = next
+                            .canonicalize()
+                            .map_err(|error| storage_failure(&next, error))?;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        missing.push(name.to_owned());
+                    }
+                    Err(error) => return Err(storage_failure(&next, error)),
+                }
+            }
+            std::path::Component::Normal(name) => missing.push(name.to_owned()),
+        }
+    }
+    let existing_ancestor = if candidate.is_dir() {
+        candidate.clone()
+    } else {
+        candidate.parent().unwrap_or(&candidate).to_owned()
+    };
+    for component in missing {
+        candidate.push(component);
+    }
+    match inspect::work_tree(git, &existing_ancestor) {
+        Ok(toplevel) => {
+            let canonical_toplevel = toplevel
+                .canonicalize()
+                .map_err(|error| storage_failure(&toplevel, error))?;
+            if candidate.starts_with(&canonical_toplevel) {
+                return Err(WorktreeError::InvalidRegistryRoot {
+                    root: candidate,
+                    inside: canonical_toplevel,
+                });
+            }
+        }
+        Err(WorktreeError::NotARepository(_)) => {}
+        Err(other) => return Err(other),
+    }
+    Ok(candidate)
+}
+
 /// How a managed worktree came to exist. Recorded because "what was this seeded
 /// from" is the first question asked of a tree during a post-mortem, and
 /// reconstructing it from the branch graph after the fact is guesswork.
@@ -169,26 +240,9 @@ impl WorktreeRegistry {
     /// never-dirty-the-source invariant.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, WorktreeError> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(&root).map_err(|e| storage_failure(&root, e))?;
-        let canonical_root = root.canonicalize().map_err(|e| storage_failure(&root, e))?;
-
-        // A git failure that is NOT "no repository here" is refused rather
-        // than skipped — see `git::inspect::work_tree`'s docs.
         let git = GitCli::new();
-        match inspect::work_tree(&git, &canonical_root) {
-            Ok(toplevel) => {
-                if let Ok(canonical_toplevel) = toplevel.canonicalize() {
-                    if canonical_root.starts_with(&canonical_toplevel) {
-                        return Err(WorktreeError::InvalidRegistryRoot {
-                            root: canonical_root,
-                            inside: canonical_toplevel,
-                        });
-                    }
-                }
-            }
-            Err(WorktreeError::NotARepository(_)) => {}
-            Err(other) => return Err(other),
-        }
+        let canonical_root = validate_external_root(&git, &root)?;
+        fs::create_dir_all(&canonical_root).map_err(|e| storage_failure(&canonical_root, e))?;
 
         let records = DurableJsonDir::open(canonical_root.join(RECORDS_DIR))?;
         let retained = DurableJsonDir::open(canonical_root.join(RETAINED_DIR))?;

@@ -13,8 +13,12 @@ pub enum ExecError {
     ExecSpawn(String),
     /// working directory is invalid or escapes the sandbox
     ExecBadDir(String),
-    /// the command exceeded its timeout and was killed (process group terminated)
+    /// execution or output draining exceeded its deadline (process group terminated)
     ExecTimeout(String),
+    /// captured output could not be read
+    ExecOutput(String),
+    /// the process exit status could not be collected
+    ExecWait(String),
 }
 
 /// One variant per `Exec` GADT constructor, named EXACTLY as in Haskell.

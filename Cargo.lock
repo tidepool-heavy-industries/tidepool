@@ -3764,6 +3764,7 @@ dependencies = [
  "tidepool-bridge-effects",
  "tidepool-effect",
  "tidepool-mcp",
+ "tidepool-protocol",
  "tidepool-repr",
  "tidepool-runtime",
  "tidepool-test-data",

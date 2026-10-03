@@ -12,7 +12,7 @@ import Prelude (Either(..), Eq, Int, Show)
 import Data.Text (Text)
 import Tidepool.Aeson.Value (ToJSON(..), object, (.=))
 
-data FsError = FsNotFound Text | FsNotUtf8 Text | FsSandbox Text | FsBadRegex Text | FsIo Text | FsNonUtf8Path Text deriving (Show, Eq)
+data FsError = FsNotFound Text | FsNotUtf8 Text | FsSandbox Text | FsBadRegex Text | FsIo Text | FsDurabilityUnknown Text | FsNonUtf8Path Text deriving (Show, Eq)
 instance ToJSON FsError where
   toJSON e = case e of
     FsNotFound path -> object ["tag" .= ("FsNotFound" :: Text), "path" .= path]
@@ -20,14 +20,17 @@ instance ToJSON FsError where
     FsSandbox detail -> object ["tag" .= ("FsSandbox" :: Text), "detail" .= detail]
     FsBadRegex detail -> object ["tag" .= ("FsBadRegex" :: Text), "detail" .= detail]
     FsIo detail -> object ["tag" .= ("FsIo" :: Text), "detail" .= detail]
+    FsDurabilityUnknown detail -> object ["tag" .= ("FsDurabilityUnknown" :: Text), "detail" .= detail]
     FsNonUtf8Path path -> object ["tag" .= ("FsNonUtf8Path" :: Text), "path" .= path]
 
 
-data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)
+data GitError = GitBadRevspec Text | GitFailed Int Text | GitMalformedOutput Text | GitNonUtf8Path Text deriving (Show, Eq)
 instance ToJSON GitError where
   toJSON e = case e of
     GitBadRevspec detail -> object ["tag" .= ("GitBadRevspec" :: Text), "detail" .= detail]
     GitFailed code detail -> object ["tag" .= ("GitFailed" :: Text), "code" .= code, "detail" .= detail]
+    GitMalformedOutput detail -> object ["tag" .= ("GitMalformedOutput" :: Text), "detail" .= detail]
+    GitNonUtf8Path path -> object ["tag" .= ("GitNonUtf8Path" :: Text), "path" .= path]
 
 
 data LlmError = LlmApi Text | LlmRefusal Text | LlmBudget deriving (Show, Eq)

@@ -29,6 +29,7 @@ if ! command -v cargo-nextest >/dev/null 2>&1 && ! cargo nextest --version >/dev
 fi
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib-extract.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib-nextest.sh"
 resolve_tidepool_extract --prefer-persistent-daemon
 
 # Per-run resident compile daemon amortizes the GHC startup and stdlib
@@ -75,8 +76,10 @@ start_battery_daemon
 # the default profile skips for quick inner-loop `cargo nextest run`. It
 # inherits slow-timeout and the ghc-heavy thread cap.
 #
-# Retain the wrapper to reject zero-test selections and own process cleanup.
+# The shared gate rejects zero-test selections and leaves this script's signal
+# handler owning the actual Nextest PID.
 set +e
+run_status=0
 # No hardcoded --workspace: the root manifest is VIRTUAL, so a bare
 # invocation already defaults to every member (script cd's to repo root
 # above) — while an explicit `--workspace` OVERRIDES any caller-passed
@@ -84,20 +87,11 @@ set +e
 # the caller asked for one crate (found live: `-p tidepool-mcp` ran 3612
 # tests, not 175). Passing "$@" bare lets `-p` actually scope.
 #
-# Backgrounded + waited (rather than run directly in the foreground) so a
-# signal sent to this script's own pid interrupts promptly — see on_signal
-# above.
-cargo nextest run --profile battery --no-fail-fast \
+# The shared gate backgrounds and waits for Nextest so a direct signal reaches
+# the handler promptly; see on_signal above.
+NEXTTEST_STDERR_LOG="$tmp_log" nextest_run_checked --profile battery --no-fail-fast \
   --status-level fail --final-status-level fail \
-  "$@" 2> >(tee "$tmp_log" >&2) &
-nextest_pid=$!
-wait "$nextest_pid"
-run_status=$?
+  "$@" || run_status=$?
 set -e
-
-if grep -qE '\b0 tests run:' "$tmp_log"; then
-  echo "error: battery selected/ran ZERO tests — a silent no-op, not a pass" >&2
-  [ "$run_status" -eq 0 ] && run_status=1
-fi
 
 exit "$run_status"

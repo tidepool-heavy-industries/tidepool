@@ -874,11 +874,13 @@ pub async fn check_recipe(
         "Modules: {}",
         selected.import_modules().collect::<Vec<_>>().join(", ")
     );
-    let missing_effects = crate::actor_host::spec_effect_preflight(&selected);
+    let missing_effects = crate::actor_host::spec_effect_preflight(&selected, scratch.path())?;
     if !missing_effects.is_empty() {
         return Err(runtime_error(missing_effects.join("\n")));
     }
-    println!("Spec effect requirements: every launchable child role holds what the spec requires.");
+    println!(
+        "Agent spec installability: every launchable child role compiles the selected spec installation."
+    );
     if recipes || recipe.is_some() {
         crate::actor_host::recipe_checks::run(&workspace, &selected, recipe.as_deref()).await?;
         println!(

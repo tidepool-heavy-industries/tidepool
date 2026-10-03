@@ -231,8 +231,8 @@ mod tests {
         let result = jit_eval(&[
             "let check nm ok = if ok then [] else [nm]",
             "putStrLn \"hello from JIT\"",
-            "kvSet \"jit_test\" (toJSON (42 :: Int))",
-            "v <- kvGet \"jit_test\"",
+            "kvSet \"jit_test\" (toJSON (42 :: Int)) >>= liftEither",
+            "v <- kvGet \"jit_test\" >>= liftEither",
             "let c1 = check \"console-print-dispatches\" True",
             "let c2 = check \"kv-set-get-roundtrip\" (toJSON v == toJSON (42 :: Int))",
             "pure (concat [c1, c2])",

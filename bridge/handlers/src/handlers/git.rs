@@ -21,36 +21,22 @@ impl GitHandler {
         Self { root }
     }
 
-    /// Run a git command in the sandbox root, through `GitCli` — the
-    /// workspace's one place that shells out to git (env scrubbing, prompt
-    /// disabling, locale; see `exomonad/worktree/CLAUDE.md`'s "one git call
-    /// site" rule). Failure is TYPED (#335): an unknown/ambiguous revspec is
-    /// `GitBadRevspec`; any other nonzero exit (or a git binary that can't
-    /// even be spawned, exit code -1) is `GitFailed code detail`.
-    fn run_git(&self, args: &[&str]) -> Result<String, GitError> {
+    /// Run read-only Git queries through the shared subprocess owner.
+    fn run_git(&self, args: &[&str]) -> Result<Vec<u8>, GitError> {
         GitCli::new()
-            .run(&self.root, args)
-            .map(|out| out.stdout)
-            .map_err(|receipt: exomonad_worktree::error::GitFailureReceipt| {
-                let stderr = receipt.stderr.trim().to_string();
-                let code = receipt.exit_code.unwrap_or(-1) as i64;
-                if stderr.contains("bad revision")
-                    || stderr.contains("unknown revision")
-                    || stderr.contains("ambiguous argument")
-                {
-                    GitError::GitBadRevspec(stderr)
-                } else {
-                    GitError::GitFailed(code, stderr)
+            .stdout_bytes(&self.root, args)
+            .map_err(|error| match error {
+                exomonad_worktree::error::WorktreeError::GitFailure(receipt) => {
+                    GitError::GitFailed(
+                        receipt.exit_code.unwrap_or(-1) as i64,
+                        receipt.stderr.trim().to_string(),
+                    )
                 }
+                other => GitError::GitFailed(-1, other.to_string()),
             })
     }
 
-    /// Reject a revspec that could be mistaken for an option by git's own
-    /// argv parser (e.g. `--output=/tmp/x` writing OUTSIDE the Fs sandbox via
-    /// `git diff`'s `--output`). No legitimate ref/revspec starts with `-`
-    /// (git itself refuses to create such refs), so this is a pure guard —
-    /// callers pass the revspec positionally, and `run_git` never invokes a
-    /// shell, so this is the one place flag-shaped input can still reach git.
+    /// Reject option-shaped input before passing a revspec to Git.
     fn validate_revspec(rev: &str) -> Result<(), GitError> {
         if rev.starts_with('-') {
             return Err(GitError::GitBadRevspec(format!(
@@ -61,198 +47,286 @@ impl GitHandler {
         Ok(())
     }
 
-    /// Parse `git log --format="%H%x00%s%x00%an%x00%cI" --name-only` output.
-    ///
-    /// Each commit block is separated by a blank line (`\n\n`).  The first
-    /// line of each block is NUL-delimited metadata; subsequent non-empty
-    /// lines are changed files.
-    fn parse_log_output(output: &str) -> Vec<GitCommit> {
-        // git log --format=... --name-only produces:
-        //   sha\x00subject\x00author\x00date\n
-        //   \n                           <- blank separator between header and files
-        //   file1\n
-        //   file2\n
-        //   sha2\x00...                 <- next header follows files directly (no blank)
-        //
-        // Scan line by line: lines with 4+ NUL-separated fields are headers; blank
-        // lines are separators (skip); all other non-empty lines are file paths.
-        let mut commits = Vec::new();
-        let mut current: Option<GitCommit> = None;
-
-        for line in output.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            let parts: Vec<&str> = line.splitn(4, '\x00').collect();
-            if parts.len() >= 4 {
-                // Header line: sha\x00subject\x00author\x00date
-                if let Some(commit) = current.take() {
-                    commits.push(commit);
-                }
-                current = Some(GitCommit {
-                    sha: parts[0].to_string(),
-                    subject: parts[1].to_string(),
-                    author: parts[2].to_string(),
-                    date: parts[3].to_string(),
-                    files: Vec::new(),
-                });
-            } else if let Some(ref mut commit) = current {
-                commit.files.push(line.to_string());
-            }
-        }
-        if let Some(commit) = current {
-            commits.push(commit);
-        }
-        commits
+    fn malformed(detail: impl Into<String>) -> GitError {
+        GitError::GitMalformedOutput(detail.into())
     }
 
-    /// Parse one commit from log output; error if missing.
-    fn parse_single_commit(output: &str, revspec: &str) -> Result<GitCommit, GitError> {
-        let commits = Self::parse_log_output(output);
-        commits.into_iter().next().ok_or_else(|| {
-            GitError::GitBadRevspec(format!("gitShow: no commit found for '{}'", revspec))
+    fn path_text(bytes: &[u8]) -> Result<String, GitError> {
+        std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| GitError::GitNonUtf8Path(format!("path bytes: {bytes:02x?}")))
+    }
+
+    fn nul_fields(bytes: &[u8]) -> Result<Vec<&[u8]>, GitError> {
+        if bytes.is_empty() {
+            return Ok(Vec::new());
+        }
+        if bytes.last() != Some(&0) {
+            return Err(Self::malformed("NUL-delimited output is truncated"));
+        }
+        Ok(bytes[..bytes.len() - 1].split(|byte| *byte == 0).collect())
+    }
+
+    fn parse_status_output(bytes: &[u8]) -> Result<Vec<GitStatusEntry>, GitError> {
+        let fields = Self::nul_fields(bytes)?;
+        let mut entries = Vec::new();
+        let mut index = 0;
+        while index < fields.len() {
+            let record = fields[index];
+            if record.len() < 4 || record[2] != b' ' {
+                return Err(Self::malformed("invalid porcelain v1 status record"));
+            }
+            let valid = |byte| b" MADRCU?!T".contains(&byte);
+            if !valid(record[0]) || !valid(record[1]) || (record[0] == b' ' && record[1] == b' ') {
+                return Err(Self::malformed("invalid porcelain v1 status code"));
+            }
+            let path = Self::path_text(&record[3..])?;
+            if path.is_empty() {
+                return Err(Self::malformed(
+                    "porcelain v1 status record has an empty path",
+                ));
+            }
+            entries.push(GitStatusEntry {
+                path,
+                state: String::from_utf8(vec![record[0], record[1]]).unwrap(),
+            });
+            index += 1;
+            // With -z, a rename/copy record is followed by the source path;
+            // the path embedded in the status record is the destination.
+            if record[0] == b'R' || record[1] == b'R' || record[0] == b'C' || record[1] == b'C' {
+                if index >= fields.len() || fields[index].is_empty() {
+                    return Err(Self::malformed(
+                        "porcelain v1 rename is missing its source path",
+                    ));
+                }
+                let _source = Self::path_text(fields[index])?;
+                index += 1;
+            }
+        }
+        Ok(entries)
+    }
+
+    fn parse_count(raw: &[u8]) -> Result<(i64, bool), GitError> {
+        if raw == b"-" {
+            return Ok((0, true));
+        }
+        if raw.is_empty() || !raw.iter().all(u8::is_ascii_digit) {
+            return Err(Self::malformed("numstat contains an invalid line count"));
+        }
+        let text = std::str::from_utf8(raw).expect("ASCII digits are UTF-8");
+        let value = text
+            .parse::<i64>()
+            .map_err(|_| Self::malformed("numstat line count is out of range"))?;
+        Ok((value, false))
+    }
+
+    fn parse_numstat_fields(
+        fields: &[&[u8]],
+        index: &mut usize,
+        transport_newline: bool,
+    ) -> Result<GitFileDelta, GitError> {
+        let field = fields[*index];
+        let row = if transport_newline {
+            Self::first_path_field(field)?
+        } else {
+            field
+        };
+        let first = row
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or_else(|| Self::malformed("numstat row is missing its first tab"))?;
+        let rest = &row[first + 1..];
+        let second = rest
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or_else(|| Self::malformed("numstat row is missing its second tab"))?;
+        let (adds, adds_binary) = Self::parse_count(&row[..first])?;
+        let (dels, dels_binary) = Self::parse_count(&rest[..second])?;
+        if adds_binary != dels_binary {
+            return Err(Self::malformed("numstat binary counts must both be '-'"));
+        }
+        let raw_path = &rest[second + 1..];
+        *index += 1;
+        let path = if raw_path.is_empty() {
+            // NUL numstat represents a rename as an empty path field followed
+            // by the old and new path fields.
+            if *index + 1 >= fields.len()
+                || fields[*index].is_empty()
+                || fields[*index + 1].is_empty()
+            {
+                return Err(Self::malformed("numstat rename is missing a path"));
+            }
+            let _old = Self::path_text(fields[*index])?;
+            let new = Self::path_text(fields[*index + 1])?;
+            *index += 2;
+            new
+        } else {
+            Self::path_text(raw_path)?
+        };
+        if path.is_empty() {
+            return Err(Self::malformed("numstat row has an empty path"));
+        }
+        Ok(GitFileDelta {
+            path,
+            adds,
+            dels,
+            binary: adds_binary,
         })
     }
 
-    /// Parse `git status --porcelain=v1` output.
-    fn parse_status_output(output: &str) -> Vec<GitStatusEntry> {
-        output
-            .lines()
-            .filter(|l| l.len() >= 3)
-            .map(|line| {
-                let state = line[..2].to_string();
-                let rest = line[3..].trim();
-                // For renames "XY old -> new", take the destination path.
-                let path = if let Some(idx) = rest.find(" -> ") {
-                    rest[idx + 4..].to_string()
-                } else {
-                    rest.to_string()
-                };
-                GitStatusEntry { path, state }
-            })
-            .collect()
-    }
-
-    /// Parse `git diff --numstat <rev>` output.
-    fn parse_numstat_output(output: &str) -> Vec<GitFileDelta> {
-        output
-            .lines()
-            .filter(|l| !l.is_empty())
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.splitn(3, '\t').collect();
-                if parts.len() < 3 {
-                    return None;
-                }
-                let (adds_s, dels_s, path) = (parts[0], parts[1], parts[2].trim());
-                // Binary files show "-" instead of counts.
-                let binary = adds_s == "-" || dels_s == "-";
-                let adds = if binary {
-                    0
-                } else {
-                    adds_s.parse::<i64>().unwrap_or(0)
-                };
-                let dels = if binary {
-                    0
-                } else {
-                    dels_s.parse::<i64>().unwrap_or(0)
-                };
-                Some(GitFileDelta {
-                    path: path.to_string(),
-                    adds,
-                    dels,
-                    binary,
-                })
-            })
-            .collect()
-    }
-
-    /// A numstat path that names a rename: either the plain `old => new` form
-    /// (no common prefix/suffix) or the `{old => new}` infix form git emits
-    /// when the rename shares a directory prefix and/or filename suffix
-    /// (e.g. `src/{old.rs => new.rs}`, `{old => new}/file.txt`). Returns the
-    /// NEW path in both cases; a non-rename path is returned unchanged.
-    fn resolve_renamed_path(raw: &str) -> String {
-        if let (Some(start), Some(end)) = (raw.find('{'), raw.find('}')) {
-            if end > start {
-                if let Some(arrow) = raw[start..end].find(" => ") {
-                    let prefix = &raw[..start];
-                    let new_part = &raw[start + arrow + 4..end];
-                    let suffix = &raw[end + 1..];
-                    return format!("{prefix}{new_part}{suffix}");
-                }
+    fn parse_numstat_output(bytes: &[u8]) -> Result<Vec<GitFileDelta>, GitError> {
+        let fields = Self::nul_fields(bytes)?;
+        let mut deltas = Vec::new();
+        let mut index = 0;
+        while index < fields.len() {
+            if fields[index].is_empty() {
+                return Err(Self::malformed("numstat output contains an empty row"));
             }
+            deltas.push(Self::parse_numstat_fields(&fields, &mut index, false)?);
         }
-        match raw.find(" => ") {
-            Some(arrow) => raw[arrow + 4..].trim().to_string(),
-            None => raw.to_string(),
-        }
+        Ok(deltas)
     }
 
-    /// Parse `git log --format="%H%x00%s%x00%an%x00%cI" --numstat -M` output:
-    /// one NUL-delimited commit header (same shape `parse_log_output` reads)
-    /// followed by that commit's own numstat lines, in ONE subprocess for
-    /// every commit — the single parse site for `gitLogNumstat`. A merge or
-    /// otherwise-empty commit's header is followed by zero numstat lines (git
-    /// shows no diff for a merge without `-m`), so `deltas` comes back `[]`
-    /// for it, not an error. `Commit.files` is populated from the same
-    /// deltas, matching `gitLog`'s (`--name-only`) shape.
-    fn parse_log_numstat_output(output: &str) -> Vec<GitCommitDeltas> {
-        let mut result = Vec::new();
-        let mut current: Option<(GitCommit, Vec<GitFileDelta>)> = None;
+    fn parse_log_header(fields: &[&[u8]], index: usize) -> Result<(GitCommit, usize), GitError> {
+        if index + 3 >= fields.len() {
+            return Err(Self::malformed(
+                "git log output has a truncated commit header",
+            ));
+        }
+        let sha = fields[index];
+        let date = fields[index + 3];
+        if !matches!(sha.len(), 40 | 64)
+            || !sha.iter().all(u8::is_ascii_hexdigit)
+            || date.len() < 20
+            || date.get(4) != Some(&b'-')
+            || date.get(7) != Some(&b'-')
+        {
+            return Err(Self::malformed(
+                "git log output has an invalid commit header",
+            ));
+        }
+        let decode = |bytes: &[u8]| {
+            std::str::from_utf8(bytes)
+                .map(str::to_owned)
+                .map_err(|_| Self::malformed("git log metadata is not UTF-8"))
+        };
+        Ok((
+            GitCommit {
+                sha: decode(sha)?,
+                subject: decode(fields[index + 1])?,
+                author: decode(fields[index + 2])?,
+                date: decode(date)?,
+                files: Vec::new(),
+            },
+            index + 4,
+        ))
+    }
 
-        for line in output.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            let header_parts: Vec<&str> = line.splitn(4, '\x00').collect();
-            if header_parts.len() >= 4 {
-                if let Some((commit, deltas)) = current.take() {
-                    result.push(GitCommitDeltas { commit, deltas });
-                }
-                current = Some((
-                    GitCommit {
-                        sha: header_parts[0].to_string(),
-                        subject: header_parts[1].to_string(),
-                        author: header_parts[2].to_string(),
-                        date: header_parts[3].to_string(),
-                        files: Vec::new(),
-                    },
-                    Vec::new(),
-                ));
-                continue;
-            }
-            let Some((commit, deltas)) = current.as_mut() else {
-                continue;
-            };
-            let parts: Vec<&str> = line.splitn(3, '\t').collect();
-            if parts.len() < 3 {
-                continue;
-            }
-            let (adds_s, dels_s, raw_path) = (parts[0], parts[1], parts[2].trim());
-            let binary = adds_s == "-" || dels_s == "-";
-            let adds = if binary {
-                0
+    fn next_commit_header(
+        fields: &[&[u8]],
+        index: &mut usize,
+    ) -> Result<Option<(GitCommit, usize)>, GitError> {
+        let boundary = *index;
+        while *index < fields.len() && fields[*index].is_empty() {
+            *index += 1;
+        }
+        if *index == fields.len() {
+            return if boundary == 0 {
+                Err(Self::malformed(
+                    "git log output has a truncated first commit header",
+                ))
             } else {
-                adds_s.parse::<i64>().unwrap_or(0)
+                Ok(None)
             };
-            let dels = if binary {
-                0
-            } else {
-                dels_s.parse::<i64>().unwrap_or(0)
+        }
+        if boundary == 0 && (*index != 1 || !fields[0].is_empty()) {
+            return Err(Self::malformed(
+                "git log output is missing its format boundary",
+            ));
+        }
+        Self::parse_log_header(fields, *index).map(Some)
+    }
+
+    fn first_path_field<'a>(field: &'a [u8]) -> Result<&'a [u8], GitError> {
+        field
+            .strip_prefix(b"\n")
+            .ok_or_else(|| Self::malformed("git log output is missing its transport newline"))
+    }
+
+    fn parse_log_output(bytes: &[u8]) -> Result<Vec<GitCommit>, GitError> {
+        let fields = Self::nul_fields(bytes)?;
+        if fields.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !fields[0].is_empty() {
+            return Err(Self::malformed(
+                "git log output is missing its format boundary",
+            ));
+        }
+
+        let mut commits = Vec::new();
+        let mut index = 0;
+        loop {
+            let Some((mut commit, next)) = Self::next_commit_header(&fields, &mut index)? else {
+                break;
             };
-            let path = Self::resolve_renamed_path(raw_path);
-            commit.files.push(path.clone());
-            deltas.push(GitFileDelta {
-                path,
-                adds,
-                dels,
-                binary,
-            });
+            index = next;
+            let mut first_path = true;
+            while index < fields.len() && !fields[index].is_empty() {
+                let field = if first_path {
+                    first_path = false;
+                    Self::first_path_field(fields[index])?
+                } else {
+                    fields[index]
+                };
+                commit.files.push(Self::path_text(field)?);
+                index += 1;
+            }
+            commits.push(commit);
         }
-        if let Some((commit, deltas)) = current {
-            result.push(GitCommitDeltas { commit, deltas });
+        Ok(commits)
+    }
+
+    fn parse_single_commit(bytes: &[u8], revspec: &str) -> Result<GitCommit, GitError> {
+        Self::parse_log_output(bytes)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                GitError::GitMalformedOutput(format!(
+                    "gitShow returned no commit for revspec '{revspec}'"
+                ))
+            })
+    }
+
+    fn parse_log_numstat_output(bytes: &[u8]) -> Result<Vec<GitCommitDeltas>, GitError> {
+        let fields = Self::nul_fields(bytes)?;
+        if fields.is_empty() {
+            return Ok(Vec::new());
         }
-        result
+        if !fields[0].is_empty() {
+            return Err(Self::malformed(
+                "git log output is missing its format boundary",
+            ));
+        }
+
+        let mut rows = Vec::new();
+        let mut index = 0;
+        loop {
+            let Some((mut commit, next)) = Self::next_commit_header(&fields, &mut index)? else {
+                break;
+            };
+            index = next;
+            let mut deltas = Vec::new();
+            let mut first_stat = true;
+            while index < fields.len() && !fields[index].is_empty() {
+                let delta = Self::parse_numstat_fields(&fields, &mut index, first_stat)?;
+                first_stat = false;
+                commit.files.push(delta.path.clone());
+                deltas.push(delta);
+            }
+            rows.push(GitCommitDeltas { commit, deltas });
+        }
+        Ok(rows)
     }
 }
 
@@ -265,23 +339,24 @@ impl GitHandler {
             "log",
             "-n",
             &n_str,
-            "--format=%H%x00%s%x00%an%x00%cI",
+            "--format=%x00%H%x00%s%x00%an%x00%cI",
             "--name-only",
+            "-z",
         ])?;
-        Ok(Self::parse_log_output(&output))
+        Self::parse_log_output(&output)
     }
 
     fn git_status(&mut self) -> Result<Vec<GitStatusEntry>, GitError> {
-        let output = self.run_git(&["status", "--porcelain=v1"])?;
-        Ok(Self::parse_status_output(&output))
+        let output = self.run_git(&["status", "--porcelain=v1", "-z"])?;
+        Self::parse_status_output(&output)
     }
 
     fn git_diff_stat(&mut self, rev: String) -> Result<Vec<GitFileDelta>, GitError> {
         Self::validate_revspec(&rev)?;
         // Trailing `--` closes the pathspec boundary so `rev` can never be
         // reinterpreted as (or followed by) an option, even defensively.
-        let output = self.run_git(&["diff", "--numstat", &rev, "--"])?;
-        Ok(Self::parse_numstat_output(&output))
+        let output = self.run_git(&["diff", "--numstat", "-M", "-z", &rev, "--"])?;
+        Self::parse_numstat_output(&output)
     }
 
     fn git_show(&mut self, rev: String) -> Result<GitCommit, GitError> {
@@ -291,8 +366,9 @@ impl GitHandler {
             "-n",
             "1",
             &rev,
-            "--format=%H%x00%s%x00%an%x00%cI",
+            "--format=%x00%H%x00%s%x00%an%x00%cI",
             "--name-only",
+            "-z",
             "--",
         ])?;
         Self::parse_single_commit(&output, &rev)
@@ -307,11 +383,12 @@ impl GitHandler {
             "log",
             "-n",
             &n_str,
-            "--format=%H%x00%s%x00%an%x00%cI",
+            "--format=%x00%H%x00%s%x00%an%x00%cI",
             "--numstat",
             "-M",
+            "-z",
         ])?;
-        Ok(Self::parse_log_numstat_output(&output))
+        Self::parse_log_numstat_output(&output)
     }
 }
 
@@ -347,46 +424,34 @@ mod tests {
 
     #[test]
     fn test_git_parse_log_output_two_commits() {
-        // Simulate `git log -n 2 --format="%H%x00%s%x00%an%x00%cI" --name-only`
-        let output = "\
-abc123\x00First commit\x00Alice\x002024-01-01T00:00:00+00:00\n\
-\n\
-file_a.txt\n\
-file_b.rs\n\
-\n\
-def456\x00Second commit\x00Bob\x002024-01-02T00:00:00+00:00\n\
-\n\
-file_c.txt\n\
-\n";
-        let commits = GitHandler::parse_log_output(output);
+        let output = b"\x000123456789012345678901234567890123456789\x00First commit\x00Alice\x002024-01-01T00:00:00+00:00\x00\nfile_a.txt\x00file_b.rs\x00\x00aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\x00Second commit\x00Bob\x002024-01-02T00:00:00+00:00\x00\nfile_c.txt\x00";
+        let commits = GitHandler::parse_log_output(output).unwrap();
         assert_eq!(commits.len(), 2);
-        assert_eq!(commits[0].sha, "abc123");
         assert_eq!(commits[0].subject, "First commit");
         assert_eq!(commits[0].author, "Alice");
         assert_eq!(commits[0].date, "2024-01-01T00:00:00+00:00");
         assert_eq!(commits[0].files, vec!["file_a.txt", "file_b.rs"]);
-        assert_eq!(commits[1].sha, "def456");
         assert_eq!(commits[1].subject, "Second commit");
         assert_eq!(commits[1].files, vec!["file_c.txt"]);
     }
 
     #[test]
     fn test_git_parse_status_renames() {
-        let output = "M  src/lib.rs\n?? untracked.txt\nR  old.rs -> new.rs\n";
-        let entries = GitHandler::parse_status_output(output);
+        let output = b"M  src/lib.rs\x00?? untracked.txt\x00R  new.rs\x00old.rs\x00";
+        let entries = GitHandler::parse_status_output(output).unwrap();
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].state, "M ");
         assert_eq!(entries[0].path, "src/lib.rs");
         assert_eq!(entries[1].state, "??");
         assert_eq!(entries[1].path, "untracked.txt");
-        // Rename: destination path only
         assert_eq!(entries[2].path, "new.rs");
     }
 
     #[test]
-    fn test_git_parse_numstat_with_binary() {
-        let output = "10\t5\tsrc/lib.rs\n-\t-\timage.png\n3\t0\tdocs/README.md\n";
-        let deltas = GitHandler::parse_numstat_output(output);
+    fn test_git_parse_numstat_with_binary_and_rename() {
+        let output =
+            b"10\t5\tsrc/lib.rs\x00-\t-\timage.png\x000\t0\t\x00old_name.rs\x00new_name.rs\x00";
+        let deltas = GitHandler::parse_numstat_output(output).unwrap();
         assert_eq!(deltas.len(), 3);
         assert_eq!(deltas[0].path, "src/lib.rs");
         assert_eq!(deltas[0].adds, 10);
@@ -395,79 +460,90 @@ file_c.txt\n\
         assert_eq!(deltas[1].path, "image.png");
         assert!(deltas[1].binary);
         assert_eq!(deltas[1].adds, 0);
-        assert_eq!(deltas[2].path, "docs/README.md");
-        assert_eq!(deltas[2].adds, 3);
-        assert_eq!(deltas[2].dels, 0);
+        assert_eq!(deltas[2].path, "new_name.rs");
     }
 
-    /// `gitLogNumstat`'s single parse site (`parse_log_numstat_output`),
-    /// every hazard as one table: a plain file, a plain `old => new` rename,
-    /// a `{old => new}` infix rename with a common PREFIX, one with a common
-    /// SUFFIX, a binary file (`-\t-\tpath`), and a merge/empty commit with
-    /// zero numstat lines (deltas == [], not an error).
     #[test]
     fn test_git_parse_log_numstat_output_hazards() {
-        let output = "\
-c1\x00Normal commit\x00Alice\x002024-01-01T00:00:00+00:00\n\
-\n\
-10\t5\tsrc/lib.rs\n\
-\n\
-c2\x00Plain rename\x00Alice\x002024-01-02T00:00:00+00:00\n\
-\n\
-0\t0\told_name.rs => new_name.rs\n\
-\n\
-c3\x00Infix rename, common prefix\x00Alice\x002024-01-03T00:00:00+00:00\n\
-\n\
-2\t1\tsrc/{old.rs => new.rs}\n\
-\n\
-c4\x00Infix rename, common suffix\x00Alice\x002024-01-04T00:00:00+00:00\n\
-\n\
-1\t1\t{old => new}/shared.rs\n\
-\n\
-c5\x00Binary file\x00Alice\x002024-01-05T00:00:00+00:00\n\
-\n\
--\t-\timage.png\n\
-\n\
-c6\x00Merge commit (no diff)\x00Alice\x002024-01-06T00:00:00+00:00\n\
-\n\
-c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
-\n\
-3\t3\tdocs/README.md\n";
-        let rows = GitHandler::parse_log_numstat_output(output);
-        assert_eq!(rows.len(), 7, "expected 7 commits, got {}", rows.len());
-
-        // c1: plain file, unaffected by rename resolution.
-        assert_eq!(rows[0].commit.sha, "c1");
-        assert_eq!(rows[0].deltas.len(), 1);
+        let output = b"\x001111111111111111111111111111111111111111\x00Normal commit\x00Alice\x002024-01-01T00:00:00+00:00\x00\n10\t5\tsrc/lib.rs\x00\x002222222222222222222222222222222222222222\x00Plain rename\x00Alice\x002024-01-02T00:00:00+00:00\x00\n0\t0\t\x00old_name.rs\x00new_name.rs\x00\x003333333333333333333333333333333333333333\x00Binary file\x00Alice\x002024-01-03T00:00:00+00:00\x00\n-\t-\timage.png\x00\x004444444444444444444444444444444444444444\x00Empty commit\x00Alice\x002024-01-04T00:00:00+00:00\x00\x00";
+        let rows = GitHandler::parse_log_numstat_output(output).unwrap();
+        assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].deltas[0].path, "src/lib.rs");
         assert_eq!(rows[0].deltas[0].adds, 10);
         assert_eq!(rows[0].deltas[0].dels, 5);
-        assert!(!rows[0].deltas[0].binary);
-        assert_eq!(rows[0].commit.files, vec!["src/lib.rs"]);
-
-        // c2: plain `old => new` rename records only the NEW path.
         assert_eq!(rows[1].deltas[0].path, "new_name.rs");
+        assert_eq!(rows[2].deltas[0].path, "image.png");
+        assert!(rows[2].deltas[0].binary);
+        assert!(rows[3].deltas.is_empty());
+    }
 
-        // c3: `{old => new}` infix with a common directory PREFIX.
-        assert_eq!(rows[2].deltas[0].path, "src/new.rs");
+    #[test]
+    fn test_git_log_numstat_frames_consecutive_empty_commits() {
+        let output = b"\x001111111111111111111111111111111111111111\x00Empty one\x00Author\x002024-01-01T00:00:00+00:00\x00\x00\x00\x002222222222222222222222222222222222222222\x00Empty two\x00Author\x002024-01-02T00:00:00+00:00\x00\x00\x00\x003333333333333333333333333333333333333333\x00Has a file\x00Author\x002024-01-03T00:00:00+00:00\x00\n1\t0\tfile.txt\x00";
+        let rows = GitHandler::parse_log_numstat_output(output).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].deltas.is_empty());
+        assert!(rows[1].deltas.is_empty());
+        assert_eq!(rows[2].deltas[0].path, "file.txt");
+    }
 
-        // c4: `{old => new}` infix with a common filename SUFFIX.
-        assert_eq!(rows[3].deltas[0].path, "new/shared.rs");
+    #[test]
+    fn test_git_log_parser_keeps_header_shaped_paths_in_the_commit() {
+        let output = b"\x001111111111111111111111111111111111111111\x00Subject\x00Author\x002024-01-01T00:00:00+00:00\x00\none\x00aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\x00looks like subject\x00looks like author\x002024-01-02T00:00:00+00:00\x00";
+        let commits = GitHandler::parse_log_output(output).unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].files.len(), 5);
+        assert_eq!(
+            commits[0].files[1],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
 
-        // c5: binary file — adds/dels are 0, not parsed from "-".
-        assert_eq!(rows[4].deltas[0].path, "image.png");
-        assert!(rows[4].deltas[0].binary);
-        assert_eq!(rows[4].deltas[0].adds, 0);
-        assert_eq!(rows[4].deltas[0].dels, 0);
+    #[test]
+    fn test_git_parsers_reject_malformed_and_truncated_output() {
+        assert!(matches!(
+            GitHandler::parse_status_output(b"M  path"),
+            Err(GitError::GitMalformedOutput(_))
+        ));
+        assert!(matches!(
+            GitHandler::parse_status_output(b"M  path\x00R  new\x00"),
+            Err(GitError::GitMalformedOutput(_))
+        ));
+        assert!(matches!(
+            GitHandler::parse_numstat_output(b"x\t1\tfile\x00"),
+            Err(GitError::GitMalformedOutput(_))
+        ));
+        assert!(matches!(
+            GitHandler::parse_numstat_output(b"1\t1\tfile"),
+            Err(GitError::GitMalformedOutput(_))
+        ));
+        assert!(matches!(
+            GitHandler::parse_log_output(
+                b"\x00abc\x00subject\x00author\x002024-01-01T00:00:00+00:00\x00"
+            ),
+            Err(GitError::GitMalformedOutput(_))
+        ));
+        assert!(matches!(
+            GitHandler::parse_log_output(b"\x00"),
+            Err(GitError::GitMalformedOutput(_))
+        ));
+        assert!(matches!(
+            GitHandler::parse_log_output(b"\x001111111111111111111111111111111111111111\x00ok\x00author\x002024-01-01T00:00:00+00:00\x00\nfile\x00\x00broken\x00"),
+            Err(GitError::GitMalformedOutput(_))
+        ));
+    }
 
-        // c6: merge/empty commit — zero numstat lines, not an error.
-        assert_eq!(rows[5].commit.sha, "c6");
-        assert!(rows[5].deltas.is_empty());
-        assert!(rows[5].commit.files.is_empty());
-
-        // c7: parsing resumes correctly after an empty-deltas commit.
-        assert_eq!(rows[6].commit.sha, "c7");
-        assert_eq!(rows[6].deltas[0].path, "docs/README.md");
+    #[test]
+    #[cfg(unix)]
+    fn test_git_parsers_reject_non_utf8_paths() {
+        assert!(matches!(
+            GitHandler::parse_status_output(b"?? bad-\xff\x00"),
+            Err(GitError::GitNonUtf8Path(_))
+        ));
+        assert!(matches!(
+            GitHandler::parse_numstat_output(b"1\t0\tbad-\xff\x00"),
+            Err(GitError::GitNonUtf8Path(_))
+        ));
     }
 
     // Build a scratch git repo with 2 commits, a staged file, and an untracked file.
@@ -518,6 +594,58 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
         fs::write(p.join("untracked.txt"), "untracked").unwrap();
 
         dir
+    }
+
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "short synchronous Git fixture commands in a temporary repository"
+    )]
+    fn test_git_handler_preserves_odd_renamed_and_binary_paths() {
+        use std::fs;
+        use std::process::Command;
+
+        let dir = make_scratch_repo();
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .output()
+                .expect("git fixture command should start");
+            assert!(
+                output.status.success(),
+                "git {:?}: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let old_path = "line\n\"quoted\".txt";
+        let new_path = "renamed\n\"quoted\".txt";
+        fs::write(root.join(old_path), "odd path contents\n").unwrap();
+        run(&["add", "--", old_path]);
+        run(&["commit", "-m", "add odd path"]);
+        fs::rename(root.join(old_path), root.join(new_path)).unwrap();
+        fs::write(root.join("binary.dat"), [0, 1, 2, 255]).unwrap();
+        run(&["add", "-A"]);
+
+        let mut handler = GitHandler::new(root.to_path_buf());
+        let status = handler.git_status().unwrap();
+        assert!(status.iter().any(|entry| entry.path == new_path));
+        let deltas = handler.git_diff_stat("HEAD".into()).unwrap();
+        assert!(deltas.iter().any(|delta| delta.path == new_path));
+        assert!(deltas
+            .iter()
+            .any(|delta| delta.path == "binary.dat" && delta.binary));
+        let history = handler.git_log_numstat(3).unwrap();
+        assert!(history
+            .iter()
+            .flat_map(|row| &row.deltas)
+            .any(|delta| delta.path == old_path));
     }
 
     #[test]
@@ -738,15 +866,14 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
     }
 
     #[test]
-    fn test_git_handler_show_bad_revspec_errors() {
+    fn test_git_handler_show_unknown_revision_is_git_failed() {
         let dir = make_scratch_repo();
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
         let mut handler = GitHandler::new(dir.path().to_path_buf());
 
-        // GitShow is errors-tagged (#335): a bad revspec is a typed
-        // `Left (GitBadRevspec _)` DATA, not an abort.
+        // GitShow is errors-tagged: a Git subprocess failure is typed data.
         let res = response_value(
             handler
                 .handle(GitReq::GitShow("notaref_zzzzzz".to_string()), &cx)
@@ -757,12 +884,12 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
             HaskellValue::Con(id, fields) if table.name_of(*id).unwrap() == "Left" => {
                 let err: GitError = FromHaskell::from_value(&fields[0], &table).unwrap();
                 assert!(
-                    matches!(err, GitError::GitBadRevspec(_)),
-                    "expected GitBadRevspec, got {:?}",
+                    matches!(err, GitError::GitFailed(_, _)),
+                    "expected GitFailed, got {:?}",
                     err
                 );
             }
-            other => panic!("expected Left (GitBadRevspec _), got {:?}", other),
+            other => panic!("expected Left (GitFailed _ _), got {:?}", other),
         }
     }
 
@@ -796,9 +923,9 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
     /// `gitLog 1` on the real repo returns a Commit record with a
     /// 40-character sha field, exercising the generated Tidepool.Effects
     /// wiring + Records visibility + con-name/arity agreement through the
-    /// JIT) + `test_jit_git_show_bad_revspec_is_typed_left` (#335 acceptance:
-    /// `gitShow` with a bad revspec is a typed `Left (GitBadRevspec _)` the
-    /// eval pattern-matches, never an abort) + a `gitLogNumstat 1` exercise
+    /// JIT) + `test_jit_git_show_unknown_revision_is_typed_left` (#335 acceptance:
+    /// `gitShow` with an unknown revision is typed `Left (GitFailed _ _)`
+    /// data the eval pattern-matches, never an abort) + a `gitLogNumstat 1` exercise
     /// (the new bulk verb: `CommitDeltas{commit,deltas}` resolves through the
     /// real `Tidepool.Records.Bridged`/`.Stable` wiring, nested record-dot
     /// access included) into one tidepool-extract compile. Skips cleanly
@@ -816,12 +943,12 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
             "commits <- gitLog 1 >>= liftEither",
             "let n = length commits",
             "let shaLen = case commits of { (c:_) -> T.length c.sha; _ -> 0 }",
-            "badRevspec <- gitShow \"notaref_zzzzzz\"",
-            "let badRevspecOk = case badRevspec of { Left (GitBadRevspec _) -> True; _ -> False }",
+            "unknownRevision <- gitShow \"notaref_zzzzzz\"",
+            "let gitFailedOk = case unknownRevision of { Left (GitFailed _ _) -> True; _ -> False }",
             "deltaRows <- gitLogNumstat 1 >>= liftEither",
             "let numstatN = length deltaRows",
             "let numstatShaLen = case deltaRows of { (cd:_) -> T.length cd.commit.sha; _ -> 0 }",
-            "pure (object [\"logCount\" .= n, \"shaLen\" .= shaLen, \"badRevspecOk\" .= badRevspecOk, \"numstatN\" .= numstatN, \"numstatShaLen\" .= numstatShaLen])",
+            "pure (object [\"logCount\" .= n, \"shaLen\" .= shaLen, \"gitFailedOk\" .= gitFailedOk, \"numstatN\" .= numstatN, \"numstatShaLen\" .= numstatShaLen])",
         ]);
         let include = prelude_include();
         let effects_dir = tidepool_mcp::ensure_effects_module(&decls).unwrap();
@@ -865,9 +992,9 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
                     "gitLog 1 commit sha should be 40 chars"
                 );
                 assert_eq!(
-                    json["badRevspecOk"],
+                    json["gitFailedOk"],
                     serde_json::json!(true),
-                    "gitShow with a bad revspec should be a typed Left (GitBadRevspec _)"
+                    "gitShow with an unknown revision should be a typed Left (GitFailed _ _)"
                 );
                 assert_eq!(
                     json["numstatN"],

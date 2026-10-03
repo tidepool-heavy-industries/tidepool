@@ -81,9 +81,34 @@ class Selection(unittest.TestCase):
         source = self.root / "a/tests/suite.rs"
         source.parent.mkdir(parents=True)
         source.write_text('#[path = "cases/a.rs"]\nmod a;\n')
+        leaf = self.root / "a/tests/cases/a.rs"
+        leaf.parent.mkdir()
+        leaf.touch()
         selection, checks, _, _ = self.select("a/tests/cases/a.rs")
         self.assertEqual(selection, {"a": {("test", "suite")}})
         self.assertEqual(checks, {})
+
+    def test_nested_suite_module_edit_selects_its_registered_target(self):
+        suite = self.root / "a/tests/suites/actor.rs"
+        actor = self.root / "a/tests/resident_local_actor.rs"
+        leaf = self.root / "a/tests/resident_local_actor/reload_uncertainty.rs"
+        suite.parent.mkdir(parents=True)
+        leaf.parent.mkdir(parents=True)
+        suite.write_text('#[path = "../resident_local_actor.rs"]\nmod resident_local_actor;\n')
+        actor.write_text('#[path = "resident_local_actor/reload_uncertainty.rs"]\nmod reload_uncertainty;\n')
+        leaf.write_text("#[test]\nfn reload_uncertainty_case() {}\n")
+        self.packages[0]["targets"][1]["src_path"] = str(suite)
+        selection, checks, actions, _ = self.select("a/tests/resident_local_actor/reload_uncertainty.rs")
+        self.assertEqual(selection, {"a": {("test", "suite")}})
+        self.assertEqual(checks, {})
+        self.assertEqual(actions, {"registration"})
+
+    def test_unresolved_test_module_widens_to_package_tests(self):
+        suite = self.root / "a/tests/suite.rs"
+        suite.parent.mkdir(parents=True)
+        suite.write_text("mod missing_support;\n")
+        selection, _, _, _ = self.select("a/tests/suite.rs")
+        self.assertEqual(selection["a"], {("lib", ""), ("test", "suite")})
 
     def test_shared_fixture_selects_all_owning_tests(self):
         selection, checks, actions, _ = self.select("a/tests/fixtures/input.hs")
@@ -129,6 +154,15 @@ class Selection(unittest.TestCase):
         self.assertEqual(checks, {})
         self.assertEqual(actions, set())
 
+    def test_cargo_report_fixture_selects_only_the_facade_unit_target(self):
+        self.package("tidepool", path="bridge/facade")
+        self.package("facade-consumer", ["tidepool"])
+        selection, checks, actions, _ = self.select(
+            "bridge/facade/src/actor_host/cargo_report_contract.hs")
+        self.assertEqual(selection, {"tidepool": {("lib", "")}})
+        self.assertEqual(checks, {})
+        self.assertEqual(actions, set())
+
     def test_production_edit_keeps_fanout_when_mixed_with_registered_test_source(self):
         self.package("tidepool-runtime", path="tidepool/runtime")
         self.package("runtime-consumer", ["tidepool-runtime"])
@@ -162,7 +196,7 @@ class Selection(unittest.TestCase):
     def test_haskell_corpus_change_cannot_disappear(self):
         self.package("tidepool-runtime")
         selection, _, actions, _ = self.select("bridge/haskell/test-execution-corpus/Case.hs")
-        self.assertIn("tidepool-runtime", selection)
+        self.assertEqual(selection, {})
         self.assertEqual(actions, {"haskell", "fixtures"})
 
     def test_haskell_library_change_checks_fixtures(self):
@@ -174,9 +208,15 @@ class Selection(unittest.TestCase):
         manifest = self.root / "bridge/haskell/tidepool-extract.cabal"
         manifest.parent.mkdir(parents=True)
         manifest.write_text("library compiler\n  hs-source-dirs: src\nexecutable worker\n  hs-source-dirs: app\ntest-suite parser\n  hs-source-dirs: test-parser\n")
-        self.assertEqual(changed.cabal_components(self.root, ["bridge/haskell/src/A.hs"]), ["compiler"])
-        self.assertEqual(changed.cabal_components(self.root, ["bridge/haskell/test-parser/A.hs"]), ["parser"])
-        self.assertEqual(changed.cabal_components(self.root, ["bridge/haskell/tidepool-extract.cabal"]), ["all"])
+        self.assertEqual(changed.cabal_components(self.root, ["bridge/haskell/src/A.hs"]), ["lib:compiler"])
+        self.assertEqual(changed.cabal_components(self.root, ["bridge/haskell/test-parser/A.hs"]), ["test:parser"])
+        self.assertEqual(changed.cabal_components(self.root, ["bridge/haskell/test-parser/A.hs-boot"]), ["test:parser"])
+        self.assertEqual(changed.cabal_components(self.root, ["bridge/haskell/test-parser/A.lhs-boot"]), ["test:parser"])
+        commands = changed.commands({}, {}, {"haskell"}, ["test:parser"])
+        self.assertTrue(any(command[-2:] == ["cabal-tests", "test:parser"] for command in commands))
+        self.assertFalse(any(command[0] == "scripts/battery.sh" for command in commands))
+        self.assertEqual(changed.cabal_components(self.root, ["bridge/haskell/tidepool-extract.cabal"]),
+                         ["lib:compiler", "exe:worker", "test:parser"])
 
     def test_cabal_extra_sources_select_all_components(self):
         manifest = self.root / "bridge/haskell/tidepool-extract.cabal"
@@ -188,10 +228,27 @@ class Selection(unittest.TestCase):
             "library compiler\n  hs-source-dirs: src\n"
             "test-suite display\n  hs-source-dirs: lib\n"
             "test-suite fixtures\n  hs-source-dirs: test-fixtures\n")
+        components = changed.cabal_components(
+            self.root, ["bridge/haskell/lib/Tidepool/Aeson/Value.hs"])
+        self.assertEqual(components, ["lib:compiler", "test:display", "test:fixtures"])
+        commands = changed.commands({}, {}, {"haskell"}, components)
+        self.assertEqual([command[-1] for command in commands if command[1] == "-c" and command[3] == "cabal-tests"],
+                         ["test:display", "test:fixtures"])
         self.assertEqual(changed.cabal_components(
-            self.root, ["bridge/haskell/lib/Tidepool/Aeson/Value.hs"]), ["all"])
-        self.assertEqual(changed.cabal_components(
-            self.root, ["bridge/haskell/test-fixtures/Case.hs"]), ["fixtures"])
+            self.root, ["bridge/haskell/test-fixtures/Case.hs"]), ["test:fixtures"])
+
+    def test_missing_cabal_source_directory_runs_every_test_suite(self):
+        manifest = self.root / "bridge/haskell/tidepool-extract.cabal"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            "library compiler\n  hs-source-dirs: src\n"
+            "test-suite parser\n  hs-source-dirs: test-parser\n"
+            "test-suite inventory\n  main-is: Main.hs\n")
+        components = changed.cabal_components(self.root, ["bridge/haskell/src/A.hs"])
+        self.assertEqual(components, ["lib:compiler", "test:parser", "test:inventory"])
+        commands = changed.commands({}, {}, {"haskell"}, components)
+        self.assertEqual([command[-1] for command in commands if command[1] == "-c" and command[3] == "cabal-tests"],
+                         ["test:parser", "test:inventory"])
 
     def test_cabal_extra_source_keeps_full_structural_fixtures(self):
         self.fixture_index()

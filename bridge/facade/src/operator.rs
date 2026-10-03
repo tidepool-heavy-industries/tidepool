@@ -79,9 +79,16 @@ type InspectArtifact = dyn Fn(exomonad_actor::ActorRef, PathBuf) -> BoxFuture<'s
     + Sync;
 
 type Provision = dyn Fn() -> BoxFuture<'static, Result<LocalActorRef, String>> + Send + Sync;
+
+#[derive(Clone)]
+enum LocalOperator {
+    Available(LocalActorRef),
+    StopRequested(LocalActorRef),
+}
+
 #[derive(Clone)]
 struct AttachmentState {
-    sessions: Arc<Mutex<BTreeMap<String, LocalActorRef>>>,
+    sessions: Arc<Mutex<BTreeMap<String, LocalOperator>>>,
     open: Arc<std::sync::atomic::AtomicBool>,
     provision: Arc<Provision>,
     inspect_graph: Arc<InspectGraph>,
@@ -233,7 +240,7 @@ async fn new(State(state): State<AttachmentState>) -> Response {
                     actor.identity().id.0,
                     actor.identity().incarnation.0
                 );
-                sessions.insert(session.clone(), actor);
+                sessions.insert(session.clone(), LocalOperator::Available(actor));
                 Json(Attachment {
                     session,
                     socket: state.socket,
@@ -256,7 +263,7 @@ async fn list(State(state): State<AttachmentState>) -> Response {
     Json(
         sessions
             .iter()
-            .filter(|(_, actor)| actor.terminal().get().is_none())
+            .filter(|(_, operator)| matches!(operator, LocalOperator::Available(actor) if actor.terminal().get().is_none()))
             .map(|(session, _)| Attachment {
                 session: session.clone(),
                 socket: state.socket.clone(),
@@ -269,62 +276,109 @@ async fn stop(
     State(state): State<AttachmentState>,
     RoutePath(session): RoutePath<String>,
 ) -> Response {
-    let Some(actor) = state.sessions.lock().await.remove(&session) else {
-        return error(
-            StatusCode::NOT_FOUND,
-            "session_not_found",
-            "Session no longer exists",
-        );
+    let (actor, initiate_shutdown) = {
+        let mut sessions = state.sessions.lock().await;
+        let Some(operator) = sessions.get_mut(&session) else {
+            return error(
+                StatusCode::NOT_FOUND,
+                "session_not_found",
+                "Session no longer exists",
+            );
+        };
+        let (actor, initiate_shutdown) = match operator {
+            LocalOperator::Available(actor) => (actor.clone(), true),
+            LocalOperator::StopRequested(actor) => (actor.clone(), false),
+        };
+        *operator = LocalOperator::StopRequested(actor.clone());
+        (actor, initiate_shutdown)
     };
+    if !initiate_shutdown {
+        let cleanup_confirmed = actor.terminal().get().is_some()
+            && actor
+                .terminal()
+                .cleanup()
+                .is_some_and(|cleanup| cleanup.is_confirmed());
+        return if cleanup_confirmed {
+            let mut sessions = state.sessions.lock().await;
+            if matches!(sessions.get(&session), Some(LocalOperator::StopRequested(current)) if current.identity() == actor.identity())
+            {
+                sessions.remove(&session);
+            }
+            Json(serde_json::json!({"stopped": session})).into_response()
+        } else {
+            error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "Retirement failed or cleanup remains unconfirmed",
+            )
+        };
+    }
+    // The detached task owns shutdown after admission, even if the HTTP
+    // observer disconnects. Keep the session until actor cleanup is proven.
+    let task_state = state.clone();
+    let task_session = session.clone();
     let task = tokio::spawn(async move {
-        actor
-            .shutdown(ActorTerminal {
+        let result = actor
+            .shutdown_with_cleanup(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary: "operator stopped workbench".into(),
             })
-            .await
+            .await;
+        if matches!(&result, Ok(shutdown) if shutdown.cleanup.is_confirmed()) {
+            let mut sessions = task_state.sessions.lock().await;
+            if matches!(sessions.get(&task_session), Some(LocalOperator::StopRequested(current)) if current.identity() == actor.identity())
+            {
+                sessions.remove(&task_session);
+            }
+        }
+        result
     });
     match task.await {
-        Ok(Ok(_)) => Json(serde_json::json!({"stopped": session})).into_response(),
+        Ok(Ok(shutdown)) if shutdown.cleanup.is_confirmed() => {
+            Json(serde_json::json!({"stopped": session})).into_response()
+        }
         _ => error(
             StatusCode::SERVICE_UNAVAILABLE,
             "unavailable",
-            "Retirement failed",
+            "Retirement failed or cleanup remains unconfirmed",
         ),
     }
 }
+
 async fn inspect(
     State(state): State<AttachmentState>,
     RoutePath(session): RoutePath<String>,
 ) -> Response {
-    if state
-        .sessions
-        .lock()
-        .await
-        .get(&session)
-        .is_some_and(|a| a.terminal().get().is_none())
-    {
-        Json(SessionInfo {
-            protocol_version: PROTOCOL_VERSION,
-            session,
-        })
-        .into_response()
-    } else {
-        error(
+    let sessions = state.sessions.lock().await;
+    match sessions.get(&session) {
+        Some(LocalOperator::Available(actor)) if actor.terminal().get().is_none() => {
+            Json(SessionInfo {
+                protocol_version: PROTOCOL_VERSION,
+                session,
+            })
+            .into_response()
+        }
+        Some(LocalOperator::StopRequested(_)) => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "Session shutdown is pending or cleanup remains unconfirmed",
+        ),
+        _ => error(
             StatusCode::NOT_FOUND,
             "session_not_found",
             "Session no longer exists",
-        )
+        ),
     }
 }
+
 async fn graph(
     State(state): State<AttachmentState>,
     RoutePath(session): RoutePath<String>,
 ) -> Response {
     let sessions = state.sessions.lock().await;
-    let Some(actor) = sessions
+    let Some(LocalOperator::Available(actor)) = sessions
         .get(&session)
-        .filter(|a| a.terminal().get().is_none())
+        .filter(|operator| matches!(operator, LocalOperator::Available(actor) if actor.terminal().get().is_none()))
     else {
         return error(
             StatusCode::NOT_FOUND,
@@ -385,9 +439,9 @@ async fn submit(
     };
     let request = WorkbenchRequest::from_cell_input(&input.source);
     let sessions = state.sessions.lock().await;
-    let Some(actor) = sessions
+    let Some(LocalOperator::Available(actor)) = sessions
         .get(&session)
-        .filter(|a| a.terminal().get().is_none())
+        .filter(|operator| matches!(operator, LocalOperator::Available(actor) if actor.terminal().get().is_none()))
     else {
         return error(
             StatusCode::NOT_FOUND,
@@ -800,6 +854,356 @@ mod artifact_tests {
         assert_eq!(body["actor"], serde_json::json!({"id":7,"incarnation":1}));
         assert_eq!(body["availability"]["state"], "unknown");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        service.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use exomonad_actor::{
+        ActorRef, ChildExitNotice, ExternalApplicationFailure, ExternalFailureDisposition,
+        KernelBehavior, KernelBehaviorError, KernelContext, KernelStep, MailboxValue,
+    };
+    use futures_util::future::BoxFuture;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Semaphore;
+
+    struct LifecycleBehavior {
+        entered: Arc<Semaphore>,
+        release: Arc<Semaphore>,
+        shutdown_calls: Arc<AtomicUsize>,
+        confirmed: bool,
+        fail_shutdown: bool,
+    }
+
+    impl KernelBehavior for LifecycleBehavior {
+        fn start<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+        ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+            Box::pin(async { Ok(KernelStep::Continue(())) })
+        }
+        fn cast<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: ActorRef,
+            _: MailboxValue,
+        ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+            Box::pin(async { panic!("unexpected cast") })
+        }
+        fn call<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: ActorRef,
+            _: exomonad_actor::CallAncestry,
+            _: MailboxValue,
+        ) -> BoxFuture<'a, Result<KernelStep<MailboxValue>, KernelBehaviorError>> {
+            Box::pin(async { panic!("unexpected call") })
+        }
+        fn tool<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: exomonad_tool::ToolInvocation,
+            _: Option<Arc<dyn exomonad_actor::HostedCheckpointCapture>>,
+        ) -> BoxFuture<
+            'a,
+            Result<KernelStep<serde_json::Value>, exomonad_actor::KernelInvocationFailure>,
+        > {
+            Box::pin(async { panic!("unexpected tool") })
+        }
+        fn workbench<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: exomonad_actor::ActorWorkbenchInvocation,
+            _: Option<Arc<exomonad_actor::WorkbenchExecutionControl>>,
+        ) -> BoxFuture<
+            'a,
+            Result<KernelStep<WorkbenchResponse>, exomonad_actor::KernelInvocationFailure>,
+        > {
+            Box::pin(async { panic!("unexpected workbench") })
+        }
+        fn external_application_failed<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: ExternalApplicationFailure,
+        ) -> BoxFuture<'a, ExternalFailureDisposition> {
+            Box::pin(async { panic!("unexpected external application failure") })
+        }
+        fn shutdown<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: &'a ActorTerminal,
+        ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
+            Box::pin(async move {
+                self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
+                self.entered.add_permits(1);
+                self.release.acquire().await.unwrap().forget();
+                if self.fail_shutdown {
+                    Err(KernelBehaviorError {
+                        detail: "test shutdown failure".into(),
+                    })
+                } else {
+                    Ok(())
+                }
+            })
+        }
+        fn shutdown_components<'a>(
+            &'a mut self,
+            context: &'a KernelContext,
+            terminal: &'a ActorTerminal,
+            _: tokio::time::Instant,
+        ) -> BoxFuture<
+            'a,
+            (
+                exomonad_actor::CleanupComponentOutcome,
+                exomonad_actor::CleanupComponentOutcome,
+            ),
+        > {
+            Box::pin(async move {
+                let hook = match self.shutdown(context, terminal).await {
+                    Ok(()) if self.confirmed => exomonad_actor::CleanupComponentOutcome::Confirmed,
+                    Ok(()) => exomonad_actor::CleanupComponentOutcome::Unconfirmed(
+                        "test cleanup uncertain".into(),
+                    ),
+                    Err(error) => {
+                        exomonad_actor::CleanupComponentOutcome::Unconfirmed(error.to_string())
+                    }
+                };
+                let realm = if self.confirmed {
+                    exomonad_actor::CleanupComponentOutcome::Confirmed
+                } else {
+                    exomonad_actor::CleanupComponentOutcome::Unconfirmed(
+                        "test cleanup uncertain".into(),
+                    )
+                };
+                (hook, realm)
+            })
+        }
+        fn stopped<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: &'a ActorTerminal,
+        ) -> BoxFuture<'a, ()> {
+            Box::pin(async {})
+        }
+        fn child_exited(&mut self, _: ChildExitNotice) {
+            panic!("unexpected child exit")
+        }
+    }
+
+    async fn service_for_actor(
+        socket: PathBuf,
+        actor: LocalActorRef,
+    ) -> (OperatorService, reqwest::Client, String) {
+        let graph_actor = actor.identity();
+        let service = OperatorService::bind(
+            socket.clone(),
+            Arc::new(move || {
+                let actor = actor.clone();
+                Box::pin(async move { Ok(actor) })
+            }),
+            Arc::new(move |actor| (actor == graph_actor).then(Vec::new)),
+            Arc::new(|_, _| Box::pin(async { panic!("unexpected artifact inspection") })),
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::builder()
+            .unix_socket(socket.as_path())
+            .build()
+            .unwrap();
+        let attachment: Attachment = client
+            .post("http://localhost/host/operators")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        (service, client, attachment.session)
+    }
+
+    fn behavior(
+        confirmed: bool,
+        fail_shutdown: bool,
+    ) -> (
+        LifecycleBehavior,
+        Arc<Semaphore>,
+        Arc<Semaphore>,
+        Arc<AtomicUsize>,
+    ) {
+        let entered = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        (
+            LifecycleBehavior {
+                entered: entered.clone(),
+                release: release.clone(),
+                shutdown_calls: calls.clone(),
+                confirmed,
+                fail_shutdown,
+            },
+            entered,
+            release,
+            calls,
+        )
+    }
+
+    #[tokio::test]
+    async fn stop_admission_survives_observer_loss_and_removes_only_confirmed_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("operator.sock");
+        let (behavior, entered, release, calls) = behavior(true, false);
+        let (actor, actor_task) = exomonad_actor::spawn_local_actor(None, behavior)
+            .await
+            .unwrap();
+        let actor_observer = actor.clone();
+        let (service, client, session) = service_for_actor(socket, actor).await;
+
+        let stopping_client = client.clone();
+        let stopping_session = session.clone();
+        let observer = tokio::spawn(async move {
+            stopping_client
+                .post(format!(
+                    "http://localhost/host/operators/{stopping_session}/stop"
+                ))
+                .send()
+                .await
+        });
+        entered.acquire().await.unwrap().forget();
+        let duplicate = client
+            .post(format!("http://localhost/host/operators/{session}/stop"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(duplicate.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        observer.abort();
+        assert!(observer.await.unwrap_err().is_cancelled());
+
+        let listed: Vec<Attachment> = client
+            .get("http://localhost/host/operators")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(listed.is_empty());
+        let submit = client
+            .post(format!("http://localhost/v1/sessions/{session}/submit"))
+            .json(&SubmitRequest {
+                source: "()".into(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(submit.status(), StatusCode::NOT_FOUND);
+
+        release.add_permits(1);
+        actor_observer.terminal().wait().await;
+        let stopped = client
+            .post(format!("http://localhost/host/operators/{session}/stop"))
+            .send()
+            .await
+            .unwrap();
+        assert!(matches!(
+            stopped.status(),
+            StatusCode::OK | StatusCode::NOT_FOUND
+        ));
+        let stopped_again = client
+            .post(format!("http://localhost/host/operators/{session}/stop"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stopped_again.status(), StatusCode::NOT_FOUND);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        actor_task.await.unwrap();
+        assert_eq!(
+            actor_observer.terminal().get().unwrap().kind,
+            ActorExitKind::Cancelled
+        );
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_cleanup_remains_tracked_and_inspection_refuses_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("operator.sock");
+        let (behavior, _, release, _) = behavior(false, false);
+        let (actor, actor_task) = exomonad_actor::spawn_local_actor(None, behavior)
+            .await
+            .unwrap();
+        let actor_observer = actor.clone();
+        let (service, client, session) = service_for_actor(socket, actor).await;
+        release.add_permits(1);
+        let stopped = client
+            .post(format!("http://localhost/host/operators/{session}/stop"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stopped.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let listed: Vec<Attachment> = client
+            .get("http://localhost/host/operators")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(listed.is_empty());
+        let inspected = client
+            .get(format!("http://localhost/v1/sessions/{session}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(inspected.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let retry = client
+            .post(format!("http://localhost/host/operators/{session}/stop"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::SERVICE_UNAVAILABLE);
+        actor_task.await.unwrap();
+        assert_eq!(
+            actor_observer.terminal().get().unwrap().kind,
+            ActorExitKind::Cancelled
+        );
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_failure_keeps_the_session_for_reobservation() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("operator.sock");
+        let (behavior, _, release, _) = behavior(false, true);
+        let (actor, actor_task) = exomonad_actor::spawn_local_actor(None, behavior)
+            .await
+            .unwrap();
+        let (service, client, session) = service_for_actor(socket, actor).await;
+        release.add_permits(1);
+        let stopped = client
+            .post(format!("http://localhost/host/operators/{session}/stop"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stopped.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let listed: Vec<Attachment> = client
+            .get("http://localhost/host/operators")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(listed.is_empty());
+        let retry = client
+            .post(format!("http://localhost/host/operators/{session}/stop"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let _terminal = actor_task.await.unwrap();
         service.shutdown().await;
     }
 }

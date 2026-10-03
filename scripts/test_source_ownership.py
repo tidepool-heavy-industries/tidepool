@@ -4,6 +4,7 @@ Only explicitly reviewed paths belong here. Unknown source remains production
 input; moving a registered source into production requires removing its entry.
 The named Cargo unit-test target owns these module and embedded fixture bytes.
 """
+import re
 
 TEST_ONLY_SOURCES = {
     'tidepool-extract-cmd': frozenset({
@@ -14,12 +15,14 @@ TEST_ONLY_SOURCES = {
         'tidepool/codegen/src/prepared_program/machine/literal_manifest_tests.rs',
     }),
     'tidepool': frozenset({
+        'bridge/facade/src/actor_host/cargo_report_contract.hs',
         'bridge/facade/src/actor_host/native_prefix_publication_tests.rs',
         'bridge/facade/src/actor_host/notebook_prefix_baseline.hs',
         'bridge/facade/src/actor_host/notebook_prefix_failure.hs',
         'bridge/facade/src/exomonad/source/publication_fault_tests.rs',
         'bridge/facade/src/exomonad/source/publication_fault_driver.hs',
         'bridge/facade/src/actor_host/fixtures/browser_agent_spec.hs',
+        'bridge/facade/src/actor_host/fixtures/unconstrained_spec_later_helper.hs',
         'bridge/facade/src/actor_host/fixtures/request_reload_agent_spec.hs',
         'bridge/facade/src/actor_host/m1_request_reload_tests.rs',
         'bridge/facade/src/actor_host/m1_eight_actor_launch.hs',
@@ -90,6 +93,106 @@ TEST_ONLY_SOURCES = {
         'tidepool/toolchain/tests/fixtures/typeable-tuple/G1.hs',
     }),
 }
+
+
+def integration_target_sources(targets):
+    """Map every Rust source reachable from an integration target to its target.
+
+    Unknown module declarations are reported separately so selectors can widen
+    their obligation instead of silently missing support files.
+    """
+    from pathlib import Path
+
+    path_attr = re.compile(r'#\[path\s*=\s*"([^"]+)"\]')
+    module = re.compile(r'(?m)^\s*(?:(?:pub(?:\([^)]*\))?)\s+)?mod\s+(\w+)\s*;')
+    result = {}
+    unknown = set()
+
+    for target in targets:
+        if "test" not in target.get("kind", []):
+            continue
+        entry = Path(target["src_path"]).resolve()
+        pending = [entry]
+        seen = set()
+        while pending:
+            source = pending.pop()
+            if source in seen:
+                continue
+            seen.add(source)
+            target_name = target.get("name", Path(target["src_path"]).stem)
+            result.setdefault(source, set()).add(target_name)
+            try:
+                text = source.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                unknown.add(target_name)
+                continue
+            source_lines = text.splitlines()
+            for match in module.finditer(text):
+                line_index = text.count("\n", 0, match.start())
+                attrs = []
+                cursor = line_index - 1
+                while cursor >= 0:
+                    line = source_lines[cursor].strip()
+                    if not line or line.startswith(("#[", "//", "/*", "*", "*/")):
+                        attrs.append(source_lines[cursor])
+                        cursor -= 1
+                        continue
+                    break
+                attr = [value for line in attrs for value in path_attr.finditer(line)]
+                if attr:
+                    child = (source.parent / attr[-1][1]).resolve()
+                else:
+                    name = match[1]
+                    base = source.parent if source == entry or source.name in ("mod.rs", "lib.rs", "main.rs") else source.parent / source.stem
+                    options = (base / f"{name}.rs", base / name / "mod.rs")
+                    child = next((item.resolve() for item in options if item.is_file()), None)
+                    if child is None:
+                        unknown.add(target_name)
+                        continue
+                if not child.is_file():
+                    unknown.add(target_name)
+                else:
+                    pending.append(child)
+    return result, unknown
+
+
+def registration_errors(metadata, _root):
+    """Report missing suite roots, unresolved modules, and orphan test files."""
+    from pathlib import Path
+    errors = []
+    members = set(metadata["workspace_members"])
+    for package in metadata["packages"]:
+        if package["id"] not in members:
+            continue
+        package_root = Path(package["manifest_path"]).parent
+        tests = package_root / "tests"
+        if not (tests / "suites").is_dir():
+            continue
+        targets = package["targets"]
+        graph, unknown = integration_target_sources(targets)
+        root_counts = {}
+        for target in targets:
+            if "test" in target.get("kind", []):
+                path = Path(target["src_path"]).resolve()
+                root_counts[path] = root_counts.get(path, 0) + 1
+        suite_roots = {p.resolve() for p in (tests / "suites").glob("*.rs")}
+        for suite_root in suite_roots:
+            if root_counts.get(suite_root, 0) != 1:
+                errors.append(f"{package['name']}: suite entry point is not registered: {suite_root.name}")
+        for target in sorted(unknown):
+            errors.append(f"{package['name']}: cannot resolve every module for target {target}")
+        test_attribute = re.compile(r"#\[(?:tokio::)?test\b|#\[test_case\b|#\[rstest\b")
+        for source in sorted(tests.rglob("*.rs")):
+            try:
+                text = source.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if not test_attribute.search(text):
+                continue
+            owners = graph.get(source.resolve(), set())
+            if not owners:
+                errors.append(f"{package['name']}: test source is not registered: {source.relative_to(tests)}")
+    return errors
 
 
 def test_source_owner(path):

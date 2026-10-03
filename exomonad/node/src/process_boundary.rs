@@ -73,6 +73,24 @@ impl ViewMount<'_> {
 }
 
 impl ProcessMountBoundary {
+    fn validate_target(
+        &self,
+        target: PathBuf,
+        project_scoped: bool,
+    ) -> Result<PathBuf, ProcessBoundaryError> {
+        let invalid = !target.is_absolute()
+            || target
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir));
+        if project_scoped {
+            if invalid || !target.starts_with(&self.project_root) {
+                return Err(ProcessBoundaryError::OverlayOutsideProjectRoot { path: target });
+            }
+        } else if invalid {
+            return Err(ProcessBoundaryError::InvalidMountTarget { path: target });
+        }
+        Ok(target)
+    }
     /// Prepare an opt-in service scope without spawning or changing legacy wrap().
     ///
     /// Requires a host-trusted absolute bubblewrap executable compatible with
@@ -166,14 +184,7 @@ impl ProcessMountBoundary {
         target: impl AsRef<Path>,
     ) -> Result<Self, ProcessBoundaryError> {
         let source = canonicalize("read-only overlay source", source.as_ref())?;
-        let target = target.as_ref().to_path_buf();
-        if !target.is_absolute()
-            || target
-                .components()
-                .any(|part| matches!(part, std::path::Component::ParentDir))
-        {
-            return Err(ProcessBoundaryError::InvalidMountTarget { path: target });
-        }
+        let target = self.validate_target(target.as_ref().to_path_buf(), false)?;
         self.read_only_overlays.push((source, target));
         self.read_only_overlays.sort();
         self.read_only_overlays.dedup();
@@ -188,10 +199,7 @@ impl ProcessMountBoundary {
         target: impl AsRef<Path>,
     ) -> Result<Self, ProcessBoundaryError> {
         let source = canonicalize("writable overlay source", source.as_ref())?;
-        let target = target.as_ref().to_path_buf();
-        if !target.is_absolute() || !target.starts_with(&self.project_root) {
-            return Err(ProcessBoundaryError::OverlayOutsideProjectRoot { path: target });
-        }
+        let target = self.validate_target(target.as_ref().to_path_buf(), true)?;
         self.writable_overlays.push((source, target));
         self.writable_overlays.sort();
         self.writable_overlays.dedup();
@@ -216,14 +224,7 @@ impl ProcessMountBoundary {
             .collect::<Result<Vec<_>, _>>()?;
         let upper = canonicalize("overlay upper directory", upper.as_ref())?;
         let work = canonicalize("overlay work directory", work.as_ref())?;
-        let target = target.as_ref().to_path_buf();
-        if !target.starts_with(&self.project_root)
-            || target
-                .components()
-                .any(|part| matches!(part, std::path::Component::ParentDir))
-        {
-            return Err(ProcessBoundaryError::OverlayOutsideProjectRoot { path: target });
-        }
+        let target = self.validate_target(target.as_ref().to_path_buf(), true)?;
         let paths: Vec<_> = layers.iter().chain([&upper, &work]).collect();
         if layers.is_empty()
             || paths.iter().any(|path| !path.is_dir())

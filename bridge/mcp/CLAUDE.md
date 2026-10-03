@@ -3,7 +3,7 @@
 ## Charter
 
 This crate owns effect declarations and generated projections, Haskell eval
-preambles, source assembly, and response validation. Concrete handlers live in
+preambles, and source assembly. Concrete handlers live in
 `tidepool-handlers`; paths and caches live in `tidepool-toolchain`; resident
 sessions live in `tidepool-runtime`. Transport and actor hosting belong to their
 production consumers, not this declaration layer.
@@ -85,7 +85,7 @@ as another warning paragraph.
 
 Useful composition patterns:
 
-- gather data before `ask`, then use the validated response to choose expensive
+- gather data before `ask`, then use the caller-supplied response to choose expensive
   work;
 - batch filesystem operations with `readGlob`/`grepGlob` and return compact
   structured results;

@@ -1,7 +1,5 @@
 //! Shared Haskell effect declarations, generated preambles, and output capture.
 
-pub mod validate;
-
 mod eval_prep;
 pub use eval_prep::*;
 // The single failure taxonomy lives in tidepool-runtime; re-export it from the
@@ -688,9 +686,9 @@ data Console a where
         assert!(!preamble.contains("parseFileMeta"));
         // `say` is the Console wrapper (re-added 2026-06-22, friction #5).
         assert!(preamble.contains("say :: forall effs. Member Console effs => Text -> Eff effs ()"));
-        // Other helpers unchanged
+        // KV storage failures are now typed at the effect boundary.
         assert!(preamble
-            .contains("kvGet :: forall effs. Member KV effs => Text -> Eff effs (Maybe Value)"));
+            .contains("kvGet :: forall effs. Member KV effs => Text -> Eff effs (Either KvError (Maybe Value))"));
         // #335: httpGet is errors-tagged.
         assert!(preamble.contains(
             "httpGet :: forall effs. Member Http effs => Text -> Eff effs (Either HttpError Value)"
@@ -830,9 +828,9 @@ data Console a where
         assert!(orch.contains("lineCount :: Text -> M Int"));
         assert!(orch.contains("fileContains :: Text -> Text -> M Bool"));
         // KV batch helper. No orchestration `kvClear :: M ()` here — it
-        // collided with the effect helper `kvClear :: Text -> Eff effs Int`
+        // collided with the effect helper `kvClear :: Text -> Eff effs (Either KvError Int)`
         // (dup-survey item 1); the effect helper strictly subsumes it.
-        assert!(orch.contains("kvAll :: M [(Text, Value)]"));
+        assert!(orch.contains("kvAll :: M (Either KvError [(Text, Value)])"));
         assert!(!orch.contains("kvClear :: M ()"));
         assert!(orch.contains("runAll :: [Text] -> M [Proc]"));
         // The expr-module preamble no longer splices these bodies — it imports
@@ -989,7 +987,7 @@ data Console a where
 
         // With budget
         let result = template_haskell(&preamble, &stack, source, "", "", Some(1024));
-        assert!(result.contains("kvSet \"__sayChars\" (toJSON (0 :: Int))"));
+        assert!(result.contains("kvSet \"__sayChars\" (toJSON (0 :: Int)) >>= liftEither"));
         assert!(result.contains("paginateResult (max 100 (1024 - _sayC)) (toJSON _r)"));
 
         // Without budget (defaults to 4096)

@@ -10,8 +10,8 @@ use crate::git::{inspect, GitCli};
 use crate::id::{BranchName, GitOid, GitRef, WorktreeId};
 use crate::label::sanitize_branch_label;
 use crate::registry::{
-    worktree_present, WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus, WorktreeRegistry,
-    WorktreeSummary,
+    validate_external_root, worktree_present, WorktreeOrigin, WorktreeReceipt,
+    WorktreeRecordStatus, WorktreeRegistry, WorktreeSummary,
 };
 use crate::storage::now_ms;
 use tidepool_repr::ActorPath;
@@ -1280,11 +1280,15 @@ impl WorktreeManager {
         named_branch: Option<BranchName>,
         inherited_index: Option<&Path>,
     ) -> Result<WorktreeHandle, WorktreeError> {
-        let common = inspect::git_common_dir(&self.git, &resolved.git_repository)?;
         let host_git = self.git.on_host();
+        let canonical_root = validate_external_root(&host_git, &self.worktree_root)?;
+        let common = inspect::git_common_dir(&self.git, &resolved.git_repository)?;
         let _write = host_git.write_scope(&common)?;
-        self.prepare_worktree_root()?;
-        let cwd = self.worktree_root.join(id.as_str());
+        fs::create_dir_all(&canonical_root).map_err(|error| WorktreeError::StorageFailure {
+            path: self.worktree_root.clone(),
+            detail: error.to_string(),
+        })?;
+        let cwd = canonical_root.join(id.as_str());
         let branch = named_branch.unwrap_or_else(|| {
             BranchName::from_raw(format!(
                 "{EXOMONAD_BRANCH_PREFIX}/{}-{}",
@@ -1346,35 +1350,11 @@ impl WorktreeManager {
     }
 
     fn prepare_worktree_root(&self) -> Result<(), WorktreeError> {
-        fs::create_dir_all(&self.worktree_root).map_err(|e| WorktreeError::StorageFailure {
+        let canonical_root = validate_external_root(&self.git, &self.worktree_root)?;
+        fs::create_dir_all(&canonical_root).map_err(|e| WorktreeError::StorageFailure {
             path: self.worktree_root.clone(),
             detail: e.to_string(),
         })?;
-        // Never-dirty-the-source, enforced rather than documentary: refuse a
-        // worktree_root that resolves inside a git working tree (same check +
-        // error as `WorktreeRegistry::open` — git walks UP from the root, so
-        // the managed worktrees materialized BELOW this root never trip it).
-        //
-        // A git failure that is NOT "no repository here" is refused rather
-        // than skipped — a corrupt `.git` or a permission error must not
-        // silently read as "safe, nothing to nest inside" (see
-        // `git::inspect::work_tree`'s docs).
-        if let Ok(canonical_root) = self.worktree_root.canonicalize() {
-            match inspect::work_tree(&self.git, &canonical_root) {
-                Ok(toplevel) => {
-                    if let Ok(canonical_toplevel) = toplevel.canonicalize() {
-                        if canonical_root.starts_with(&canonical_toplevel) {
-                            return Err(WorktreeError::InvalidRegistryRoot {
-                                root: canonical_root,
-                                inside: canonical_toplevel,
-                            });
-                        }
-                    }
-                }
-                Err(WorktreeError::NotARepository(_)) => {}
-                Err(other) => return Err(other),
-            }
-        }
         Ok(())
     }
 

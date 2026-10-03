@@ -1,63 +1,83 @@
-{-# LANGUAGE OverloadedStrings, ScopedTypeVariables, OverloadedRecordDot #-}
+{-# LANGUAGE MonoLocalBinds, DuplicateRecordFields, FlexibleContexts, OverloadedStrings, ScopedTypeVariables, OverloadedRecordDot #-}
 
 -- | Cargo effect module: typed wrappers over 'runArgv' that parse
--- @--message-format=json@ line-delimited output into 'Value' lists.
+-- @--message-format=json@ line-delimited output into 'CargoReport' values.
 --
--- Lens-free: deconstruct 'Value' with 'KM.lookup' + case on
--- 'Object'\/'Array'\/'String', not optics (@^?@\/@key@\/@_String@).
---
--- Example — collect only compiler errors:
--- > msgs <- cargoCheck []
--- > let errs = [ v | v@(Object m) <- msgs
--- >                , Just (String "compiler-message") <- [KM.lookup "reason" m] ]
+-- Lens-free: deconstruct 'Value' with @KM.lookup@ + case on
+-- @Object@\/@Array@\/@String@, not optics (@^?@\/@key@\/_String@).
 module Tidepool.Cargo
-  ( cargoCheck
+  ( CargoError (..)
+  , CargoReport (..)
+  , cargoReportFrom
+  , cargoCheck
   , cargoClippy
   , cargoMetadata
   ) where
 
 import Prelude
+import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson.Value (Value)
 import Tidepool.Aeson.FromJSON (eitherDecode)
-import Tidepool.Records (Proc(..))
-import Tidepool.Effects (M, runArgv, liftEither)
+import Tidepool.Records (Proc (..))
+import Tidepool.Effects (Exec, ExecError, M, runArgv)
 import qualified Tidepool.Shell as Shell
 
--- | Run @cargo check --message-format=json [extras]@ and return each JSON
--- line as a 'Value'. @cargo check@ exits nonzero when there are errors, but
--- the JSON diagnostics are on stdout — we capture stdout regardless of exit
--- code and return the parsed lines.
+-- | The command failed to execute, or a non-empty JSON output line was invalid.
+-- Line indices are one-based and include blank lines in the original output.
+data CargoError
+  = CargoExecutionError ExecError
+  | CargoInvalidJson Int Text
+  deriving (Eq, Show)
+
+-- | Parsed Cargo output. A nonzero 'exitCode' remains data so callers can
+-- inspect compiler diagnostics and stderr before deciding how to proceed.
+data CargoReport = CargoReport
+  { exitCode :: Int,
+    stderr :: Text,
+    messages :: [Value]
+  }
+  deriving (Eq, Show)
+
+-- | Run @cargo check --message-format=json [extras]@.
 --
--- Filter on the @\"reason\"@ field:
--- @\"compiler-message\"@ — error\/warning with @message.{code,rendered,spans}@;
--- @\"compiler-artifact\"@ — successful crate build.
-cargoCheck :: [Text] -> M [Value]
+-- > Right report <- cargoCheck []
+-- > let diagnostics = report.messages
+-- >     failed = report.exitCode /= 0
+cargoCheck :: Member Exec effects => [Text] -> Eff effects (Either CargoError CargoReport)
 cargoCheck extras = runCargoJson ("check" : "--message-format=json" : extras)
 
--- | Run @cargo clippy --message-format=json [extras]@. Same shape as 'cargoCheck'.
-cargoClippy :: [Text] -> M [Value]
+-- | Run @cargo clippy --message-format=json [extras]@. Same result as
+-- 'cargoCheck', including nonzero exits as reports.
+cargoClippy :: Member Exec effects => [Text] -> Eff effects (Either CargoError CargoReport)
 cargoClippy extras = runCargoJson ("clippy" : "--message-format=json" : extras)
 
 -- | Run @cargo metadata --format-version=1@ and return the parsed 'Value'.
---
--- The top-level object has @\"packages\"@, @\"workspace_members\"@,
--- @\"workspace_root\"@, @\"resolve\"@, etc. Deconstruct with 'KM.lookup':
--- > case v of { Object m -> KM.lookup "packages" m; _ -> Nothing }
+-- This keeps its existing throwing contract.
 cargoMetadata :: M Value
 cargoMetadata = Shell.shJson ["cargo", "metadata", "--format-version=1"]
 
--- ---------------------------------------------------------------------------
--- Internal helpers
--- ---------------------------------------------------------------------------
-
--- | Run @cargo <subArgs>@ via shell-free argv, capture stdout (regardless of
--- exit code — cargo exits nonzero on errors but JSON goes to stdout), then
--- parse each non-empty line as JSON. Lines that are not valid JSON (e.g.
--- progress messages in some terminal configurations) are silently skipped.
-runCargoJson :: [Text] -> M [Value]
+runCargoJson :: Member Exec effects => [Text] -> Eff effects (Either CargoError CargoReport)
 runCargoJson subArgs = do
-  p <- runArgv ("cargo" : subArgs) >>= liftEither
-  let ls = filter (not . T.null) (T.lines p.stdout)
-  pure [ v | l <- ls, Right v <- [eitherDecode l :: Either Text Value] ]
+  result <- runArgv ("cargo" : subArgs)
+  pure (cargoReportFrom result)
+
+-- | Interpret captured Cargo execution data without imposing an exit-code
+-- policy. Useful when a caller has retained a 'Proc' and wants the same
+-- strict JSON-line parsing as 'cargoCheck'.
+cargoReportFrom :: Either ExecError Proc -> Either CargoError CargoReport
+cargoReportFrom result = do
+  proc <- either (Left . CargoExecutionError) Right result
+  parsed <- traverse parseLine (zip [1 ..] (T.lines proc.stdout))
+  pure
+    ( CargoReport
+        { exitCode = proc.exitCode,
+          stderr = proc.stderr,
+          messages = [value | Just value <- parsed]
+        }
+    )
+  where
+    parseLine (_, line) | T.null line = Right Nothing
+    parseLine (lineIndex, line) =
+      either (Left . CargoInvalidJson lineIndex) (Right . Just) (eitherDecode line :: Either Text Value)

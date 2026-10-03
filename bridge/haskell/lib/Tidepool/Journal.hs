@@ -15,20 +15,13 @@
 -- (e.g. a step kind and the branch or task it concerns), and 'payload' is one
 -- opaque JSON value.
 --
--- APPEND-ONLY, FOREVER: there is no rewrite, truncate, or compaction verb —
--- a later record for the same 'key' does not replace an earlier one in the
--- file, it is simply appended after it. Folding many records for one 'key'
--- down to "the current state of that key" (e.g. keeping only the LAST one)
--- is a reader's job, not this module's; reading the journal back and
--- injecting it at boot so a resumed run can skip completed steps is the
--- caller's job too — 'record' is a write-only effect from the authored
--- program's point of view.
+-- APPEND-ONLY, FOREVER: there is no rewrite, truncate, compaction, or read
+-- verb. A later record for the same 'key' does not replace an earlier one in
+-- the file; it is simply appended after it. 'record' is write-only from the
+-- authored program's point of view.
 --
--- A WRITE FAILURE ABORTS THE RUN, deliberately: 'record' returns unit, not
--- @Either@ — a journal write failure (disk full, unwritable path) is not an
--- error the authored program handles, the driver fails the whole cycle. A
--- run that cannot journal cannot honestly resume, so continuing would trade
--- durability for the appearance of progress.
+-- A write failure aborts the cycle: 'record' returns unit, not @Either@,
+-- so the authored program cannot continue after a disk or permission error.
 module Tidepool.Journal
   ( record
   , trace

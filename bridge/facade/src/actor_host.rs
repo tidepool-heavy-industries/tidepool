@@ -3867,64 +3867,85 @@ fn scaffolding_default() -> exomonad_actor::EffectiveRole {
     })
 }
 
-/// Resolve the workspace's installed agent spec and report, for every
-/// launchable child role, each effect its `Member` constraints require that
-/// the role's effect row does not hold — a diagnostic naming the role, the
-/// missing effect, and the spec entry, not a silent grant.
-///
-/// A spec found by convention (`AgentSpec.hs`) or named by a configured entry
-/// point (`[haskell] spec`) are both covered: whichever
-/// `exomonad_actor::agent_spec::resolve` would install for an actor with no
-/// checkout of its own is exactly what a project root installs, and what
-/// every configured child role's spec is compiled from. A workspace with no
-/// spec at all has no tool surface to require anything, so it reports
-/// nothing.
+/// Typecheck the exact selected spec installation for each static launchable
+/// child role row. GHC expands aliases and checks the selected entry's actual
+/// type, so this also covers requirements that are not spelled in its
+/// signature. This is an authored-row check; runtime handler availability is
+/// resolved later when an actor's workbench is installed.
 pub(crate) fn spec_effect_preflight(
     workspace: &crate::exomonad::workspace::FrozenWorkspace,
-) -> Vec<String> {
+    run_root: &Path,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let roots = workspace.captured_source_roots().to_vec();
     let resolved = exomonad_actor::agent_spec::resolve(roots, workspace.spec.as_deref());
     let Some(entry) = resolved.entry.as_deref() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let Some((_, value)) = entry.rsplit_once('.') else {
-        return Vec::new();
+    let Some((module, _)) = entry.rsplit_once('.') else {
+        return Err(runtime_error(format!(
+            "selected agent spec entry {entry} is not qualified by a module"
+        )));
     };
-    let source = resolved
-        .file
-        .as_deref()
-        .and_then(|file| std::fs::read_to_string(file).ok())
-        .or_else(|| find_module_source(&resolved.searched, entry));
-    let Some(source) = source else {
-        return Vec::new();
-    };
-    let required = exomonad_actor::agent_spec::required_effects_from_signature(&source, value);
-    if required.is_empty() {
-        return Vec::new();
+    let DriverSources {
+        mut preamble,
+        include,
+    } = driver_sources(workspace.runtime_actors(), Some(workspace), run_root, None)?;
+    preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Effects.Core");
+    preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Contract");
+    preamble = insert_preamble_imports(&preamble, &format!("qualified {module}"));
+    let mut failures = Vec::new();
+    for (label, role) in LAUNCHABLE_ROLES {
+        let installation =
+            exomonad_actor::agent_spec::installation_expression(entry, role().effect_keys());
+        let dispatcher_effects = format!(
+            "(Tidepool.Effects.Core.AgentTools ': Tidepool.Effects.Core.ContextReadWrite ': {})",
+            installation.effect_row
+        );
+        let templates = resident_workbench_templates(&preamble, &dispatcher_effects, "");
+        let template = templates
+            .iter()
+            .find(|template| {
+                template.kind == tidepool_runtime::session::TemplateSelector::BindDiscard
+            })
+            .ok_or_else(|| runtime_error("resident workbench has no discarded-bind template"))?;
+        let source = tidepool_runtime::session::render_template(
+            &template.source,
+            &installation.expression,
+            &[],
+        );
+        match tidepool_toolchain::artifacts::check_source(
+            &tidepool_toolchain::artifacts::SourceCheckRequest {
+                source: &source,
+                include: &include,
+                fallback_module_name: "Expr",
+            },
+        ) {
+            Ok(()) => {}
+            Err(tidepool_toolchain::CompileError::Diagnostics(diagnostics)) => {
+                let detail = tidepool_toolchain::diag::render_diagnostics(
+                    &diagnostics,
+                    &tidepool_toolchain::diag::RenderOpts {
+                        anchor: "Expr.hs",
+                        label: "<agent-spec-installation>",
+                        user_lines: None,
+                        line_offset: 0,
+                        col_indent: 0,
+                        drop_foreign_gen_warnings_except: None,
+                        source: &source,
+                    },
+                );
+                failures.push(format!(
+                    "role {label} cannot install spec {entry}:\n{detail}"
+                ));
+            }
+            Err(error) => {
+                return Err(runtime_error(format!(
+                    "could not establish whether role {label} can install spec {entry}: {error}"
+                )));
+            }
+        }
     }
-    LAUNCHABLE_ROLES
-        .iter()
-        .flat_map(|(label, role)| {
-            role()
-                .missing_effect_names(&required)
-                .into_iter()
-                .map(move |effect| {
-                    format!("role {label} lacks effect {effect} required by {entry}")
-                })
-        })
-        .collect()
-}
-
-/// Find the `.hs` file a module entry point resolves to among `roots`, the
-/// same directories GHC would search — used when the spec's entry names a
-/// module (`[haskell] spec`) rather than a file discovery already
-/// found (`AgentSpec.hs`, carried on `ResolvedSpec::file`).
-fn find_module_source(roots: &[PathBuf], entry: &str) -> Option<String> {
-    let (module, _) = entry.rsplit_once('.')?;
-    let relative = PathBuf::from(module.replace('.', "/")).with_extension("hs");
-    roots
-        .iter()
-        .find_map(|root| std::fs::read_to_string(root.join(&relative)).ok())
+    Ok(failures)
 }
 
 /// Typecheck the driver against a CANDIDATE source revision. This is the whole

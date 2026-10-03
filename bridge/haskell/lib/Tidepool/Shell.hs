@@ -76,7 +76,7 @@ shTry argv = do
 -- | Run a shell-string command in a specific working directory, keeping the
 -- whole 'Proc' (unlike 'shTry', which strips to stdout/stderr text and drops
 -- the directory). @Right proc@ on ANY exit, including nonzero — inspect
--- `proc.exitCode`/`ok proc` yourself; @Left@ is only a genuine spawn/dir
+-- `proc.exitCode`/`ok proc` yourself; @Left@ reports an execution or capture
 -- failure, rendered via 'renderExecError'. Do NOT collapse a spawn error into
 -- the exit-code check: the two are typed separately (#335) for a reason.
 runInTry :: Text -> Text -> M (Either Text Proc)
@@ -90,6 +90,8 @@ renderExecError e = case e of
   ExecSpawn detail -> "could not spawn: " <> detail
   ExecBadDir detail -> "bad working directory: " <> detail
   ExecTimeout detail -> "timed out: " <> detail
+  ExecOutput detail -> "output capture failed: " <> detail
+  ExecWait detail -> "exit status unavailable: " <> detail
 
 -- | Split a text line on ASCII whitespace, discarding empty segments.
 -- Useful for parsing fixed-column porcelain output (e.g. @git status --porcelain@).

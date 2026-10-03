@@ -15,6 +15,9 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_source_ownership import integration_target_sources
 
 TEST_ATTR = re.compile(r"#\[(tokio::)?test\b|#\[test_case\b|#\[rstest\b")
 
@@ -91,15 +94,11 @@ def command(package, path, name) -> str:
     for target in targets:
         if os.path.abspath(target["src_path"]) == path:
             return f"just test-target {crate} {target['name']} 'test({name})'"
-    # Suite roots include leaves with #[path = "../leaf.rs"] (or support dirs).
-    relative_to_suites = os.path.relpath(path, os.path.join(pkg_dir, "tests", "suites"))
-    for target in targets:
-        try:
-            source = open(target["src_path"], encoding="utf-8").read()
-        except OSError:
-            continue
-        if f'"{relative_to_suites}"' in source:
-            return f"just test-target {crate} {target['name']} 'test({name})'"
+    graph, _unknown = integration_target_sources(targets)
+    owners = graph.get(Path(path).resolve(), set())
+    if len(owners) == 1:
+        target_name = next(iter(owners))
+        return f"just test-target {crate} {target_name} 'test({name})'"
     return f"just test {crate} 'test({name})'  # no single target found; selects across targets"
 
 

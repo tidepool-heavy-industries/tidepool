@@ -22,7 +22,7 @@ class CheckCommands(unittest.TestCase):
         (self.root / "scripts").mkdir()
         (self.root / "bin").mkdir()
         self.env = os.environ | {"PATH": f"{self.root / 'bin'}:{os.environ['PATH']}"}
-        for name in ("check.sh", "test-suite.sh", "battery.sh", "lib-steps.sh"):
+        for name in ("check.sh", "test-suite.sh", "battery.sh", "lib-steps.sh", "lib-nextest.sh"):
             shutil.copyfile(SCRIPTS / name, self.root / "scripts" / name)
             (self.root / "scripts" / name).chmod(0o755)
         self.script("scripts/lib-extract.sh", '''
@@ -60,6 +60,8 @@ if os.environ.get("WAIT_FOR_SIGNAL"):
         time.sleep(0.01)
 if os.environ.get("ZERO_TESTS"):
     print("Summary 0 tests run:", file=sys.stderr)
+elif not os.environ.get("MISSING_SUMMARY"):
+    print("Summary: 2 tests run: 2 passed", file=sys.stderr)
 sys.exit(int(os.environ.get("TEST_STATUS", "0")))
 ''', python=True)
 
@@ -96,7 +98,7 @@ sys.exit(int(os.environ.get("TEST_STATUS", "0")))
                 self.assertNotIn("start", (self.root / "events").read_text().splitlines())
 
     def test_suite_propagates_failure_and_rejects_zero_tests(self):
-        for env in ({"TEST_STATUS": "9"}, {"ZERO_TESTS": "1"}):
+        for env in ({"TEST_STATUS": "9"}, {"ZERO_TESTS": "1"}, {"MISSING_SUMMARY": "1"}):
             with self.subTest(env=env):
                 result = subprocess.run(["bash", "scripts/test-suite.sh", "example"],
                                         cwd=self.root, env=self.env | env,

@@ -342,6 +342,52 @@ fn create_reports_typed_failure_when_a_file_blocks_the_worktree_root() {
     assert!(manager.list().expect("list").is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn create_rejects_nested_and_symlink_worktree_roots_before_mkdir() {
+    let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("a.txt", "one", "first")
+        .expect("commit");
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let nested = repo.path().join("absent/deep/worktrees");
+    let nested_target = repo.path().join("alias-target");
+    fs::create_dir(&nested_target).expect("nested target");
+    let alias = repo.path().join("alias");
+    std::os::unix::fs::symlink(&nested_target, &alias).expect("symlink");
+    fs::write(nested_target.join("seed.txt"), "seed\n").expect("seed symlink target");
+    repo.git()
+        .try_run(repo.path(), &["add", "alias", "alias-target/seed.txt"])
+        .expect("stage symlink fixture");
+    repo.git()
+        .try_run(repo.path(), &["commit", "-m", "seed nested root fixture"])
+        .expect("commit symlink fixture");
+    let registry = WorktreeRegistry::open(base.path().join("registry")).expect("registry");
+    let git = GitCli::new();
+    let before = git
+        .try_run(repo.path(), &["status", "--porcelain"])
+        .expect("status before")
+        .stdout;
+
+    for root in [nested.clone(), alias.join("worktrees")] {
+        let manager =
+            WorktreeManager::new(GitCli::new(), registry.clone(), root.clone(), repo.path());
+        let result = manager.create(&WorktreeSpec::from_current_repository("child"));
+        assert!(
+            matches!(&result, Err(WorktreeError::InvalidRegistryRoot { .. })),
+            "expected InvalidRegistryRoot for {}, got {result:?}",
+            root.display()
+        );
+        assert!(!root.exists());
+    }
+    assert_eq!(
+        before,
+        git.try_run(repo.path(), &["status", "--porcelain"])
+            .expect("status after")
+            .stdout
+    );
+}
+
 /// A malformed row in the MIDDLE of the journal is a corrupted receipt, not a
 /// torn write, and must fail loudly.
 ///

@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source scripts/lib-extract.sh
 source scripts/lib-steps.sh
+source scripts/lib-nextest.sh
 resolve_tidepool_extract --prefer-persistent-daemon
 prepare_battery_artifacts check just check
 nextest_pid=""
@@ -25,11 +26,8 @@ run_default_tests() {
   # Mixed default-tier targets still compile Haskell. Reuse an outer daemon
   # when present; otherwise this check owns one for the entire test step.
   start_battery_daemon || return $?
-  cargo nextest run --no-fail-fast --status-level fail --final-status-level fail &
-  nextest_pid=$!
   local status=0
-  wait "$nextest_pid" || status=$?
-  nextest_pid=""
+  NEXTTEST_STDERR_LOG="$BATTERY_NEXTEST_LOG" nextest_run_checked --no-fail-fast --status-level fail --final-status-level fail || status=$?
   return "$status"
 }
 

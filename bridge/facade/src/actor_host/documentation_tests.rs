@@ -3029,11 +3029,9 @@ fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
     repository
 }
 
-/// `exomonad check --workspace` resolves the installed spec's required
-/// effects against every launchable child role's effect row and fails
-/// closed, naming the role and the effect, instead of letting a spec a child
-/// cannot satisfy compile clean and fail only once a child is admitted (the
-/// `Journal` friction the preflight exists to catch before that fork).
+/// `exomonad check --workspace` asks GHC whether every launchable child role
+/// can install the selected spec and retains the role, entry, and compiler
+/// evidence when one cannot.
 #[tokio::test(flavor = "multi_thread")]
 async fn workspace_check_refuses_a_spec_no_child_role_can_satisfy() {
     let repository = recipe_workspace(None);
@@ -3041,13 +3039,23 @@ async fn workspace_check_refuses_a_spec_no_child_role_can_satisfy() {
     let original = std::fs::read_to_string(&spec).unwrap();
     let widened = original
         .replacen(
-            "import Tidepool.Effects.Core (ActorContext, Commands, Jev, Lookup, Notifications, Reflect)",
-            "import Tidepool.Effects.Core (ActorContext, Commands, Jev, Lookup, Notifications, Reflect)\nimport Tidepool.Effects (Journal)",
+            "import Tidepool.Effects.Core (BoundWorktree, Commands, Jev, Lookup, Reflect)",
+            "import Tidepool.Effects.Core (BoundWorktree, Commands, Jev, Lookup, Reflect)\nimport Tidepool.Effects (Journal)",
             1,
         )
         .replacen(
-            "Member Reflect effects\n  ) =>",
-            "Member Reflect effects, Member Journal effects\n  ) =>",
+            "{-# LANGUAGE FlexibleContexts #-}",
+            "{-# LANGUAGE FlexibleContexts #-}\n{-# LANGUAGE ConstraintKinds #-}",
+            1,
+        )
+        .replacen(
+            "Member BoundWorktree effects\n  ) =>",
+            "Member BoundWorktree effects, RequiresJournal effects\n  ) =>",
+            1,
+        )
+        .replacen(
+            "agentSpec ::",
+            "type RequiresJournal effects = Member Journal effects\n\nagentSpec ::",
             1,
         );
     assert_ne!(
@@ -3061,13 +3069,32 @@ async fn workspace_check_refuses_a_spec_no_child_role_can_satisfy() {
         .unwrap_err();
     let message = error.to_string();
     assert!(
-        message.contains("role research lacks effect Journal required by AgentSpec.agentSpec"),
+        message.contains("role research cannot install spec AgentSpec.agentSpec"),
         "{message}"
     );
     assert!(
-        message.contains("role coding lacks effect Journal required by AgentSpec.agentSpec"),
+        message.contains("role coding cannot install spec AgentSpec.agentSpec"),
         "{message}"
     );
+    assert!(
+        message.contains("Journal") && message.contains("<agent-spec-installation>"),
+        "{message}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_check_ignores_constraints_on_a_later_helper() {
+    let repository = recipe_workspace(None);
+    let spec = repository.path().join(".exomonad/AgentSpec.hs");
+    std::fs::write(
+        &spec,
+        include_str!("fixtures/unconstrained_spec_later_helper.hs"),
+    )
+    .unwrap();
+    super::test_campaign::commit_workspace(repository.path());
+    crate::exomonad::check(Some(repository.path().to_path_buf()), false)
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

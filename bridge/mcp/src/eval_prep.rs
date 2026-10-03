@@ -906,13 +906,13 @@ impl TurnTemplate<'_> {
         out.push_str(&format!("{name} :: Eff {} Value\n", self.effect_stack));
         out.push_str(&format!("{name} = do\n"));
         if self.budget.is_some() {
-            out.push_str("  kvSet \"__sayChars\" (toJSON (0 :: Int))\n");
+            out.push_str("  kvSet \"__sayChars\" (toJSON (0 :: Int)) >>= liftEither\n");
         }
         out.push_str(&format!("  _r <- {source}\n"));
         if self.unpaginated {
             out.push_str(&format!("  pure ({render_call} {rendered})\n"));
         } else if let Some(b) = self.budget {
-            out.push_str("  _scV <- kvGet \"__sayChars\"\n");
+            out.push_str("  _scV <- kvGet \"__sayChars\" >>= liftEither\n");
             out.push_str("  let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }\n");
             out.push_str(&format!(
                 "  paginateResult (max 100 ({} - _sayC)) ({render_call} {rendered})\n",

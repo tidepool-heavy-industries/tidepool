@@ -13,7 +13,7 @@ pub fn exec_decl() -> crate::EffectDecl {
             "RunArgv :: [Text] -> Exec (Either ExecError Proc)",
         ],
         type_defs: &[
-            "data ExecError = ExecSpawn Text | ExecBadDir Text | ExecTimeout Text deriving (Show, Eq)\ninstance ToJSON ExecError where\n  toJSON e = case e of\n    ExecSpawn detail -> object [\"tag\" .= (\"ExecSpawn\" :: Text), \"detail\" .= detail]\n    ExecBadDir detail -> object [\"tag\" .= (\"ExecBadDir\" :: Text), \"detail\" .= detail]\n    ExecTimeout detail -> object [\"tag\" .= (\"ExecTimeout\" :: Text), \"detail\" .= detail]\n",
+            "data ExecError = ExecSpawn Text | ExecBadDir Text | ExecTimeout Text | ExecOutput Text | ExecWait Text deriving (Show, Eq)\ninstance ToJSON ExecError where\n  toJSON e = case e of\n    ExecSpawn detail -> object [\"tag\" .= (\"ExecSpawn\" :: Text), \"detail\" .= detail]\n    ExecBadDir detail -> object [\"tag\" .= (\"ExecBadDir\" :: Text), \"detail\" .= detail]\n    ExecTimeout detail -> object [\"tag\" .= (\"ExecTimeout\" :: Text), \"detail\" .= detail]\n    ExecOutput detail -> object [\"tag\" .= (\"ExecOutput\" :: Text), \"detail\" .= detail]\n    ExecWait detail -> object [\"tag\" .= (\"ExecWait\" :: Text), \"detail\" .= detail]\n",
         ],
         extra_imports: &[
             "import qualified Tidepool.Shell as Shell",
@@ -21,7 +21,7 @@ pub fn exec_decl() -> crate::EffectDecl {
             "import qualified Tidepool.Cargo as Cargo",
         ],
         helpers: &[
-            "-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}\n-- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left\n-- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`\n-- for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when\n-- the command outran its timeout and was killed. A nonzero EXIT is NOT a\n-- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.\nrun :: forall effs. Member Exec effs => Text -> Eff effs (Either ExecError Proc)\nrun = send . Run",
+            "-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}\n-- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left\n-- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`\n-- for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when\n-- execution or output draining outran its timeout, `Left (ExecOutput _)` for a read failure,\n-- and `Left (ExecWait _)` if its exit status cannot be collected. A nonzero\n-- EXIT is NOT a failure — inspect `p.exitCode`. Natural spelling:\n-- `Right p <- run cmd`.\nrun :: forall effs. Member Exec effs => Text -> Eff effs (Either ExecError Proc)\nrun = send . Run",
             "runIn :: forall effs. Member Exec effs => Text -> Text -> Eff effs (Either ExecError Proc)\nrunIn dir cmd = send (RunIn dir cmd)",
             "runArgv :: forall effs. Member Exec effs => [Text] -> Eff effs (Either ExecError Proc)\nrunArgv = send . RunArgv",
         ],

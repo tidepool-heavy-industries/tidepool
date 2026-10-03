@@ -70,9 +70,9 @@ schemaToValue (SOpt s) = schemaToValue s
 schemaToValue (SObj fields) = object ["type" .= ("object" :: Text), "properties" .= object (map (\(k,s) -> k .= schemaToValue (innerSchema s)) fields), "required" .= map fst (filter (not . isOpt . snd) fields)]
 
 -- | Suspend execution and ask the calling agent a STRUCTURED question.
--- Carries @schema@ as JSON Schema in the suspension; the resume reply is
--- validated against it server-side before re-entering the computation
--- (invalid replies do NOT consume the continuation). Extract fields from the
--- returned 'Value' with optics, e.g. @v ^? key "path" . _String@.
+-- Carries @schema@ as JSON Schema in the suspension for the caller to use.
+-- It describes the expected value; this module does not validate resume
+-- replies. Extract fields from the returned 'Value' with optics, e.g.
+-- @v ^? key "path" . _String@.
 ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value
 ask schema prompt = askRaw prompt (object ["schema" .= schemaToValue schema])

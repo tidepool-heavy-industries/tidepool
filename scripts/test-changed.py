@@ -11,7 +11,7 @@ import sys
 # Also support importlib-based unit tests without changing their caller cwd.
 sys.path.insert(0, str(Path(__file__).parent))
 from fixture_dependencies import affected as affected_fixtures
-from test_source_ownership import test_source_owner
+from test_source_ownership import integration_target_sources, test_source_owner
 
 # These packages' unit tests do not launch the extractor. Keep this explicit:
 # default nextest filters constrain execution, not Cargo's build graph.
@@ -50,21 +50,34 @@ def cabal_components(root, changed):
         text = manifest.read_text()
     except OSError:
         return ["all"]
+    def all_components():
+        selectors = []
+        for component in re.split(r"(?m)^(?=(?:library|executable|test-suite) )", text)[1:]:
+            fields = component.splitlines()[0].split()
+            kind = fields[0]
+            name = fields[1] if len(fields) > 1 else re.search(r"(?m)^name:\s*(\S+)", text)[1]
+            prefix = {"library": "lib", "executable": "exe", "test-suite": "test"}[kind]
+            selectors.append(prefix + ":" + name)
+        return selectors or ["all"]
     if any(path.endswith(".cabal") or Path(path).name.startswith("cabal.project") for path in changed):
-        return ["all"]
+        return all_components()
     if cabal_embedded_library_source_changes(text, changed):
-        return ["all"]
+        return all_components()
     selected = set()
     components = {}
+    component_kinds = {}
     for component in re.split(r"(?m)^(?=(?:library|executable|test-suite) )", text)[1:]:
-        name = component.splitlines()[0].split()[1]
+        fields = component.splitlines()[0].split()
+        kind, name = fields[0], fields[1]
         components[name] = component
+        component_kinds[name] = kind
         directories = re.search(r"(?m)^  hs-source-dirs:\s*([^\n]+)", component)
         if directories is None:
-            return ["all"]
+            return all_components()
         roots = [root / "bridge/haskell" / directory for directory in re.split(r"[,\s]+", directories[1].strip())]
         if any((root / path).is_relative_to(directory) for path in changed for directory in roots):
             selected.add(name)
+    directly_selected = set(selected)
     while True:
         consumers = {name for name, body in components.items()
                      if any(re.search(r"(?<![\w-])" + re.escape(dependency) + r"(?![\w-])", body)
@@ -73,7 +86,12 @@ def cabal_components(root, changed):
         if expanded == selected:
             break
         selected = expanded
-    return sorted(selected) or ["all"]
+    if not selected:
+        return all_components()
+    test_suites = set(re.findall(r"(?m)^test-suite\s+(\S+)", text))
+    return sorted(("test:" + name) if name in test_suites and name in directly_selected
+                  else {"library": "lib", "executable": "exe", "test-suite": "test"}[component_kinds[name]] + ":" + name
+                  for name in selected)
 
 
 def cabal_embedded_library_source_changes(manifest, changed):
@@ -98,6 +116,8 @@ def cabal_embedded_library_source_changes(manifest, changed):
 def select(metadata, changed, root):
     packages = {p["name"]: p for p in metadata["packages"]
                 if p["id"] in metadata["workspace_members"]}
+    target_sources = {name: integration_target_sources(package["targets"])
+                      for name, package in packages.items()}
     roots = {name: Path(p["manifest_path"]).parent.relative_to(root)
              for name, p in packages.items()}
     selections = {}
@@ -132,11 +152,11 @@ def select(metadata, changed, root):
             add(test_owner, "lib")
             continue
         if path.startswith("bridge/haskell/"):
-            if file.suffix in (".hs", ".cabal", ".cbor", ".json") or file.name.startswith("cabal.project"):
+            # Cabal boot files use their full suffix but share source-dir ownership.
+            if file.suffix in (".hs", ".lhs", ".hs-boot", ".lhs-boot", ".cabal", ".cbor", ".json") or file.name.startswith("cabal.project"):
                 actions.add("haskell")
                 if path.startswith(("bridge/haskell/src/", "bridge/haskell/app/", "bridge/haskell/lib/", "bridge/haskell/test/", "bridge/haskell/test-prepared-stg/", "bridge/haskell/test-execution-corpus/")):
                     actions.add("fixtures")
-                all_tests("tidepool-runtime")
             continue
         owner = next((n for n, directory in roots.items() if file.is_relative_to(directory)), None)
         if owner is None:
@@ -145,21 +165,14 @@ def select(metadata, changed, root):
             continue
         relative = file.relative_to(roots[owner])
         if relative.parts[0] == "tests":
-            matched = False
-            for target in packages[owner]["targets"]:
-                if "test" not in target["kind"]:
-                    continue
-                source = Path(target["src_path"])
-                members = {source}
-                if source.exists():
-                    members.update((source.parent / p).resolve() for p in
-                                   re.findall(r'#\[path\s*=\s*"([^"]+)"\]', source.read_text()))
-                if (root / file).resolve() in members:
-                    add(owner, "test", target["name"])
-                    matched = True
+            graph, unknown = target_sources[owner]
+            matches = graph.get((root / file).resolve(), set())
+            for target_name in matches:
+                add(owner, "test", target_name)
+            matched = bool(matches)
             # Shared fixtures, helpers, deleted/new unregistered leaves: check
             # registration and conservatively select this package's test targets.
-            if not matched:
+            if not matched or unknown:
                 all_tests(owner)
             actions.add("registration")
         elif relative.parts[0] in ("src", "examples", "benches") or relative.name in ("Cargo.toml", "build.rs"):
@@ -223,10 +236,17 @@ def commands(selections, obligations, actions, components=None):
     if "registration" in actions:
         result.append(["scripts/test-suite-check.sh"])
     if "haskell" in actions:
-        result.append(["bash", "-c", 'cd bridge/haskell && cabal build "$@"', "cabal-components", *(components or ["all"])])
+        component_args = components or ["all"]
+        result.append(["bash", "-c", 'cd bridge/haskell && cabal build "$@"', "cabal-components", *component_args])
+        manifest_components = components or []
+        # A component argument that names a test-suite must execute that suite;
+        # cabal build alone only compiles its test executable.
+        for component in manifest_components:
+            if component.startswith("test:"):
+                result.append(["bash", "-c", 'cd bridge/haskell && cabal test "$@"', "cabal-tests", component])
     for name, targets in sorted(selections.items()):
         # One invocation per package, deduplicating unit and suite targets.
-        prefix = (["cargo", "nextest", "run", "--profile", "battery", "--no-fail-fast"]
+        prefix = (["scripts/nextest-run.sh", "--profile", "battery", "--no-fail-fast"]
                   if name in EXTRACTOR_FREE else ["scripts/battery.sh"])
         flags = [arg for kind, target in sorted(targets)
                  for arg in (["--lib"] if kind == "lib" else ["--" + kind, target])]

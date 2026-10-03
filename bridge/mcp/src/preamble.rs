@@ -433,9 +433,9 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
             "putStrLn :: Text -> M ()\n",
             "putStrLn t = do\n",
             "  send (Print t)\n",
-            "  v <- kvGet \"__sayChars\"\n",
+            "  v <- kvGet \"__sayChars\" >>= liftEither\n",
             "  let cur = case v of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }\n",
-            "  kvSet \"__sayChars\" (toJSON (cur + T.length t))\n",
+            "  kvSet \"__sayChars\" (toJSON (cur + T.length t)) >>= liftEither\n",
         ));
     } else if has_console {
         out.push_str(concat!(
@@ -583,12 +583,13 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     if has_kv {
         out.push_str("-- KV orchestration helpers\n");
         out.push_str(concat!(
-            "memo :: Text -> M Value -> M Value\n",
+            "memo :: Text -> M Value -> M (Either KvError Value)\n",
             "memo k compute = do\n",
             "  cached <- kvGet k\n",
             "  case cached of\n",
-            "    Just v  -> pure v\n",
-            "    Nothing -> do { v <- compute; kvSet k v; pure v }\n",
+            "    Left e -> pure (Left e)\n",
+            "    Right (Just v) -> pure (Right v)\n",
+            "    Right Nothing -> do { v <- compute; saved <- kvSet k v; pure (v <$ saved) }\n",
         ));
         // kvModify/kvIncr/kvAppend are lost-update-free: each is an optimistic
         // compare-and-swap RETRY loop over `kvCas`, not a racy kvGet-then-kvSet.
@@ -597,37 +598,34 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         // KV). On a conflict `kvCas` refreshes the store, so the retry's kvGet
         // reads the fresh value.
         out.push_str(concat!(
-            "kvModify :: Text -> (Maybe Value -> Value) -> M Value\n",
+            "kvModify :: Text -> (Maybe Value -> Value) -> M (Either KvError Value)\n",
             "kvModify k f = do\n",
-            "  old <- kvGet k\n",
-            "  let new = f old\n",
-            "  r <- kvCas k old new\n",
-            "  case r of { Right () -> pure new; Left _ -> kvModify k f }\n",
+            "  oldResult <- kvGet k\n",
+            "  case oldResult of\n",
+            "    Left e -> pure (Left e)\n",
+            "    Right old -> do { r <- kvCas k old (f old); case r of { Left e -> pure (Left e); Right (Right ()) -> pure (Right (f old)); Right (Left _) -> kvModify k f } }\n",
         ));
         out.push_str(concat!(
-            "kvIncr :: Text -> M Int\n",
+            "kvIncr :: Text -> M (Either KvError Int)\n",
             "kvIncr k = do\n",
-            "  old <- kvGet k\n",
-            "  let n = case old >>= (^? _Int) of { Just i -> i; _ -> 0 }\n",
-            "  let n' = n + 1\n",
-            "  r <- kvCas k old (toJSON n')\n",
-            "  case r of { Right () -> pure n'; Left _ -> kvIncr k }\n",
+            "  oldResult <- kvGet k\n",
+            "  case oldResult of\n",
+            "    Left e -> pure (Left e)\n",
+            "    Right old -> do { let { n = case old >>= (^? _Int) of { Just i -> i; _ -> 0 }; n' = n + 1 }; r <- kvCas k old (toJSON n'); case r of { Left e -> pure (Left e); Right (Right ()) -> pure (Right n'); Right (Left _) -> kvIncr k } }\n",
         ));
         out.push_str(concat!(
-            "kvAppend :: Text -> Value -> M [Value]\n",
+            "kvAppend :: Text -> Value -> M (Either KvError [Value])\n",
             "kvAppend k v = do\n",
-            "  old <- kvGet k\n",
-            "  let xs = case old >>= (^? _Array) of { Just arr -> arr; _ -> [] }\n",
-            "  let xs' = xs ++ [v]\n",
-            "  r <- kvCas k old (toJSON xs')\n",
-            "  case r of { Right () -> pure xs'; Left _ -> kvAppend k v }\n",
+            "  oldResult <- kvGet k\n",
+            "  case oldResult of\n",
+            "    Left e -> pure (Left e)\n",
+            "    Right old -> do { let { xs = case old >>= (^? _Array) of { Just arr -> arr; _ -> [] }; xs' = xs ++ [v] }; r <- kvCas k old (toJSON xs'); case r of { Left e -> pure (Left e); Right (Right ()) -> pure (Right xs'); Right (Left _) -> kvAppend k v } }\n",
         ));
         out.push_str(concat!(
-            "kvAll :: M [(Text, Value)]\n",
+            "kvAll :: M (Either KvError [(Text, Value)])\n",
             "kvAll = do\n",
-            "  ks <- kvKeysP \"\"\n",
-            "  vs <- mapM kvGet ks\n",
-            "  pure (zipWith (\\k mv -> (k, maybe Null id mv)) ks vs)\n",
+            "  keys <- kvKeysP \"\"\n",
+            "  case keys of { Left e -> pure (Left e); Right ks -> do { values <- mapM kvGet ks; pure (sequence values >>= \\vs -> Right (zipWith (\\k mv -> (k, maybe Null id mv)) ks vs)) } }\n",
         ));
     }
     if has_fs {

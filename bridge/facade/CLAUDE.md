@@ -2,10 +2,10 @@
 
 **Charter.** Belongs: the `cargo install tidepool` utility and Exomonad binaries,
 the independent compile reporter, and library re-exports of the workspace's
-other crates. The retained `exomonad/harness` and `exomonad/web` source trees
-are historical reference material and are excluded from the supported
-workspace build. Actual effect/session logic lives in the maintained crates this one
-wires together (`tidepool-mcp`, `tidepool-handlers`, and `tidepool-runtime`).
+other crates. The facade also embeds the pinned `exomonad/harness` runtime;
+`exomonad/web` remains outside the supported workspace build. Effect/session
+logic lives in the maintained crates this one wires together (`tidepool-mcp`,
+`tidepool-handlers`, and `tidepool-runtime`).
 
 `src/exomonad.rs` owns CLI/project defaults, tmux startup, and environment
 forwarding. `src/actor_host.rs` composes actor runtime, worktrees, provider

@@ -28,25 +28,20 @@ pub fn journal() -> Effect {
         decl_fn: "journal_decl",
         description: &[
             "Durable append-only run journal: a resident harness records completed \
-            steps as it happens, mid-loop, so progress survives a crash and resume \
-            can fold the journal instead of redoing finished work. `record kind key \
+            steps as it happens, mid-loop, so progress survives a crash. `record kind key \
             payload` appends ONE entry — `kind` and `key` are caller-chosen labels \
             (e.g. a step kind and the branch or task it concerns), `payload` is an \
             opaque JSON value. Every append is flushed immediately; the journal is \
             append-only forever — there is no rewrite or compaction verb. \
             `trace stage key payload` appends ONE observability entry to the run's \
-            sibling TRACE stream instead: never folded into resume, timestamped at \
-            the handler, for decision narration and telemetry a reader merges into \
-            one timeline by ts.",
+            sibling TRACE stream instead, timestamped at the handler for decision \
+            narration and telemetry; timestamps can be correlated with journal entries.",
         ],
         prompt_card: None,
         type_params: &[],
         default_row_args: &[],
         helpers_row_polymorphic: true,
-        // The READ half of the run journal. `record` stays write-only —
-        // `Tidepool.Resume` reads nothing; it is the type of the
-        // already-folded value the driver injects at boot.
-        extra_imports: &["import qualified Tidepool.Resume as Resume"],
+        extra_imports: &[],
         type_defs: Vec::new(),
         foreign_types: &[],
         errors: None,
@@ -120,11 +115,11 @@ pub fn journal() -> Effect {
                 substrate: false,
                 doc: &[
                     "Append one observability entry to the run's sibling TRACE stream: \
-                decision narration and telemetry, never folded into resume. `stage` \
+                decision narration and telemetry. `stage` \
                 names what kind of moment this is (e.g. \"resume-verdict\", \"park\"); \
                 `key` is the branch or unit it concerns; `payload` is an opaque JSON \
                 value whose shape may evolve freely. The handler stamps a timestamp \
-                on every line, so trace and journal merge into one timeline.",
+                on every line, so trace timestamps can be correlated with journal entries.",
                 ],
                 body: HelperBody::Applied(&["stage", "key", "payload"]),
             },

@@ -154,6 +154,28 @@ fn writable_overlay_keeps_build_artifacts_outside_the_checkout() {
     assert!(!workspace.join(relative_target).join("probe").exists());
 }
 
+#[test]
+fn writable_overlay_rejects_parent_components_and_accepts_project_targets() {
+    let root = tempfile::tempdir().expect("temp root");
+    let workspace = root.path().join("workspace");
+    let project = root.path().join("project");
+    let resource = root.path().join("resource");
+    for path in [&workspace, &project, &resource] {
+        std::fs::create_dir_all(path).expect("create fixture path");
+    }
+    let boundary = ProcessMountBoundary::new(&workspace, [workspace.clone()], [workspace.clone()])
+        .expect("boundary")
+        .with_project_root(&project)
+        .expect("project root");
+    assert!(boundary
+        .clone()
+        .with_writable_overlay(&resource, project.join("../outside"))
+        .is_err());
+    assert!(boundary
+        .with_writable_overlay(&resource, project.join("inside"))
+        .is_ok());
+}
+
 fn git<const N: usize>(cwd: &std::path::Path, args: [&str; N]) {
     #[allow(clippy::disallowed_methods, reason = "test fixture process")]
     let output = Command::new("git")

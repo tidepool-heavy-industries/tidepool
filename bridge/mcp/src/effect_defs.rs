@@ -332,11 +332,6 @@ macro_rules! extra_imports_for {
             "import Tidepool.Agent.Delegate (Delegate, DelegateBrief (..), DelegateResult (..), DelegateRun (..), DelegateError (..), delegate, delegateTyped, delegateTypedFrom, delegateTypedIn, renderDelegateError, runDelegate)",
         ]
     };
-    // Journal was migrated to the `tidepool-protocol` schema; its
-    // `extra_imports` (`import qualified Tidepool.Resume as Resume` — the
-    // READ half of the run journal) is schema data now, emitted
-    // straight into its generated decl. See `bridge/protocol/src/effects/journal.rs`.
-    //
     // Green was migrated to the `tidepool-protocol` schema; its
     // `extra_imports` (`import Tidepool.Async` — the green-thread surface
     // rides `Green`'s substrate verbs) is schema data now, emitted straight
@@ -847,15 +842,17 @@ macro_rules! git_effect_def {
                 "`FileDelta {path,adds,dels,binary}`, `CommitDeltas {commit,deltas}`.",
             ],
             type_defs [],
-            // #335 typed-failure ADT. `GitBadRevspec` covers an unknown/ambiguous
-            // revspec (also a `gitShow` with zero matching commits); `GitFailed`
-            // is the residual (git exited nonzero for another reason, or the git
-            // binary itself couldn't be spawned — exit code -1 in that case).
+            // #335 typed-failure ADT. `GitBadRevspec` covers a revspec rejected
+            // before execution (for example, option-shaped input); `GitFailed`
+            // carries every subprocess failure. Structured-output corruption and
+            // paths outside the Haskell Text domain have their own constructors.
             // Reuse the pre-schema `GitError` exported by
             // `Tidepool.Records.Stable`; do not declare a duplicate in Core.
             errors GitError [
-                { ctor GitBadRevspec, fields { detail: "Text" as String },                     doc "unknown or ambiguous revspec" },
-                { ctor GitFailed,     fields { code: "Int" as i64, detail: "Text" as String },  doc "git exited nonzero (or could not be spawned)" },
+                { ctor GitBadRevspec, fields { detail: "Text" as String },                     doc "revspec rejected before execution" },
+                { ctor GitFailed,          fields { code: "Int" as i64, detail: "Text" as String },  doc "git exited nonzero (or could not be spawned)" },
+                { ctor GitMalformedOutput, fields { detail: "Text" as String },                     doc "git returned malformed structured output" },
+                { ctor GitNonUtf8Path,     fields { path: "Text" as String },                       doc "git returned a path that is not valid UTF-8" },
             ],
             stable_errors true,
             verbs [
@@ -893,8 +890,9 @@ macro_rules! git_effect_def {
                        "path/adds/dels/binary."],
                   body pointfree GitDiffStat },
                 { name gitShow, sig "forall effs. Member Git effs => Text -> Eff effs (Either GitError Commit)",
-                  doc ["Single commit by revspec. `Left (GitBadRevspec _)` on an unknown or",
-                       "ambiguous revspec; unwrap with `Right c <- gitShow rev` or `>>= liftEither`."],
+                  doc ["Single commit by revspec. `Left (GitBadRevspec _)` when the handler rejects",
+                       "option-shaped input; Git subprocess failures return `GitFailed`. Unwrap with",
+                       "`Right c <- gitShow rev` or `>>= liftEither`."],
                   body pointfree GitShow },
                 { name gitLogNumstat, sig "forall effs. Member Git effs => Int -> Eff effs (Either GitError [CommitDeltas])",
                   doc ["Last N commits, newest-first, EACH PAIRED WITH ITS OWN per-file numstat",
@@ -925,9 +923,8 @@ macro_rules! ask_effect_def {
             helpers_row_polymorphic true,
             description [
                 "Suspend execution and ask the calling agent a STRUCTURED question. ",
-                "`ask schema prompt` carries the schema as JSON Schema in the suspension; ",
-                "the resume reply is validated against it server-side before re-entering ",
-                "the computation (invalid replies do NOT consume the continuation). ",
+                "`ask schema prompt` carries the schema as JSON Schema in the suspension ",
+                "for the caller to use; Ask does not validate resume replies. ",
                 "Extract fields from the returned Value with optics, e.g. ",
                 "`v ^? key \"path\" . _String`.",
             ],
@@ -1007,8 +1004,8 @@ macro_rules! llm_effect_def {
             helpers_row_polymorphic true,
             description [
                 "Call an LLM for classification, extraction, or judgment. ",
-                "`llm schema prompt` returns a Value validated against the schema ",
-                "(structured output, no markdown fences). Extract with optics, e.g. ",
+                "`llm schema prompt` requests schema-constrained JSON from the provider ",
+                "and returns a parsed Value. Extract with optics, e.g. ",
                 "`v ^? key \"category\" . _String`.",
             ],
             type_defs [],
@@ -1051,11 +1048,7 @@ macro_rules! llm_effect_def {
 
 /// KV effect — single definition.
 ///
-/// NOT `errors`-tagged under #335: KV's only failures are JSON-file IO faults
-/// (disk/permission) — infra faults nothing dispatches on, so they stay
-/// aborts. Contrast Llm, which IS fully total, because budget exhaustion is
-/// dispatchable DATA (`LlmBudget`). The test: does a caller ever branch on the
-/// failure? Yes → typed (`Left`); no → abort. KV is a `no`.
+/// KV failures are typed so authored callers can decide how to recover.
 #[macro_export]
 macro_rules! kv_effect_def {
     ($project:path) => {
@@ -1070,56 +1063,62 @@ macro_rules! kv_effect_def {
                 "Key convention: use slash-delimited namespaces (e.g. \"agent-42/foo\") to avoid ",
                 "cross-agent collision. kvClear/kvKeysP operate on prefix boundaries. For a typed ",
                 "round-trip instead of hand-unwrapping the stored `Value`, use `kvGetAs @T key` ",
-                "(`Tidepool.Kv`) — decodes via `FromJSON`, `Right (Just x)`/`Right Nothing`/a legible ",
-                "`Left` on a decode mismatch, never a crash.",
+                "(`Tidepool.Kv`) — decodes via `FromJSON`, returning `Right (Just x)`/`Right Nothing` ",
+                "or a typed `KvError` for storage or decode failures.",
             ],
             type_defs [],
+            errors KvError [
+                { ctor KvCorrupt, fields { detail: "Text" as String }, doc "the backing file contains invalid JSON" },
+                { ctor KvIo, fields { detail: "Text" as String }, doc "a storage operation failed before publication" },
+                { ctor KvDurabilityUnknown, fields { detail: "Text" as String }, doc "the new value is visible but its durability could not be confirmed" },
+                { ctor KvDecode, fields { detail: "Text" as String }, doc "a stored value could not be decoded to the requested type" },
+            ],
             verbs [
                 { ctor KvGet, method kv_get,
                   args { key: "Text" as String },
-                  ret "(Maybe Value)" },
+                  ret "(Maybe Value)", errors KvError },
                 { ctor KvSet, method kv_set,
-                  args { key: "Text" as String, val: "Value" as tidepool_bridge::HaskellValue },
-                  ret "()" },
+                  args { key: "Text" as String, val: "Value" as crate::effect_glue::JsonArg },
+                  ret "()", errors KvError },
                 { ctor KvDelete, method kv_delete,
                   args { key: "Text" as String },
-                  ret "()" },
+                  ret "()", errors KvError },
                 { ctor KvKeys, method kv_keys,
                   args { },
-                  ret "[Text]" },
+                  ret "[Text]", errors KvError },
                 // Delete all keys with the given prefix; return count deleted.
                 // Pass "" to clear the ENTIRE store (dangerous — see kvClear docstring).
                 { ctor KvClear, method kv_clear,
                   args { prefix: "Text" as String },
-                  ret "Int" },
+                  ret "Int", errors KvError },
                 // List keys matching a prefix, sorted.
                 { ctor KvKeysP, method kv_keys_p,
                   args { prefix: "Text" as String },
-                  ret "[Text]" },
+                  ret "[Text]", errors KvError },
                 // Summary: {count, sample, file_size_bytes} — inspect the junk-drawer.
                 { ctor KvInfo, method kv_info,
                   args { },
-                  ret "Value" },
+                  ret "Value", errors KvError },
                 // Cross-process compare-and-swap: set key=new only if its
                 // current value equals `expected` (Nothing = require absent).
-                // `Left actual` on a mismatch — the lost-update-free primitive.
+                // `Right (Left actual)` on conflict, preserving absence vs JSON null.
                 { ctor KvCas, method kv_cas,
                   args { key: "Text" as String,
-                         expected: "Maybe Value" as Option<tidepool_bridge::HaskellValue>,
-                         new: "Value" as tidepool_bridge::HaskellValue },
-                  ret "(Either Value ())" },
+                         expected: "Maybe Value" as Option<crate::effect_glue::JsonArg>,
+                         new: "Value" as crate::effect_glue::JsonArg },
+                  ret "(Either (Maybe Value) ())", errors KvError },
             ],
             helpers [
-                { name kvGet, sig "forall effs. Member KV effs => Text -> Eff effs (Maybe Value)",
+                { name kvGet, sig "forall effs. Member KV effs => Text -> Eff effs (Either KvError (Maybe Value))",
                   doc ["Look up a key; Nothing when absent."],
                   body pointfree KvGet },
-                { name kvSet, sig "forall effs. Member KV effs => Text -> Value -> Eff effs ()",
+                { name kvSet, sig "forall effs. Member KV effs => Text -> Value -> Eff effs (Either KvError ())",
                   doc ["Persist a JSON value under a key."],
                   body applied KvSet(k, v) },
-                { name kvDel, sig "forall effs. Member KV effs => Text -> Eff effs ()",
+                { name kvDel, sig "forall effs. Member KV effs => Text -> Eff effs (Either KvError ())",
                   doc ["Delete a key (no-op when absent)."],
                   body pointfree KvDelete },
-                { name kvClear, sig "forall effs. Member KV effs => Text -> Eff effs Int",
+                { name kvClear, sig "forall effs. Member KV effs => Text -> Eff effs (Either KvError Int)",
                   doc ["Delete all keys whose name starts with @prefix@; return the count deleted.",
                        "Pass \"\" (empty string) to clear the ENTIRE store — this erases ALL",
                        "persisted KV data for this server session, so use with caution.",
@@ -1127,22 +1126,23 @@ macro_rules! kv_effect_def {
                        "NOTE: per-session automatic scoping is a deferred design decision (#327);",
                        "callers manage namespaces manually via this prefix argument."],
                   body pointfree KvClear },
-                { name kvKeysP, sig "forall effs. Member KV effs => Text -> Eff effs [Text]",
+                { name kvKeysP, sig "forall effs. Member KV effs => Text -> Eff effs (Either KvError [Text])",
                   doc ["All keys whose name starts with @prefix@, returned sorted.",
                        "E.g. @kvKeysP \"agent/\"@ returns @[\"agent/bar\", \"agent/foo\", ...]@.",
                        "Pass \"\" to list ALL keys, sorted."],
                   body pointfree KvKeysP },
-                { name kvInfo, sig "forall effs. Member KV effs => Eff effs Value",
+                { name kvInfo, sig "forall effs. Member KV effs => Eff effs (Either KvError Value)",
                   doc ["Summary of KV store state as a JSON Value:",
                        "@{count :: Int, sample :: [Text], file_size_bytes :: Int}@.",
                        "Use to inspect junk-drawer accumulation without listing all keys.",
-                       "Extract fields with optics: @i <- kvInfo; i ^? key \"count\" . _Int@"],
+                       "Extract fields with optics: @Right i <- kvInfo; i ^? key \"count\" . _Int@"],
                   body nullary KvInfo },
-                { name kvCas, sig "forall effs. Member KV effs => Text -> Maybe Value -> Value -> Eff effs (Either Value ())",
+                { name kvCas, sig "forall effs. Member KV effs => Text -> Maybe Value -> Value -> Eff effs (Either KvError (Either (Maybe Value) ()))",
                   doc ["Atomic compare-and-swap: set @key@ to @new@ only if its current",
                        "value equals @expected@ (Nothing = require the key ABSENT).",
-                       "@Right ()@ on success; @Left actual@ (the current value) on a",
-                       "mismatch, with nothing written. Cross-process safe (the store",
+                       "@Right (Right ())@ on success; @Right (Left actual)@ on conflict,",
+                       "where @actual@ is @Nothing@ for absence and @Just value@ otherwise.",
+                       "Outer @Left@ carries a storage failure. Cross-process safe (the store",
                        "file is flocked), so it is the lost-update-free primitive that",
                        "kvModify\\/kvIncr\\/kvAppend retry over — prefer those for the",
                        "common read-modify-write; reach for kvCas directly for a custom",
@@ -1187,6 +1187,7 @@ macro_rules! fs_read_effect_def {
                 { ctor FsSandbox,  fields { detail: "Text" as String }, doc "path escapes the sandbox, or the glob pattern is not allowed" },
                 { ctor FsBadRegex, fields { detail: "Text" as String }, doc "grep regex failed to compile" },
                 { ctor FsIo,       fields { detail: "Text" as String }, doc "other I/O failure" },
+                { ctor FsDurabilityUnknown, fields { detail: "Text" as String }, doc "the write is visible but storage durability could not be confirmed" },
                 // camino-utf8-paths: the OS path itself (not its content) is not
                 // valid UTF-8, so it cannot be represented as Haskell `Text` at
                 // all — `path` carries the lossy (replacement-char) rendering for
@@ -1271,6 +1272,7 @@ macro_rules! fs_write_effect_def {
                 { ctor FsSandbox,  fields { detail: "Text" as String }, doc "path escapes the sandbox, or the glob pattern is not allowed" },
                 { ctor FsBadRegex, fields { detail: "Text" as String }, doc "grep regex failed to compile" },
                 { ctor FsIo,       fields { detail: "Text" as String }, doc "other I/O failure" },
+                { ctor FsDurabilityUnknown, fields { detail: "Text" as String }, doc "the write is visible but storage durability could not be confirmed" },
                 { ctor FsNonUtf8Path, fields { path: "Text" as String }, doc "path is not valid UTF-8 (lossy rendering shown for diagnostics)" },
             ],
             stable_errors true,
@@ -1280,7 +1282,7 @@ macro_rules! fs_write_effect_def {
                   ret "()", errors FsError },
                 { ctor FsWriteCas, method fs_write_cas,
                   args { path: "Text" as String, expected: "Maybe Text" as Option<String>, content: "Text" as String },
-                  ret "(Either (Maybe Text) ())" },
+                  ret "(Either (Maybe Text) ())", errors FsError },
             ],
             helpers [
                 { raw ["-- | Write a file (mkdir -p on the parent). `Left (FsSandbox _)` on a path\n-- escape, `Left (FsIo _)` on write failure; unwrap with `liftEither`.\nwriteFile :: forall effs. Member FsWrite effs => FilePath -> Text -> Eff effs (Either FsError ())\nwriteFile f c = send (FsWrite f c)"] },
@@ -1290,7 +1292,7 @@ macro_rules! fs_write_effect_def {
                 { raw ["-- | `update` from the `input` JSON parameter: {file, old, new} (for big/quote-heavy\n-- fragments). Reports the outcome as an `UpdateOneOutcome` DATA value (never\n-- throws, same contract as `update`): a malformed payload (missing or\n-- non-string file/old/new key) is `UpdateOneRejected` — one bad item never\n-- aborts a batch.\nupdateJ :: forall effs. Members '[FsRead, FsWrite] effs => Value -> Eff effs UpdateOneOutcome\nupdateJ v = case (v ^? key \"file\" . _String, v ^? key \"old\" . _String, v ^? key \"new\" . _String) of\n  (Just f, Just o, Just n) -> update f o n\n  _ -> pure (UpdateOneRejected \"updateJ: need {file, old, new} strings in input\" Nothing)"] },
                 { raw ["-- | Insert a block after the unique line containing `anchor`. Reports the\n-- outcome as an `InsertAfterOutcome` DATA value (never throws): a missing\n-- file, or an anchor matching zero or 2+ lines, is `InsertAfterRejected`\n-- (nothing written); otherwise `InsertAfterApplied`.\ninsertAfter :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Text -> Eff effs InsertAfterOutcome\ninsertAfter path anchor block = do\n  er <- readFile path\n  case er of\n    Left e -> pure (InsertAfterRejected (\"file not found: \" <> T.pack (show e)) Nothing)\n    Right src ->\n      let ls = lines src\n          n = length (filter (isInfixOf anchor) ls)\n      in case n of\n           1 -> writeFile path (unlines (concatMap (\\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))\n                  >>= liftEither >> pure InsertAfterApplied\n           _ -> pure (InsertAfterRejected (\"anchor matched \" <> T.pack (show n) <> \" lines in \" <> path) (Just n))"] },
                 { raw ["-- | Compute-check-commit: write only if every named check holds; failures\n-- come back as a `WriteOutcome` (nothing written on failure).\nwriteChecked :: forall effs. Member FsWrite effs => FilePath -> [(Text, Bool)] -> Text -> Eff effs WriteOutcome\nwriteChecked path checks content = do\n  let failed = [name | (name, ok) <- checks, not ok]\n  if null failed\n    then writeFile path content >>= liftEither >> pure (Written path (length checks))\n    else pure (WriteBlocked path failed)"] },
-                { raw ["-- | Content-hash compare-and-swap write (#330). Writes CONTENT only if the\n-- file's current blake3 hash equals EXPECTED (Nothing = expect the file ABSENT,\n-- i.e. create-only). The compare-and-write is atomic within the handler, closing\n-- the lost-update race between parallel agents. Returns a WriteOutcome: 'Written'\n-- on success, or 'WriteConflict' (carrying expected vs actual hash) if the\n-- precondition failed — conflicts come back as DATA, nothing is written. Get\n-- EXPECTED from fileHash; on a conflict re-read, recompute, and retry.\nwriteCheckedIf :: forall effs. Member FsWrite effs => Maybe Text -> FilePath -> Text -> Eff effs WriteOutcome\nwriteCheckedIf expected path content = do\n  r <- send (FsWriteCas path expected content)\n  pure $ case r of\n    Right () -> Written path 1\n    Left actual -> WriteConflict path expected actual"] },
+                { raw ["-- | Content-hash compare-and-swap write (#330). Writes CONTENT only if the\n-- file's current blake3 hash equals EXPECTED (Nothing = expect the file ABSENT,\n-- i.e. create-only). The compare-and-write is atomic within the handler, closing\n-- the lost-update race between parallel agents. Returns a WriteOutcome: 'Written'\n-- on success, or 'WriteConflict' (carrying expected vs actual hash) if the\n-- precondition failed — conflicts come back as DATA, nothing is written.\n-- Storage and sandbox failures are `Left FsError`; inspect them before using\n-- the `WriteOutcome`. Get EXPECTED from fileHash; on conflict re-read,\n-- recompute, and retry. Never retry `FsDurabilityUnknown`: the write is visible.\nwriteCheckedIf :: forall effs. Member FsWrite effs => Maybe Text -> FilePath -> Text -> Eff effs (Either FsError WriteOutcome)\nwriteCheckedIf expected path content = do\n  r <- send (FsWriteCas path expected content)\n  pure $ case r of\n    Left err -> Left err\n    Right (Right ()) -> Right (Written path 1)\n    Right (Left actual) -> Right (WriteConflict path expected actual)"] },
             ],
         }
     };
@@ -1604,7 +1606,7 @@ mod tests {
         // single-sourced from the schema) is the closest available approximation of
         // rule 3's "derive by calling the renderer" for this effect.
         assert!(
-            d.type_defs.contains(&"data ExecError = ExecSpawn Text | ExecBadDir Text | ExecTimeout Text deriving (Show, Eq)\ninstance ToJSON ExecError where\n  toJSON e = case e of\n    ExecSpawn detail -> object [\"tag\" .= (\"ExecSpawn\" :: Text), \"detail\" .= detail]\n    ExecBadDir detail -> object [\"tag\" .= (\"ExecBadDir\" :: Text), \"detail\" .= detail]\n    ExecTimeout detail -> object [\"tag\" .= (\"ExecTimeout\" :: Text), \"detail\" .= detail]\n")
+            d.type_defs.contains(&"data ExecError = ExecSpawn Text | ExecBadDir Text | ExecTimeout Text | ExecOutput Text | ExecWait Text deriving (Show, Eq)\ninstance ToJSON ExecError where\n  toJSON e = case e of\n    ExecSpawn detail -> object [\"tag\" .= (\"ExecSpawn\" :: Text), \"detail\" .= detail]\n    ExecBadDir detail -> object [\"tag\" .= (\"ExecBadDir\" :: Text), \"detail\" .= detail]\n    ExecTimeout detail -> object [\"tag\" .= (\"ExecTimeout\" :: Text), \"detail\" .= detail]\n    ExecOutput detail -> object [\"tag\" .= (\"ExecOutput\" :: Text), \"detail\" .= detail]\n    ExecWait detail -> object [\"tag\" .= (\"ExecWait\" :: Text), \"detail\" .= detail]\n")
         );
         assert_eq!(d.helpers.len(), 3);
         assert_eq!(
@@ -1613,8 +1615,10 @@ mod tests {
              -- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left\n\
              -- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`\n\
              -- for `runIn` with a bad/escaping directory, `Left (ExecTimeout _)` when\n\
-             -- the command outran its timeout and was killed. A nonzero EXIT is NOT a\n\
-             -- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.\n\
+             -- execution or output draining outran its timeout, `Left (ExecOutput _)` for a read failure,\n\
+             -- and `Left (ExecWait _)` if its exit status cannot be collected. A nonzero\n\
+             -- EXIT is NOT a failure — inspect `p.exitCode`. Natural spelling:\n\
+             -- `Right p <- run cmd`.\n\
              run :: forall effs. Member Exec effs => Text -> Eff effs (Either ExecError Proc)\n\
              run = send . Run"
         );
@@ -1691,7 +1695,7 @@ mod tests {
             write.constructors,
             &[
                 "FsWrite :: Text -> Text -> FsWrite (Either FsError ())",
-                "FsWriteCas :: Text -> Maybe Text -> Text -> FsWrite (Either (Maybe Text) ())",
+                "FsWriteCas :: Text -> Maybe Text -> Text -> FsWrite (Either FsError (Either (Maybe Text) ()))",
             ]
         );
         assert!(!write.constructors.iter().any(|c| c.contains("FsRead ::")));
@@ -1756,6 +1760,23 @@ mod tests {
             .contains(&"LlmStructured :: Text -> Value -> Llm (Either LlmError Value)"));
         assert!(!d.constructors.iter().any(|c| c.starts_with("Try")));
         assert!(d.type_defs.is_empty());
+    }
+
+    #[test]
+    fn generated_kv_decl_types_every_verb_failure_and_preserves_absence_in_cas() {
+        let decl = crate::kv_decl();
+        assert_eq!(decl.constructors.len(), 8);
+        assert!(decl
+            .constructors
+            .iter()
+            .all(|constructor| constructor.contains("KV (Either KvError ")));
+        assert!(decl
+            .constructors
+            .iter()
+            .any(|constructor| constructor.contains("Either (Maybe Value) ()")));
+        assert!(decl.type_defs.iter().any(|definition| {
+            definition.contains("data KvError = KvCorrupt Text | KvIo Text | KvDurabilityUnknown Text | KvDecode Text")
+        }));
     }
 
     /// The Fork effect's generated decl: two constructors (`ForkWith`/

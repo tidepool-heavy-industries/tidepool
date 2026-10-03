@@ -162,8 +162,8 @@ wire records belong in `tidepool-protocol`/`tidepool-mcp`, not handwritten
 copies in the library.
 
 `ask` and `llm` share the `Schema` vocabulary. `ask` suspends for a caller
-reply; `llm` performs a server-side structured model call. Both validate the
-returned JSON value against the schema.
+reply, which the caller checks; `llm` requests schema-constrained output from
+the model provider and parses its JSON response.
 
 ## Adding Prelude or library functions
 

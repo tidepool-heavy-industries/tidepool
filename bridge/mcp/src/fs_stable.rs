@@ -28,6 +28,7 @@ pub const FS_ERROR_STABLE_DECL: &str = crate::effect_defs::error_decl_text!(
     { ctor FsSandbox,  fields { detail: "Text" as String }, doc "path escapes the sandbox, or the glob pattern is not allowed" },
     { ctor FsBadRegex, fields { detail: "Text" as String }, doc "grep regex failed to compile" },
     { ctor FsIo,       fields { detail: "Text" as String }, doc "other I/O failure" },
+    { ctor FsDurabilityUnknown, fields { detail: "Text" as String }, doc "the write is visible but storage durability could not be confirmed" },
     { ctor FsNonUtf8Path, fields { path: "Text" as String }, doc "path is not valid UTF-8 (lossy rendering shown for diagnostics)" },
 );
 
@@ -35,8 +36,10 @@ pub const FS_ERROR_STABLE_DECL: &str = crate::effect_defs::error_decl_text!(
 /// `git_effect_def!`'s `errors GitError [...]` block (effect_defs.rs).
 pub const GIT_ERROR_STABLE_DECL: &str = crate::effect_defs::error_decl_text!(
     GitError,
-    { ctor GitBadRevspec, fields { detail: "Text" as String },                    doc "unknown or ambiguous revspec" },
-    { ctor GitFailed,     fields { code: "Int" as i64, detail: "Text" as String }, doc "git exited nonzero (or could not be spawned)" },
+    { ctor GitBadRevspec, fields { detail: "Text" as String },                    doc "revspec rejected before execution" },
+    { ctor GitFailed,          fields { code: "Int" as i64, detail: "Text" as String }, doc "git exited nonzero (or could not be spawned)" },
+    { ctor GitMalformedOutput, fields { detail: "Text" as String },                    doc "git returned malformed structured output" },
+    { ctor GitNonUtf8Path,     fields { path: "Text" as String },                       doc "git returned a path that is not valid UTF-8" },
 );
 
 /// `LlmError`'s Haskell decl + `ToJSON` instance. MUST stay in sync with

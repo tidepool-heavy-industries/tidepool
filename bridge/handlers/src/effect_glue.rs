@@ -188,6 +188,12 @@ macro_rules! error_enum {
         pub enum $errname {
             $( $c( $($efr),* ) ),*
         }
+        #[cfg(test)]
+        impl $errname {
+            pub(crate) const TEST_CONSTRUCTORS: &'static [(&'static str, u32)] = &[
+                $( (stringify!($c), (&[$(stringify!($efn)),*] as &[&str]).len() as u32) ),*
+            ];
+        }
     };
 }
 pub(crate) use error_enum;

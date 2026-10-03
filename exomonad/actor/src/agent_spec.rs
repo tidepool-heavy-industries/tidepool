@@ -157,43 +157,36 @@ pub(crate) fn layer_revision(layer: &[PathBuf]) -> Option<String> {
     Some(revision.file_name()?.to_str()?.to_owned())
 }
 
-/// Effect names named in `Member <Effect> ...` constraints in the type
-/// signature `source` gives `value`, in the order they first appear.
+/// The effect row and expression used to install one selected spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallationExpression {
+    /// The authored effects used as the `installSpec` type application.
+    pub effect_row: String,
+    /// The exact workbench statement that installs the selected spec.
+    pub expression: String,
+}
+
+/// Render the single source of truth for actor spec installation.
 ///
-/// This is a textual read of exactly the context GHC would need to accept a
-/// call into that effect, spelled the same way
-/// [`crate::ActorEffectKey::haskell_name`] spells it — not a type check.
-/// `exomonad check --workspace` uses it to catch what a role's effect row is
-/// missing before a child is ever admitted, rather than after; it does not
-/// replace GHC, and a spec that hides its requirement behind polymorphism
-/// GHC infers rather than an explicit `Member` constraint is invisible to it.
+/// Workspace checks typecheck this expression against each launchable role's
+/// row, and the resident workbench executes the same expression at admission.
 #[must_use]
-pub fn required_effects_from_signature(source: &str, value: &str) -> Vec<String> {
-    let needle = format!("{value} ::");
-    let Some(start) = source.find(&needle) else {
-        return Vec::new();
-    };
-    let rest = &source[start + needle.len()..];
-    // A context always ends at `=>`; a signature with none has no
-    // constraints to read, so there is nothing more to find.
-    let Some(context_end) = rest.find("=>") else {
-        return Vec::new();
-    };
-    let context = &rest[..context_end];
-    let mut names = Vec::new();
-    let mut cursor = context;
-    while let Some(index) = cursor.find("Member") {
-        let after = cursor[index + "Member".len()..].trim_start();
-        let name: String = after
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '\'')
-            .collect();
-        cursor = &after[name.len()..];
-        if !name.is_empty() && !names.contains(&name) {
-            names.push(name);
-        }
+pub fn installation_expression(
+    entry: &str,
+    effects: &[crate::ActorEffectKey],
+) -> InstallationExpression {
+    let effect_row = format!(
+        "'[{}]",
+        effects
+            .iter()
+            .map(|effect| effect.haskell_name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    InstallationExpression {
+        expression: format!("_ <- Tidepool.Agent.Contract.installSpec @({effect_row}) {entry}"),
+        effect_row,
     }
-    names
 }
 
 #[cfg(test)]
@@ -201,36 +194,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn required_effects_reads_the_member_constraints_of_the_named_value() {
-        let source = r#"
-module AgentSpec (agentSpec) where
-
-agentSpec ::
-  ( Member Commands effects, Member Lookup effects, Member Journal effects
-  ) =>
-  AgentSpec Tools.WorkspaceTools effects
-agentSpec = defaultSpec { specTools = Tools.tools }
-"#;
-        assert_eq!(
-            required_effects_from_signature(source, "agentSpec"),
-            vec![
-                "Commands".to_owned(),
-                "Lookup".to_owned(),
-                "Journal".to_owned()
-            ]
+    fn installation_expression_renders_the_exact_effect_row_and_entry() {
+        let installation = installation_expression(
+            "AgentSpec.agentSpec",
+            &[
+                crate::ActorEffectKey::Commands,
+                crate::ActorEffectKey::Journal,
+            ],
         );
-    }
-
-    #[test]
-    fn a_signature_with_no_context_requires_nothing() {
-        let source =
-            "agentSpec :: AgentSpec Tools.WorkspaceTools effects\nagentSpec = defaultSpec\n";
-        assert!(required_effects_from_signature(source, "agentSpec").is_empty());
-    }
-
-    #[test]
-    fn an_absent_value_requires_nothing() {
-        assert!(required_effects_from_signature("module X where\n", "agentSpec").is_empty());
+        assert_eq!(installation.effect_row, "'[Commands, Journal]");
+        assert_eq!(
+            installation.expression,
+            "_ <- Tidepool.Agent.Contract.installSpec @('[Commands, Journal]) AgentSpec.agentSpec"
+        );
     }
 
     /// Convention wins over the configured name, and names the file it was read

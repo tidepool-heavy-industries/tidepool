@@ -1094,6 +1094,8 @@ fn settling_a_released_binding_also_permits_rebind() {
 fn registry_open_refuses_a_root_inside_a_working_tree() {
     let repo = TestRepo::init().expect("init");
     let nested = repo.path().join("nested-registry");
+    let git = GitCli::new();
+    let before = capture_state(&git, repo.path());
 
     match WorktreeRegistry::open(&nested) {
         Err(WorktreeError::InvalidRegistryRoot { root, inside }) => {
@@ -1110,6 +1112,104 @@ fn registry_open_refuses_a_root_inside_a_working_tree() {
         }
         other => panic!("expected InvalidRegistryRoot, got {other:?}"),
     }
+    assert!(!nested.exists(), "rejection must not create source files");
+    assert_untouched(&before, &capture_state(&git, repo.path()));
+}
+
+#[cfg(unix)]
+#[test]
+fn registry_open_rejects_nested_and_symlink_roots_before_creating_them() {
+    let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("seed.txt", "seed\n", "seed source")
+        .expect("seed source repository");
+    let nested_target = repo.path().join("nested-target");
+    std::fs::create_dir(&nested_target).expect("nested target");
+    let alias = repo.path().join("alias");
+    std::os::unix::fs::symlink(&nested_target, &alias).expect("symlink");
+    let git = GitCli::new();
+    let before = capture_state(&git, repo.path());
+    for path in [
+        repo.path().join("absent/deep/registry"),
+        alias.join("registry"),
+    ] {
+        assert!(matches!(
+            WorktreeRegistry::open(&path),
+            Err(WorktreeError::InvalidRegistryRoot { .. })
+        ));
+        assert!(!path.exists());
+    }
+    assert_untouched(&before, &capture_state(&git, repo.path()));
+}
+
+#[cfg(unix)]
+#[test]
+fn registry_open_uses_os_symlink_parent_traversal_and_allows_missing_external_root() {
+    let repo = TestRepo::init().expect("init");
+    let nested_target = repo.path().join("nested-target");
+    std::fs::create_dir(&nested_target).expect("nested target");
+    let alias = repo.path().join("alias");
+    std::os::unix::fs::symlink(&nested_target, &alias).expect("symlink");
+    let traversed = alias.join("../rejected-registry");
+    assert!(matches!(
+        WorktreeRegistry::open(&traversed),
+        Err(WorktreeError::InvalidRegistryRoot { .. })
+    ));
+    assert!(!repo.path().join("rejected-registry").exists());
+
+    let external = tempfile::TempDir::new().expect("external root");
+    let outside = external.path().join("new/deep/registry");
+    let registry = WorktreeRegistry::open(&outside).expect("missing external root is valid");
+    assert_eq!(
+        registry.root(),
+        outside.canonicalize().expect("canonical root")
+    );
+}
+
+#[test]
+fn inherited_git_config_environment_is_scrubbed_in_child_process() {
+    const CHILD: &str = "TIDEPOOL_GIT_CONFIG_ENV_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let repo = TestRepo::init().expect("init child repo");
+        repo.git()
+            .try_run(repo.path(), &["config", "core.bare", "false"])
+            .expect("set local core.bare");
+        let value = GitCli::new()
+            .try_run(repo.path(), &["config", "--bool", "core.bare"])
+            .expect("query default core.bare");
+        assert_eq!(value.trimmed(), "false");
+        let explicit = GitCli::new()
+            .with_env("GIT_CONFIG_COUNT", "1")
+            .with_env("GIT_CONFIG_KEY_0", "core.bare")
+            .with_env("GIT_CONFIG_VALUE_0", "true")
+            .try_run(repo.path(), &["config", "--bool", "core.bare"])
+            .expect("query explicit override");
+        assert_eq!(explicit.trimmed(), "true");
+        return;
+    }
+    let config = tempfile::NamedTempFile::new().expect("config file");
+    std::fs::write(config.path(), "[core]\n\tbare = true\n").expect("write config");
+    let exe = std::env::current_exe().expect("test executable");
+    #[allow(clippy::disallowed_methods, reason = "isolated child test process")]
+    let output = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "inherited_git_config_environment_is_scrubbed_in_child_process",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.bare")
+        .env("GIT_CONFIG_VALUE_0", "true")
+        .env("GIT_CONFIG_PARAMETERS", "'core.bare=true'")
+        .env("GIT_CONFIG_GLOBAL", config.path())
+        .output()
+        .expect("run isolated test child");
+    assert!(
+        output.status.success(),
+        "child test failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// A git failure that is NOT "no repository here" — a corrupt `.git` — must

@@ -880,6 +880,13 @@ pub(super) fn inspect_sources(source: &Path) -> Result<BTreeMap<PathBuf, String>
     Ok(files)
 }
 
+pub(super) fn is_haskell_source(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("hs" | "lhs" | "hs-boot" | "lhs-boot" | "h")
+    )
+}
+
 fn capture_runtime_libraries(
     sources: &[PathBuf; 2],
     expected_identity: &str,
@@ -951,12 +958,7 @@ fn inspect_source_tree(
         let path = relative.join(&name);
         if kind.is_dir() {
             inspect_source_tree(&entry.path(), &path, destination, files, all_authored)?;
-        } else if all_authored
-            || matches!(
-                entry.path().extension().and_then(|x| x.to_str()),
-                Some("hs" | "lhs" | "hs-boot" | "lhs-boot" | "h")
-            )
-        {
+        } else if all_authored || is_haskell_source(&entry.path()) {
             let bytes = std::fs::read(entry.path())?;
             if let Some(destination) = destination {
                 tidepool_atomic_write::write_durable(&destination.join(&path), &bytes)?;

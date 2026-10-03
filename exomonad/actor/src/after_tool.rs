@@ -168,6 +168,13 @@ impl AfterToolLog {
         self.invocations.push(invocation);
         let overflow = self.invocations.len().saturating_sub(AFTER_TOOL_LOG);
         self.invocations.drain(..overflow);
+        let retained = self
+            .invocations
+            .iter()
+            .map(|invocation| invocation.ordinal)
+            .collect::<std::collections::HashSet<_>>();
+        self.seen
+            .retain(|_, (ordinal, _)| retained.contains(ordinal));
     }
 
     /// The first sighting of a diagnostic earns the diagnostic. Every later
@@ -339,5 +346,54 @@ mod tests {
         assert_eq!(rows.len(), AFTER_TOOL_LOG);
         assert!(rows[0].contains("after-tool#5"), "{rows:?}");
         assert!(rows.last().unwrap().contains("abstained: unprunable"));
+    }
+
+    #[test]
+    fn evicted_failure_references_are_reannounced_and_deduplication_stays_bounded() {
+        let mut log = AfterToolLog::default();
+        let first = log.begin();
+        let notice = log.notice(first, "repeated failure");
+        assert!(matches!(notice, FailureNotice::First { ordinal: 1, .. }));
+        log.record(failed_invocation(first));
+
+        for index in 0..AFTER_TOOL_LOG + 2 {
+            let ordinal = log.begin();
+            let reason = format!("distinct failure {index}");
+            let notice = log.notice(ordinal, &reason);
+            log.record(failed_invocation(ordinal));
+            assert!(matches!(notice, FailureNotice::First { .. }));
+        }
+
+        assert!(log.seen.len() <= AFTER_TOOL_LOG);
+        assert!(!log.seen.contains_key("repeated failure"));
+
+        let ordinal = log.begin();
+        let notice = log.notice(ordinal, "repeated failure");
+        assert!(
+            matches!(notice, FailureNotice::First { ordinal: current, .. } if current == ordinal)
+        );
+        assert!(failed("result", &notice).contains("repeated failure"));
+        log.record(failed_invocation(ordinal));
+
+        let ordinal = log.begin();
+        let notice = log.notice(ordinal, "repeated failure");
+        assert!(
+            matches!(notice, FailureNotice::Again { ordinal: first, count: 2 } if first == ordinal - 1)
+        );
+        log.record(failed_invocation(ordinal));
+        assert!(log.seen.len() <= AFTER_TOOL_LOG);
+
+        log.forget_failures();
+        assert!(log.seen.is_empty());
+    }
+
+    fn failed_invocation(ordinal: u64) -> Invocation {
+        Invocation {
+            ordinal,
+            tool: "probe".into(),
+            elapsed: Duration::from_millis(1),
+            provenance: "install=1".into(),
+            disposition: Disposition::Failed("failure".into()),
+        }
     }
 }

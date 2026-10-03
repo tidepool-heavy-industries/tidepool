@@ -4,14 +4,6 @@ use tidepool_mcp::CapturedOutput;
 use tidepool_repr::execution_schema::JsonLayout;
 use tidepool_repr::{DataCon, DataConId, DataConTable};
 
-pub(crate) fn expect_handled(
-    result: Result<Option<tidepool_effect::Response>, tidepool_effect::EffectError>,
-) -> tidepool_effect::Response {
-    result
-        .expect("effect dispatch should succeed")
-        .expect("test request should be handled")
-}
-
 pub(crate) fn response_value(r: tidepool_effect::Response, table: &DataConTable) -> HaskellValue {
     r.to_value(table)
         .expect("handler response should materialize")
@@ -107,6 +99,16 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         }
     }
 
+    let exec_schema = tidepool_protocol::effects::exec::exec();
+    let exec_constructors: Vec<_> = exec_schema
+        .errors
+        .as_ref()
+        .unwrap()
+        .variants
+        .iter()
+        .map(|variant| (variant.ctor, variant.fields.len() as u32))
+        .collect();
+
     let response_extras: &[(&str, u32)] = &[
         ("WorktreeAuthorityDenied", 1),
         ("WorktreeUnauthorized", 1),
@@ -132,31 +134,7 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         // Either — the per-file readGlob surface + the WriteCas result + #335 typed failures.
         ("Right", 1),
         ("Left", 1),
-        // #335 Fs typed-failure ADT + the readGlob record (these live in the Fs
-        // effect's type_defs, not its GADT constructors, so they aren't picked up
-        // by the decl-constructor loop above).
-        ("FsNotFound", 1),
-        ("FsNotUtf8", 1),
-        ("FsSandbox", 1),
-        ("FsBadRegex", 1),
-        ("FsIo", 1),
-        ("FsNonUtf8Path", 1),
         ("FileRead", 2),
-        // #335 rest-wave typed-failure ADTs (Exec/Http/Git/Llm) — same
-        // reason as the Fs constructors above: they live in each effect's
-        // type_defs, not its GADT constructors.
-        ("ExecSpawn", 1),
-        ("ExecBadDir", 1),
-        ("HttpInvalidUrl", 1),
-        ("HttpRestricted", 1),
-        ("HttpNetwork", 1),
-        ("HttpStatus", 2),
-        ("HttpTooLarge", 1),
-        ("GitBadRevspec", 1),
-        ("GitFailed", 2),
-        ("LlmApi", 1),
-        ("LlmRefusal", 1),
-        ("LlmBudget", 0),
         ("Match", 5),
         ("Rust", 0),
         ("Python", 0),
@@ -187,7 +165,16 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         // Time effect response types
         ("UTCTime", 1),
     ];
-    for &(name, arity) in response_extras {
+    for &(name, arity) in response_extras
+        .iter()
+        .chain(FsError::TEST_CONSTRUCTORS)
+        .chain(KvError::TEST_CONSTRUCTORS)
+        .chain(&exec_constructors)
+        .chain(HttpError::TEST_CONSTRUCTORS)
+        .chain(GitError::TEST_CONSTRUCTORS)
+        .chain(LlmError::TEST_CONSTRUCTORS)
+        .chain(SpawnError::TEST_CONSTRUCTORS)
+    {
         if t.get_by_name(name).is_some() {
             continue;
         }
@@ -231,38 +218,6 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         int: role("I#"),
     };
     t.with_json_layout(Some(layout))
-}
-
-pub(crate) fn assert_is_haskell_list(val: &HaskellValue, table: &DataConTable) {
-    match val {
-        HaskellValue::Con(id, fields) => {
-            let name = table.name_of(*id).unwrap();
-            match name {
-                "[]" => assert!(fields.is_empty()),
-                ":" => {
-                    assert_eq!(fields.len(), 2, "cons cell should have 2 fields");
-                    assert_is_json_value(&fields[0], table);
-                    assert_is_haskell_list(&fields[1], table);
-                }
-                other => panic!("Expected list constructor, got {}", other),
-            }
-        }
-        other => panic!("Expected Con (list), got {:?}", other),
-    }
-}
-
-pub(crate) fn assert_is_json_value(val: &HaskellValue, table: &DataConTable) {
-    match val {
-        HaskellValue::Con(id, _) => {
-            let name = table.name_of(*id).unwrap();
-            assert!(
-                ["Object", "Array", "String", "Number", "Bool", "Null"].contains(&name),
-                "Expected JSON Value constructor, got {}",
-                name
-            );
-        }
-        _ => panic!("Expected Con (JSON Value), got {:?}", val),
-    }
 }
 
 pub(crate) fn assert_is_cons_list(val: &HaskellValue, table: &DataConTable) {

@@ -111,6 +111,7 @@ fn stable_records_decl_matches_fs_effect_def() {
         "FsBadRegex",
         "FsIo",
         "FsNonUtf8Path",
+        "FsDurabilityUnknown",
     ] {
         assert!(
             tidepool_mcp::FS_ERROR_STABLE_DECL.contains(ctor),
@@ -127,9 +128,14 @@ fn stable_records_decl_matches_fs_effect_def() {
 
 #[test]
 fn stable_records_decl_matches_git_llm_http_effect_defs() {
-    // `GIT_ERROR_STABLE_DECL` hand-carries the SAME 2 variants as
+    // `GIT_ERROR_STABLE_DECL` hand-carries the SAME variants as
     // `git_effect_def!`'s `errors GitError [...]` block.
-    for ctor in ["GitBadRevspec", "GitFailed"] {
+    for ctor in [
+        "GitBadRevspec",
+        "GitFailed",
+        "GitMalformedOutput",
+        "GitNonUtf8Path",
+    ] {
         assert!(
             tidepool_mcp::GIT_ERROR_STABLE_DECL.contains(ctor),
             "stable GitError decl is missing constructor `{ctor}`"

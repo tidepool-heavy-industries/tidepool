@@ -366,15 +366,17 @@ impl std::fmt::Display for FsError {
             FsError::FsNotFound(p) => write!(f, "no such file or directory: {p}"),
             FsError::FsNotUtf8(p) => write!(f, "{p}: not valid UTF-8"),
             FsError::FsNonUtf8Path(p) => write!(f, "path is not valid UTF-8 (lossy): {p}"),
-            FsError::FsSandbox(d) | FsError::FsBadRegex(d) | FsError::FsIo(d) => write!(f, "{d}"),
+            FsError::FsSandbox(d)
+            | FsError::FsBadRegex(d)
+            | FsError::FsIo(d)
+            | FsError::FsDurabilityUnknown(d) => write!(f, "{d}"),
         }
     }
 }
 
 /// Forward a typed `FsError` to the eval-abort channel, for the untagged verbs
-/// (`FsReadGlob`/`FsWriteCas`) whose method still returns
-/// `Result<Response, EffectError>`. Their shared-helper (`resolve`/`expand_glob`)
-/// failures are genuine aborts (a sandbox escape is not per-item data).
+/// (`FsReadGlob`) whose method still returns `Result<Response, EffectError>`.
+/// FsWriteCas is errors-tagged so sandbox and storage failures are data.
 /// `FsMetadata` is NOT in this set: a metadata query is total (`None`).
 fn fs_err_to_effect(e: FsError) -> EffectError {
     EffectError::Handler(e.to_string())
@@ -554,46 +556,40 @@ impl FsBackend {
 
     fn fs_write_cas(
         &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
         path: String,
         expected: Option<String>,
         contents: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        // Compare-and-swap write (#330): snapshot the current content hash
-        // (None = absent) and write ONLY if it equals `expected` (None expected
-        // = require the file absent, i.e. create-only). The read-compare-write
-        // runs while holding an exclusive `flock` on the parent directory, so
-        // two agent PROCESSES racing on the same file cannot both pass the
-        // compare and clobber each other — one blocks until the other's write
-        // is durable, then sees the new hash and gets `Left actual`. On a
-        // precondition miss nothing is written and the ACTUAL hash comes back
-        // as `Left actual` (conflicts-as-data, matching Diff/Edit + #335).
-        let resolved = self.resolve(&path).map_err(fs_err_to_effect)?;
+    ) -> Result<Result<(), Option<String>>, FsError> {
+        let resolved = self.resolve(&path)?;
         let parent = resolved
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        std::fs::create_dir_all(&parent).map_err(|e| EffectError::Handler(e.to_string()))?;
+        tidepool_atomic_write::create_dir_all_durable(&parent)
+            .map_err(|error| FsError::FsIo(error.to_string()))?;
 
-        let outcome = with_dir_flock(
-            &parent,
-            || -> std::io::Result<Result<(), Option<String>>> {
-                let actual = read_if_exists(&resolved)?.map(|bytes| blake3_hex(&bytes));
-                if actual == expected {
-                    std::fs::write(&resolved, &contents)?;
-                    Ok(Ok(()))
-                } else {
-                    Ok(Err(actual))
+        with_dir_flock(&parent, || {
+            let actual = read_if_exists(&resolved)
+                .map_err(|error| FsError::FsIo(format!("read '{path}' failed: {error}")))?
+                .map(|bytes| blake3_hex(&bytes));
+            if actual != expected {
+                return Ok(Err(actual));
+            }
+
+            let staged = tidepool_atomic_write::stage_durable(&resolved, contents.as_bytes())
+                .map_err(|error| FsError::FsIo(error.to_string()))?;
+            staged.publish().map_err(|error| match error {
+                tidepool_atomic_write::PublishError::BeforeRename(error) => {
+                    FsError::FsIo(error.to_string())
                 }
-            },
-        )
-        .map_err(|e| EffectError::Handler(e.to_string()))?
-        .map_err(|e| EffectError::Handler(e.to_string()))?;
-
-        match outcome {
-            Ok(()) => cx.respond(Ok::<(), Option<String>>(())),
-            Err(actual) => cx.respond(Err::<(), Option<String>>(actual)),
-        }
+                tidepool_atomic_write::PublishError::PublishedDurabilityUnconfirmed {
+                    source,
+                    ..
+                } => FsError::FsDurabilityUnknown(source.to_string()),
+            })?;
+            Ok(Ok(()))
+        })
+        .map_err(|error| FsError::FsIo(error.to_string()))?
     }
 }
 
@@ -664,7 +660,7 @@ impl tidepool_effect::dispatch::EffectHandler<CapturedOutput> for FsWriteHandler
                 cx.respond(self.backend.fs_write(path, contents))
             }
             FsWriteReq::FsWriteCas(path, expected, contents) => {
-                self.backend.fs_write_cas(cx, path, expected, contents)
+                cx.respond(self.backend.fs_write_cas(path, expected, contents))
             }
         }
     }
@@ -1043,14 +1039,15 @@ mod tests {
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
 
-        let decode =
-            |r: tidepool_effect::Response, t: &DataConTable| -> Result<(), Option<String>> {
-                FromHaskell::from_value(&response_value(r, t), t).unwrap()
-            };
+        let decode = |r: tidepool_effect::Response,
+                      t: &DataConTable|
+         -> Result<Result<(), Option<String>>, FsError> {
+            FromHaskell::from_value(&response_value(r, t), t).unwrap()
+        };
 
         // create-only (expected = None): file absent → writes.
         let req = FsWriteReq::FsWriteCas("f.txt".to_string(), None, "v1".to_string());
-        assert_eq!(decode(writer.handle(req, &cx).unwrap(), &table), Ok(()));
+        assert_eq!(decode(writer.handle(req, &cx).unwrap(), &table), Ok(Ok(())));
         assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "v1");
 
         // fileHash (FsHash): current digest of an existing file. Now errors-
@@ -1069,14 +1066,14 @@ mod tests {
 
         // CAS HIT: expected == current hash → writes v2.
         let req = FsWriteReq::FsWriteCas("f.txt".to_string(), Some(h.clone()), "v2".to_string());
-        assert_eq!(decode(writer.handle(req, &cx).unwrap(), &table), Ok(()));
+        assert_eq!(decode(writer.handle(req, &cx).unwrap(), &table), Ok(Ok(())));
         assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "v2");
 
         // CAS MISS: stale expected hash (of v1) → Left(actual = hash of v2), no write.
         let req = FsWriteReq::FsWriteCas("f.txt".to_string(), Some(h), "v3".to_string());
         assert_eq!(
             decode(writer.handle(req, &cx).unwrap(), &table),
-            Err(Some(blake3_hex(b"v2"))),
+            Ok(Err(Some(blake3_hex(b"v2")))),
             "conflict must carry the ACTUAL hash"
         );
         assert_eq!(
@@ -1089,7 +1086,7 @@ mod tests {
         let req = FsWriteReq::FsWriteCas("f.txt".to_string(), None, "v4".to_string());
         assert_eq!(
             decode(writer.handle(req, &cx).unwrap(), &table),
-            Err(Some(blake3_hex(b"v2")))
+            Ok(Err(Some(blake3_hex(b"v2"))))
         );
 
         // MISSING FILE, distinct from a content mismatch: the caller still
@@ -1103,7 +1100,7 @@ mod tests {
             FsWriteReq::FsWriteCas("f.txt".to_string(), Some(stale_v2_hash), "v5".to_string());
         assert_eq!(
             decode(writer.handle(req, &cx).unwrap(), &table),
-            Err(None),
+            Ok(Err(None)),
             "a CAS against a since-deleted file must report actual = None, not a hash"
         );
         assert!(
@@ -1127,13 +1124,40 @@ mod tests {
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
         let result = handler.fs_write_cas(
-            &cx,
             "directory".into(),
             Some("stale".into()),
             "replacement".into(),
         );
-        assert!(result.is_err());
+        assert!(matches!(result, Err(FsError::FsIo(_))));
         assert!(dir.path().join("directory").is_dir());
+
+        let sandbox = handler.fs_write_cas("../outside.txt".into(), None, "replacement".into());
+        assert!(matches!(sandbox, Err(FsError::FsSandbox(_))));
+
+        let mut writer = FsWriteHandler::new(dir.path().to_path_buf());
+        let response = writer
+            .handle(
+                FsWriteReq::FsWriteCas(
+                    "directory".into(),
+                    Some("stale".into()),
+                    "replacement".into(),
+                ),
+                &cx,
+            )
+            .unwrap();
+        let decoded: Result<Result<(), Option<String>>, FsError> =
+            FromHaskell::from_value(&response_value(response, &table), &table).unwrap();
+        assert!(matches!(decoded, Err(FsError::FsIo(_))));
+
+        let response = writer
+            .handle(
+                FsWriteReq::FsWriteCas("../outside.txt".into(), None, "replacement".into()),
+                &cx,
+            )
+            .unwrap();
+        let decoded: Result<Result<(), Option<String>>, FsError> =
+            FromHaskell::from_value(&response_value(response, &table), &table).unwrap();
+        assert!(matches!(decoded, Err(FsError::FsSandbox(_))));
     }
 
     #[test]

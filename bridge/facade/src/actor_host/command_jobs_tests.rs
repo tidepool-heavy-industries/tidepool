@@ -43,6 +43,110 @@ pub(super) async fn raw_backend_request(
         .await
 }
 
+#[test]
+fn cargo_report_preserves_nonzero_diagnostics_and_typed_parse_errors() {
+    use std::collections::VecDeque;
+    use tidepool_effect::{EffectContext, EffectError, EffectHandler, Response};
+    use tidepool_handlers::{
+        ConsoleHandler, ExecError, ExecReq, FsReadHandler, FsWriteHandler, HttpHandler, KvHandler,
+        Proc,
+    };
+    use tidepool_testing::eval_harness::EvalHarness;
+
+    struct MockCargoExec {
+        responses: VecDeque<Result<Proc, ExecError>>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl EffectHandler<tidepool_mcp::CapturedOutput> for MockCargoExec {
+        type Request = ExecReq;
+
+        fn handle(
+            &mut self,
+            request: Self::Request,
+            context: &EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        ) -> Result<Response, EffectError> {
+            assert!(
+                matches!(request, ExecReq::RunArgv(_)),
+                "Cargo should use runArgv"
+            );
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            context.respond(
+                self.responses
+                    .pop_front()
+                    .expect("one mock result per Cargo call"),
+            )
+        }
+    }
+
+    tidepool_testing::eval_harness::require_extract();
+    let scratch = tempfile::tempdir().unwrap();
+    std::fs::write(
+        scratch.path().join("CargoReportContract.hs"),
+        include_str!("cargo_report_contract.hs"),
+    )
+    .unwrap();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handlers = frunk::hlist![
+        ConsoleHandler,
+        KvHandler::new(scratch.path().join("cargo-test-kv.json")),
+        FsReadHandler::new(scratch.path().to_path_buf()),
+        FsWriteHandler::new(scratch.path().to_path_buf()),
+        HttpHandler,
+        MockCargoExec {
+            responses: VecDeque::from([
+                Ok(Proc {
+                    exit_code: 101,
+                    stdout: "{\"reason\":\"compiler-message\"}\n".into(),
+                    stderr: "compiler failed".into(),
+                }),
+                Ok(Proc {
+                    exit_code: 0,
+                    stdout: "{}\n\nnot-json\n".into(),
+                    stderr: String::new(),
+                }),
+                Ok(Proc {
+                    exit_code: 101,
+                    stdout: "{}\n\nnot-json\n".into(),
+                    stderr: String::new(),
+                }),
+                Err(ExecError::ExecBadDir("unavailable".into())),
+            ]),
+            calls: Arc::clone(&calls),
+        },
+    ];
+    let preamble = concat!(
+        "{-# LANGUAGE DataKinds, FlexibleContexts, NoImplicitPrelude, TypeOperators #-}\n",
+        "module Expr where\n",
+        "import Tidepool.Prelude\n",
+        "import Tidepool.Effects\n",
+        "import Control.Monad.Freer (Eff)\n",
+        "import qualified CargoReportContract\n",
+    );
+    let effect_stack = tidepool_mcp::build_effect_stack_type(&tidepool_mcp::standard_decls());
+    let source = tidepool_runtime::session::assemble_expression_module(
+        preamble,
+        "result",
+        &effect_stack,
+        "CargoReportContract.result",
+        tidepool_runtime::session::ExpressionLift::Effectful,
+    );
+    let harness = EvalHarness::new()
+        .with_stdlib()
+        .with_effects_module()
+        .with_include(scratch.path().to_path_buf());
+    let outcome = harness.run_with(
+        &source,
+        "result",
+        handlers,
+        tidepool_mcp::CapturedOutput::new(),
+    );
+    assert!(outcome.is_ok(), "Cargo fixture failed: {:?}", outcome.err());
+    assert_eq!(outcome.json(), serde_json::json!([true, true, true, true]));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 4);
+}
+
 #[tokio::test]
 async fn ordinary_command_report_skips_unrequested_source_probe() {
     let mut campaign = TestCampaign::start_with_shell().await;

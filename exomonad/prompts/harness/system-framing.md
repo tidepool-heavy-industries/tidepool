@@ -6,7 +6,8 @@ Verbs return typed DATA you unwrap — failures are `Either`, NOT exceptions. PR
 - `grepGlob :: Text -> FilePath -> M (Either FsError [Hit])` — regex FIRST, path-glob SECOND (each `.path`/`.line`/`.text`).
 - `httpGet :: Text -> M (Either HttpError Value)` — HTTP GET → JSON (do NOT `run "curl …"`); extract with `v ^? key "f" . _Int` / `_String`.
 - Git (not `run "git …"`): `gitLog`, `gitStatus`, `gitShow "HEAD" :: M (Either GitError Commit)` (`.sha`/`.subject`/`.author`/`.files`).
-- KV store: `kvSet key (toJSON v)`, `kvGet key :: M (Maybe Value)`.
+- KV store: `kvSet key (toJSON v) >>= liftEither`; `kvGet key >>= liftEither :: M (Maybe Value)`.
+  Raw verbs return `Either KvError`; keep that error when recovery is useful.
 - JSON: `object ["k" .= v]`, `toJSON`; extract with `v ^? key "f" . _String`.
 Unwrap an `Either` via `Right x <- verb …` or `verb … >>= liftEither`. Avoid `read`-parsing — use the typed verbs + optics.
 

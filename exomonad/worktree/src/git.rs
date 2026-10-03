@@ -546,17 +546,39 @@ impl GitCli {
     }
 
     fn environment(&self) -> Vec<(OsString, Option<OsString>)> {
-        let mut environment: Vec<_> = [
+        let mut scrubbed: BTreeSet<OsString> = [
             "GIT_DIR",
             "GIT_INDEX_FILE",
             "GIT_WORK_TREE",
             "GIT_OBJECT_DIRECTORY",
             "GIT_COMMON_DIR",
             "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_CONFIG_KEY_",
+            "GIT_CONFIG_VALUE_",
         ]
         .into_iter()
-        .map(|key| (OsString::from(key), None))
+        .map(OsString::from)
         .collect();
+        for (key, _) in std::env::vars_os() {
+            let key_text = key.to_string_lossy();
+            if ["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"]
+                .iter()
+                .any(|prefix| {
+                    key_text
+                        .strip_prefix(prefix)
+                        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                })
+            {
+                scrubbed.insert(key);
+            }
+        }
+        let mut environment: Vec<_> = scrubbed.into_iter().map(|key| (key, None)).collect();
         environment.extend([
             (
                 OsString::from("GIT_TERMINAL_PROMPT"),
@@ -827,7 +849,9 @@ impl GitCli {
         self.read(cwd, args).map_err(WorktreeError::GitFailure)
     }
 
-    fn stdout_bytes<S: AsRef<OsStr>>(
+    /// Run a read-only Git command and preserve stdout bytes for protocols
+    /// whose paths may not be UTF-8 (for example porcelain and numstat).
+    pub fn stdout_bytes<S: AsRef<OsStr>>(
         &self,
         cwd: &Path,
         args: &[S],
@@ -1556,6 +1580,26 @@ mod admission_tests {
             .contains("not included in the active admission scope"));
         drop(capture);
         git.read(&sibling, &["rev-parse", "HEAD"]).unwrap();
+    }
+
+    #[test]
+    fn active_write_scope_rejects_a_borrowed_gitfile_in_another_worktree() {
+        let repo = crate::testing::TestRepo::init().unwrap();
+        repo.writer().commit_file("file", "seed", "seed").unwrap();
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(
+            other.path().join(".git"),
+            format!("gitdir: {}\n", repo.path().join(".git").display()),
+        )
+        .unwrap();
+        let git = super::GitCli::new();
+        let _write = git.write_scope(repo.path()).unwrap();
+        let failure = git
+            .read(other.path(), &["rev-parse", "--show-toplevel"])
+            .unwrap_err();
+        assert!(failure
+            .stderr
+            .contains("not included in the active admission scope"));
     }
 
     #[test]

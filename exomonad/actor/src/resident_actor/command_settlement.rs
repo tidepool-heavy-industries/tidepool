@@ -42,7 +42,7 @@ const SOURCE_PROBE_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration:
 /// differs from it, untracked files included. Optional locks stay off so the
 /// probe never contends for the index with the command it precedes or with
 /// another checkout user.
-const SOURCE_PROBE: &str = "pwd\ngit rev-parse --verify -q HEAD 2>/dev/null || exit 0\nif [ -z \"$(git status --porcelain --untracked-files=normal 2>/dev/null)\" ]; then echo clean; else echo dirty; fi\n";
+const SOURCE_PROBE: &str = "pwd || exit 1\ncommit=$(git rev-parse --verify -q HEAD 2>/dev/null) || exit 0\nstatus=$(git status --porcelain --untracked-files=normal 2>/dev/null)\nstatus_code=$?\n[ \"$status_code\" -eq 0 ] || exit \"$status_code\"\nif [ -z \"$status\" ]; then state=clean; else state=dirty; fi\nprintf '%s\\n%s\\n' \"$commit\" \"$state\"\n";
 
 #[derive(Clone)]
 pub(super) struct CommandSettlements {
@@ -105,14 +105,29 @@ fn probe_spec(spec: &CommandSpec) -> CommandSpec {
 fn parse_probe(stdout: &str) -> Option<CommandSource> {
     let mut lines = stdout.lines();
     let directory = lines.next().filter(|line| !line.is_empty())?.to_owned();
-    let commit = lines
-        .next()
-        .filter(|line| !line.is_empty() && line.chars().all(|c| c.is_ascii_hexdigit()))
-        .map(str::to_owned);
-    let dirty = commit.is_some() && lines.next() == Some("dirty");
+    let Some(commit) = lines.next() else {
+        return Some(CommandSource {
+            directory,
+            commit: None,
+            dirty: false,
+        });
+    };
+    let valid_oid = matches!(commit.len(), 40 | 64)
+        && commit
+            .chars()
+            .all(|character| character.is_ascii_hexdigit());
+    let state = lines.next()?;
+    if !valid_oid || lines.next().is_some() {
+        return None;
+    }
+    let dirty = match state {
+        "clean" => false,
+        "dirty" => true,
+        _ => return None,
+    };
     Some(CommandSource {
         directory,
-        commit,
+        commit: Some(commit.to_owned()),
         dirty,
     })
 }
@@ -659,6 +674,66 @@ mod tests {
             })
         );
         assert_eq!(parse_probe(""), None);
+    }
+
+    #[test]
+    fn source_probe_rejects_incomplete_or_invalid_git_evidence() {
+        let sha256 = "b".repeat(64);
+        assert_eq!(
+            parse_probe(&format!("/work/tree\n{sha256}\nclean\n")).map(|source| source.dirty),
+            Some(false)
+        );
+        assert_eq!(
+            parse_probe(&format!("/work/tree\n{}\nclean\n", "a".repeat(39))),
+            None
+        );
+        assert_eq!(
+            parse_probe(&format!("/work/tree\n{}\nunknown\n", "a".repeat(40))),
+            None
+        );
+        assert_eq!(
+            parse_probe(&format!("/work/tree\n{}\nclean\nextra\n", "a".repeat(40))),
+            None
+        );
+        assert_eq!(
+            parse_probe(&format!("/work/tree\n{}\n", "a".repeat(40))),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_git_status_does_not_emit_clean_source_evidence() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let git = directory.path().join("git");
+        std::fs::write(
+            &git,
+            "#!/bin/sh\ncase \"$1\" in\n  rev-parse) printf '%040d\\n' 0 ;;\n  status) exit 7 ;;\n  *) exit 2 ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let output = std::process::Command::new("bash")
+            .args(["--noprofile", "--norc", "-c", SOURCE_PROBE])
+            .current_dir(directory.path())
+            .env("PATH", {
+                let mut paths = vec![directory.path().to_path_buf()];
+                paths.extend(std::env::split_paths(
+                    &std::env::var_os("PATH").unwrap_or_default(),
+                ));
+                std::env::join_paths(paths).unwrap()
+            })
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success());
+        assert_eq!(
+            parse_probe(std::str::from_utf8(&output.stdout).unwrap())
+                .map(|source| (source.commit, source.dirty)),
+            Some((None, false))
+        );
     }
 
     #[test]
