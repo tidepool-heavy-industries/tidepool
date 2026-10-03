@@ -3990,21 +3990,26 @@ tidepool-target phase=desugar module=Execute\n",
                         Ok((code, vec![1], vec![2]))
                     },
                 );
+                let owned_status = worker.child.try_wait().unwrap();
+                let other_alive = other.try_wait().unwrap().is_none();
+                drop(client);
+                worker.abort();
+                let retired_status = worker.child.wait().unwrap();
+                other.kill().unwrap();
+                other.wait().unwrap();
+                // Clean both owned fixtures before assertions, including a
+                // failing regression against the original monitor body.
                 if disconnected {
                     assert!(matches!(
                         result,
                         Err(FrontendError::WorkerClientDisconnected)
                     ));
-                    assert!(!worker.child.wait().unwrap().success());
+                    assert!(!retired_status.success());
                 } else {
                     assert_eq!(result.unwrap(), (code, vec![1], vec![2]));
-                    assert!(worker.child.try_wait().unwrap().is_none());
+                    assert!(owned_status.is_none());
                 }
-                assert!(other.try_wait().unwrap().is_none());
-                drop(client);
-                worker.abort();
-                other.kill().unwrap();
-                other.wait().unwrap();
+                assert!(other_alive);
             }
         }
     }
