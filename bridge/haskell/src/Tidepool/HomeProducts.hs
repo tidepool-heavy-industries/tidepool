@@ -8,11 +8,11 @@ module Tidepool.HomeProducts
 
 import Control.Exception
   ( Exception, SomeException, SomeAsyncException, displayException, fromException, throwIO, try )
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.IORef (readIORef)
+import Data.IORef (newIORef, readIORef, atomicModifyIORef')
 import Data.ByteString qualified as BS
 import Crypto.Hash.SHA256 qualified as SHA256
 import Numeric (showHex)
@@ -175,12 +175,14 @@ hydrateCandidateHomeProductsWithOriginals initial loadGraph interfaces originals
             , Map.member (ms_mod_name summary) selected]
           ordinaryByName = Map.fromList
             [(moduleName (mi_module iface), iface) | (_, iface) <- interfaces]
+          ordinaryByModule = Map.fromList [(mi_module iface, iface) | (_, iface) <- interfaces]
           ordinaryNames = Map.fromList [(ms_mod_name summary, ()) | summary <- ordered]
           bootNames = Map.fromList [(ms_mod_name summary, ()) | summary <- boots]
           graphBootNames = Map.fromList [(ms_mod_name summary, ())
             | ModuleNode _ summary <- mgModSummaries' selectedGraph
             , ms_hsc_src summary == HsBootFile]
       unless (Map.keysSet selected == Map.keysSet ordinaryByName
+          && Map.keysSet ordinaryByModule == Set.fromList (map ms_mod summaries)
           && Map.keysSet selected == Map.keysSet ordinaryNames
           && length summaries == Map.size selected
           && length interfaces == Map.size ordinaryByName
@@ -197,25 +199,42 @@ hydrateCandidateHomeProductsWithOriginals initial loadGraph interfaces originals
           [] -> pure ()
           issues -> liftIO (ioError (userError
             ("cached home input has untracked compiler plugin inputs: " ++ show issues)))
-      validationBase <- if null boots then pure initial else do
-        -- In a boot SCC, an early extraction pass can consume a load-produced
-        -- ordinary interface before that owner gets its prepared interface.
-        -- Recreate that context for every boot owner and its GHC-selected
-        -- dependencies. Other accepted products retain the ordinary hydration
-        -- path; their interfaces are checked in the original dependency order.
+      (validationBase, sourceValidated) <- if null boots then pure (initial, Set.empty) else do
+        -- GHC make supplies each module's actual dependency HPT, including
+        -- boot interfaces inside SOURCE loops. Its completed HPT has ordinary
+        -- interfaces instead, so it cannot recheck those original usage seals.
         sourceGraph <- either (liftIO . ioError . userError) pure
           (sourceValidationGraph selectedGraph boots)
+        validatedRef <- liftIO (newIORef Set.empty)
+        let expected = Set.fromList [ms_mod summary
+              | ModuleNode _ summary <- mgModSummaries' sourceGraph
+              , ms_hsc_src summary == HsSrcFile]
+            validateLoaded env _ _ (ModuleNode _ summary)
+              | ms_hsc_src summary == HsSrcFile = do
+                  iface <- maybe (ioError (userError "cached SOURCE interface owner missing")) pure
+                    (Map.lookup (ms_mod summary) ordinaryByModule)
+                  validateHomeInterface env summary iface
+                  duplicate <- atomicModifyIORef' validatedRef $ \validated ->
+                    (Set.insert (ms_mod summary) validated, Set.member (ms_mod summary) validated)
+                  when duplicate $
+                    ioError (userError "cached SOURCE interface checked twice")
+            validateLoaded _ _ _ _ = pure ()
         setSession initial {hsc_mod_graph = sourceGraph}
         flag <- timeDetailPhase timing "ghc_setup" "home_products_source_load" $
-          load' Nothing LoadAllTargets mkUnknownDiagnostic Nothing
+          load' Nothing LoadAllTargets mkUnknownDiagnostic (Just validateLoaded)
             (scopeRetainedModuleGraph sourceGraph)
         unless (case flag of Succeeded -> True; Failed -> False) $
           liftIO (ioError (userError "cached home SOURCE graph failed fresh load"))
+        validated <- liftIO (readIORef validatedRef)
+        unless (validated == expected) $
+          liftIO (ioError (userError "cached SOURCE interface validation inventory differs"))
         loaded <- getSession
         let current = loaded {hsc_mod_graph = selectedGraph}
         setSession current
         liftIO $ emitCount timing "home_products_source_load_owners"
           (toInteger (length (eltsHpt (hsc_HPT current))))
+        liftIO $ emitCount timing "home_products_source_validation_owners"
+          (toInteger (Set.size validated))
         forM_ boots $ \summary -> do
           unless (ms_hsc_src summary == HsBootFile) $
             liftIO (ioError (userError "cached home boot input is not a boot summary"))
@@ -225,25 +244,19 @@ hydrateCandidateHomeProductsWithOriginals initial loadGraph interfaces originals
           unless (null dependentFiles) $
             liftIO (ioError (userError "cached home boot input read untracked dependent files"))
         setSession current
-        pure current
+        pure (current, validated)
       combined <- liftIO (hydrateExactScope validationBase (originals ++ interfaces))
       hydrated <- liftIO (installLexical selectedGraph combined)
         >>= either (liftIO . ioError . userError) pure
       liftIO (validateEnvironmentFamilies hydrated)
       setSession (if null boots then hydrated else validationBase)
       forM_ ordered $ \summary -> do
-        iface <- maybe
-          (liftIO (ioError (userError "cached interface owner missing"))) pure
-          (Map.lookup (ms_mod_name summary) ordinaryByName)
         current <- getSession
-        decision <- liftIO $ checkOldIface
-          (scopeRetainedHscEnv (ms_mod summary) current) summary (Just iface)
-        case decision of
-          UpToDateItem _ -> pure ()
-          OutOfDateItem reason _ -> liftIO (ioError (userError
-            ("cached home product failed fresh interface validation: "
-              ++ moduleNameString (ms_mod_name summary) ++ ": "
-              ++ renderWithContext defaultSDocContext (ppr reason))))
+        unless (ms_mod summary `Set.member` sourceValidated) $ do
+          iface <- maybe
+            (liftIO (ioError (userError "cached interface owner missing"))) pure
+            (Map.lookup (ms_mod summary) ordinaryByModule)
+          liftIO (validateHomeInterface current summary iface)
         hmi <- maybe
           (liftIO (ioError (userError "hydrated home product owner missing"))) pure
           (lookupHpt (hsc_HPT hydrated) (ms_mod_name summary))
@@ -252,6 +265,19 @@ hydrateCandidateHomeProductsWithOriginals initial loadGraph interfaces originals
       let restored = final {hsc_mod_graph = hsc_mod_graph initial}
       setSession restored
       pure restored
+
+validateHomeInterface :: HscEnv -> ModSummary -> ModIface -> IO ()
+validateHomeInterface environment summary iface = do
+  unless (mi_module iface == ms_mod summary) $
+    ioError (userError "cached interface has another module owner")
+  decision <- checkOldIface
+    (scopeRetainedHscEnv (ms_mod summary) environment) summary (Just iface)
+  case decision of
+    UpToDateItem _ -> pure ()
+    OutOfDateItem reason _ -> ioError (userError
+      ("cached home product failed fresh interface validation: "
+        ++ moduleNameString (ms_mod_name summary) ++ ": "
+        ++ renderWithContext defaultSDocContext (ppr reason)))
 
 -- GHC's cached reachability retains boot nodes and their real downsweep
 -- edges. Root both forms of every boot owner, keep the original node order,
