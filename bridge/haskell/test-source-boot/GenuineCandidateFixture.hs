@@ -3,7 +3,7 @@
 -- module never writes durable certificates or candidate/scope descriptors.
 module GenuineCandidateFixture
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope
-  , writeGenuineEmptyMetadataScope ) where
+  , writeGenuineEmptyMetadataScope, writeGenuineCandidateNativeScope ) where
 
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
@@ -39,21 +39,29 @@ import Tidepool.PreparedTime (resolveTimeAuthority)
 writeGenuineCandidateManifestFor
   :: [String] -> FilePath -> FilePath -> [FilePath] -> PreparedPipelineResult -> IO ()
 writeGenuineCandidateManifestFor names work source includes prepared =
-  writePacket work (Just (source, includes, prepared)) names [] Nothing
+  writePacket work (Just (source, includes, prepared)) names [] [] Nothing
 
 writeGenuineMetadataScope
   :: FilePath -> FilePath -> FilePath -> [FilePath] -> [String] -> PreparedPipelineResult -> IO ()
 writeGenuineMetadataScope destination work source includes names prepared =
-  writePacket work (Just (source, includes, prepared)) [] names (Just destination)
+  writePacket work (Just (source, includes, prepared)) [] names [] (Just destination)
 
 writeGenuineEmptyMetadataScope :: FilePath -> IO ()
 writeGenuineEmptyMetadataScope destination =
-  writePacket (takeDirectory destination) Nothing [] [] (Just destination)
+  writePacket (takeDirectory destination) Nothing [] [] [] (Just destination)
+
+-- Native products and candidate descriptors share one immutable finalization
+-- packet. The Rust owner retains the complete canonical interface closure and
+-- admits native execution only from its genuinely certified original products.
+writeGenuineCandidateNativeScope
+  :: [String] -> FilePath -> FilePath -> [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
+writeGenuineCandidateNativeScope names work source includes destination prepared =
+  writePacket work (Just (source, includes, prepared)) names [] names (Just destination)
 
 writePacket
   :: FilePath -> Maybe (FilePath, [FilePath], PreparedPipelineResult)
-  -> [String] -> [String] -> Maybe FilePath -> IO ()
-writePacket work input candidates exactOwners destination = do
+  -> [String] -> [String] -> [String] -> Maybe FilePath -> IO ()
+writePacket work input candidates exactOwners nativeOwners destination = do
   issuer <- lookupEnv "TIDEPOOL_CANDIDATE_FIXTURE_ISSUER" >>= maybe
     (fail "genuine fixture requires the matched tidepool-toolchain libtest executable in TIDEPOOL_CANDIDATE_FIXTURE_ISSUER") pure
   -- The adapter verifies this configured producer against its admitted endpoint.
@@ -72,8 +80,8 @@ writePacket work input candidates exactOwners destination = do
       includes = maybe [] (\(_, roots, _) -> roots) input
       source = (\(path, _, _) -> path) <$> input
   BS.writeFile (packet </> "request.cbor") (toStrictByteString
-    (encodeListLen 7 <> text "TPSOURCEBOOTFIXTURE1" <> optional source
-      <> names includes <> names candidates <> names exactOwners
+    (encodeListLen 8 <> text "TPSOURCEBOOTFIXTURE2" <> optional source
+      <> names includes <> names candidates <> names exactOwners <> names nativeOwners
       <> optional destination <> text producer))
   bracket (lookupEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET")
     (maybe (unsetEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET") (setEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET")) $ \_ -> do

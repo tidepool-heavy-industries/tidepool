@@ -3,7 +3,8 @@ module Main (main) where
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots)
 import ExactScopeV8Test (exactScopeV8Checks, candidateCanonicalChecks)
 import GenuineCandidateFixture
-  ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope, writeGenuineEmptyMetadataScope )
+  ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope, writeGenuineEmptyMetadataScope
+  , writeGenuineCandidateNativeScope )
 
 import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
@@ -203,6 +204,10 @@ main = getArgs >>= \case
   ["--candidate-manifest-products", path] -> candidateManifestProducts path
   ["--candidate-compact-inventory"] -> candidateCompactInventory
   ["--candidate-ghc-load"] -> candidateGhcLoad
+  ["--source-boot-reuse"] -> withTiming (withScratch sourceBootReuseAt)
+  ["--source-boot-reuse", work] -> withTiming $ do
+    createDirectory work
+    sourceBootReuseAt work
   ["--candidate-sited-siblings"] -> candidateSitedSiblings
   ["--candidate-sited-siblings", work] -> candidateSitedSiblingsAt work
   ["--generated-scaffold-imports"] -> generatedScaffoldImports
@@ -236,51 +241,71 @@ main = getArgs >>= \case
     setEnv "TIDEPOOL_TIMING" "1"
     forM_ [1, 10, 100] (mixedGraph False)
     mixedGraph True 10
-  [] -> withScratch $ \work -> do
+  [] -> do
     exactScopeBinders
     selectedHomeInstanceEdges
-    forM_ ["CacheEven.hs", "CacheEven.hs-boot", "CacheOdd.hs", "CacheEntry.hs"] $ \file ->
-      copyFile ("test-source-boot/fixtures" </> file) (work </> file)
-    cold <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
-      (work </> "CacheEntry.hs") [work] (Just (work </> "build-products"))
-    unless (all (`elem` preparedNames cold) ["CacheEven", "CacheOdd", "CacheEntry"]
-        && null (pprAcceptedCandidates cold)) $
-      fail "cold SOURCE graph omitted original defining products"
-    unless (dependencyCacheSafe (pprDependencies cold)
-        && dependencySelectionComplete (pprDependencies cold)) $
-      fail "cold SOURCE graph lacks final source/package evidence"
-    writeManifest work cold
-    verifyHydration work cold
+    withTiming (withScratch sourceBootReuseAt)
     candidateSitedSiblings
-    partial <- runPipelineSelected (PreparedProducts (Just (manifest work)))
-      (work </> "CacheEven.hs") [work]
-    requireRefused "SCC containing the fresh target" partial
-    withResidentPipelineSelected [work] $ \compile -> do
-      first <- compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
-        Nothing (work </> "CacheEntry.hs") [] Nothing
-      requireReused "first resident request" first
-      second <- compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
-        Nothing (work </> "CacheEntry.hs") [] Nothing
-      requireReused "warm resident request" second
-      let originalProduct = work </> "CacheEven.candidate.hi.descriptor-only.tpmod"
-          reuse = compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
-            Nothing (work </> "CacheEntry.hs") [] Nothing
-      originalBytes <- BS.readFile originalProduct
-      (BS.writeFile originalProduct "changed original native bytes" >>
-        reuse >>= requireRefused "changed original native product")
-        `finally` BS.writeFile originalProduct originalBytes
-      reuse >>= requireReused "restored original native product"
-      exerciseRefusals work (compile (PreparedProducts (Just (manifest work))) Set.empty
-        GeneralCompile Nothing (work </> "CacheEntry.hs") [] Nothing)
-    executable <- getExecutablePath
-    (exit, _, errors) <- readProcessWithExitCode executable ["--fresh", work] ""
-    unless (exit == ExitSuccess) $ fail ("fresh worker reuse failed: " ++ errors)
-    _ <- reuseFresh work >>= requireReused "reuse after refusal"
-    putStrLn "SOURCE boot cache: cold, resident, warm, fresh-worker, ABI and CPP refusal passed"
     setEnv "TIDEPOOL_TIMING" "1"
     mixedGraph False 1
     mixedGraph True 10
   _ -> fail "unexpected SOURCE boot test arguments"
+
+-- The SOURCE SCC reuses one genuine immutable packet across isolated mutable
+-- compiler sessions; its v8 scope carries the same original native products.
+sourceBootReuseAt :: FilePath -> IO ()
+sourceBootReuseAt work = do
+  forM_ ["CacheEven.hs", "CacheEven.hs-boot", "CacheOdd.hs", "CacheEntry.hs"] $ \file ->
+    copyFile ("test-source-boot/fixtures" </> file) (work </> file)
+  cold <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
+    (work </> "CacheEntry.hs") [work] (Just (work </> "build-products"))
+  unless (all (`elem` preparedNames cold) ["CacheEven", "CacheOdd", "CacheEntry"]
+      && null (pprAcceptedCandidates cold)) $
+    fail "cold SOURCE graph omitted original defining products"
+  unless (dependencyCacheSafe (pprDependencies cold)
+      && dependencySelectionComplete (pprDependencies cold)) $
+    fail "cold SOURCE graph lacks final source/package evidence"
+  let nativeScope = work </> "native-scope.cbor"
+  writeGenuineCandidateNativeScope ["CacheEven", "CacheOdd"] work
+    (work </> "CacheEntry.hs") [work] nativeScope cold
+  deliveredScope <- readExactScope nativeScope >>= either fail pure
+  unless (Set.fromList (map originalModule (scopeProducts deliveredScope))
+      == Set.fromList ["CacheEven", "CacheOdd"]
+      && not (null (scopeExecutionGraphs deliveredScope))
+      && not (null (scopeExecutionNativeOwners deliveredScope))) $
+    fail "genuine SOURCE scope omitted original native rows or authenticated execution custody"
+  exactScopeV8Checks nativeScope
+  candidateCanonicalChecks nativeScope (manifest work)
+  verifyHydration work cold
+  partial <- runPipelineSelected (PreparedProducts (Just (manifest work)))
+    (work </> "CacheEven.hs") [work]
+  requireRefused "SCC containing the fresh target" partial
+  withResidentPipelineSelected [work] $ \compile -> do
+    first <- compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
+      Nothing (work </> "CacheEntry.hs") [] Nothing
+    requireReused "first resident request" first
+    second <- compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
+      Nothing (work </> "CacheEntry.hs") [] Nothing
+    requireReused "warm resident request" second
+    candidates <- readModuleCandidates (manifest work) >>= either fail pure
+    originalProduct <- case [candidateProductPath candidate | candidate <- candidates
+      , candidateModule candidate == "CacheEven"] of
+      [path] -> pure path
+      _ -> fail "genuine SOURCE fixture lost its native product"
+    let reuse = compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
+          Nothing (work </> "CacheEntry.hs") [] Nothing
+    originalBytes <- BS.readFile originalProduct
+    (BS.writeFile originalProduct "changed original native bytes" >>
+      reuse >>= requireRefused "changed original native product")
+      `finally` BS.writeFile originalProduct originalBytes
+    reuse >>= requireReused "restored original native product"
+    exerciseRefusals work (compile (PreparedProducts (Just (manifest work))) Set.empty
+      GeneralCompile Nothing (work </> "CacheEntry.hs") [] Nothing)
+  executable <- getExecutablePath
+  (exit, _, errors) <- readProcessWithExitCode executable ["--fresh", work] ""
+  unless (exit == ExitSuccess) $ fail ("fresh worker reuse failed: " ++ errors)
+  _ <- reuseFresh work >>= requireReused "reuse after refusal"
+  putStrLn "SOURCE boot cache: cold, resident, warm, fresh-worker, ABI and CPP refusal passed"
 
 -- Load provenance is local to a request; retained owners and source changes
 -- must still govern the next exact frontend.
@@ -1830,6 +1855,11 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
         Just hmi | let linkable = hm_linkable hmi
                  , isJust (homeMod_bytecode linkable) || isJust (homeMod_object linkable) -> pure ()
         _ -> fail "native candidate retention discarded its actual GHC executable"
+      putStrLn ("candidate GHC load evidence: expected=" ++ show expected
+        ++ " accepted=" ++ show accepted ++ " fresh=" ++ show fresh
+        ++ " executable_demand=" ++ show (counterValues "candidate_executable_required" diagnostics)
+        ++ " helper_frontends=" ++ show (length (filter (==
+          "tidepool-canonical-frontend module=MetadataQuoteSupport") (lines diagnostics))))
   putStrLn "candidate GHC load: original native reuse, actual quoter execution and source A/B/A passed"
 
 -- Pure issuer and scope-budget controls; the runtime suite separately drives
@@ -2782,6 +2812,8 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
         && not (loadedOwner `elem` lines diagnostics && checkedOwner `elem` lines diagnostics)
         && "tidepool-checked module=MetadataTarget target=True" `elem` lines diagnostics) $
       fail "exact metadata repeated the loaded source frontend or changed its instance result"
+    putStrLn ("exact loaded metadata evidence: owner_frontends="
+      ++ show (frontendCount "MetadataOwner" diagnostics))
     (extensionOnly, extensionDiagnostics) <- captureDiagnostics
       (checked "MetadataExtensionOnlyTarget.hs")
     let executableOwner env = case lookupHpt (hsc_HPT env) (mkModuleName "MetadataOwner") of
@@ -2827,6 +2859,11 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
         && "tidepool-checked-dependency-executable module=MetadataQuoteSupport bytecode=True object=False" `elem` lines candidateQuoteDiagnostics
         && counterValues "candidate_executable_required" candidateQuoteDiagnostics == [1]) $
       fail "source candidate discarded a GHC-required quoter executable"
+    putStrLn ("candidate loaded metadata evidence: accepted_count="
+      ++ show (counterValues "candidate_admission.CandidateAccepted" candidateQuoteDiagnostics)
+      ++ " executable_demand=" ++ show (counterValues "candidate_executable_required" candidateQuoteDiagnostics)
+      ++ " helper_frontends=" ++ show (frontendCount "MetadataQuoteSupport" candidateQuoteDiagnostics)
+      ++ " quoter_frontends=" ++ show (frontendCount "MetadataQuoter" candidateQuoteDiagnostics))
     hidden <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
       (work </> "MetadataHiddenFamily.hs") [work] Nothing
     writeGenuineMetadataScope scopePath work (work </> "MetadataHiddenFamily.hs") [work]
@@ -2861,6 +2898,10 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
           && counterValues "candidate_admission.CandidateAccepted" metadataDiagnostics == [1]
           && counterValues "candidate_executable_required" metadataDiagnostics == [0]) $
         fail "metadata-only candidate required or restored executable Core"
+      putStrLn ("metadata-only candidate evidence: accepted_count="
+        ++ show (counterValues "candidate_admission.CandidateAccepted" metadataDiagnostics)
+        ++ " executable_demand=" ++ show (counterValues "candidate_executable_required" metadataDiagnostics)
+        ++ " owner_frontends=" ++ show (frontendCount "MetadataOwner" metadataDiagnostics))
       ) `finally` BS.writeFile corePath originalCore
     family <- try (checked "MetadataFamilyTarget.hs") :: IO (Either SomeException CheckedEnvironmentResult)
     case family of
@@ -3902,12 +3943,15 @@ verifyHydration work cold = do
         , ms_hsc_src summary == HsSrcFile, ms_mod_name summary `elem` names]
       boots = [summary | ModuleNode _ summary <- mgModSummaries' graph
         , ms_hsc_src summary == HsBootFile, ms_mod_name summary `elem` names]
+  candidates <- readModuleCandidates (manifest work) >>= either fail pure
   interfaces <- forM ["CacheEven", "CacheOdd"] $ \name -> do
-    let hi = work </> (name ++ ".candidate.hi")
-    bytes <- BS.readFile hi
+    candidate <- case [value | value <- candidates, candidateModule value == name] of
+      [value] -> pure value
+      _ -> fail "SOURCE hydration lost its genuine candidate interface"
     iface <- maybe (fail "missing original source iface") pure
       (Map.lookup (mkModuleName name) (pprProductInterfaces cold))
-    pure (ExactIfaceArtifact "main" name hi (digest bytes) [], iface)
+    pure (ExactIfaceArtifact (candidateUnit candidate) name (candidateInterface candidate)
+      (candidateInterfaceSha256 candidate) (candidateInterfaceRequirements candidate), iface)
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     fresh <- liftIO (freshExactState producer)
@@ -3917,9 +3961,6 @@ verifyHydration work cold = do
     case restored of
       Left reason -> liftIO (fail ("fresh SOURCE hydration refused: " ++ reason))
       Right _ -> pure ()
-
-writeManifest :: FilePath -> PreparedPipelineResult -> IO ()
-writeManifest = writeManifestFor ["CacheEven", "CacheOdd"]
 
 writeManifestFor :: [String] -> FilePath -> PreparedPipelineResult -> IO ()
 writeManifestFor names work cold = do

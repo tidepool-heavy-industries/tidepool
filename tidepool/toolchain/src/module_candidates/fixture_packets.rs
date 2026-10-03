@@ -30,11 +30,11 @@ fn source_boot_candidate_packet_producer() {
     assert!(request.len() <= MANIFEST_LIMIT);
     let request: Value = ciborium::de::from_reader(request.as_slice()).unwrap();
     let fields = request.as_array().expect("fixture request tuple");
-    assert_eq!(fields.len(), 7);
-    assert_eq!(text_field(&fields[0]), "TPSOURCEBOOTFIXTURE1");
+    assert_eq!(fields.len(), 8);
+    assert_eq!(text_field(&fields[0]), "TPSOURCEBOOTFIXTURE2");
     let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
     let producer = endpoint.identity().producer_bytes();
-    assert_eq!(text_field(&fields[6]), endpoint.identity().producer_hex());
+    assert_eq!(text_field(&fields[7]), endpoint.identity().producer_hex());
     let producer_sha =
         crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
             .sha256();
@@ -50,6 +50,17 @@ fn source_boot_candidate_packet_producer() {
             module,
         })
         .collect::<Vec<_>>();
+    let native_owners = names(&fields[5])
+        .into_iter()
+        .map(|module| ExactModuleIdentity {
+            unit: "main".into(),
+            module,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        (exact_owners.is_empty() && native_owners.is_empty()) || !matches!(fields[6], Value::Null),
+        "retained interface/native custody requires an actual delivered scope"
+    );
     let delivery = packet.join("delivery");
     fs::create_dir(&delivery).unwrap();
     let mut context = ExactDeclarationContext::new(&[], &[], vec![])
@@ -96,6 +107,41 @@ fn source_boot_candidate_packet_producer() {
                 .extend_interface_artifacts(&view.interface_projection(&exact_owners).unwrap())
                 .unwrap();
         }
+        if !native_owners.is_empty() {
+            context = context
+                .extend_interface_artifacts(&view.interface_projection(&native_owners).unwrap())
+                .unwrap();
+            let native = certified
+                .recovery_products
+                .iter()
+                .filter(|product| {
+                    native_owners.iter().any(|owner| {
+                        owner.unit == product.owner().unit && owner.module == product.owner().module
+                    })
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                native
+                    .iter()
+                    .map(|product| ExactModuleIdentity {
+                        unit: product.owner().unit.clone(),
+                        module: product.owner().module.clone(),
+                    })
+                    .collect::<BTreeSet<_>>(),
+                native_owners.iter().cloned().collect::<BTreeSet<_>>(),
+                "native scope owners require genuine original products"
+            );
+            assert!(
+                native
+                    .iter()
+                    .all(|product| product.execution_source().is_some()),
+                "native execution scope requires original authenticated source recipes"
+            );
+            context = context
+                .extend_checked_original_products(producer_sha, &native, &BTreeMap::new())
+                .unwrap();
+        }
         if !requested.is_empty() {
             let (_, publication) = prepare_publication(
                 producer,
@@ -127,10 +173,15 @@ fn source_boot_candidate_packet_producer() {
             fs::copy(&selected.manifest_path, destination).unwrap();
         }
     } else {
-        assert!(requested.is_empty() && exact_owners.is_empty() && include.is_empty());
+        assert!(
+            requested.is_empty()
+                && exact_owners.is_empty()
+                && native_owners.is_empty()
+                && include.is_empty()
+        );
     }
-    if !matches!(fields[5], Value::Null) {
-        let destination = PathBuf::from(text_field(&fields[5]));
+    if !matches!(fields[6], Value::Null) {
+        let destination = PathBuf::from(text_field(&fields[6]));
         assert!(destination.is_absolute());
         let scope = Arc::new(context)
             .prepare_compilation(&delivery.join("scope"), producer)
