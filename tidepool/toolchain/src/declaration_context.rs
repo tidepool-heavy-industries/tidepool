@@ -1764,6 +1764,50 @@ fn boolean(value: &Value) -> Result<bool, CompileError> {
     }
 }
 
+fn scope_interface_evidence(
+    entry: &ArtifactEntry,
+    root: &Path,
+    validation: &mut PackageInterfaceValidation,
+) -> Result<Value, CompileError> {
+    let interface = match (&entry.descriptor.kind, &entry.payload) {
+        (ArtifactKind::CanonicalModuleInterface, ArtifactPayload::Canonical(interface)) => {
+            interface
+        }
+        (ArtifactKind::OriginalModule, ArtifactPayload::Original(product)) => product
+            .module_interface()
+            .ok_or_else(|| failure("native interface evidence is missing"))?,
+        (ArtifactKind::LexicalJoin, ArtifactPayload::Interface(_)) => {
+            return Ok(Value::Array(vec![text("join")]))
+        }
+        (ArtifactKind::ValueInterface, ArtifactPayload::Interface(_)) => {
+            return Ok(Value::Array(vec![text("value")]))
+        }
+        _ => return Err(failure("interface evidence kind differs from payload")),
+    };
+    let reference = recovery_artifacts::materialize_module_interface(
+        root,
+        interface,
+        validation,
+        MaterializationMode::Scratch,
+    )
+    .map_err(failure)?;
+    Ok(Value::Array(vec![
+        text("module"),
+        path_value(&root.join(reference.certificate_path))?,
+        text(hex(&reference.certificate_sha256)),
+        reference
+            .core
+            .as_ref()
+            .map(|core| path_value(&root.join(&core.path)))
+            .transpose()?
+            .unwrap_or(Value::Null),
+        reference
+            .core
+            .as_ref()
+            .map_or(Value::Null, |core| text(hex(&core.sha256))),
+    ]))
+}
+
 fn failure(message: impl std::fmt::Display) -> CompileError {
     CompileError::ExtractFailed(format!("exact declaration context: {message}"))
 }
@@ -1997,7 +2041,13 @@ impl ExactDeclarationContext {
         for descriptor in artifacts.descriptors() {
             self.admit_producer(descriptor.producer_sha256)?;
         }
-        self.inventory = self.inventory.merge(artifacts)?;
+        let owners = artifacts
+            .interface_owners()
+            .into_iter()
+            .map(|interface| interface.owner)
+            .collect::<Vec<_>>();
+        let interfaces = artifacts.interface_projection(&owners)?;
+        self.inventory = self.inventory.merge(&interfaces)?;
         self.normalize()?;
         Ok(self)
     }
@@ -2766,43 +2816,16 @@ impl ExactDeclarationContext {
                             ),
                             path_value(&packages)?,
                             text(sha256(&std::fs::read(packages)?)),
-                            match metadata.artifacts.values().find_map(|entry| {
-                                match &entry.payload {
-                                    ArtifactPayload::Canonical(interface)
-                                        if interface.unit() == iface.unit
-                                            && interface.module() == iface.module =>
-                                    {
-                                        Some(interface)
-                                    }
-                                    _ => None,
-                                }
-                            }) {
-                                None => Value::Null,
-                                Some(interface) => {
-                                    let reference =
-                                        recovery_artifacts::materialize_module_interface(
-                                            root,
-                                            interface,
-                                            &mut validation,
-                                            MaterializationMode::Scratch,
-                                        )
-                                        .map_err(failure)?;
-                                    Value::Array(vec![
-                                        path_value(&root.join(reference.certificate_path))?,
-                                        text(hex(&reference.certificate_sha256)),
-                                        reference
-                                            .core
-                                            .as_ref()
-                                            .map(|core| path_value(&root.join(&core.path)))
-                                            .transpose()?
-                                            .unwrap_or(Value::Null),
-                                        reference
-                                            .core
-                                            .as_ref()
-                                            .map_or(Value::Null, |core| text(hex(&core.sha256))),
-                                    ])
-                                }
-                            },
+                            scope_interface_evidence(
+                                metadata
+                                    .entries
+                                    .get(&identity(&iface.unit, &iface.module))
+                                    .ok_or_else(|| {
+                                        failure("interface evidence owner is missing")
+                                    })?,
+                                root,
+                                &mut validation,
+                            )?,
                         ]))
                     })
                     .collect::<Result<Vec<_>, CompileError>>()?,
@@ -3124,12 +3147,15 @@ mod tests {
             &mut packages,
         )
         .unwrap();
-        CertifiedRecoveryProduct::from_certification(
-            owner,
-            interface,
-            product,
-            packages,
-            certification,
+        crate::certified_products::fixture_finalized_product(
+            CertifiedRecoveryProduct::from_certification(
+                owner,
+                interface,
+                product,
+                packages,
+                certification,
+            ),
+            [2; 32],
         )
     }
 
@@ -3216,7 +3242,10 @@ mod tests {
             .clone()
             .extend_checked_original_products(
                 context.producer,
-                &[support_product("Later")],
+                &[crate::certified_products::fixture_finalized_product(
+                    support_product("Later"),
+                    context.producer,
+                )],
                 &BTreeMap::new(),
             )
             .unwrap();
@@ -3310,11 +3339,21 @@ mod tests {
             .admit(
                 &inventory.empty_view(),
                 vec![
-                    ArtifactEntry::original(producer_sha256, support_product("Alpha"), Vec::new())
-                        .unwrap(),
                     ArtifactEntry::original(
                         producer_sha256,
-                        support_product("Beta"),
+                        crate::certified_products::fixture_finalized_product(
+                            support_product("Alpha"),
+                            producer_sha256,
+                        ),
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                    ArtifactEntry::original(
+                        producer_sha256,
+                        crate::certified_products::fixture_finalized_product(
+                            support_product("Beta"),
+                            producer_sha256,
+                        ),
                         vec![identity("fixture", "Alpha")],
                     )
                     .unwrap(),
@@ -3350,6 +3389,42 @@ mod tests {
     }
 
     #[test]
+    fn exact_scope_evidence_uses_admitted_artifact_roles() {
+        let (context, _) = metadata_fixture();
+        let root = tempfile::tempdir().unwrap();
+        let metadata = context.inventory.metadata_snapshot();
+        for entry in metadata.entries.values() {
+            let value = scope_interface_evidence(
+                entry,
+                root.path(),
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap();
+            let row = value.as_array().unwrap();
+            match entry.descriptor.kind {
+                ArtifactKind::OriginalModule | ArtifactKind::CanonicalModuleInterface => {
+                    assert_eq!(row.len(), 5);
+                    assert_eq!(row[0], text("module"));
+                    assert!(row[3].as_text().is_some());
+                    assert!(row[4].as_text().is_some());
+                }
+                ArtifactKind::LexicalJoin => assert_eq!(row, &[text("join")]),
+                ArtifactKind::ValueInterface => assert_eq!(row, &[text("value")]),
+            }
+        }
+        let mut forged = metadata.entries[&identity("fixture", "Joined")]
+            .as_ref()
+            .clone();
+        forged.descriptor.kind = ArtifactKind::CanonicalModuleInterface;
+        assert!(scope_interface_evidence(
+            &forged,
+            root.path(),
+            &mut PackageInterfaceValidation::default()
+        )
+        .is_err());
+    }
+
+    #[test]
     fn metadata_validation_indexes_owners_and_rechecks_late_corruption() {
         let (context, _) = metadata_fixture();
         let directory = tempfile::tempdir().unwrap();
@@ -3357,9 +3432,9 @@ mod tests {
         let before = context.inventory.inventory().metrics();
         context.validate_artifacts(&artifacts).unwrap();
         let after = context.inventory.inventory().metrics();
-        assert_eq!(after.graph_visits - before.graph_visits, 4);
+        assert_eq!(after.graph_visits - before.graph_visits, 6);
         assert_eq!(after.view_queries - before.view_queries, 1);
-        assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 4);
+        assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 10);
         assert!(context.validate_artifacts(&artifacts[..3]).is_err());
         let mut duplicate = artifacts.clone();
         duplicate.push(artifacts[0].clone());
@@ -3472,7 +3547,10 @@ mod tests {
             .clone()
             .extend_checked_original_products(
                 context.producer,
-                &[support_product("Later")],
+                &[crate::certified_products::fixture_finalized_product(
+                    support_product("Later"),
+                    context.producer,
+                )],
                 &BTreeMap::new(),
             )
             .unwrap();
@@ -4619,7 +4697,7 @@ mod tests {
             .unwrap();
         assert!(request.program_source_lexical().is_empty());
         let native = request.program_support.as_ref().unwrap();
-        assert_eq!(native.descriptors().len(), 1);
+        assert_eq!(native.descriptors().len(), 2);
         assert!(context
             .retain_value_source_surface(native, request.program_source_lexical())
             .unwrap()
@@ -4844,12 +4922,15 @@ mod tests {
         ]);
         let mut package_bytes = Vec::new();
         ciborium::ser::into_writer(&package_value, &mut package_bytes).unwrap();
-        let product = CertifiedRecoveryProduct::from_certification(
-            owner,
-            interface,
-            product_bytes,
-            package_bytes,
-            certification,
+        let product = crate::certified_products::fixture_finalized_product(
+            CertifiedRecoveryProduct::from_certification(
+                owner,
+                interface,
+                product_bytes,
+                package_bytes,
+                certification,
+            ),
+            [2; 32],
         );
         let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let context = Arc::new(
@@ -4902,12 +4983,15 @@ mod tests {
         let certification =
             crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
                 .unwrap();
-        let product = CertifiedRecoveryProduct::from_certification(
-            owner,
-            b"interface".to_vec(),
-            b"product".to_vec(),
-            Vec::new(),
-            certification,
+        let product = crate::certified_products::fixture_finalized_product(
+            CertifiedRecoveryProduct::from_certification(
+                owner,
+                b"interface".to_vec(),
+                b"product".to_vec(),
+                Vec::new(),
+                certification,
+            ),
+            [2; 32],
         );
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], Vec::new())
@@ -4973,12 +5057,15 @@ mod tests {
         let certification =
             crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
                 .unwrap();
-        let product = CertifiedRecoveryProduct::from_certification(
-            owner.clone(),
-            b"interface".to_vec(),
-            b"product".to_vec(),
-            Vec::new(),
-            certification.clone(),
+        let product = crate::certified_products::fixture_finalized_product(
+            CertifiedRecoveryProduct::from_certification(
+                owner.clone(),
+                b"interface".to_vec(),
+                b"product".to_vec(),
+                Vec::new(),
+                certification.clone(),
+            ),
+            [2; 32],
         );
         let context = ExactDeclarationContext::new(&[], &[], Vec::new())
             .unwrap()
@@ -4989,7 +5076,7 @@ mod tests {
             )
             .unwrap();
         assert!(context.lexical_graph().is_empty());
-        assert_eq!(context.artifact_view().descriptors().len(), 1);
+        assert_eq!(context.artifact_view().descriptors().len(), 2);
         let repeated = context
             .clone()
             .extend_checked_original_products(
@@ -4999,7 +5086,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(context.semantic_sha256(), repeated.semantic_sha256());
-        assert_eq!(repeated.artifact_view().inventory().node_count(), 1);
+        assert_eq!(repeated.artifact_view().inventory().node_count(), 2);
         let changed = CertifiedRecoveryProduct::from_certification(
             owner,
             b"interface".to_vec(),
@@ -5047,12 +5134,15 @@ mod tests {
             &mut packages,
         )
         .unwrap();
-        let product = CertifiedRecoveryProduct::from_certification(
-            owner,
-            b"iface".to_vec(),
-            b"product".to_vec(),
-            packages,
-            seal,
+        let product = crate::certified_products::fixture_finalized_product(
+            CertifiedRecoveryProduct::from_certification(
+                owner,
+                b"iface".to_vec(),
+                b"product".to_vec(),
+                packages,
+                seal,
+            ),
+            [7; 32],
         )
         .with_execution_source_with_validation(graph, &mut validation)
         .unwrap();
@@ -5381,7 +5471,7 @@ mod tests {
         ];
         let manifest = encode_scope_manifest(fields, Some(execution), None).unwrap();
         let decoded: Value = ciborium::de::from_reader(manifest.as_slice()).unwrap();
-        assert_eq!(decoded.as_array().unwrap()[1], text("6"));
+        assert_eq!(decoded.as_array().unwrap()[1], text("8"));
         std::fs::write(root.join("exact-declaration-scope.cbor"), manifest).unwrap();
         let missing = execution_scope_fixture(&entries[..1], &root)
             .unwrap()
@@ -5415,12 +5505,15 @@ mod tests {
                 &mut packages,
             )
             .unwrap();
-            let product = CertifiedRecoveryProduct::from_certification(
-                owner,
-                b"iface".to_vec(),
-                b"product".to_vec(),
-                packages,
-                seal,
+            let product = crate::certified_products::fixture_finalized_product(
+                CertifiedRecoveryProduct::from_certification(
+                    owner,
+                    b"iface".to_vec(),
+                    b"product".to_vec(),
+                    packages,
+                    seal,
+                ),
+                [2; 32],
             );
             Arc::new(ArtifactEntry::original([7; 32], product, vec![]).unwrap())
         };
@@ -5476,6 +5569,8 @@ mod tests {
         let owner = product.owner().clone();
         let producer = b"execution manifest producer";
         let producer_sha256 = Sha256::digest(producer).into();
+        let product =
+            crate::certified_products::fixture_finalized_product(product, producer_sha256);
         let evidence = DependencyEvidence {
             version: 4,
             cache_safe: true,
@@ -5535,6 +5630,8 @@ mod tests {
             product.package_imports_bytes().to_vec(),
             seal,
         )
+        .with_module_interface(product.module_interface().unwrap().clone())
+        .unwrap()
         .with_execution_source_with_validation(graph.clone(), &mut validation)
         .unwrap();
         let context = Arc::new(
@@ -5560,7 +5657,7 @@ mod tests {
         let value: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         let fields = value.as_array().unwrap();
         assert_eq!(fields.len(), 9);
-        assert_eq!(fields[1], text("6"));
+        assert_eq!(fields[1], text("8"));
         assert_eq!(fields[8], Value::Null);
         assert_eq!(
             fields[7].as_array().unwrap()[1].as_array().unwrap().len(),
@@ -5617,16 +5714,15 @@ mod tests {
         ]);
         for authorization in [None, Some(authorization)] {
             let mut expected = base.clone();
-            expected[1] = text(if authorization.is_some() { "4" } else { "2" });
-            if let Some(value) = &authorization {
-                expected.push(value.clone());
-            }
+            expected[1] = text("8");
+            expected.push(Value::Null);
+            expected.push(authorization.clone().unwrap_or(Value::Null));
             let mut legacy = Vec::new();
             ciborium::ser::into_writer(&Value::Array(expected), &mut legacy).unwrap();
             assert_eq!(
                 encode_scope_manifest(base.clone(), None, authorization.clone()).unwrap(),
                 legacy,
-                "optional recipe absence preserves legacy v2/v4 canonical bytes"
+                "v8 always retains explicit execution and purpose fields"
             );
             let overflow = Value::Array(vec![
                 Value::Bytes(vec![0; EXACT_SCOPE_BYTES_LIMIT - 32]),
@@ -5641,7 +5737,7 @@ mod tests {
                     .unwrap();
             let decoded: Value = ciborium::de::from_reader(with_recipe.as_slice()).unwrap();
             let decoded = decoded.as_array().unwrap();
-            assert_eq!(decoded[1], text("6"));
+            assert_eq!(decoded[1], text("8"));
             assert_eq!(decoded[8], authorization.unwrap_or(Value::Null));
         }
     }

@@ -251,7 +251,7 @@ impl ArtifactEntry {
     pub(crate) fn original(
         producer: [u8; 32],
         product: CertifiedRecoveryProduct,
-        requirements: Vec<ExactModuleIdentity>,
+        _requirements: Vec<ExactModuleIdentity>,
     ) -> Result<Self, CompileError> {
         let owner = product.owner();
         let canonical = product
@@ -281,8 +281,9 @@ impl ArtifactEntry {
             .into_iter()
             .map(|((unit, module), seal)| (ExactModuleIdentity { unit, module }, seal))
             .collect::<BTreeMap<_, _>>();
-        let mut requirements = requirements;
-        requirements.extend(interface_seals.keys().cloned());
+        // The canonical compiler interface owns type closure. Source lexical
+        // adjacency cannot add or remove its sealed interface requirements.
+        let requirements = interface_seals.keys().cloned().collect();
         let native_requirements = crate::certified_products::original_native_requirements(&product)
             .map_err(|error| {
                 CompileError::ExtractFailed(format!(
@@ -421,6 +422,33 @@ pub(crate) fn restore_recovery_interface_dependencies(
         ));
     }
     for entry in entries.iter_mut() {
+        if let ArtifactPayload::Original(product) = &entry.payload {
+            let canonical = ArtifactEntry::canonical(
+                product
+                    .module_interface()
+                    .ok_or_else(|| failure("recovered native lacks canonical carrier"))?
+                    .clone(),
+            )
+            .descriptor
+            .id;
+            let direct = edges
+                .iter()
+                .filter(|(from, _, _)| *from == entry.descriptor.id)
+                .cloned()
+                .collect::<Vec<_>>();
+            if direct
+                != vec![(
+                    entry.descriptor.id,
+                    canonical,
+                    ArtifactDependency::Interface,
+                )]
+            {
+                return Err(failure(
+                    "native interface edge differs from canonical carrier",
+                ));
+            }
+            continue;
+        }
         let requirements = edges
             .iter()
             .filter(|(from, to, dependency)| {
@@ -751,7 +779,7 @@ impl ArtifactInventory {
         }
         for (id, entry) in additions {
             let source = state.indices[&id];
-            for owner in &entry.requirements {
+            for owner in entry.requirements.iter().filter(|_| !entry.is_native()) {
                 let target = state.indices[&state
                     .owners
                     .get(owner)
@@ -942,7 +970,7 @@ impl ArtifactView {
             let entry = &state.payloads[&id];
             let owner = entry.descriptor.owner.clone();
             if entry.is_native() || !entries.contains_key(&owner) {
-                entries.insert(owner, Arc::clone(entry));
+                entries.insert(owner, id);
             }
             artifacts.insert(id, Arc::clone(entry));
             dependencies.extend(
@@ -953,9 +981,13 @@ impl ArtifactView {
             );
         }
         dependencies.sort();
+        let entries = entries
+            .into_iter()
+            .map(|(owner, id)| (owner, Arc::clone(&artifacts[&id])))
+            .collect::<BTreeMap<_, _>>();
         state
             .entry_handle_copies
-            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+            .fetch_add((entries.len() + artifacts.len()) as u64, Ordering::Relaxed);
         ArtifactMetadataSnapshot {
             entries,
             artifacts,
@@ -1147,7 +1179,7 @@ impl ArtifactView {
             .collect::<Vec<_>>();
         state
             .entry_handle_copies
-            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+            .fetch_add((entries.len() + artifacts.len()) as u64, Ordering::Relaxed);
         entries.sort_by(|a, b| a.descriptor.owner.cmp(&b.descriptor.owner));
         entries
     }
@@ -1162,7 +1194,7 @@ impl ArtifactView {
             .collect::<Vec<_>>();
         state
             .entry_handle_copies
-            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+            .fetch_add((entries.len() + artifacts.len()) as u64, Ordering::Relaxed);
         entries
     }
     pub(crate) fn entries_for_owners(
@@ -1185,7 +1217,7 @@ impl ArtifactView {
             .collect::<BTreeMap<_, _>>();
         state
             .entry_handle_copies
-            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+            .fetch_add((entries.len() + artifacts.len()) as u64, Ordering::Relaxed);
         entries
     }
 
@@ -1260,24 +1292,108 @@ mod tests {
         name: &str,
         requirements: Vec<ExactModuleIdentity>,
     ) -> ArtifactEntry {
+        let requirements = requirements
+            .into_iter()
+            .map(|owner| {
+                (
+                    (owner.unit, owner.module.clone()),
+                    digest(owner.module.as_bytes()),
+                )
+            })
+            .collect();
+        ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+            [2; 32],
+            unit,
+            name,
+            requirements,
+        ))
+    }
+
+    fn native_entry(name: &str, requirements: &[&str]) -> ArtifactEntry {
+        let interface = crate::certified_products::fixture_module_interface(
+            [2; 32],
+            "unit",
+            name,
+            requirements
+                .iter()
+                .map(|required| {
+                    (
+                        ("unit".into(), (*required).into()),
+                        digest(required.as_bytes()),
+                    )
+                })
+                .collect(),
+        );
         let owner = CachedHomeOwner {
-            unit: unit.into(),
+            unit: "unit".into(),
             module: name.into(),
             module_version: ModuleVersion([1; 32]),
-            skinny_iface_sha256: digest(name.as_bytes()),
+            skinny_iface_sha256: interface.interface_sha256(),
             product_sha256: digest(name.as_bytes()),
         };
-        let certification =
-            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
-                .unwrap();
+        let certification = crate::certified_products::encode_home_certification_with_module(
+            &owner,
+            &[],
+            &BTreeMap::new(),
+            interface.requirements(),
+            digest(interface.certificate_bytes()),
+        )
+        .unwrap();
         let product = CertifiedRecoveryProduct::from_certification(
             owner,
             name.as_bytes().to_vec(),
             name.as_bytes().to_vec(),
-            vec![],
+            interface.package_imports_bytes().to_vec(),
             certification,
-        );
-        ArtifactEntry::original([2; 32], product, requirements).unwrap()
+        )
+        .with_module_interface(interface)
+        .unwrap();
+        let mut entry = ArtifactEntry::original(
+            [2; 32],
+            product,
+            requirements.iter().map(|name| module(name)).collect(),
+        )
+        .unwrap();
+        for required in ["Original", "Helper"] {
+            entry.native_owners.insert(
+                module(required),
+                NativeOwnerKey {
+                    owner: module(required),
+                    version: [1; 32],
+                    interface: digest(required.as_bytes()),
+                    product: digest(required.as_bytes()),
+                },
+            );
+        }
+        entry
+    }
+
+    #[test]
+    fn later_native_admission_cannot_broaden_an_interface_capability() {
+        let inventory = ArtifactInventory::default();
+        let canonical = entry("Owner", &[]);
+        let canonical_id = canonical.descriptor.id;
+        let type_cap = inventory
+            .admit(&inventory.empty_view(), vec![canonical])
+            .unwrap();
+        let native = native_entry("Owner", &[]);
+        let native_id = native.descriptor.id;
+        let execution_cap = inventory.admit(&type_cap, vec![native]).unwrap();
+        assert_eq!(type_cap.artifact_ids(), vec![canonical_id]);
+        assert!(type_cap.entries().iter().all(|entry| !entry.is_native()));
+        assert!(execution_cap.artifact_ids().contains(&native_id));
+        assert!(execution_cap.dependencies().contains(&(
+            native_id,
+            canonical_id,
+            ArtifactDependency::Interface
+        )));
+        let projected = execution_cap
+            .interface_projection(&[module("Owner")])
+            .unwrap();
+        assert_eq!(projected.artifact_ids(), vec![canonical_id]);
+        drop(execution_cap);
+        assert_eq!(inventory.node_count(), 1);
+        assert_eq!(type_cap.artifact_ids(), vec![canonical_id]);
     }
 
     #[test]
@@ -1316,30 +1432,15 @@ mod tests {
         required: &ArtifactDescriptor,
         seal: [u8; 32],
     ) -> ArtifactEntry {
-        let original = entry(name, &[]);
-        let ArtifactPayload::Original(product) = original.payload else {
-            unreachable!()
-        };
-        let mut wire: ciborium::value::Value =
-            ciborium::de::from_reader(product.certification_bytes()).unwrap();
-        wire.as_array_mut().unwrap()[7] =
-            ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![
-                ciborium::value::Value::Text(required.owner.unit.clone()),
-                ciborium::value::Value::Text(required.owner.module.clone()),
-                ciborium::value::Value::Text(
-                    seal.iter().map(|byte| format!("{byte:02x}")).collect(),
-                ),
-            ])]);
-        let mut certification = Vec::new();
-        ciborium::ser::into_writer(&wire, &mut certification).unwrap();
-        let product = CertifiedRecoveryProduct::from_certification(
-            product.owner().clone(),
-            product.interface_bytes().to_vec(),
-            product.product_bytes().to_vec(),
-            product.package_imports_bytes().to_vec(),
-            certification,
-        );
-        ArtifactEntry::original(original.descriptor.producer_sha256, product, Vec::new()).unwrap()
+        ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+            [2; 32],
+            "unit",
+            name,
+            BTreeMap::from([(
+                (required.owner.unit.clone(), required.owner.module.clone()),
+                seal,
+            )]),
+        ))
     }
 
     #[test]
@@ -1441,10 +1542,12 @@ mod tests {
             &private.descriptor,
             private.descriptor.interface_sha256,
         );
-        let ArtifactPayload::Original(product) = private.payload else {
-            unreachable!()
-        };
-        private = ArtifactEntry::original([8; 32], product, Vec::new()).unwrap();
+        private = ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+            [8; 32],
+            "unit",
+            "PrivateNominalOwner",
+            BTreeMap::new(),
+        ));
         assert!(inventory.admit(&empty, vec![private, dependent]).is_err());
         assert_eq!(inventory.node_count(), 0);
     }
@@ -1489,10 +1592,13 @@ mod tests {
             let empty = inventory.empty_view();
             let original = entry_in_unit("cohort-a", "EpochModule", vec![]);
             let owner = original.descriptor.owner.clone();
-            let ArtifactPayload::Original(product) = &original.payload else {
-                panic!("expected an original fixture");
-            };
-            let conflicting = ArtifactEntry::original([3; 32], product.clone(), vec![]).unwrap();
+            let conflicting =
+                ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+                    [3; 32],
+                    "cohort-a",
+                    "EpochModule",
+                    BTreeMap::new(),
+                ));
             let retained = if simultaneous {
                 empty.clone()
             } else {
@@ -1683,7 +1789,7 @@ mod tests {
     #[test]
     fn metadata_snapshot_preserves_canonical_typed_edges_in_one_closure() {
         let inventory = ArtifactInventory::default();
-        let mut consumer = entry("Consumer", &["Original"]);
+        let mut consumer = native_entry("Consumer", &["Original"]);
         consumer.native_requirements.push((
             module("Original"),
             ArtifactDependency::NativeGroup {
@@ -1704,7 +1810,7 @@ mod tests {
         let view = inventory
             .admit(
                 &inventory.empty_view(),
-                vec![consumer, entry("Original", &[])],
+                vec![consumer, native_entry("Original", &[])],
             )
             .unwrap();
         let expected_descriptors = view.descriptors();
@@ -1713,7 +1819,7 @@ mod tests {
         let metadata = view.metadata_snapshot();
         assert_eq!(
             metadata
-                .entries
+                .artifacts
                 .values()
                 .map(|entry| entry.descriptor.clone())
                 .collect::<Vec<_>>(),
@@ -1721,9 +1827,9 @@ mod tests {
         );
         assert_eq!(metadata.dependencies(), expected_dependencies);
         let after = inventory.metrics();
-        assert_eq!(after.graph_visits - before.graph_visits, 2);
+        assert_eq!(after.graph_visits - before.graph_visits, 4);
         assert_eq!(after.view_queries - before.view_queries, 1);
-        assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 2);
+        assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 6);
     }
 
     #[test]
@@ -1756,7 +1862,7 @@ mod tests {
         let empty = inventory.empty_view();
         let value = entry("Val", &[]);
         let type_user = entry("TypeOnly", &["Val"]);
-        let mut helper = entry("Helper", &["Val"]);
+        let mut helper = native_entry("Helper", &["Val"]);
         helper.native_requirements.push((
             module("Val"),
             ArtifactDependency::NativeBinding {
@@ -1777,7 +1883,7 @@ mod tests {
                 record_parent: None,
             },
         ));
-        let mut consumer = entry("Consumer", &["TypeOnly", "Helper"]);
+        let mut consumer = native_entry("Consumer", &["TypeOnly", "Helper"]);
         consumer.native_requirements.push((
             module("Helper"),
             ArtifactDependency::NativeGroup {
@@ -1889,7 +1995,7 @@ mod tests {
     fn native_requirements_remain_typed_and_do_not_grant_a_value_implementation() {
         let inventory = ArtifactInventory::default();
         let empty = inventory.empty_view();
-        let mut consumer = entry("Consumer", &["Original"]);
+        let mut consumer = native_entry("Consumer", &["Original"]);
         consumer.native_requirements.push((
             module("Original"),
             ArtifactDependency::NativeGroup {
@@ -1898,10 +2004,10 @@ mod tests {
             },
         ));
         let view = inventory
-            .admit(&empty, vec![entry("Original", &[]), consumer])
+            .admit(&empty, vec![native_entry("Original", &[]), consumer])
             .unwrap();
         let dependencies = view.dependencies();
-        assert_eq!(dependencies.len(), 2);
+        assert_eq!(dependencies.len(), 4);
         assert!(dependencies
             .iter()
             .any(|(_, _, edge)| matches!(edge, ArtifactDependency::Interface)));
@@ -1923,8 +2029,8 @@ mod tests {
 
     #[test]
     fn recovery_restores_interface_edges_and_keeps_certified_native_facts() {
-        let original = entry("Original", &[]);
-        let mut consumer = entry("Consumer", &[]);
+        let original = native_entry("Original", &[]);
+        let mut consumer = native_entry("Consumer", &["Original"]);
         consumer.native_requirements.push((
             module("Original"),
             ArtifactDependency::NativeGroup {
@@ -1932,13 +2038,41 @@ mod tests {
                 required_ordinal: 7,
             },
         ));
-        let descriptors = vec![original.descriptor.clone(), consumer.descriptor.clone()];
-        let edges = vec![(
-            consumer.descriptor.id,
-            original.descriptor.id,
-            ArtifactDependency::Interface,
-        )];
-        let mut entries = vec![original.clone(), consumer.clone()];
+        let canonical = |entry: &ArtifactEntry| {
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                panic!("native fixture")
+            };
+            ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+        };
+        let original_interface = canonical(&original);
+        let consumer_interface = canonical(&consumer);
+        let edges = vec![
+            (
+                original.descriptor.id,
+                original_interface.descriptor.id,
+                ArtifactDependency::Interface,
+            ),
+            (
+                consumer.descriptor.id,
+                consumer_interface.descriptor.id,
+                ArtifactDependency::Interface,
+            ),
+            (
+                consumer_interface.descriptor.id,
+                original_interface.descriptor.id,
+                ArtifactDependency::Interface,
+            ),
+        ];
+        let mut entries = vec![
+            original.clone(),
+            consumer.clone(),
+            original_interface,
+            consumer_interface,
+        ];
+        let descriptors = entries
+            .iter()
+            .map(|entry| entry.descriptor.clone())
+            .collect::<Vec<_>>();
         restore_recovery_interface_dependencies(&mut entries, &descriptors, &edges).unwrap();
         assert_eq!(entries[1].requirements, vec![module("Original")]);
         assert_eq!(entries[1].native_requirements, consumer.native_requirements);
@@ -2008,7 +2142,7 @@ mod tests {
     #[test]
     fn native_package_obligations_follow_selected_groups_without_package_artifact_nodes() {
         let inventory = ArtifactInventory::default();
-        let mut root = entry("Root", &[]);
+        let mut root = native_entry("Root", &[]);
         root.native_requirements.push((
             module("Helper"),
             ArtifactDependency::NativeGroup {
@@ -2016,7 +2150,7 @@ mod tests {
                 required_ordinal: 7,
             },
         ));
-        let mut helper = entry("Helper", &[]);
+        let mut helper = native_entry("Helper", &[]);
         let package = |ordinal, occurrence: &str| RetainedPackageDependency {
             dependent_ordinal: ordinal,
             identity: tidepool_repr::execution_schema::SymbolIdentity {
@@ -2047,6 +2181,6 @@ mod tests {
                 .len(),
             2
         );
-        assert_eq!(inventory.metrics().nodes, 2);
+        assert_eq!(inventory.metrics().nodes, 4);
     }
 }

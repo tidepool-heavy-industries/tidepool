@@ -2154,6 +2154,7 @@ mod authored_tests {
         let recovered = ExactDeclarationContext::capture_recovery(
             durable.path(),
             &stored.products,
+            &stored.module_interfaces,
             &[stored.join],
             lexical.clone(),
         )

@@ -626,10 +626,18 @@ impl PackageInterfaceValidation {
             if error.kind() == io::ErrorKind::NotFound {
                 RecoveryArtifactError::Unavailable(path.to_path_buf())
             } else {
-                RecoveryArtifactError::Io(error)
+                RecoveryArtifactError::Unreadable {
+                    path: path.to_path_buf(),
+                    error,
+                }
             }
         })?;
-        let metadata = file.metadata()?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| RecoveryArtifactError::Unreadable {
+                path: path.to_path_buf(),
+                error,
+            })?;
         if !metadata.is_file() || metadata.len() > PACKAGE_INTERFACE_LIMIT {
             return Err(RecoveryArtifactError::InvalidPackageImports(
                 path.to_path_buf(),
@@ -637,7 +645,11 @@ impl PackageInterfaceValidation {
         }
         let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
         file.take(PACKAGE_INTERFACE_LIMIT + 1)
-            .read_to_end(&mut bytes)?;
+            .read_to_end(&mut bytes)
+            .map_err(|error| RecoveryArtifactError::Unreadable {
+                path: path.to_path_buf(),
+                error,
+            })?;
         if bytes.len() as u64 > PACKAGE_INTERFACE_LIMIT {
             return Err(RecoveryArtifactError::InvalidPackageImports(
                 path.to_path_buf(),
@@ -1072,6 +1084,25 @@ fn resolve_owned(recovery_root: &Path, relative: &Path) -> Result<PathBuf, Recov
     }
     let canonical_root = fs::canonicalize(recovery_root)?;
     let candidate = recovery_root.join(relative);
+    let mut component = canonical_root.clone();
+    for part in relative.components() {
+        component.push(part);
+        match fs::symlink_metadata(&component) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(RecoveryArtifactError::InvalidCapturedPayload(candidate))
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(RecoveryArtifactError::Unavailable(candidate))
+            }
+            Err(error) => {
+                return Err(RecoveryArtifactError::Unreadable {
+                    path: candidate,
+                    error,
+                })
+            }
+        }
+    }
     let canonical = match fs::canonicalize(&candidate) {
         Ok(path) => path,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -1506,6 +1537,14 @@ pub(crate) fn recover_module_interface(
         &anchor.package_imports_sha256,
         None,
         PACKAGE_IMPORTS_LIMIT,
+        validation,
+    )?;
+    validate_package_imports_with_validation(
+        &package_imports_bytes,
+        &anchor.unit,
+        &anchor.module,
+        &anchor.skinny_iface_sha256,
+        &root.join(&anchor.package_imports_path),
         validation,
     )?;
     let certificate = capture_module_payload(
@@ -2812,11 +2851,55 @@ mod tests {
         iface_sha256
     }
 
+    fn fixture_module_reference(
+        interface: &Path,
+        owner: &CachedHomeOwner,
+    ) -> RecoveryModuleInterfaceRef {
+        let bytes = fs::read(interface).unwrap();
+        let packages = fs::read(package_sidecar_path(interface))
+            .ok()
+            .filter(|bytes| {
+                validate_package_imports(
+                    bytes,
+                    &owner.unit,
+                    &owner.module,
+                    &owner.skinny_iface_sha256,
+                    interface,
+                )
+                .is_ok()
+            })
+            .unwrap_or_else(|| {
+                package_witness(
+                    &owner.unit,
+                    &owner.module,
+                    &owner.skinny_iface_sha256,
+                    Vec::new(),
+                )
+            });
+        let proof = crate::certified_products::fixture_interface_bytes(
+            [1; 32],
+            &owner.unit,
+            &owner.module,
+            bytes,
+            packages,
+        );
+        materialize_module_interface(
+            interface.parent().unwrap(),
+            &proof,
+            &mut PackageInterfaceValidation::default(),
+            MaterializationMode::Durable,
+        )
+        .unwrap()
+    }
+
     fn write_certification(interface: &Path, owner: &CachedHomeOwner) -> Vec<u8> {
-        let bytes = crate::certified_products::encode_home_certification(
+        let canonical = fixture_module_reference(interface, owner);
+        let bytes = crate::certified_products::encode_home_certification_with_module(
             owner,
             &[],
             &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+            canonical.certificate_sha256,
         )
         .unwrap();
         fs::write(certification_sidecar_path(interface), &bytes).unwrap();
@@ -2845,6 +2928,7 @@ mod tests {
             &[RecoveryArtifactInput {
                 owner: &owner,
                 interface_source: &iface,
+                module_interface: (source.path(), &fixture_module_reference(&iface, &owner)),
                 product_source: &product,
             }],
         )
@@ -2956,12 +3040,7 @@ mod tests {
                 ..first.clone()
             })
         );
-        let first_certification = crate::certified_products::encode_home_certification(
-            &first,
-            &[],
-            &std::collections::BTreeMap::new(),
-        )
-        .unwrap();
+        let first_certification = write_certification(&iface, &first);
         fs::write(certification_sidecar_path(&iface), &first_certification).unwrap();
         let first_ref = materialize_recovery_closure(
             run.path(),
@@ -2969,6 +3048,7 @@ mod tests {
             &[RecoveryArtifactInput {
                 owner: &first,
                 interface_source: &iface,
+                module_interface: (source.path(), &fixture_module_reference(&iface, &first)),
                 product_source: &first_product,
             }],
         )
@@ -2976,12 +3056,7 @@ mod tests {
         .remove(0);
         assert!(verify_materialized_ref(run.path(), &first_ref).is_ok());
 
-        let second_certification = crate::certified_products::encode_home_certification(
-            &second,
-            &[],
-            &std::collections::BTreeMap::new(),
-        )
-        .unwrap();
+        let second_certification = write_certification(&iface, &second);
         fs::write(certification_sidecar_path(&iface), &second_certification).unwrap();
         let second_ref = materialize_recovery_closure(
             run.path(),
@@ -2989,6 +3064,7 @@ mod tests {
             &[RecoveryArtifactInput {
                 owner: &second,
                 interface_source: &iface,
+                module_interface: (source.path(), &fixture_module_reference(&iface, &second)),
                 product_source: &first_product,
             }],
         )
@@ -3011,6 +3087,7 @@ mod tests {
             &[RecoveryArtifactInput {
                 owner: &third,
                 interface_source: &iface,
+                module_interface: (source.path(), &fixture_module_reference(&iface, &third)),
                 product_source: &second_product,
             }],
         )
@@ -3041,6 +3118,7 @@ mod tests {
         let input = [RecoveryArtifactInput {
             owner: &owner,
             interface_source: &iface,
+            module_interface: (source.path(), &fixture_module_reference(&iface, &owner)),
             product_source: &product,
         }];
         let first = materialize_recovery_closure(run.path(), [1; 32], &input)
@@ -3150,6 +3228,7 @@ mod tests {
                 &[RecoveryArtifactInput {
                     owner: &owner,
                     interface_source: &iface,
+                    module_interface: (source.path(), &fixture_module_reference(&iface, &owner)),
                     product_source: &product_path,
                 }],
             ),
@@ -3196,6 +3275,7 @@ mod tests {
         let input = [RecoveryArtifactInput {
             owner: &owner,
             interface_source: &iface,
+            module_interface: (source.path(), &fixture_module_reference(&iface, &owner)),
             product_source: &product,
         }];
         let refs = materialize_recovery_closure(run.path(), [1; 32], &input).unwrap();
@@ -3259,6 +3339,7 @@ mod tests {
                 &[RecoveryArtifactInput {
                     owner: &owner,
                     interface_source: &iface,
+                    module_interface: (source.path(), &fixture_module_reference(&iface, &owner)),
                     product_source: &product,
                 }]
             ),
@@ -3278,6 +3359,7 @@ mod tests {
                 &[RecoveryArtifactInput {
                     owner: &owner,
                     interface_source: &iface,
+                    module_interface: (source.path(), &fixture_module_reference(&iface, &owner)),
                     product_source: &product,
                 }]
             ),

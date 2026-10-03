@@ -1815,6 +1815,59 @@ pub(crate) fn original_home_requirements_with_validation(
 /// Private construction proves a native issuer selected this same canonical
 /// carrier; recovery uses the full wire decoder instead.
 #[cfg(test)]
+pub(crate) fn fixture_module_interface(
+    producer: [u8; 32],
+    unit: &str,
+    module: &str,
+    requirements: BTreeMap<(String, String), [u8; 32]>,
+) -> CertifiedModuleInterface {
+    let bytes = module.as_bytes().to_vec();
+    let value = value_array([
+        value_text("TPPKGROOTS"),
+        value_text("2"),
+        value_array([
+            value_text(unit),
+            value_text(module),
+            value_text(hex(&sha(&bytes))),
+        ]),
+        value_array([]),
+        value_array([]),
+    ]);
+    let mut packages = Vec::new();
+    ciborium::ser::into_writer(&value, &mut packages).unwrap();
+    finalized_module::fixture_interface(
+        producer,
+        unit,
+        module,
+        [1; 32],
+        bytes,
+        packages,
+        requirements,
+        Some(b"fixture-core".to_vec()),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_interface_bytes(
+    producer: [u8; 32],
+    unit: &str,
+    module: &str,
+    interface: Vec<u8>,
+    packages: Vec<u8>,
+) -> CertifiedModuleInterface {
+    finalized_module::fixture_interface(
+        producer,
+        unit,
+        module,
+        [1; 32],
+        interface,
+        packages,
+        BTreeMap::new(),
+        Some(b"fixture-core".to_vec()),
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn fixture_finalized_product(
     product: crate::recovery_artifacts::CertifiedRecoveryProduct,
     producer: [u8; 32],
@@ -4267,6 +4320,7 @@ pub(crate) mod tests {
             package_bytes,
             seal,
         );
+        let product = fixture_finalized_product(product, [2; 32]);
         let original =
             crate::recovery_artifacts::materialize_certified_products(root, [2; 32], &[product])
                 .unwrap()
@@ -4298,8 +4352,9 @@ pub(crate) mod tests {
             crate::recovery_artifacts::RecoveryValueInterfaceRef,
         )>(&serde_json::to_vec(&(original, value)).unwrap())
         .unwrap();
+        let canonical = original.module_interface.clone().unwrap();
         if let Some(output) = std::env::var_os("TIDEPOOL_RECOVERY_NATIVE_PACKET_OUTPUT") {
-            let paths = [
+            let mut paths = vec![
                 &original.interface_path,
                 &original.package_imports_path,
                 &original.certification_path,
@@ -4307,6 +4362,14 @@ pub(crate) mod tests {
                 &value.interface.interface_path,
                 &value.interface.package_imports_path,
             ];
+            paths.extend([
+                &canonical.interface.interface_path,
+                &canonical.interface.package_imports_path,
+                &canonical.certificate_path,
+            ]);
+            if let Some(core) = &canonical.core {
+                paths.push(&core.path);
+            }
             let files = paths
                 .into_iter()
                 .map(|path| (path.clone(), std::fs::read(root.path().join(path)).unwrap()))
@@ -4320,14 +4383,21 @@ pub(crate) mod tests {
         let descriptors = [
             ArtifactDescriptor::from_recovery_product(&original),
             ArtifactDescriptor::from_recovery_value_interface(&value),
+            ArtifactDescriptor::from_recovery_module_interface(&canonical),
         ];
+        let interfaces = [(
+            descriptors[0].id,
+            descriptors[2].id,
+            ArtifactDependency::Interface,
+        )];
         let inventory = RecoveredArtifactInventory::capture(
             root.path(),
             &[original.clone()],
+            &[canonical.clone()],
             &[],
             &[value.clone()],
             &descriptors,
-            &[],
+            &interfaces,
         )
         .unwrap();
         let ids = descriptors
@@ -4353,7 +4423,7 @@ pub(crate) mod tests {
             }
         )));
         assert!(edges.iter().any(|(_, target, edge)| *target == value.artifact_id && matches!(edge, ArtifactDependency::NativeBinding { dependent_ordinal: 7, generation: 1, occurrence, .. } if occurrence == "x")));
-        assert!(first.artifact_view().interface_dependencies().is_empty());
+        assert_eq!(first.artifact_view().interface_dependencies(), interfaces);
         let required = first
             .artifact_view()
             .native_binding_requirements_from_roots(&[descriptors[0].id])
@@ -4365,33 +4435,42 @@ pub(crate) mod tests {
         assert!(RecoveredArtifactInventory::capture(
             root.path(),
             &[original],
+            &[canonical],
             &[],
             &[value],
             &descriptors,
-            &[]
+            &interfaces
         )
         .is_err());
     }
 
     #[test]
     fn recovery_refuses_tampered_and_ambiguous_native_dependency_owners() {
-        use crate::artifact_inventory::ArtifactDescriptor;
+        use crate::artifact_inventory::{ArtifactDependency, ArtifactDescriptor};
         use crate::declaration_join::RecoveredArtifactInventory;
         let root = tempfile::tempdir().unwrap();
         let (original, value) = recovery_native_fixture(root.path());
+        let canonical = original.module_interface.clone().unwrap();
         let descriptors = [
             ArtifactDescriptor::from_recovery_product(&original),
             ArtifactDescriptor::from_recovery_value_interface(&value),
+            ArtifactDescriptor::from_recovery_module_interface(&canonical),
         ];
+        let interfaces = [(
+            descriptors[0].id,
+            descriptors[2].id,
+            ArtifactDependency::Interface,
+        )];
         let mut forged = descriptors.clone();
         forged[1].interface_sha256 = [99; 32];
         assert!(RecoveredArtifactInventory::capture(
             root.path(),
             &[original.clone()],
+            &[canonical.clone()],
             &[],
             &[value.clone()],
             &forged,
-            &[]
+            &interfaces
         )
         .is_err());
         let bytes = b"another value interface".to_vec();
@@ -4426,22 +4505,30 @@ pub(crate) mod tests {
         let descriptors = [
             descriptors[0].clone(),
             descriptors[1].clone(),
+            descriptors[2].clone(),
             ArtifactDescriptor::from_recovery_value_interface(&alternative),
         ];
         let inventory = RecoveredArtifactInventory::capture(
             root.path(),
             &[original.clone()],
+            &[canonical.clone()],
             &[],
             &[value.clone(), alternative],
             &descriptors,
-            &[],
+            &interfaces,
         )
         .unwrap();
         assert!(inventory
-            .context(&[descriptors[0].id, descriptors[1].id], vec![])
+            .context(
+                &[descriptors[0].id, descriptors[1].id, descriptors[2].id],
+                vec![]
+            )
             .is_ok());
         assert!(inventory
-            .context(&[descriptors[0].id, descriptors[2].id], vec![])
+            .context(
+                &[descriptors[0].id, descriptors[3].id, descriptors[2].id],
+                vec![]
+            )
             .is_ok());
         assert!(inventory
             .context(
@@ -4453,10 +4540,11 @@ pub(crate) mod tests {
         assert!(RecoveredArtifactInventory::capture(
             root.path(),
             &[original],
+            &[canonical],
             &[],
             &[value],
-            &descriptors[..2],
-            &[]
+            &descriptors[..3],
+            &interfaces
         )
         .is_err());
     }
@@ -5596,12 +5684,35 @@ pub(crate) mod tests {
         let mut packages = Vec::new();
         ciborium::ser::into_writer(&package_seal, &mut packages).unwrap();
         std::fs::write(interface.with_extension("hi.packages"), packages).unwrap();
+        let finalized = fixture_finalized_product(
+            crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+                owner.clone(),
+                vec![0x42],
+                std::fs::read(&product).unwrap(),
+                std::fs::read(interface.with_extension("hi.packages")).unwrap(),
+                seal,
+            ),
+            [1; 32],
+        );
+        std::fs::write(
+            interface.with_extension("hi.owners"),
+            finalized.certification_bytes(),
+        )
+        .unwrap();
+        let canonical = crate::recovery_artifacts::materialize_module_interface(
+            source.path(),
+            finalized.module_interface().unwrap(),
+            &mut PackageInterfaceValidation::default(),
+            crate::recovery_artifacts::MaterializationMode::Durable,
+        )
+        .unwrap();
         let refs = crate::recovery_artifacts::materialize_recovery_closure(
             run.path(),
             [1; 32],
             &[crate::recovery_artifacts::RecoveryArtifactInput {
                 owner: &owner,
                 interface_source: &interface,
+                module_interface: (source.path(), &canonical),
                 product_source: &product,
             }],
         )
@@ -5614,7 +5725,9 @@ pub(crate) mod tests {
             artifact.product_bytes.clone(),
             artifact.package_imports_bytes.clone(),
             artifact.certification_bytes.clone(),
-        );
+        )
+        .with_module_interface(artifact.module_interface.clone())
+        .unwrap();
         assert_eq!(
             certify_owned_products_with_validation(
                 &[&owned],
@@ -5840,6 +5953,78 @@ pub(crate) mod tests {
         }
     }
 
+    fn fixture_finalization(
+        root: Option<&Path>,
+        modules: &[CertifiedModuleReceipt],
+    ) -> FinalizationEnvelope {
+        let mut finalized = BTreeMap::new();
+        let mut home_units = BTreeSet::from(["main".to_owned()]);
+        for module in modules {
+            home_units.insert(module.unit.clone());
+            home_units.extend(
+                module
+                    .interface_requirements
+                    .keys()
+                    .map(|(unit, _)| unit.clone()),
+            );
+            if module.origin != ProductOrigin::Fresh {
+                continue;
+            }
+            let package_value = value_array([
+                value_text("TPPKGROOTS"),
+                value_text("2"),
+                value_array([
+                    value_text(&module.unit),
+                    value_text(&module.module),
+                    value_text(hex(&module.skinny_iface_sha256)),
+                ]),
+                value_array([]),
+                value_array([]),
+            ]);
+            let mut packages = Vec::new();
+            ciborium::ser::into_writer(&package_value, &mut packages).unwrap();
+            let descriptor = |suffix: &str, bytes: &[u8], digest| CapturedArtifactDescriptor {
+                relative_path: PathBuf::from(format!(
+                    "finalized-fixture/{}.{}.{}",
+                    module.unit, module.module, suffix
+                )),
+                sha256: digest,
+                bytes: bytes.len() as u64,
+            };
+            let interface = descriptor("hi", &[0x42], module.skinny_iface_sha256);
+            let package_imports = descriptor("packages", &packages, sha(&packages));
+            let core_bytes = b"fixture-finalized-core";
+            let core = descriptor("core", core_bytes, sha(core_bytes));
+            if let Some(root) = root {
+                std::fs::create_dir_all(root.join("finalized-fixture")).unwrap();
+                for (artifact, bytes) in [
+                    (&interface, &[0x42][..]),
+                    (&package_imports, packages.as_slice()),
+                    (&core, core_bytes.as_slice()),
+                ] {
+                    std::fs::write(root.join(&artifact.relative_path), bytes).unwrap();
+                }
+            }
+            finalized.insert(
+                (module.unit.clone(), module.module.clone()),
+                FinalizedModuleReceipt {
+                    unit: module.unit.clone(),
+                    module: module.module.clone(),
+                    source_sha256: module.source_sha256,
+                    interface,
+                    package_imports,
+                    core: Some(core),
+                    interface_requirements: module.interface_requirements.clone(),
+                },
+            );
+        }
+        FinalizationEnvelope {
+            profile: finalized_module::FINALIZATION_PROFILE.into(),
+            home_units,
+            modules: finalized,
+        }
+    }
+
     fn cached_closure_fixture(
         root: &Path,
         module: &str,
@@ -5910,6 +6095,10 @@ pub(crate) mod tests {
             package_bytes.clone(),
             encode_home_certification(&owner, &[], &BTreeMap::new()).unwrap(),
         );
+        let recovery = fixture_finalized_product(
+            recovery.with_source_sha256(sha(source_text.as_bytes())),
+            [3; 32],
+        );
         let accepted = CertifiedModuleReceipt {
             origin: ProductOrigin::Cached,
             unit: owner.unit.clone(),
@@ -5937,7 +6126,7 @@ pub(crate) mod tests {
                 evidence: evidence.into(),
                 target_source: "target".into(),
                 origin: crate::module_candidates::CandidateOrigin::Ordinary,
-                original_module_interface: None,
+                original_module_interface: recovery.module_interface().cloned(),
                 original_execution: None,
                 execution_admitted: false,
             },
@@ -5992,6 +6181,10 @@ pub(crate) mod tests {
                 ]),
             },
             CertifiedReceipt {
+                finalization: fixture_finalization(
+                    None,
+                    &vec![accepted_a.clone(), accepted_b.clone()],
+                ),
                 modules: vec![accepted_a, accepted_b],
                 targets: BTreeMap::new(),
                 packages: BTreeMap::new(),
@@ -6190,6 +6383,8 @@ pub(crate) mod tests {
             b.package_imports_bytes().to_vec(),
             seal,
         )
+        .with_module_interface(b.module_interface().unwrap().clone())
+        .unwrap()
         .with_execution_source(b_graph.clone())
         .unwrap();
         let context = crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
@@ -6398,6 +6593,7 @@ pub(crate) mod tests {
         let mut accepted = receipt(&bytes, &admitted, support_source);
         accepted.dependency_witness_sha256 = sha(&evidence_bytes);
         let mut fresh_receipt = CertifiedReceipt {
+            finalization: fixture_finalization(Some(root.path()), &vec![accepted.clone()]),
             modules: vec![accepted.clone()],
             targets: BTreeMap::new(),
             packages: BTreeMap::new(),
@@ -6595,6 +6791,7 @@ pub(crate) mod tests {
         accepted.product_sha256 = bundle.owner.product_sha256;
         accepted.dependency_witness_sha256 = sha(&serde_json::to_vec(&bundle.evidence).unwrap());
         let cached_receipt = CertifiedReceipt {
+            finalization: fixture_finalization(Some(root.path()), &vec![accepted.clone()]),
             modules: vec![accepted],
             targets: BTreeMap::new(),
             packages: BTreeMap::new(),
@@ -6734,6 +6931,10 @@ pub(crate) mod tests {
             quoter_receipt.module = "Quoter".into();
             quoter_receipt.dependency_witness_sha256 = sha(&current_bytes);
             let mixed = CertifiedReceipt {
+                finalization: fixture_finalization(
+                    Some(root.path()),
+                    &vec![cached_receipt.modules[0].clone(), quoter_receipt.clone()],
+                ),
                 modules: vec![cached_receipt.modules[0].clone(), quoter_receipt],
                 targets: BTreeMap::new(),
                 packages: BTreeMap::new(),
@@ -6874,6 +7075,7 @@ pub(crate) mod tests {
         let certified = certify_products(
             None,
             &CertifiedReceipt {
+                finalization: fixture_finalization(Some(directory.path()), &vec![accepted.clone()]),
                 modules: vec![accepted],
                 targets: BTreeMap::new(),
                 packages: BTreeMap::new(),
@@ -6945,8 +7147,17 @@ pub(crate) mod tests {
         )
         .is_ok());
         let recovered = Arc::new(
-            ExactDeclarationContext::capture_recovery(directory.path(), &references, &[], vec![])
-                .unwrap(),
+            ExactDeclarationContext::capture_recovery(
+                directory.path(),
+                &references,
+                &references
+                    .iter()
+                    .map(|reference| reference.module_interface.clone().unwrap())
+                    .collect::<Vec<_>>(),
+                &[],
+                vec![],
+            )
+            .unwrap(),
         );
         assert_eq!(recovered.toolchain_identity_sha256(), canonical_producer);
         let recovered_request = recovered
@@ -6982,6 +7193,7 @@ pub(crate) mod tests {
         let certified = certify_products(
             None,
             &CertifiedReceipt {
+                finalization: fixture_finalization(Some(directory.path()), &vec![accepted.clone()]),
                 modules: vec![accepted.clone()],
                 targets: BTreeMap::new(),
                 packages: BTreeMap::new(),
@@ -7000,7 +7212,8 @@ pub(crate) mod tests {
         assert_eq!(certified.recovery_products.len(), 1);
         let refs = crate::recovery_artifacts::materialize_certified_products(
             directory.path(),
-            [3; 32],
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(b"producer")
+                .sha256(),
             &certified.recovery_products,
         )
         .unwrap();
@@ -7018,6 +7231,10 @@ pub(crate) mod tests {
             certify_products(
                 None,
                 &CertifiedReceipt {
+                    finalization: fixture_finalization(
+                        Some(directory.path()),
+                        &vec![accepted.clone()]
+                    ),
                     modules: vec![accepted.clone()],
                     targets: BTreeMap::new(),
                     packages: BTreeMap::new(),
@@ -7039,6 +7256,10 @@ pub(crate) mod tests {
             certify_products(
                 None,
                 &CertifiedReceipt {
+                    finalization: fixture_finalization(
+                        Some(directory.path()),
+                        &vec![changed.clone()]
+                    ),
                     modules: vec![changed],
                     targets: BTreeMap::new(),
                     packages: BTreeMap::new()
@@ -7061,6 +7282,7 @@ pub(crate) mod tests {
         assert!(certify_products(
             None,
             &CertifiedReceipt {
+                finalization: fixture_finalization(Some(directory.path()), &vec![changed.clone()]),
                 modules: vec![changed],
                 targets: BTreeMap::new(),
                 packages: BTreeMap::new()
@@ -7274,6 +7496,34 @@ pub(crate) mod tests {
         bytes
     }
 
+    fn fixture_envelope_value(envelope: &FinalizationEnvelope) -> Value {
+        value_array([
+            value_text(&envelope.profile),
+            value_array(envelope.home_units.iter().map(value_text)),
+            value_array(envelope.modules.values().map(|module| {
+                value_array([
+                    value_text(&module.unit),
+                    value_text(&module.module),
+                    value_text(hex(&module.source_sha256)),
+                    value_text(module.interface.relative_path.to_string_lossy()),
+                    value_text(hex(&module.interface.sha256)),
+                    Value::Integer(module.interface.bytes.into()),
+                    value_text(module.package_imports.relative_path.to_string_lossy()),
+                    value_text(hex(&module.package_imports.sha256)),
+                    Value::Integer(module.package_imports.bytes.into()),
+                    module.core.as_ref().map_or(Value::Null, |core| {
+                        value_array([
+                            value_text(core.relative_path.to_string_lossy()),
+                            value_text(hex(&core.sha256)),
+                            Value::Integer(core.bytes.into()),
+                        ])
+                    }),
+                    encode_interface_requirements(&module.interface_requirements),
+                ])
+            })),
+        ])
+    }
+
     fn dictionary_receipt(legacy: &Value) -> Value {
         let mut compact = legacy.clone();
         let Value::Array(header) = &mut compact else {
@@ -7334,8 +7584,34 @@ pub(crate) mod tests {
             };
             rewrite(&mut target[1]);
         }
-        header[1] = Value::Integer(5.into());
+        let modules = array(&header[2])
+            .unwrap()
+            .iter()
+            .map(|module| {
+                let row = array(module).unwrap();
+                CertifiedModuleReceipt {
+                    origin: if string(&row[0]).unwrap() == "fresh" {
+                        ProductOrigin::Fresh
+                    } else {
+                        ProductOrigin::Cached
+                    },
+                    unit: string(&row[1]).unwrap().into(),
+                    module: string(&row[2]).unwrap().into(),
+                    module_version: None,
+                    source_sha256: digest(&row[4]).unwrap(),
+                    skinny_iface_sha256: digest(&row[5]).unwrap(),
+                    product_sha256: digest(&row[6]).unwrap(),
+                    dependency_witness_sha256: digest(&row[7]).unwrap(),
+                    groups: vec![],
+                    interface_requirements: BTreeMap::new(),
+                }
+            })
+            .collect::<Vec<_>>();
+        header[1] = Value::Integer(6.into());
         header.push(value_array(indexed.into_values().map(|(_, row)| row)));
+        header.push(fixture_envelope_value(&fixture_finalization(
+            None, &modules,
+        )));
         compact
     }
 
@@ -7376,6 +7652,7 @@ pub(crate) mod tests {
         assert_eq!(
             decode_receipt(&encoded).unwrap(),
             CertifiedReceipt {
+                finalization: fixture_finalization(None, &vec![accepted.clone()]),
                 modules: vec![accepted],
                 targets: BTreeMap::from([("target".into(), vec![])]),
                 packages: BTreeMap::from([(
