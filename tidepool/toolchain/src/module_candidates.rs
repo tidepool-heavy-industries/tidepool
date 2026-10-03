@@ -2737,10 +2737,12 @@ mod tests {
             )
             .sha256(),
         );
-        let producer_dir = fixture_record_dir(root).parent().unwrap().to_path_buf();
+        let dir = fixture_record_dir(root);
+        fs::create_dir_all(&dir).unwrap();
+        let producer_dir = dir.parent().unwrap();
         record.module_interface = Some(
             crate::recovery_artifacts::materialize_module_interface(
-                &producer_dir,
+                producer_dir,
                 original.module_interface().unwrap(),
                 &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                 crate::recovery_artifacts::MaterializationMode::Durable,
@@ -2749,9 +2751,7 @@ mod tests {
         );
         record.original_certification = original.certification_bytes().to_vec();
         let bytes = encode_record(&record).unwrap();
-        let dir = fixture_record_dir(root);
-        shared_evidence::publish(dir.parent().unwrap(), &record.evidence).unwrap();
-        fs::create_dir_all(&dir).unwrap();
+        shared_evidence::publish(producer_dir, &record.evidence).unwrap();
         let name = format!(
             "{}.cbor",
             sha(format!("{unit}:{module}:{}", source.display()).as_bytes())
