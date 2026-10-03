@@ -125,7 +125,7 @@ withScratch = bracket acquire removeDirectoryRecursive
 receiptChecks :: FilePath -> CheckedItemAdmission -> CheckedDisplayAdmission -> IO ()
 receiptChecks root item display = do
   let scope = ExactScope "manifest" "request" "producer" "semantic" [] [] [] [] []
-        Nothing Nothing Nothing Nothing Set.empty
+        Nothing Nothing Nothing Nothing Nothing Set.empty
       source = "recipe λ"
   writeCheckedItemReceipt root scope item source
   check "checked-item.cbor" itemGolden

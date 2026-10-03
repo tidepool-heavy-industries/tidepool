@@ -35,7 +35,8 @@ import System.IO.Error (isAlreadyExistsError)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
-import Tidepool.CheckedCell (CheckedSignature(..), CheckedSignatureName(..))
+import Tidepool.CheckedCell
+  ( CheckedSignature(..), RequestTypeSignatures, decodeCheckedSignature, decodeRequestTypeSignatures )
 import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), ProjectedGroup(..), ProjectedGroupBody(..), GlobalDecl(..) )
 import Tidepool.ModuleCandidates (CandidateGroup(..), CandidateGlobal(..))
@@ -65,6 +66,7 @@ data ExactScope = ExactScope
   , scopeCheckedItem :: Maybe CheckedItemAdmission
   , scopeCheckedDisplay :: Maybe CheckedDisplayAdmission
   , scopeIncludePaths :: Maybe [FilePath]
+  , scopeRequestTypes :: Maybe RequestTypeSignatures
   -- Request-local source proof roots are revalidated by subsequent stages;
   -- they are never serialized as baseline lexical authority.
   , scopeSourceSelectedOwners :: Set.Set (String,String)
@@ -546,14 +548,21 @@ decodeScope = do
     pure (graphs, references)
     else pure ([], [])
   nullPurpose <- if version == "6" then (== TypeNull) <$> peekTokenType else pure False
-  (checked, checkedItem, checkedDisplay, includes) <- if version == "2" || nullPurpose
+  (requestTypes, (checked, checkedItem, checkedDisplay, includes)) <- if version == "2" || nullPurpose
     then do
       when nullPurpose decodeNull
-      pure (Nothing,Nothing,Nothing,Nothing)
+      pure (Nothing, (Nothing,Nothing,Nothing,Nothing))
     else do
-    authCount <- decodeListLen
-    purpose <- string
-    case purpose of
+    outerCount <- decodeListLen
+    outerPurpose <- string
+    (authCount, purpose, requestTypes) <- if outerPurpose == "request-types1" then do
+      unless (outerCount == 3) (fail "invalid native request type admission")
+      native <- decodeRequestTypeSignatures
+      count <- decodeListLen
+      purpose <- string
+      pure (count, purpose, Just native)
+      else pure (outerCount, outerPurpose, Nothing)
+    admission <- case purpose of
       tag | tag == "cell-check2" || tag == "host-input-check1" -> do
         unless (authCount == if tag == "host-input-check1" then 10 else 9) (fail "invalid cell-check admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
@@ -664,8 +673,9 @@ decodeScope = do
         paths <- includePaths
         pure (Nothing,Nothing,Just admission,Just paths)
       _ -> fail "unsupported exact compile purpose"
+    pure (requestTypes, admission)
   pure (ExactScope "" "" producer semantic interfaces lexical products [] executionOwners
-    checked checkedItem checkedDisplay includes Set.empty, descriptors)
+    checked checkedItem checkedDisplay includes requestTypes Set.empty, descriptors)
   where
     includePaths = bounded 4096 $ do
       path <- absolute
@@ -701,18 +711,7 @@ decodeScope = do
             && length fingerprint == 32 && all isHexDigit fingerprint)
           (fail "invalid completed original declaration identity")
         pure (Just ((unit,ownerModule),fingerprint))
-    signature = do
-      array 5
-      magic <- nonempty
-      unless (magic == "TPCHECKEDSIGNATURE2") (fail "checked signature version")
-      key <- nonempty
-      rendering <- nonempty
-      interface <- decodeBytes
-      unless (not (BS.null interface) && BS.length interface <= 4 * 1024 * 1024)
-        (fail "checked signature interface bound")
-      names <- bounded 65536 (array 4 >> (CheckedSignatureName <$> nonempty <*> nonempty <*> nonempty <*> nonempty))
-      unique "checked signature Names" names
-      pure (CheckedSignature key rendering interface names)
+    signature = decodeCheckedSignature
 
 identity :: Decoder s SymbolIdentity
 identity = do

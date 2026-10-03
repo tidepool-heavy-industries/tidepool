@@ -13,7 +13,7 @@ import Tidepool.ExactScope (ExactScope(..))
 cellProgramStateChecks :: IO ()
 cellProgramStateChecks = do
   let prologue = SourcePrologue [] []
-      exact = ExactScope "" "" "" "" [] [] [] [] [] Nothing Nothing Nothing Nothing Set.empty
+      exact = ExactScope "" "" "" "" [] [] [] [] [] Nothing Nothing Nothing Nothing Nothing Set.empty
       initial = initialProgramCellState prologue exact Map.empty
       item index kind = CellAnalysisItem (CellSourceSpan index 1 index 2) (show index)
         (StmtBinders kind [] []) [] False

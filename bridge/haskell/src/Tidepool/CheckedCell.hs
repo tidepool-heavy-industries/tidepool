@@ -6,7 +6,7 @@ module Tidepool.CheckedCell
   , CheckedTypeWitness, captureCheckedTypeWitness, sealCheckedTypeWitness
   , encodeCheckedTypeWitness, renderCheckedTypeWitness
   , NativeParsedModule(..), unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModule
-  , rewriteCheckedAnnotations, rewriteHostInputType
+  , rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
   ) where
 
 import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeString, encodeBytes, encodeInt)
@@ -183,27 +183,63 @@ resolveCheckedSignature env signature = do
     _ -> fail "checked signature did not resolve to an Id"
   where bytes = signatureInterface signature
 
--- The host recipe owns this reserved AST slot. Its exact type comes from
--- admitted compiler evidence, never from the spelling of a captured type.
-rewriteHostInputType :: HscEnv -> Int -> CheckedSignature -> ParsedModule -> IO NativeParsedModule
-rewriteHostInputType env expected signature parsed = do
-  (exact, names) <- resolveCheckedSignature env signature
-  count <- newIORef (0 :: Int)
-  rewritten <- rewriteSyntax (mkM (replaceSlot count exact)) (pm_parsed_source parsed)
-  actual <- readIORef count
-  unless (actual == expected) (fail "host input recipe has missing or duplicated native type slots")
-  pure (NativeParsedModule (parsed { pm_parsed_source = rewritten }) names)
+-- Reserved leaves belong to admitted generated templates. Resolve each native
+-- signature once, then rewrite all its occurrences in a single syntax walk.
+data NativeTypeSlot = ActivationInputSlot | RequestReplySlot | RequestProgressSlot
+  deriving (Eq, Ord)
+
+slotOccurrence :: NativeTypeSlot -> String
+slotOccurrence ActivationInputSlot = "TidepoolActivationInput"
+slotOccurrence RequestReplySlot = "TidepoolRequestReply"
+slotOccurrence RequestProgressSlot = "TidepoolRequestProgress"
+
+rewriteNativeSlots
+  :: HscEnv -> [(NativeTypeSlot, Int, Maybe CheckedSignature)]
+  -> ParsedModule -> IO NativeParsedModule
+rewriteNativeSlots env slots parsed = do
+  unless (Map.size (Map.fromList [(slot, ()) | (slot, _, _) <- slots]) == length slots)
+    (fail "generated recipe repeats a native type slot")
+  resolved <- forM slots $ \(slot, expected, signature) -> do
+    unless (expected >= 0 && (expected == 0) == maybe True (const False) signature)
+      (fail "generated recipe has invalid native type slot evidence")
+    native <- traverse (resolveCheckedSignature env) signature
+    pure (slotOccurrence slot, (expected, native))
+  counts <- newIORef Map.empty
+  let inventory = Map.fromList resolved
+  rewritten <- rewriteSyntax (mkM (replaceSlot counts inventory)) (pm_parsed_source parsed)
+  actual <- readIORef counts
+  forM_ resolved $ \(slot, (expected, _)) ->
+    unless (Map.findWithDefault 0 slot actual == expected)
+      (fail ("generated recipe has missing or duplicated native type slot: " ++ slot))
+  pure (NativeParsedModule (parsed { pm_parsed_source = rewritten })
+    (unionNameSets [names | (_, (_, Just (_, names))) <- resolved]))
   where
-    replaceSlot :: IORef Int -> Type -> HsType GhcPs -> IO (HsType GhcPs)
-    replaceSlot count exact node@(HsTyVar _ promotion located)
-      | occNameString (rdrNameOcc (unLoc located)) == "TidepoolActivationInput" =
-          case (promotion, unLoc located) of
-            (NotPromoted, Unqual occurrence) | isTcOcc occurrence -> do
-              modifyIORef' count (+ 1)
-              pure (XHsType exact)
-            _ -> fail "host input native type slot is qualified or promoted"
-      | otherwise = pure node
+    replaceSlot :: IORef (Map.Map String Int) -> Map.Map String (Int, Maybe (Type, NameSet))
+      -> HsType GhcPs -> IO (HsType GhcPs)
+    replaceSlot counts inventory node@(HsTyVar _ promotion located) =
+      let spelling = occNameString (rdrNameOcc (unLoc located))
+      in case Map.lookup spelling inventory of
+        Nothing -> pure node
+        Just (_, Nothing) -> fail ("generated recipe has an unauthorized native type slot: " ++ spelling)
+        Just (_, Just (exact, _)) -> case (promotion, unLoc located) of
+          (NotPromoted, Unqual occurrence) | isTcOcc occurrence -> do
+            modifyIORef' counts (Map.insertWith (+) spelling 1)
+            pure (XHsType exact)
+          _ -> fail ("generated native type slot is qualified or promoted: " ++ spelling)
     replaceSlot _ _ node = pure node
+
+rewriteHostInputType :: HscEnv -> Int -> CheckedSignature -> ParsedModule -> IO NativeParsedModule
+rewriteHostInputType env expected signature =
+  rewriteNativeSlots env [(ActivationInputSlot, expected, Just signature)]
+
+-- Reply occurs in both sessionReply and respond; progress occurs only in
+-- reportProgress. No presentation string participates in these annotations.
+rewriteRequestTypes :: HscEnv -> RequestTypeSignatures -> ParsedModule -> IO NativeParsedModule
+rewriteRequestTypes env signatures = rewriteNativeSlots env
+  [ (RequestReplySlot, 2, Just (requestReplySignature signatures))
+  , (RequestProgressSlot, maybe 0 (const 1) (requestProgressSignature signatures),
+      requestProgressSignature signatures)
+  ]
 
 -- Only compiler-generated signature binders acquire exact Types. Authored
 -- source continues through ordinary GHC renaming and lexical lookup.

@@ -121,8 +121,8 @@ import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule)
 import Tidepool.Session (sessionHiPath)
 import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
-import Tidepool.CheckedCell (CheckedSignature(..), captureCheckedSignature, encodeCheckedSignature
-  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, rewriteCheckedAnnotations, rewriteHostInputType, NativeParsedModule, typecheckNativeModule)
+import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), captureCheckedSignature, encodeCheckedSignature
+  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, NativeParsedModule, typecheckNativeModule)
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
 import Tidepool.Binders (BoundBinder(..))
 import Tidepool.ExecutionSource
@@ -1835,6 +1835,46 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
           :: IO (Either SomeException NativeParsedModule))
         liftIO $ unless (case refusedSlot of Left _ -> True; Right _ -> False)
           (fail "host input admitted a missing, qualified or duplicated native slot")
+      -- A request carries native reply/progress leaves independently of their
+      -- presentation. Neither nominal owner is introduced as a source import.
+      reply <- liftIO (captureCheckedSignature (crHscEnv checked) "request-reply" expected)
+      progressType <- maybe (fail "native progress fixture missing") pure
+        (Map.lookup "__tidepool_cell_pin_6_tuple" original)
+      progress <- liftIO (captureCheckedSignature (crHscEnv checked) "request-progress" progressType)
+      let requestBody replySlot progressSlot = unlines
+            ([ "sessionReply :: " ++ replySlot
+             , "sessionReply = undefined"
+             , "respond :: " ++ replySlot ++ " -> ()"
+             , "respond _ = ()"
+             ] ++ case progressSlot of
+               Nothing -> []
+               Just slotName -> ["reportProgress :: " ++ slotName ++ " -> ()", "reportProgress _ = ()"])
+          presentationOnly nativeSignature = nativeSignature
+            { signaturePresentation = "this is deliberately not a Haskell type" }
+      forM_ [Nothing, Just progress] $ \maybeProgress -> do
+        let contract = RequestTypeSignatures (presentationOnly reply) (presentationOnly <$> maybeProgress)
+            progressSlot = "TidepoolRequestProgress" <$ maybeProgress
+        requestParsed <- parseSlot (requestBody "TidepoolRequestReply" progressSlot)
+        requestNative <- liftIO (rewriteRequestTypes (crHscEnv checked) contract requestParsed)
+        requestChecked <- typecheckNativeModule requestNative
+        let (requestEnvironment, _) = tm_internals_ requestChecked
+            replyTypes = [idType identifier | identifier <- typeEnvIds (tcg_type_env requestEnvironment)
+              , getOccString identifier == "sessionReply"]
+        liftIO $ unless (case replyTypes of [ty] -> eqType expected ty; _ -> False)
+          (fail "request annotation reconstructed a type from presentation")
+      let plainContract = RequestTypeSignatures reply Nothing
+          rejectedBodies =
+            [ requestBody "Int" Nothing
+            , requestBody "Missing.TidepoolRequestReply" Nothing
+            , requestBody "(TidepoolRequestReply, TidepoolRequestReply)" Nothing
+            , requestBody "TidepoolRequestReply" (Just "TidepoolRequestProgress")
+            ]
+      forM_ rejectedBodies $ \body -> do
+        malformed <- parseSlot body
+        refusedRequest <- liftIO (try (rewriteRequestTypes (crHscEnv checked) plainContract malformed)
+          :: IO (Either SomeException NativeParsedModule))
+        liftIO $ unless (case refusedRequest of Left _ -> True; Right _ -> False)
+          (fail "request recipe admitted missing, qualified, duplicated or unauthorized native slots")
   putStrLn "native checked signatures: 7 shapes, source-free nominal slot and authority/slot refusals passed"
 
 hostActivationPurposeTest :: Maybe FilePath -> IO ()
@@ -2029,7 +2069,7 @@ freshExecutionRecipeTest = withScratch $ \work -> do
   let original = ExactProduct "main" "Support" sha sha sha "" []
       scope = ExactScope "" sha sha sha
         [(ExactIfaceArtifact "main" "Support" "" sha [],"",sha)] [] [original]
-        [] [] Nothing Nothing Nothing Nothing Set.empty
+        [] [] Nothing Nothing Nothing Nothing Nothing Set.empty
       oversized = graph {executionGraphBytes=BS.replicate (executionSourceGraphBytesLimit+1) 0}
   bounded <- either (fail . show) pure
     (extendExactExecutionSourcesWithinBudget [oversized] [reference] scope)
