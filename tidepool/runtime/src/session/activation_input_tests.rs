@@ -599,7 +599,7 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
         .map(PathBuf::as_path)
         .collect::<Vec<_>>();
     let injected = view.injected_module_names();
-    let (checked, _) = turn::check_cell_admitted(
+    let checked = turn::check_cell_admitted(
         CellCheckRequest {
             exact_context: view.exact_declaration_context().cloned(),
             session_id: Some(view.session()),
@@ -613,7 +613,6 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
         },
         admission.clone(),
         &templates,
-        None,
     )
     .unwrap();
     let item = checked.checked_item(0).unwrap();

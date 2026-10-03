@@ -549,7 +549,6 @@ data CellExpressionPlan = CellExpressionPlan
   , expressionPlanPresentation :: ExpressionPresentation
   , expressionPlanType :: String
   , expressionPlanHeads :: [NominalHead]
-  , expressionPlanImports :: [String]
   } deriving (Eq, Show)
 
 -- | One original source item retained beneath its execution item. Declaration
@@ -561,15 +560,12 @@ data CellAnalysisSourceItem = CellAnalysisSourceItem
   , cellAnalysisSourceKind :: TurnKind
   } deriving (Eq, Show)
 
--- | A post-zonk type captured for a statement binder during the whole-cell
--- check. The rendered type is replanted into the later staged compile while
--- nominal heads let the consumer distinguish same-cell declarations from
--- already-installed names.
+-- | Diagnostic post-zonk type and nominal heads captured during whole-cell
+-- checking. Native signatures supply the authority for generated annotations.
 data CheckedBinderPin = CheckedBinderPin
   { checkedPinKey :: String
   , checkedPinType :: String
   , checkedPinHeads :: [NominalHead]
-  , checkedPinImports :: [String]
   } deriving (Eq, Show)
 
 -- | Split and classify a cell in one GHC session. Classification is deliberately

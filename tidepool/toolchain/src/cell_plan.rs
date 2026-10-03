@@ -210,7 +210,7 @@ fn admit(
 ) -> Result<Arc<ParsedCellPlan>, CompileError> {
     let root = decode(&receipt)?;
     let fields = crate::checked_cell::row(&root, 7)?;
-    if text(&fields[0])? != "TPCELLPLAN1"
+    if text(&fields[0])? != "TPCELLPLAN2"
         || text(&fields[1])? != crate::checked_cell::hash(specification.cell_source.as_bytes())
         || text(&fields[2])? != crate::checked_cell::hash(specification.template_source.as_bytes())
     {
@@ -241,7 +241,7 @@ fn admit(
         return Err(failure("parser observations"));
     };
     let observations_value = decode(observations)?;
-    let observed = crate::checked_cell::row(&observations_value, 5)?;
+    let observed = crate::checked_cell::cell_observations(&observations_value)?;
     if !list(&observed[1], 0)?.is_empty()
         || text(&observed[2])? != ""
         || !list(&observed[4], 0)?.is_empty()
@@ -434,14 +434,18 @@ mod tests {
             Value::Bool(false),
         ]);
         let observations = a(vec![
-            a(vec![item]),
-            a(vec![]),
-            t(""),
-            a(vec![a(vec![]), a(vec![])]),
-            a(vec![]),
+            t("TPCELLOBSERVATIONS"),
+            2.into(),
+            a(vec![
+                a(vec![item]),
+                a(vec![]),
+                t(""),
+                a(vec![a(vec![]), a(vec![])]),
+                a(vec![]),
+            ]),
         ]);
         let receipt = a(vec![
-            t("TPCELLPLAN1"),
+            t("TPCELLPLAN2"),
             t(&crate::checked_cell::hash(
                 specification.cell_source.as_bytes(),
             )),
@@ -468,13 +472,35 @@ mod tests {
             edited.as_array_mut().unwrap()[index] = Value::Null;
             assert!(admit(specification.clone(), &include, &[1; 32], encoded(&edited)).is_err());
         }
+        let mut old_receipt = receipt.clone();
+        old_receipt.as_array_mut().unwrap()[0] = Value::Text("TPCELLPLAN1".into());
+        assert!(admit(
+            specification.clone(),
+            &include,
+            &[1; 32],
+            encoded(&old_receipt)
+        )
+        .is_err());
+        let mut old_observations = receipt.clone();
+        let envelope = decode(old_observations.as_array().unwrap()[6].as_bytes().unwrap()).unwrap();
+        old_observations.as_array_mut().unwrap()[6] =
+            Value::Bytes(encoded(&envelope.as_array().unwrap()[2]));
+        assert!(admit(
+            specification.clone(),
+            &include,
+            &[1; 32],
+            encoded(&old_observations)
+        )
+        .is_err());
         let mut trailing = encoded(&receipt);
         trailing.push(0);
         assert!(admit(specification.clone(), &include, &[1; 32], trailing).is_err());
         let mut edited = receipt.clone();
         let bytes = edited.as_array_mut().unwrap()[6].as_bytes().unwrap();
         let mut observations = decode(bytes).unwrap();
-        observations.as_array_mut().unwrap()[1] = Value::Array(vec![Value::Null]);
+        observations.as_array_mut().unwrap()[2]
+            .as_array_mut()
+            .unwrap()[1] = Value::Array(vec![Value::Null]);
         edited.as_array_mut().unwrap()[6] = Value::Bytes(encoded(&observations));
         assert!(admit(specification, &include, &[1; 32], encoded(&edited)).is_err());
     }

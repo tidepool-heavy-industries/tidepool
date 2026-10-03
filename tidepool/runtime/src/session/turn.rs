@@ -163,9 +163,6 @@ pub struct CheckedExpressionPlan {
     /// effectful expression this includes its exact `Eff` row.
     pub type_display: String,
     pub heads: Vec<NominalHead>,
-    /// Modules GHC qualified in the rendered type, needed by its wrapper.
-    pub imports: Vec<String>,
-    authority: Option<ExactCheckedItem>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -181,13 +178,10 @@ pub struct CheckedBinderPin {
     /// Compiler-reserved alias key. It encodes the item index and binder name
     /// but is never parsed for control flow by the compiler worker.
     pub key: String,
-    /// GHC-rendered type replanted into the staged bind wrapper.
+    /// GHC-rendered type for presentation; native signatures own annotations.
     pub ty: String,
     /// Nominal heads used by relocation/preflight to identify same-cell names.
     pub heads: Vec<NominalHead>,
-    /// Modules GHC qualified in the rendered type, needed by its wrapper.
-    pub imports: Vec<String>,
-    authority: Option<ExactCheckedItem>,
 }
 
 /// Compiler-parsed header syntax, preserved in authored order. It applies to
@@ -263,44 +257,6 @@ impl DeclarationSource {
     }
 }
 
-/// A fold is an optional preparation after successful whole-cell checking.
-/// Ineligible cells remain valid; attempted failures retain their owning stage.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CellFoldOutcome {
-    NotRequested,
-    Ineligible(CellFoldIneligibility),
-    AttemptedFailed(CellFoldAttemptFailure),
-    Compiled,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CellFoldIneligibility {
-    EmptyCell,
-    MultipleItems,
-    Expression,
-    Declaration,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CellFoldStage {
-    CheckingEvidence,
-    CompilingTurn,
-    SealingReceipt,
-}
-impl std::fmt::Display for CellFoldStage {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::CheckingEvidence => "checking evidence",
-            Self::CompilingTurn => "compiling turn",
-            Self::SealingReceipt => "sealing receipt",
-        })
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("cell fold failed during {stage}: {cause}")]
-pub struct CellFoldAttemptFailure {
-    pub stage: CellFoldStage,
-    pub cause: String,
-}
-
 /// Successful whole-cell preflight result.
 #[derive(Clone, Debug)]
 pub struct CellCheck {
@@ -319,7 +275,6 @@ pub struct CellCheck {
     pub warnings: Vec<crate::diag::ExtractDiag>,
     authority: Option<Arc<ExactCheckedCell>>,
     admission: Option<Arc<super::RuntimeCellAdmission>>,
-    fold_outcome: CellFoldOutcome,
 }
 
 /// Editable diagnostic observations carry no checked execution authority.
@@ -350,15 +305,11 @@ impl From<CellCheckObservations> for CellCheck {
             warnings: observation.warnings,
             authority: None,
             admission: None,
-            fold_outcome: CellFoldOutcome::NotRequested,
         }
     }
 }
 
 impl CellCheck {
-    pub fn fold_outcome(&self) -> &CellFoldOutcome {
-        &self.fold_outcome
-    }
     pub fn checked_item(&self, item_index: usize) -> Result<ExactCheckedItem, CompileError> {
         let authority = self.authority.as_ref().ok_or_else(|| {
             CompileError::ExtractFailed(
@@ -429,134 +380,8 @@ impl CellCheck {
         Ok(item)
     }
 
-    pub fn attach_fold_prefix(
-        &self,
-        folded: &mut TurnResult,
-        item_admission: Arc<super::RuntimeCheckedItemAdmission>,
-    ) -> Result<(), CompileError> {
-        let prefix = item_admission.prefix();
-        let admission = self
-            .admission
-            .as_ref()
-            .ok_or_else(|| CompileError::ExtractFailed("fold has no runtime admission".into()))?;
-        if !Arc::ptr_eq(admission, prefix.admission()) {
-            return Err(CompileError::ExtractFailed(
-                "fold prefix belongs to another runtime admission".into(),
-            ));
-        }
-        let item = self.checked_item(0)?;
-        let TurnResult::Bind { compiled, .. } = folded else {
-            return Err(CompileError::ExtractFailed(
-                "fold is not the checked bind".into(),
-            ));
-        };
-        let certification = compiled
-            .certification
-            .as_mut()
-            .ok_or_else(|| CompileError::ExtractFailed("fold has no sealed products".into()))?;
-        let execution = certification.checked_execution.as_ref().ok_or_else(|| {
-            CompileError::ExtractFailed("fold has no checked execution proof".into())
-        })?;
-        if execution.item() != item_admission.item()
-            || execution.generation() != item_admission.generation().0
-            || !execution.item().same_cell(&item)
-            || execution.item().index() != 0
-            || item_admission.snapshot().compiler_prefix().next_item() != 0
-            || !execution.matches_target(&compiled.prepared)
-        {
-            return Err(CompileError::ExtractFailed(
-                "fold authority differs from the next checked item".into(),
-            ));
-        }
-        certification.checked_prefix = Some(prefix.clone());
-        Ok(())
-    }
-
     pub fn admission(&self) -> Option<&Arc<super::RuntimeCellAdmission>> {
         self.admission.as_ref()
-    }
-    pub fn expression_plan_for_item(
-        &self,
-        item_index: usize,
-        cell_text: &str,
-        compile_generation: u64,
-        compile_view_evidence: &str,
-    ) -> Result<CheckedExpressionPlan, CompileError> {
-        if self.checked_cell_text != cell_text
-            || self.compile_generation != compile_generation
-            || self.compile_view_evidence != compile_view_evidence
-        {
-            return Err(CompileError::ExtractFailed(
-                "whole-cell expression evidence is stale for this source or generation".into(),
-            ));
-        }
-        let item = self.items.get(item_index).ok_or_else(|| {
-            CompileError::ExtractFailed(format!("cell item index {item_index} is out of range"))
-        })?;
-        if item.verdict.kind != TurnKind::Expr {
-            return Err(CompileError::ExtractFailed(format!(
-                "cell item {} is not an expression",
-                item_index + 1
-            )));
-        }
-        let key = format!("__tidepool_cell_expr_{item_index}");
-        let mut matches = self.expression_plans.iter().filter(|plan| plan.key == key);
-        let mut plan = matches.next().cloned().ok_or_else(|| {
-            CompileError::ExtractFailed(format!(
-                "whole-cell check returned no execution plan for item {}",
-                item_index + 1
-            ))
-        })?;
-        if matches.next().is_some() {
-            return Err(CompileError::ExtractFailed(format!(
-                "whole-cell check returned duplicate execution plans for item {}",
-                item_index + 1
-            )));
-        }
-        plan.authority = self
-            .authority
-            .as_ref()
-            .map(|_| self.checked_item(item_index))
-            .transpose()?;
-        Ok(plan)
-    }
-
-    /// Resolve pins for one classified bind without parsing compiler output.
-    /// Expected keys are derived from the source item and GHC-reported binder
-    /// names; missing or duplicate pins reject preflight.
-    pub fn pins_for_item(&self, item_index: usize) -> Result<Vec<CheckedBinderPin>, CompileError> {
-        let item = self.items.get(item_index).ok_or_else(|| {
-            CompileError::ExtractFailed(format!("cell item index {item_index} is out of range"))
-        })?;
-        if item.verdict.kind != TurnKind::Bind {
-            return Ok(Vec::new());
-        }
-        item.verdict
-            .binders
-            .iter()
-            .map(|binder| {
-                let key = format!("__tidepool_cell_pin_{item_index}_{binder}");
-                let mut matches = self.pins.iter().filter(|pin| pin.key == key);
-                let mut pin = matches.next().cloned().ok_or_else(|| {
-                    CompileError::ExtractFailed(format!(
-                        "whole-cell check returned no type for binder {binder:?} in item {}",
-                        item_index + 1
-                    ))
-                })?;
-                if matches.next().is_some() {
-                    return Err(CompileError::ExtractFailed(format!(
-                        "whole-cell check returned duplicate type pins for {binder:?} in item {}",
-                        item_index + 1
-                    )));
-                }
-                pin.authority = self
-                    .authority
-                    .as_ref()
-                    .map(|_| self.checked_item(item_index))
-                    .transpose()?;
-                Ok(pin)
-            })
-            .collect()
     }
 }
 
@@ -579,7 +404,6 @@ fn encode_checked_pin(pin: &CheckedBinderPin) -> CborValue {
         CborValue::Text(pin.key.clone()),
         CborValue::Text(pin.ty.clone()),
         encode_nominal_heads(&pin.heads),
-        CborValue::Array(pin.imports.iter().cloned().map(CborValue::Text).collect()),
     ])
 }
 fn encode_checked_expression(plan: &CheckedExpressionPlan) -> CborValue {
@@ -601,7 +425,6 @@ fn encode_checked_expression(plan: &CheckedExpressionPlan) -> CborValue {
         ),
         CborValue::Text(plan.type_display.clone()),
         encode_nominal_heads(&plan.heads),
-        CborValue::Array(plan.imports.iter().cloned().map(CborValue::Text).collect()),
     ])
 }
 
@@ -2555,43 +2378,11 @@ fn forward_extract_timing(stderr: &str, prefix: &str) {
 /// effect is installed. The runtime supplies the exact next-cell scope as a
 /// source template; the worker owns Haskell parsing and post-zonk binder
 /// harvesting.
-/// One of the two compile granularities a cell pays for: the whole-cell
-/// check, once per cell. The other is `run_turn`'s per-input-unit compile.
+/// This lower-level check returns diagnostic observations. Admitted execution
+/// uses checked item recipes or the complete cell program.
 #[tracing::instrument(name = "cell_check", level = "info", skip_all, fields(cell_bytes = req.cell_text.len()))]
 pub fn check_cell(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFailure> {
-    check_cell_impl(req, None, None, None).map(|(checked, _folded)| checked)
-}
-
-/// The single-item fold materials for [`check_cell_with_fold`]: the SAME
-/// per-item install templates `compile_block_off_checkout` would otherwise
-/// send in its OWN, separate request, attached to the whole-cell check
-/// instead. The worker attempts this item's `PreparedStg` compile in the
-/// SAME invocation, immediately after the check, only when the check
-/// resolves to exactly one item and that item is a bind (`x <- e` /
-/// `let x = e`) — never a declaration or a bare expression; see
-/// `bridge/haskell/app/Main.hs`'s `attemptCellFoldTurn` for why an
-/// expression item still falls back to a separate request. When the shape
-/// doesn't match, or the item fails to compile, no folded result comes
-/// back and the caller runs its own per-item compile exactly as it does
-/// today — this is pure opportunistic reuse of the check's own compile,
-/// never a second way to install a cell item.
-pub struct CellFoldTurn<'a> {
-    pub templates: &'a [TurnTemplate],
-    pub gen: u64,
-    pub retained_imports: &'a [(SymbolIdentity, u64)],
-}
-
-/// Like [`check_cell`], but also attempts [`CellFoldTurn`]'s single-item
-/// compile in the SAME worker request. Returns the folded [`TurnResult`]
-/// alongside the check exactly when the worker produced one; `None` is the
-/// documented "fall back to the ordinary per-item compile" signal, not an
-/// error — a rejected or ineligible fold never fails this call.
-#[tracing::instrument(name = "cell_check_fold", level = "info", skip_all, fields(cell_bytes = req.cell_text.len()))]
-pub fn check_cell_with_fold(
-    req: CellCheckRequest<'_>,
-    fold: CellFoldTurn<'_>,
-) -> Result<(CellCheck, Option<TurnResult>), CellCheckFailure> {
-    check_cell_impl(req, Some(fold), None, None)
+    check_cell_impl(req, None, None)
 }
 
 /// Check against the runtime's retained view and interface bytes. The compiler
@@ -2600,8 +2391,7 @@ pub fn check_cell_admitted(
     req: CellCheckRequest<'_>,
     admission: Arc<super::RuntimeCellAdmission>,
     templates: &[TurnTemplate],
-    fold: Option<CellFoldTurn<'_>>,
-) -> Result<(CellCheck, Option<TurnResult>), CellCheckFailure> {
+) -> Result<CellCheck, CellCheckFailure> {
     validate_cell_admitted_request(&req, &admission)?;
     if admission.plan_reservation().is_some() {
         return Err(CompileError::ExtractFailed(
@@ -2609,35 +2399,13 @@ pub fn check_cell_admitted(
         )
         .into());
     }
-    let view = admission.view();
     if admission.reserved_generations().len() > 1 {
         return Err(CompileError::ExtractFailed(
             "checked cells support one initial reserved declaration group".into(),
         )
         .into());
     }
-    if fold
-        .as_ref()
-        .is_some_and(|fold| fold.gen != view.next_value_generation().0)
-    {
-        return Err(CompileError::ExtractFailed(
-            "checked fold has another runtime generation".into(),
-        )
-        .into());
-    }
-    if fold.as_ref().is_some_and(|fold| {
-        fold.templates.len() != templates.len()
-            || fold
-                .templates
-                .iter()
-                .zip(templates)
-                .any(|(a, b)| a.kind != b.kind || a.source != b.source)
-    }) {
-        return Err(
-            CompileError::ExtractFailed("checked fold has another compiler recipe".into()).into(),
-        );
-    }
-    check_cell_impl(req, fold, Some(admission), Some(templates))
+    check_cell_impl(req, Some(admission), Some(templates))
 }
 
 /// Check only the placeholder interface belonging to an original host input.
@@ -2672,9 +2440,7 @@ pub fn check_activation_input(
         },
         owner.admission.clone(),
         &owner.templates,
-        None,
     )
-    .map(|(checked, _)| checked)
 }
 
 /// Produce only the opaque compiler recipe for the original host mount.
@@ -2936,10 +2702,9 @@ pub fn compile_cell_program_admitted(
 
 fn check_cell_impl(
     req: CellCheckRequest<'_>,
-    fold: Option<CellFoldTurn<'_>>,
     admission: Option<Arc<super::RuntimeCellAdmission>>,
     admitted_templates: Option<&[TurnTemplate]>,
-) -> Result<(CellCheck, Option<TurnResult>), CellCheckFailure> {
+) -> Result<CellCheck, CellCheckFailure> {
     let temp = TempDir::new()?;
     let cell_path = temp.path().join("cell.txt");
     let template_path = temp.path().join("CellCheckTemplate.hs");
@@ -2959,22 +2724,7 @@ fn check_cell_impl(
     if let Some(session_id) = req.session_id {
         cmd.session_incarnation(session_id.0.to_string());
     }
-    let turn_out_path = temp.path().join("turn.cbor");
-    if let Some(fold) = &fold {
-        cmd.cell_fold_turn()
-            .turn_out(&turn_out_path)
-            .bind_gen(fold.gen);
-        let retained = admission
-            .as_ref()
-            .map_or(fold.retained_imports, |admission| {
-                admission.admitted_retained_imports()
-            });
-        for (identity, generation) in retained {
-            cmd.retained_generation(extract_identity(identity), *generation);
-        }
-    }
-    if let Some(templates) = admitted_templates.or_else(|| fold.as_ref().map(|fold| fold.templates))
-    {
+    if let Some(templates) = admitted_templates {
         for (i, tmpl) in templates.iter().enumerate() {
             let path = temp.path().join(format!("checked-template-{i}.hs"));
             std::fs::write(&path, &tmpl.source)?;
@@ -3108,86 +2858,7 @@ fn check_cell_impl(
         );
         checked.admission = Some(admission);
     }
-    let fold_bytes = std::fs::read(temp.path().join("cell-fold.cbor"))?;
-    checked.fold_outcome = decode_cell_fold_outcome(&fold_bytes)
-        .map_err(|error| offer.retain_failure(temp.path(), &output.stderr, error))?;
-    validate_cell_fold_outcome(&checked.fold_outcome, fold.is_some(), &checked.items)
-        .map_err(|error| offer.retain_failure(temp.path(), &output.stderr, error))?;
-    let mut folded = match &checked.fold_outcome {
-        CellFoldOutcome::Compiled => {
-            if !turn_out_path.exists() {
-                return Err(CompileError::ExtractFailed(
-                    "compiled cell fold lacks its turn artifact".into(),
-                )
-                .into());
-            }
-            Some(
-                decode_turn_output_dir(temp.path(), &offer)
-                    .map_err(|error| offer.retain_failure(temp.path(), &output.stderr, error))?,
-            )
-        }
-        CellFoldOutcome::AttemptedFailed(attempt) => {
-            if std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1") {
-                let diagnostic = offer.retain_failure(
-                    temp.path(),
-                    &output.stderr,
-                    CompileError::ExtractFailed(attempt.to_string()),
-                );
-                eprintln!("{diagnostic}");
-            }
-            None
-        }
-        CellFoldOutcome::NotRequested | CellFoldOutcome::Ineligible(_) => {
-            if turn_out_path.exists() {
-                return Err(CompileError::ExtractFailed(
-                    "unattempted cell fold has a turn artifact".into(),
-                )
-                .into());
-            }
-            None
-        }
-    };
-    if let (
-        Some(cell),
-        Some(fold),
-        Some(TurnResult::Bind {
-            compiled,
-            wrapped_source,
-            ..
-        }),
-    ) = (&checked.authority, &fold, &mut folded)
-    {
-        let execution = offer.admit_checked_fold(
-            temp.path(),
-            cell,
-            fold.gen,
-            wrapped_source,
-            &compiled.prepared,
-        )?;
-        let certification = compiled.certification.as_mut().ok_or_else(|| {
-            CompileError::ExtractFailed("checked fold lacks sealed target products".into())
-        })?;
-        certification.checked_item = Some(execution.item().clone());
-        certification.checked_execution = Some(execution);
-    }
-    if checked.authority.is_some() && folded.is_some() {
-        if let Some(fold) = &fold {
-            let relative = tidepool_repr::SessionModule::val(tidepool_repr::Generation(fold.gen))
-                .relative_hi_path();
-            let bytes = std::fs::read(
-                offer
-                    .checked_value_root()
-                    .unwrap_or(req.session_root)
-                    .join(&relative),
-            )?;
-            let output = req.session_root.join(relative);
-            if let Some(parent) = output.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(output, bytes)?;
-        }
-    }
-    Ok((checked, folded))
+    Ok(checked)
 }
 
 /// The one entry point for a session-eval turn. Writes the turn text and
@@ -4389,7 +4060,15 @@ pub(super) fn decode_cell_out(
     let value: CborValue = ciborium::de::from_reader(bytes).map_err(|error| {
         CompileError::ExtractFailed(format!("CellOut CBOR: malformed: {error}"))
     })?;
-    let root = cbor_expect_array_len(&value, 5, "CellOut")?;
+    let envelope = cbor_expect_array_len(&value, 3, "cell observations envelope")?;
+    if cbor_expect_text(&envelope[0], "cell observations magic")? != "TPCELLOBSERVATIONS"
+        || cbor_as_usize(&envelope[1], "cell observations version")? != 2
+    {
+        return Err(CompileError::ExtractFailed(
+            "unsupported cell observations version".into(),
+        ));
+    }
+    let root = cbor_expect_array_len(&envelope[2], 5, "CellOut")?;
     let items = cbor_expect_array(&root[0], "cell items")?
         .iter()
         .map(decode_cell_item)
@@ -4416,119 +4095,13 @@ pub(super) fn decode_cell_out(
         warnings: Vec::new(),
         authority: None,
         admission: None,
-        fold_outcome: CellFoldOutcome::NotRequested,
     })
-}
-
-fn decode_cell_fold_outcome(bytes: &[u8]) -> Result<CellFoldOutcome, CompileError> {
-    if bytes.len() > 16 * 1024 {
-        return Err(CompileError::ExtractFailed(
-            "cell fold outcome exceeds its bounded receipt".into(),
-        ));
-    }
-    let mut cursor = std::io::Cursor::new(bytes);
-    let value: CborValue = ciborium::de::from_reader(&mut cursor)
-        .map_err(|error| CompileError::ExtractFailed(format!("cell fold outcome CBOR: {error}")))?;
-    if cursor.position() != bytes.len() as u64 {
-        return Err(CompileError::ExtractFailed(
-            "cell fold outcome has trailing bytes".into(),
-        ));
-    }
-    let fields = cbor_expect_array_len(&value, 5, "cell fold outcome")?;
-    if cbor_expect_text(&fields[0], "fold magic")? != "TPCELLFOLD"
-        || fields[1] != CborValue::Integer(1.into())
-    {
-        return Err(CompileError::ExtractFailed(
-            "unsupported cell fold outcome schema".into(),
-        ));
-    }
-    let tag = cbor_expect_text(&fields[2], "fold outcome")?;
-    let outcome = match tag {
-        "not-requested" if fields[3] == CborValue::Null && fields[4] == CborValue::Null => {
-            CellFoldOutcome::NotRequested
-        }
-        "compiled" if fields[3] == CborValue::Null && fields[4] == CborValue::Null => {
-            CellFoldOutcome::Compiled
-        }
-        "ineligible" if fields[4] == CborValue::Null => {
-            CellFoldOutcome::Ineligible(match cbor_expect_text(&fields[3], "fold eligibility")? {
-                "empty-cell" => CellFoldIneligibility::EmptyCell,
-                "multiple-items" => CellFoldIneligibility::MultipleItems,
-                "expression" => CellFoldIneligibility::Expression,
-                "declaration" => CellFoldIneligibility::Declaration,
-                _ => {
-                    return Err(CompileError::ExtractFailed(
-                        "unknown cell fold ineligibility".into(),
-                    ))
-                }
-            })
-        }
-        "attempted-failed" => {
-            let stage = match cbor_expect_text(&fields[3], "fold failure stage")? {
-                "checking-evidence" => CellFoldStage::CheckingEvidence,
-                "compiling-turn" => CellFoldStage::CompilingTurn,
-                "sealing-receipt" => CellFoldStage::SealingReceipt,
-                _ => {
-                    return Err(CompileError::ExtractFailed(
-                        "unknown cell fold failure stage".into(),
-                    ))
-                }
-            };
-            let cause = cbor_expect_text(&fields[4], "fold failure cause")?;
-            if cause.is_empty() || cause.chars().count() > 2048 {
-                return Err(CompileError::ExtractFailed(
-                    "invalid bounded cell fold failure cause".into(),
-                ));
-            }
-            CellFoldOutcome::AttemptedFailed(CellFoldAttemptFailure {
-                stage,
-                cause: cause.to_owned(),
-            })
-        }
-        _ => {
-            return Err(CompileError::ExtractFailed(
-                "invalid cell fold outcome fields".into(),
-            ))
-        }
-    };
-    Ok(outcome)
-}
-
-fn validate_cell_fold_outcome(
-    outcome: &CellFoldOutcome,
-    requested: bool,
-    items: &[CellAnalysisItem],
-) -> Result<(), CompileError> {
-    let eligible = items.len() == 1 && items[0].verdict.kind == TurnKind::Bind;
-    let valid = match outcome {
-        CellFoldOutcome::NotRequested => !requested,
-        CellFoldOutcome::Ineligible(reason) => {
-            requested
-                && match reason {
-                    CellFoldIneligibility::EmptyCell => items.is_empty(),
-                    CellFoldIneligibility::MultipleItems => items.len() > 1,
-                    CellFoldIneligibility::Expression => {
-                        items.len() == 1 && items[0].verdict.kind == TurnKind::Expr
-                    }
-                    CellFoldIneligibility::Declaration => {
-                        items.len() == 1 && items[0].verdict.kind == TurnKind::Decl
-                    }
-                }
-        }
-        CellFoldOutcome::AttemptedFailed(_) | CellFoldOutcome::Compiled => requested && eligible,
-    };
-    if !valid {
-        return Err(CompileError::ExtractFailed(
-            "cell fold outcome contradicts the checked cell eligibility".into(),
-        ));
-    }
-    Ok(())
 }
 
 fn decode_checked_expression_plan(
     value: &CborValue,
 ) -> Result<CheckedExpressionPlan, CompileError> {
-    let fields = cbor_expect_array_len(value, 6, "checked expression plan")?;
+    let fields = cbor_expect_array_len(value, 5, "checked expression plan")?;
     let lift = match cbor_expect_text(&fields[1], "expression lift")? {
         "effectful" => ExpressionLift::Effectful,
         "pure" => ExpressionLift::Pure,
@@ -4553,8 +4126,6 @@ fn decode_checked_expression_plan(
         presentation,
         type_display: cbor_expect_text(&fields[3], "full expression type")?.to_owned(),
         heads: decode_nominal_heads(&fields[4], "expression result nominal heads")?,
-        imports: decode_string_array(&fields[5], "expression type imports")?,
-        authority: None,
     })
 }
 
@@ -4657,13 +4228,11 @@ fn decode_cell_source_item(value: &CborValue) -> Result<CellAnalysisSourceItem, 
 }
 
 fn decode_checked_binder_pin(value: &CborValue) -> Result<CheckedBinderPin, CompileError> {
-    let fields = cbor_expect_array_len(value, 4, "checked binder pin")?;
+    let fields = cbor_expect_array_len(value, 3, "checked binder pin")?;
     Ok(CheckedBinderPin {
         key: cbor_expect_text(&fields[0], "checked binder pin key")?.to_owned(),
         ty: cbor_expect_text(&fields[1], "checked binder pin type")?.to_owned(),
         heads: decode_nominal_heads(&fields[2], "checked binder pin heads")?,
-        imports: decode_string_array(&fields[3], "checked binder pin imports")?,
-        authority: None,
     })
 }
 
@@ -5529,6 +5098,52 @@ mod ambiguity_advice_tests {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn cell_observations_reject_old_wire_and_import_bearing_rows() {
+        let array = CborValue::Array;
+        let text = |value: &str| CborValue::Text(value.into());
+        let payload = array(vec![
+            array(vec![]),
+            array(vec![]),
+            text(""),
+            array(vec![array(vec![]), array(vec![])]),
+            array(vec![]),
+        ]);
+        let envelope = array(vec![text("TPCELLOBSERVATIONS"), 2.into(), payload.clone()]);
+        let decode = |value: &CborValue| {
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(value, &mut bytes).unwrap();
+            decode_cell_out(&bytes, "", 0, "")
+        };
+        assert!(decode(&envelope).is_ok());
+        assert!(decode(&payload).is_err());
+        let mut old_version = envelope.clone();
+        old_version.as_array_mut().unwrap()[1] = 1.into();
+        assert!(decode(&old_version).is_err());
+        let pin = array(vec![text("bind0_owned"), text("Int"), array(vec![])]);
+        let expression = array(vec![
+            text("expr0"),
+            text("pure"),
+            text("opaque"),
+            text("Int"),
+            array(vec![]),
+        ]);
+        assert!(decode_checked_binder_pin(&pin).is_ok());
+        assert!(decode_checked_expression_plan(&expression).is_ok());
+        let mut old_pin = pin;
+        old_pin
+            .as_array_mut()
+            .unwrap()
+            .push(array(vec![text("Invented.Import")]));
+        assert!(decode_checked_binder_pin(&old_pin).is_err());
+        let mut old_expression = expression;
+        old_expression
+            .as_array_mut()
+            .unwrap()
+            .push(array(vec![text("Invented.Import")]));
+        assert!(decode_checked_expression_plan(&old_expression).is_err());
+    }
+
+    #[test]
     #[serial_test::serial]
     fn runtime_cell_refuses_unknown_or_mismatched_deployment_before_worker_body() {
         use std::os::unix::fs::PermissionsExt;
@@ -5553,7 +5168,7 @@ mod tests {
             exact_context: None,
             session_id: None,
             cell_text: "let value = 42",
-            template: include_str!("fixtures/checked-fold-outcome-template.hs"),
+            template: include_str!("fixtures/checked-cell-template.hs"),
             include: &[],
             session_root: directory.path(),
             inject_modules: &[],
@@ -5586,137 +5201,7 @@ mod tests {
     }
 
     #[test]
-    fn cell_fold_outcome_separates_ineligibility_failure_and_malformed_protocol() {
-        use super::*;
-        fn encoded(tag: &str, detail: CborValue, cause: CborValue) -> Vec<u8> {
-            let value = CborValue::Array(vec![
-                CborValue::Text("TPCELLFOLD".into()),
-                CborValue::Integer(1.into()),
-                CborValue::Text(tag.into()),
-                detail,
-                cause,
-            ]);
-            let mut bytes = Vec::new();
-            ciborium::ser::into_writer(&value, &mut bytes).unwrap();
-            bytes
-        }
-        let cases = [
-            (
-                encoded("not-requested", CborValue::Null, CborValue::Null),
-                CellFoldOutcome::NotRequested,
-            ),
-            (
-                encoded(
-                    "ineligible",
-                    CborValue::Text("expression".into()),
-                    CborValue::Null,
-                ),
-                CellFoldOutcome::Ineligible(CellFoldIneligibility::Expression),
-            ),
-            (
-                encoded(
-                    "attempted-failed",
-                    CborValue::Text("compiling-turn".into()),
-                    CborValue::Text("actual source rejection".into()),
-                ),
-                CellFoldOutcome::AttemptedFailed(CellFoldAttemptFailure {
-                    stage: CellFoldStage::CompilingTurn,
-                    cause: "actual source rejection".into(),
-                }),
-            ),
-            (
-                encoded("compiled", CborValue::Null, CborValue::Null),
-                CellFoldOutcome::Compiled,
-            ),
-        ];
-        for (bytes, expected) in cases {
-            assert_eq!(decode_cell_fold_outcome(&bytes).unwrap(), expected);
-            let mut trailing = bytes;
-            trailing.push(0);
-            assert!(decode_cell_fold_outcome(&trailing).is_err());
-        }
-        for bytes in [
-            encoded(
-                "ineligible",
-                CborValue::Text("unknown".into()),
-                CborValue::Null,
-            ),
-            encoded(
-                "attempted-failed",
-                CborValue::Text("unknown".into()),
-                CborValue::Text("cause".into()),
-            ),
-            encoded(
-                "compiled",
-                CborValue::Text("unexpected".into()),
-                CborValue::Null,
-            ),
-            encoded(
-                "attempted-failed",
-                CborValue::Text("compiling-turn".into()),
-                CborValue::Text(String::new()),
-            ),
-        ] {
-            assert!(decode_cell_fold_outcome(&bytes).is_err());
-        }
-        assert!(validate_cell_fold_outcome(&CellFoldOutcome::NotRequested, false, &[]).is_ok());
-        assert!(validate_cell_fold_outcome(
-            &CellFoldOutcome::Ineligible(CellFoldIneligibility::EmptyCell),
-            true,
-            &[]
-        )
-        .is_ok());
-        assert!(validate_cell_fold_outcome(&CellFoldOutcome::Compiled, true, &[]).is_err());
-        assert!(validate_cell_fold_outcome(&CellFoldOutcome::NotRequested, true, &[]).is_err());
-    }
-
-    #[test]
-    fn checked_cell_reports_expression_skip_and_real_fold_compile_failure() {
-        tidepool_testing::eval_harness::require_extract();
-        let root = tempfile::tempdir().unwrap();
-        let template = include_str!("fixtures/checked-fold-outcome-template.hs");
-        let request = |source| CellCheckRequest {
-            exact_context: None,
-            session_id: None,
-            cell_text: source,
-            template,
-            include: &[],
-            session_root: root.path(),
-            inject_modules: &[],
-            compile_generation: 0,
-            compile_view_evidence: "",
-        };
-        let fold = || CellFoldTurn {
-            templates: &[],
-            gen: 1,
-            retained_imports: &[],
-        };
-        let (expression, compiled) =
-            check_cell_with_fold(request("40 + 2 :: Int"), fold()).unwrap();
-        assert!(compiled.is_none());
-        assert_eq!(
-            expression.fold_outcome(),
-            &CellFoldOutcome::Ineligible(CellFoldIneligibility::Expression)
-        );
-        let (binding, compiled) =
-            check_cell_with_fold(request("let value = (42 :: Int)"), fold()).unwrap();
-        assert!(compiled.is_none());
-        let CellFoldOutcome::AttemptedFailed(failure) = binding.fold_outcome() else {
-            panic!("eligible bind must record its attempted failure")
-        };
-        assert_eq!(failure.stage, CellFoldStage::CompilingTurn);
-        assert!(!failure.cause.is_empty());
-        assert_eq!(binding.items.len(), 1);
-        assert_eq!(binding.items[0].verdict.kind, TurnKind::Bind);
-        let unchecked_fold = check_cell(request("40 + 2 :: Int")).unwrap();
-        assert_eq!(
-            unchecked_fold.fold_outcome(),
-            &CellFoldOutcome::NotRequested
-        );
-    }
-
-    #[test]
-    fn checked_fold_retains_fresh_home_type_owners_after_source_removal() {
+    fn checked_item_retains_fresh_home_type_owners_after_source_removal() {
         use crate::session::{
             resident_cell_check_template, resident_workbench_templates, ModuleEnv,
             PersistentSession, SessionLib,
@@ -5776,7 +5261,7 @@ mod tests {
             .iter()
             .map(PathBuf::as_path)
             .collect::<Vec<_>>();
-        let (_, folded) = check_cell_admitted(
+        let checked = check_cell_admitted(
             CellCheckRequest {
                 exact_context: view.exact_declaration_context().cloned(),
                 session_id: Some(view.session()),
@@ -5790,15 +5275,31 @@ mod tests {
             },
             admission.clone(),
             &templates,
-            Some(CellFoldTurn {
-                templates: &templates,
-                gen: admission.initial_value_generation().0,
-                retained_imports: &[],
-            }),
         )
         .unwrap();
-        let Some(TurnResult::Bind { compiled, .. }) = folded else {
-            panic!("home value must use the same-check fold")
+        let item = checked.checked_item(0).unwrap();
+        let prefix = session
+            .begin_checked_prefix(admission.clone(), item.clone())
+            .unwrap();
+        let item_admission = session.admit_checked_item(prefix, item).unwrap();
+        let TurnResult::Bind { compiled, .. } = run_checked_item(
+            TurnRequest {
+                exact_context: view.exact_declaration_context().cloned(),
+                session_id: Some(view.session()),
+                turn_text: source,
+                templates: &templates,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &[],
+                gen: admission.initial_value_generation().0,
+                verdict: Some(checked.items[0].verdict.clone()),
+                target: None,
+                retained_imports: &[],
+            },
+            item_admission,
+        )
+        .unwrap() else {
+            panic!("the runtime-admitted item must be a bind");
         };
         let artifact = compiled
             .certification
@@ -6140,7 +5641,7 @@ mod tests {
         let specification = CheckedCellSpecification {
             admission_digest: [0; 32],
             cell_source: "let value = RootChoice.value".into(),
-            template_source: include_str!("fixtures/checked-fold-outcome-template.hs").replace(
+            template_source: include_str!("fixtures/checked-cell-template.hs").replace(
                 "{{CELL_IMPORTS}}",
                 "{{CELL_IMPORTS}}\nimport qualified RootChoice",
             ),
@@ -6260,7 +5761,7 @@ mod tests {
         let specification = CheckedCellSpecification {
             admission_digest: [0; 32],
             cell_source: "let value = RootChoice.value".into(),
-            template_source: include_str!("fixtures/checked-fold-outcome-template.hs").replace(
+            template_source: include_str!("fixtures/checked-cell-template.hs").replace(
                 "{{CELL_IMPORTS}}",
                 "{{CELL_IMPORTS}}\nimport qualified RootChoice",
             ),
@@ -6298,8 +5799,7 @@ mod tests {
                 compile_view_evidence: "",
             },
             admission.clone(),
-            &[],
-            None
+            &[]
         )
         .is_err());
         // A public offer cannot label the original roots while invoking different roots.
@@ -6363,7 +5863,7 @@ mod tests {
         let specification = CheckedCellSpecification {
             admission_digest: [0; 32],
             cell_source: "let value = (42 :: Int)".into(),
-            template_source: include_str!("fixtures/checked-fold-outcome-template.hs").into(),
+            template_source: include_str!("fixtures/checked-cell-template.hs").into(),
             turn_templates: Vec::new(),
             injected_modules: Vec::new(),
             reserved_declaration_modules: Vec::new(),
@@ -6420,7 +5920,7 @@ mod tests {
         let mut specification = CheckedCellSpecification {
             admission_digest: [0; 32],
             cell_source: "originalValue = (42 :: Int)".into(),
-            template_source: include_str!("fixtures/checked-fold-outcome-template.hs").into(),
+            template_source: include_str!("fixtures/checked-cell-template.hs").into(),
             turn_templates: Vec::new(),
             injected_modules: Vec::new(),
             reserved_declaration_modules: Vec::new(),
@@ -6540,7 +6040,7 @@ mod tests {
             let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
             let injected = view.injected_module_names();
             let started = std::time::Instant::now();
-            let (_, folded) = check_cell_admitted(
+            let checked = check_cell_admitted(
                 CellCheckRequest {
                     exact_context: view.exact_declaration_context().cloned(),
                     session_id: Some(view.session()),
@@ -6554,15 +6054,31 @@ mod tests {
                 },
                 admission.clone(),
                 &templates,
-                Some(CellFoldTurn {
-                    templates: &templates,
-                    gen: admission.initial_value_generation().0,
-                    retained_imports: &[],
-                }),
             )
             .unwrap();
-            let Some(TurnResult::Bind { compiled, .. }) = folded else {
-                panic!("the eligible tiny bind must compile in its same-check fold")
+            let item = checked.checked_item(0).unwrap();
+            let prefix = session
+                .begin_checked_prefix(admission.clone(), item.clone())
+                .unwrap();
+            let item_admission = session.admit_checked_item(prefix, item).unwrap();
+            let TurnResult::Bind { compiled, .. } = run_checked_item(
+                TurnRequest {
+                    exact_context: view.exact_declaration_context().cloned(),
+                    session_id: Some(view.session()),
+                    turn_text: source,
+                    templates: &templates,
+                    include: &include,
+                    session_root: view.session_root(),
+                    inject_modules: &injected,
+                    gen: admission.initial_value_generation().0,
+                    verdict: Some(checked.items[0].verdict.clone()),
+                    target: None,
+                    retained_imports: &[],
+                },
+                item_admission,
+            )
+            .unwrap() else {
+                panic!("the runtime-admitted item must be a bind");
             };
             let groups = &compiled.certification.unwrap().groups;
             let support_groups = groups
@@ -6642,7 +6158,7 @@ mod tests {
         let include = view.include_paths(effects.include_paths());
         let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         let injected = view.injected_module_names();
-        let (checked, _) = check_cell_admitted(
+        let checked = check_cell_admitted(
             CellCheckRequest {
                 exact_context: view.exact_declaration_context().cloned(),
                 session_id: Some(view.session()),
@@ -6656,7 +6172,6 @@ mod tests {
             },
             admission.clone(),
             &templates,
-            None,
         )
         .unwrap();
         assert_eq!(checked.items.len(), 2);
@@ -6907,7 +6422,6 @@ mod tests {
             },
             admission.clone(),
             &[],
-            None,
         );
         let failure = match outcome {
             Err(failure) => failure,
@@ -6974,7 +6488,7 @@ mod tests {
         let include = view.include_paths(effects.include_paths());
         let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         let injected = view.injected_module_names();
-        let (checked, fold) = check_cell_admitted(
+        let checked = check_cell_admitted(
             CellCheckRequest {
                 exact_context: view.exact_declaration_context().cloned(),
                 session_id: Some(view.session()),
@@ -6988,10 +6502,8 @@ mod tests {
             },
             admission.clone(),
             &templates,
-            None,
         )
         .unwrap();
-        assert!(fold.is_none());
         assert_eq!(checked.items.len(), 4);
         let declaration = checked.checked_item(0).unwrap();
         let certificate = declaration
@@ -7470,7 +6982,7 @@ mod tests {
                 include.iter().map(|path| path.to_path_buf()).collect(),
             )
             .unwrap();
-        let (checked, mut folded) = check_cell_admitted(
+        let checked = check_cell_admitted(
             CellCheckRequest {
                 exact_context: Some(context.clone()),
                 session_id: Some(view.session()),
@@ -7484,17 +6996,8 @@ mod tests {
             },
             admission.clone(),
             &templates,
-            Some(CellFoldTurn {
-                templates: &templates,
-                gen: view.next_value_generation().0,
-                retained_imports: &[],
-            }),
         )
         .unwrap();
-        assert!(
-            matches!(folded, Some(TurnResult::Bind { .. })),
-            "exact single bind must use the same-check fold"
-        );
         assert_eq!(checked.items.len(), 1);
         let item = checked.checked_item(0).unwrap();
         assert_eq!(item.admission_digest(), admission.digest());
@@ -7509,8 +7012,6 @@ mod tests {
                 None
             )
             .is_err());
-        let pins = checked.pins_for_item(0).unwrap();
-        assert!(pins[0].ty.ends_with("HiddenResult"), "{}", pins[0].ty);
         assert!(item.signatures()[0]
             .names()
             .iter()
@@ -7521,9 +7022,6 @@ mod tests {
             .unwrap();
         let item_admission = session.admit_checked_item(prefix, item.clone()).unwrap();
         let binding_prefix = item_admission.prefix().clone();
-        checked
-            .attach_fold_prefix(folded.as_mut().unwrap(), item_admission.clone())
-            .unwrap();
         let TurnResult::Bind {
             bound, compiled, ..
         } = run_checked_item(
@@ -7603,7 +7101,7 @@ mod tests {
                 include.iter().map(|path| path.to_path_buf()).collect(),
             )
             .unwrap();
-        let (expression_check, expression_fold) = check_cell_admitted(
+        let expression_check = check_cell_admitted(
             CellCheckRequest {
                 exact_context: Some(context.clone()),
                 session_id: Some(view.session()),
@@ -7617,14 +7115,8 @@ mod tests {
             },
             expression_admission.clone(),
             &templates,
-            None,
         )
         .unwrap();
-        assert!(expression_fold.is_none());
-        assert_eq!(
-            expression_check.fold_outcome(),
-            &CellFoldOutcome::NotRequested
-        );
         let expression_item = expression_check.checked_item(0).unwrap();
         assert!(expression_item.signatures()[0]
             .names()
@@ -7832,14 +7324,6 @@ mod tests {
             &display_snapshot,
             &expression_reservation.prefix().snapshot()
         ));
-        let TurnResult::Bind {
-            bound: fold_bound,
-            compiled: fold_compiled,
-            ..
-        } = folded.unwrap()
-        else {
-            panic!("eligible folded bind is absent")
-        };
         resident
             .set_run_context(crate::session::SessionRunContext {
                 lexical_scope: binding_scope,
@@ -7848,9 +7332,9 @@ mod tests {
             .unwrap();
         let outcome = resident
             .run_bind_with_sites(
-                "folded",
-                fold_compiled.code(),
-                &fold_bound[0],
+                "checked",
+                compiled.code(),
+                &bound[0],
                 view.next_value_generation(),
             )
             .unwrap();
@@ -8093,7 +7577,11 @@ mod tests {
             compile_view_evidence: "",
         })
         .unwrap();
-        let pins = checked.pins_for_item(1).unwrap();
+        let pins = checked
+            .pins
+            .iter()
+            .filter(|pin| pin.key == "__tidepool_cell_pin_1_h")
+            .collect::<Vec<_>>();
         assert_eq!(pins.len(), 1);
         assert_eq!(pins[0].ty, "Maybe G");
         assert!(
@@ -8108,8 +7596,10 @@ mod tests {
             .iter()
             .any(|head| head.module == "CellCheck" && head.name == "G"));
         let expression = checked
-            .expression_plan_for_item(3, cell, 0, "")
-            .expect("same-cell nominal expression plan");
+            .expression_plans
+            .iter()
+            .find(|plan| plan.key == "__tidepool_cell_expr_3")
+            .expect("same-cell nominal expression observation");
         assert_eq!(expression.type_display, "Maybe G");
         assert!(expression
             .heads
@@ -8307,8 +7797,10 @@ mod tests {
             .unwrap_or_else(|failure| panic!("{cell:?}: {:?}", failure.error));
             let index = checked.items.len() - 1;
             let plan = checked
-                .expression_plan_for_item(index, cell, 7, evidence)
-                .expect("fresh checked expression evidence");
+                .expression_plans
+                .iter()
+                .find(|plan| plan.key == format!("__tidepool_cell_expr_{index}"))
+                .expect("checked expression observation");
             assert_eq!((plan.lift, plan.presentation), (lift, presentation));
             assert!(
                 !plan.type_display.contains("ZonkAny"),
@@ -8329,12 +7821,6 @@ mod tests {
                     plan.type_display
                 );
             }
-            assert!(checked
-                .expression_plan_for_item(index, "different source", 7, evidence)
-                .is_err());
-            assert!(checked
-                .expression_plan_for_item(index, cell, 7, "compile-view-b")
-                .is_err());
         }
     }
 
@@ -8378,16 +7864,14 @@ mod tests {
         assert_eq!(final_item.verdict.kind, TurnKind::Expr);
         assert_eq!(final_item.source, "pure (1 :: Int)\n");
         let plan = checked
-            .expression_plan_for_item(checked.items.len() - 1, &cell, 0, "")
-            .expect("checked expression plan");
+            .expression_plans
+            .last()
+            .expect("checked expression observation");
         // The helper type owns `Eff` identity, so this isolated fixture's
         // local stand-in is still the exact constructor selected by its own
         // cell template.
         assert_eq!(plan.lift, ExpressionLift::Effectful);
         assert_eq!(plan.presentation, ExpressionPresentation::Rendered);
-        assert!(checked
-            .expression_plan_for_item(checked.items.len() - 1, &cell, 1, "")
-            .is_err());
     }
 
     /// A genuinely pure final expression (no `Applicative`/`Monad` ambiguity
@@ -8428,8 +7912,9 @@ mod tests {
         .expect("a genuinely pure final expression must still be accepted outright");
         let final_item = checked.items.last().expect("cell has at least one item");
         let plan = checked
-            .expression_plan_for_item(checked.items.len() - 1, &cell, 0, "")
-            .expect("checked expression plan");
+            .expression_plans
+            .last()
+            .expect("checked expression observation");
         assert_eq!(plan.lift, ExpressionLift::Pure);
         assert_eq!(plan.presentation, ExpressionPresentation::Rendered);
         assert_eq!(final_item.verdict.kind, TurnKind::Expr);

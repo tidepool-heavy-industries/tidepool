@@ -7765,7 +7765,7 @@ mod authored_publication_tests {
         let include = view.include_paths(effects.include_paths());
         let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         let injected = view.injected_module_names();
-        let (checked, _) = check_cell_admitted(
+        let checked = check_cell_admitted(
             CellCheckRequest {
                 exact_context: view.exact_declaration_context().cloned(),
                 session_id: Some(view.session()),
@@ -7779,7 +7779,6 @@ mod authored_publication_tests {
             },
             admission.clone(),
             &templates,
-            None,
         )
         .unwrap();
         let first = checked.checked_item(0).unwrap();
@@ -9142,7 +9141,7 @@ mod authored_publication_tests {
             )
             .unwrap();
         let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let (checked, _) = check_cell_admitted(
+        let checked = check_cell_admitted(
             CellCheckRequest {
                 exact_context: view.exact_declaration_context().cloned(),
                 session_id: Some(view.session()),
@@ -9156,7 +9155,6 @@ mod authored_publication_tests {
             },
             admission.clone(),
             &templates,
-            None,
         )
         .unwrap();
         let item = checked.checked_item(0).unwrap();

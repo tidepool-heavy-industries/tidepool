@@ -108,7 +108,7 @@ import GHC.Tc.Solver.InertSet (emptyInert)
 import GHC.Tc.Utils.Monad (initTcWithGbl)
 import GHC.Tc.Utils.TcMType (newEvVars)
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
-import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, nonDetEltsUniqSet)
+import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy, tcMkDFunSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds, typeEnvTyCons)
 import GHC.LanguageExtensions.Type qualified as LangExt
@@ -128,7 +128,7 @@ import Control.Concurrent (myThreadId)
 import Control.Exception
   ( Exception, SomeException, SomeAsyncException, fromException, finally, bracket, mask, try, catch, throwIO, IOException )
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes)
-import Data.List (find, isPrefixOf, isInfixOf, nub, nubBy, sort, sortOn, intercalate)
+import Data.List (find, isPrefixOf, nub, nubBy, sort, sortOn, intercalate)
 import Data.Containers.ListUtils (nubOrd)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
 import Numeric (showHex)
@@ -370,7 +370,6 @@ cellExpressionEvidence result = forM expressionIds $ \identifier -> do
         , expressionPlanPresentation = if rendered then ExpressionRendered else ExpressionOpaque
         , expressionPlanType = renderCellPinType names stableType
         , expressionPlanHeads = nominalHeadsOfType stableType
-        , expressionPlanImports = cellPinTypeImports names stableType
         }
   signature <- captureCheckedSignature (crHscEnv result) occurrence stableType
   pure (plan, signature)
@@ -4406,7 +4405,6 @@ capturedCellBinderPins hsc tcg =
       { checkedPinKey = occurrence
       , checkedPinType = renderCellPinType names stableType
       , checkedPinHeads = nominalHeadsOfType stableType
-      , checkedPinImports = cellPinTypeImports names stableType
       }
   | (occurrence, identifier) <- Map.toAscList unique
   , let stableType = stabilizeEffectRows (idType identifier)
@@ -4420,9 +4418,8 @@ capturedCellBinderPins hsc tcg =
       , "__tidepool_cell_pin_" `isPrefixOf` occurrence
       ]
 
--- A cell's pins are compiled again after the declaration module is staged.
--- Session types must retain their defining generation even when a newer
--- declaration shadows the same occurrence name.
+-- Diagnostic types retain their defining generation when another declaration
+-- shadows the same occurrence. These strings never become signature authority.
 renderCellPinType :: NamePprCtx -> Type -> String
 renderCellPinType originalNames = renderWithContext context . ppr
   where
@@ -4436,50 +4433,6 @@ cellPinNameContext originalNames = originalNames
         Just _ -> NameQual (moduleName modu)
         Nothing -> queryQualifyName originalNames modu occurrence
   }
-
--- Ask the same GHC printer which qualified constructors survive rendering.
--- Candidate traversal is deliberately broad (including invisible arguments
--- and synonym expansions); only a marker that appears in the printed type
--- becomes an import. A pre-existing qualified import, including an alias,
--- stays with the workbench source. Session generation imports are rebuilt.
-cellPinTypeImports :: NamePprCtx -> Type -> [String]
-cellPinTypeImports originalNames ty = sort . nub $
-  [ moduleNameString (moduleName modu)
-  | ((modu, _), marker) <- markers
-  , (moduleNameString marker ++ ".") `isInfixOf` probed
-  ]
-  where
-    names = cellPinNameContext originalNames
-    constructorNames =
-      [ (modu, nameOccName name)
-      | tc <- surfaceTyCons ty ++ nonDetEltsUniqSet (tyConsOfType ty)
-      , let name = tyConName tc
-      , Just modu <- [nameModule_maybe name]
-      ]
-    surfaceTyCons (TyConApp tc args) = tc : concatMap surfaceTyCons args
-    surfaceTyCons (AppTy function argument) =
-      surfaceTyCons function ++ surfaceTyCons argument
-    surfaceTyCons (ForAllTy _ body) = surfaceTyCons body
-    surfaceTyCons (FunTy _ multiplicity argument result) =
-      surfaceTyCons multiplicity ++ surfaceTyCons argument ++ surfaceTyCons result
-    surfaceTyCons (CastTy inner _) = surfaceTyCons inner
-    surfaceTyCons _ = []
-    needsImport (modu, occurrence) =
-      case queryQualifyName names modu occurrence of
-        NameUnqual -> False
-        NameQual _ -> isJust (parseSessionModule (moduleNameString (moduleName modu)))
-        _ -> True
-    markers = zip
-      (filter needsImport (nub constructorNames))
-      [ mkModuleName ("TidepoolPinImport" ++ show index) | index <- [(0 :: Int)..] ]
-    probeNames = names
-      { queryQualifyName = \modu occurrence ->
-          case lookup (modu, occurrence) markers of
-            Just marker -> NameQual marker
-            Nothing -> queryQualifyName names modu occurrence
-      }
-    probed = renderWithContext
-      (defaultSDocContext { sdocStyle = mkUserStyle probeNames AllTheWay }) (ppr ty)
 
 -- Stop at an 'Id': descending through its type/name graph is both unnecessary
 -- and dramatically larger than the typechecked syntax tree that owns it.

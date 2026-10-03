@@ -1260,7 +1260,6 @@ impl CheckedSettledValues {
 
 #[derive(Clone, Debug)]
 enum CheckedExecutionAdmission {
-    InitialFold([u8; 32]),
     RuntimeItem([u8; 32]),
     CellProgram([u8; 32]),
     HostActivationInput([u8; 32]),
@@ -1625,12 +1624,6 @@ impl ExactCompiledItem {
             CheckedExecutionAdmission::HostActivationInput(_) => false,
             CheckedExecutionAdmission::RuntimeItem(digest) => digest == item_digest,
             CheckedExecutionAdmission::CellProgram(digest) => digest == cell_digest,
-            CheckedExecutionAdmission::InitialFold(digest) => {
-                digest == cell_digest
-                    && self.item.index() == 0
-                    && self.item.kind() == CheckedItemKind::Bind
-                    && self.settled_values.rows.is_empty()
-            }
         };
         if !valid {
             return Err(failure(
@@ -2225,7 +2218,7 @@ impl ExactCheckedItem {
         let Some(expression) = &self.cell.items[self.index].expression else {
             return Ok(None);
         };
-        Ok(Some(match string(&row(expression, 6)?[1])? {
+        Ok(Some(match string(&row(expression, 5)?[1])? {
             "pure" => CheckedExpressionLift::Pure,
             "effectful" => CheckedExpressionLift::Effectful,
             _ => return Err(failure("sealed expression has an unknown lift")),
@@ -2237,7 +2230,7 @@ impl ExactCheckedItem {
         let Some(expression) = &self.cell.items[self.index].expression else {
             return Ok(None);
         };
-        Ok(Some(match string(&row(expression, 6)?[2])? {
+        Ok(Some(match string(&row(expression, 5)?[2])? {
             "rendered" => CheckedExpressionPresentation::Rendered,
             "opaque" => CheckedExpressionPresentation::Opaque,
             _ => return Err(failure("sealed expression has an unknown presentation")),
@@ -2279,50 +2272,6 @@ impl ExactCheckedItem {
     }
 }
 
-pub(crate) fn seal_checked_fold(
-    root: &Path,
-    producer: &[u8],
-    context: [u8; 32],
-    request: &str,
-    cell: &Arc<ExactCheckedCell>,
-    generation: u64,
-    source: &str,
-    target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
-    artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
-    source_lexical: &[crate::declaration_join::ExactLexicalNode],
-) -> Result<Arc<ExactCompiledItem>, CompileError> {
-    cell.revalidate(producer, &context)?;
-    if cell.items.len() != 1
-        || cell.items[0].kind != CheckedItemKind::Bind
-        || hash(&read(root.join("checked-cell.cbor"), 8 * 1024 * 1024)?)
-            != hex(&cell.receipt_digest)
-    {
-        return Err(failure(
-            "fold is not the sole bind of its same checked offer",
-        ));
-    }
-    let item = cell.item(0)?;
-    CheckedItemOffer {
-        purpose: CheckedItemPurpose::Authored,
-        prefix: item.initial_prefix()?,
-        item,
-        runtime_prefix_digest: cell.admission_digest(),
-        generation,
-        observation_name: None,
-        is_fold: true,
-        is_program: false,
-        settled_values: CheckedSettledValues::default(),
-    }
-    .seal(
-        root,
-        request,
-        source,
-        target,
-        artifact_context,
-        source_lexical,
-    )
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct CheckedItemOffer {
     pub(crate) purpose: CheckedItemPurpose,
@@ -2331,7 +2280,6 @@ pub(crate) struct CheckedItemOffer {
     pub(crate) runtime_prefix_digest: [u8; 32],
     pub(crate) generation: u64,
     pub(crate) observation_name: Option<String>,
-    pub(crate) is_fold: bool,
     pub(crate) is_program: bool,
     pub(crate) settled_values: CheckedSettledValues,
 }
@@ -2356,7 +2304,6 @@ impl CheckedItemOffer {
             || self.item.cell.receipt_digest == [0; 32]
             || self.runtime_prefix_digest == [0; 32]
             || self.observation_name.is_some()
-            || self.is_fold
             || self.is_program
             || self.generation == 0
         {
@@ -2629,8 +2576,6 @@ impl CheckedItemOffer {
                     CheckedExecutionAdmission::HostActivationInput(self.runtime_prefix_digest)
                 } else if self.is_program {
                     CheckedExecutionAdmission::CellProgram(self.item.admission_digest())
-                } else if self.is_fold {
-                    CheckedExecutionAdmission::InitialFold(self.runtime_prefix_digest)
                 } else {
                     CheckedExecutionAdmission::RuntimeItem(self.runtime_prefix_digest)
                 },
@@ -2725,7 +2670,7 @@ pub(crate) fn admit_checked_cell(
     let header = row(&value, if program.is_some() { 11 } else { 10 })?;
     let observations = read(root.join("cell.cbor"), 32 * 1024 * 1024)?;
     let output = decode(&observations)?;
-    let output = row(&output, 5)?;
+    let output = cell_observations(&output)?;
     let checked_source = string(&output[2])?.to_owned();
     if string(&header[0])?
         != if program.is_some() {
@@ -2733,7 +2678,7 @@ pub(crate) fn admit_checked_cell(
         } else {
             "TPEXACTCHECK"
         }
-        || string(&header[1])? != "1"
+        || string(&header[1])? != "2"
         || string(&header[2])? != request_digest
         || string(&header[3])? != hex(&specification.admission_digest)
         || string(&header[4])? != hash(specification.cell_source.as_bytes())
@@ -2830,7 +2775,7 @@ pub(crate) fn admit_checked_cell(
                 binders
                     .iter()
                     .map(|binder| {
-                        unique_key(pins, &format!("__tidepool_cell_pin_{index}_{binder}"), 4)
+                        unique_key(pins, &format!("__tidepool_cell_pin_{index}_{binder}"), 3)
                     })
                     .collect::<Result<Vec<_>, _>>()?
             } else {
@@ -2840,17 +2785,17 @@ pub(crate) fn admit_checked_cell(
                 Some(unique_key(
                     expressions,
                     &format!("__tidepool_cell_expr_{index}"),
-                    6,
+                    5,
                 )?)
             } else {
                 None
             };
             let mut keys = item_pins
                 .iter()
-                .map(|value| row(value, 4).and_then(|row| string(&row[0])))
+                .map(|value| row(value, 3).and_then(|row| string(&row[0])))
                 .collect::<Result<Vec<_>, _>>()?;
             if let Some(expression) = &expression {
-                keys.push(string(&row(expression, 6)?[0])?);
+                keys.push(string(&row(expression, 5)?[0])?);
             }
             let item_signatures = keys
                 .iter()
@@ -3054,6 +2999,28 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Value, CompileError> {
     }
     Ok(value)
 }
+/// Decode the matched observation format; old bare rows cannot satisfy a
+/// checked receipt or parser capability under the current compiler protocol.
+pub(crate) fn cell_observations(value: &Value) -> Result<&[Value], CompileError> {
+    let envelope = row(value, 3)?;
+    if string(&envelope[0])? != "TPCELLOBSERVATIONS"
+        || envelope[1]
+            .as_integer()
+            .and_then(|value| u64::try_from(value).ok())
+            != Some(2)
+    {
+        return Err(failure("unsupported cell observations version"));
+    }
+    let payload = row(&envelope[2], 5)?;
+    for pin in list(&payload[1], 65536)? {
+        row(pin, 3)?;
+    }
+    for expression in list(&payload[4], 65536)? {
+        row(expression, 5)?;
+    }
+    Ok(payload)
+}
+
 pub(crate) fn row(value: &Value, count: usize) -> Result<&[Value], CompileError> {
     let values = list(value, count)?;
     if values.len() != count {
@@ -3091,6 +3058,30 @@ fn failure(error: impl std::fmt::Display) -> CompileError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn observation_migration_refuses_unversioned_and_import_bearing_rows() {
+        use super::*;
+        let payload = Value::Array(vec![
+            Value::Array(vec![]),
+            Value::Array(vec![]),
+            text(""),
+            Value::Array(vec![Value::Array(vec![]), Value::Array(vec![])]),
+            Value::Array(vec![]),
+        ]);
+        let envelope = Value::Array(vec![text("TPCELLOBSERVATIONS"), 2.into(), payload.clone()]);
+        assert!(cell_observations(&envelope).is_ok());
+        assert!(cell_observations(&payload).is_err());
+        let mut old_version = envelope.clone();
+        old_version.as_array_mut().unwrap()[1] = 1.into();
+        assert!(cell_observations(&old_version).is_err());
+        for (section, count) in [(1, 4), (4, 6)] {
+            let mut old_row = envelope.clone();
+            old_row.as_array_mut().unwrap()[2].as_array_mut().unwrap()[section] =
+                Value::Array(vec![Value::Array(vec![Value::Null; count])]);
+            assert!(cell_observations(&old_row).is_err());
+        }
+    }
+
     use super::{CheckedPrefixSequence, CheckedValueInputs};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -3692,7 +3683,6 @@ mod tests {
             runtime_prefix_digest: [6; 32],
             generation: 1,
             observation_name: None,
-            is_fold: false,
             is_program: false,
             settled_values: Default::default(),
         }

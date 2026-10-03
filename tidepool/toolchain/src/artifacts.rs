@@ -407,7 +407,7 @@ pub struct CompiledArtifacts {
 }
 
 /// Candidate suggestions for a worker compile whose source is rendered by the
-/// worker after the request starts (the resident turn and folded-turn lanes).
+/// worker after the request starts (the resident turn lane).
 /// The same offer must be passed to final sealing; a manifest path alone is
 /// never authority for a cached product.
 pub struct ModuleCandidateOffer {
@@ -1112,7 +1112,6 @@ impl ModuleCandidateOffer {
             runtime_prefix_digest,
             generation,
             observation_name: observation_name.map(str::to_owned),
-            is_fold: false,
             is_program: false,
             settled_values,
         };
@@ -1654,7 +1653,6 @@ impl ModuleCandidateOffer {
                 runtime_prefix_digest: cell.admission_digest(),
                 generation,
                 observation_name: observation,
-                is_fold: false,
                 is_program: true,
                 settled_values: completed.prepared_value_selection()?,
             }
@@ -1942,64 +1940,6 @@ impl ModuleCandidateOffer {
             certificate: Arc::new(certificate),
             receipt_digest: Sha256::digest(&bytes).into(),
         }))
-    }
-
-    pub fn admit_checked_fold(
-        &self,
-        root: &Path,
-        cell: &Arc<crate::checked_cell::ExactCheckedCell>,
-        generation: u64,
-        source: &str,
-        target: &Arc<PreparedProgram>,
-    ) -> Result<Arc<crate::checked_cell::ExactCompiledItem>, CompileError> {
-        if self.checked_cell.is_none() {
-            return Err(CompileError::ExtractFailed(
-                "ordinary offer cannot certify a checked fold".into(),
-            ));
-        }
-        let exact = self
-            .exact
-            .as_ref()
-            .ok_or_else(|| CompileError::ExtractFailed("checked fold lacks exact scope".into()))?;
-        let sealed = seal_turn_outputs(
-            self,
-            root,
-            &root.join(format!(
-                "{}.hs",
-                extract_module_name(source).ok_or_else(|| CompileError::ExtractFailed(
-                    "checked fold source has no module".into()
-                ))?
-            )),
-            source,
-            target,
-            "__prepared",
-        )?
-        .ok_or_else(|| {
-            CompileError::ExtractFailed("checked fold lacks certified products".into())
-        })?;
-        let source_path = root.join(format!(
-            "{}.hs",
-            extract_module_name(source).expect("validated module")
-        ));
-        let admitted_source = exact.admit_source(
-            &source_path,
-            source,
-            &crate::checked_cell::read(root.join("dependencies.json"), 32 << 20)?,
-        )?;
-        let context =
-            checked_output_context(self, &sealed.recovery_products, &admitted_source, source)?;
-        crate::checked_cell::seal_checked_fold(
-            root,
-            &self.producer,
-            exact.semantic_sha256,
-            &exact.request_sha256,
-            cell,
-            generation,
-            source,
-            target,
-            &context.0,
-            &context.1,
-        )
     }
 
     pub fn exact_scope_path(&self) -> Option<&Path> {

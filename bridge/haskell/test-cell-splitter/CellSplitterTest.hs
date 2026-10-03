@@ -140,10 +140,9 @@ runAllTests = do
     ["--dependency-evidence"] -> dependencyEvidenceCompilation
     ["--untracked-compile-time"] -> untrackedCompileTimeCompilation
     ["--validation-memo"] -> validationMemoCompilation
-    ["--pin-imports"] -> pinnedTypeImportsCompilation
     ["--path-insensitive-witness"] -> pathInsensitiveWitnessCompilation
     ["--memo-lifecycle"] -> memoLifecycleCompilation
-    _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --pin-imports, --path-insensitive-witness, --memo-lifecycle, or --structural-display EFFECTS_INCLUDE"
+    _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --path-insensitive-witness, --memo-lifecycle, or --structural-display EFFECTS_INCLUDE"
 
 requestValidationChecks :: IO ()
 requestValidationChecks = do
@@ -450,6 +449,13 @@ checkingSourceRequestRoundTrip = do
     Left _ -> pure ()
     other -> fail ("retired request bytes accepted: " ++ show other)
 
+  [singleFlag, singlePayload] <- pure (workerArgv [ActivationPreview])
+  forM_ ["22", "2d"] $ \retiredTag -> do
+    let retiredField = take (length singlePayload - 2) singlePayload ++ retiredTag
+    case workerRequestFromArgv [singleFlag, retiredField] of
+      Left message | "retired field tag" `isInfixOf` message -> pure ()
+      other -> fail ("retired fold/type-pin field accepted: " ++ show other)
+
 certificationRequestValidation :: IO ()
 certificationRequestValidation = do
   let valid = [Input "Probe.hs", Targets ["probe"], Include "lib"
@@ -464,7 +470,7 @@ certificationRequestValidation = do
   forM_ [ Cell, Classify, Turn, InspectType "Int", InspectTypeBatch "Batch.hs"
         , DeclarationJoin "join.cbor", BindGen 1, InjectVal "Val1"
         , ModuleCandidates "candidates.cbor"
-        , ActivationPreview, CellFoldTurn, TargetModuleOnly
+        , ActivationPreview, TargetModuleOnly
         , RetainedGeneration (SymbolIdentity "main" "Producer" "value" "value" Nothing) 1
         ] $ \field ->
     case workerRequestFromArgv (workerArgv (valid ++ [field])) of
@@ -507,13 +513,13 @@ requestShapeValidation = do
       , ("session injection", InjectVal "Val1"), ("session root", SessionRoot "session")
       , ("session incarnation", SessionIncarnation "1"), ("session artifacts", SessionArtifacts "scope")
       , ("turn mode", Turn), ("turn template", TurnTemplate "kind" "template")
-      , ("turn output", TurnOut "turn"), ("turn verdict", TurnVerdict "ok"), ("turn pin", TurnPin "pin")
+      , ("turn output", TurnOut "turn"), ("turn verdict", TurnVerdict "ok")
       , ("classification mode", Classify), ("classification output", ClassifyOut "classify")
       , ("cell mode", Cell), ("cell plan mode", CellPlan), ("cell template", CellTemplate "template")
       , ("cell output", CellOut "cell"), ("harness profile", HarnessProfile)
       , ("declaration join", DeclarationJoin "join"), ("declaration join output", DeclarationJoinOut "join-out")
       , ("activation preview", ActivationPreview)
-      , ("cell fold turn", CellFoldTurn), ("inspection strictness", InspectionStrict)
+      , ("inspection strictness", InspectionStrict)
       , ("inspection output", InspectOut "inspect"), ("type batch", InspectTypeBatch "batch")
       , ("inspection query", InspectType "Int")
       , ("retained generation", RetainedGeneration (SymbolIdentity "main" "M" "value" "x" Nothing) 1)
@@ -523,7 +529,7 @@ requestShapeValidation = do
       , ("inspection query", InspectType "Int"), ("session artifacts", SessionArtifacts "scope")
       , ("declaration join", DeclarationJoin "join"), ("candidate authority", ModuleCandidates "scope")
       , ("activation preview", ActivationPreview)
-      , ("cell fold turn", CellFoldTurn), ("binding generation", BindGen 1)
+      , ("binding generation", BindGen 1)
       , ("retained generation", RetainedGeneration (SymbolIdentity "main" "M" "value" "x" Nothing) 1)
       ]
 
@@ -1110,64 +1116,6 @@ pathInsensitiveWitnessCompilation = bracket temporary removeDirectoryRecursive $
       createDirectory path
       pure path
 
-pinnedTypeImportsCompilation :: IO ()
-pinnedTypeImportsCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
-  let alias = root </> "PinHandler.hs"
-      checkedSource = root </> "PinCheck.hs"
-      stagedSource = root </> "PinStage.hs"
-  writeFile alias $ unlines
-    [ "{-# LANGUAGE DataKinds, TypeOperators #-}"
-    , "module PinHandler (Handler, Box(..)) where"
-    , "import Control.Monad.Freer (Eff)"
-    , "import qualified Control.Monad.Freer.State as S"
-    , "type Handler a = Eff '[S.State Int] a"
-    , "data Box = Box"
-    ]
-  writeFile checkedSource $ unlines
-    [ "module PinCheck where"
-    , "import PinHandler (Handler)"
-    , "import qualified PinHandler as Alias"
-    , "__cell = do { let { saved = (pure () :: Handler ()) };"
-    , "  let { __tidepool_cell_pin_0_saved = saved };"
-    , "  let { boxed = (1 :: Int, [Alias.Box]) };"
-    , "  let { __tidepool_cell_pin_1_boxed = boxed }; pure () } :: IO ()"
-    ]
-  withResidentPipelineSelected [root] $ \compile -> do
-    checked <- compile CheckedEnvironment mempty GeneralCompile Nothing checkedSource [] Nothing
-    pin <- case filter ((== "__tidepool_cell_pin_0_saved") . checkedPinKey)
-                 (crCheckedBinderPins checked) of
-      [selected] -> pure selected
-      _ -> fail "whole-cell check did not capture the Handler binding"
-    unless ("Control.Monad.Freer.State" `elem` checkedPinImports pin) $
-      fail ("expanded Handler type omitted its qualified State import: " ++ show pin)
-    aliasPin <- case filter ((== "__tidepool_cell_pin_1_boxed") . checkedPinKey)
-                      (crCheckedBinderPins checked) of
-      [selected] -> pure selected
-      _ -> fail "whole-cell check did not capture the alias-qualified binding"
-    assertContains "authored import alias stays in the pinned type" "Alias.Box" (checkedPinType aliasPin)
-    unless (null (checkedPinImports aliasPin)) $
-      fail ("tuple/list/alias type added an unneeded module import: " ++ show aliasPin)
-    writeFile stagedSource $ unlines $
-      [ "{-# LANGUAGE DataKinds, TypeOperators #-}"
-      , "module PinStage where"
-      , "import PinHandler (Handler)"
-      , "import qualified PinHandler as Alias"
-      ] ++ map ("import qualified " ++) (checkedPinImports pin) ++
-      [ "__result = do { let { saved = (pure () :: Handler ()) };"
-      , "  let { boxed = (1 :: Int, [Alias.Box]) };"
-      , "  pure ((saved :: " ++ checkedPinType pin ++ "),"
-          ++ " (boxed :: " ++ checkedPinType aliasPin ++ ")) } :: IO (Handler (), (Int, [Alias.Box]))"
-      ]
-    _ <- compile CheckedEnvironment mempty GeneralCompile Nothing stagedSource [] Nothing
-    pure ()
-  where
-    temporary = do
-      parent <- getTemporaryDirectory
-      (path, handle) <- openTempFile parent "tidepool-pin-imports"
-      hClose handle
-      removeFile path
-      createDirectory path
-      pure path
 
 validationMemoCompilation :: IO ()
 validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -> do

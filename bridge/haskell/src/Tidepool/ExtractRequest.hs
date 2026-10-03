@@ -48,7 +48,6 @@ data RequestField
   | CheckSource
   | CellTemplate FilePath
   | CellOut FilePath
-  | TurnPin String
   | HarnessProfile
   | BuildProductsDir FilePath
   | ModuleCandidates FilePath
@@ -69,10 +68,6 @@ data RequestField
   | RetainedGeneration SymbolIdentity Word64
   | ActivationPreview
   | InspectionStrict
-  -- | Ask a 'Cell' request to also attempt one item's turn-shaped compile
-  -- in the same worker invocation, when the whole-cell check resolves to
-  -- exactly one non-declaration item. See 'Main.runCellMode'.
-  | CellFoldTurn
   deriving (Eq, Show)
 
 -- | A decoded compiler-worker invocation. This is the Haskell boundary's
@@ -105,7 +100,6 @@ data WorkerRequest = WorkerRequest
   , requestCellPlan :: Bool
   , requestCellTemplate :: Maybe FilePath
   , requestCellOut :: Maybe FilePath
-  , requestTurnPin :: Maybe String
   , requestHarnessProfile :: Bool
   , requestBuildProductsDir :: Maybe FilePath
   , requestModuleCandidates :: Maybe FilePath
@@ -125,7 +119,6 @@ data WorkerRequest = WorkerRequest
   -- same compile, linked against 'requestRetainedGenerations'.
   , requestActivationPreview :: Bool
   , requestInspectionStrict :: Bool
-  , requestCellFoldTurn :: Bool
   }
   deriving (Eq, Show)
 
@@ -145,11 +138,11 @@ validateRequestShape args
       && null (requestInspections args) && not hasSessionScope
       && not (present (requestDeclarationJoin args)) && not (present (requestDeclarationJoinOut args))
       && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
-      && not (requestHarnessProfile args) && not (requestCellFoldTurn args)
+      && not (requestHarnessProfile args)
       && not (present (requestOutDir args)) && not (present (requestTarget args))
       && null (requestTargets args) && not (present (requestBindGen args))
       && null (requestTurnTemplates args) && not (present (requestTurnOut args))
-      && not (present (requestTurnVerdict args)) && not (present (requestTurnPin args))
+      && not (present (requestTurnVerdict args))
       && not (present (requestCellOut args)) && not (present (requestCellTemplate args))
       && not (present (requestClassifyOut args)) && not (present (requestInspectOut args))
       && not (present (requestInspectTypeBatch args)) && not (present (requestSessionArtifacts args))
@@ -161,7 +154,7 @@ validateRequestShape args
       && null (requestInspections args) && not (present (requestSessionArtifacts args))
       && not (present (requestDeclarationJoin args)) && not (present (requestModuleCandidates args))
       && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
-      && not (requestCellFoldTurn args) && not (present (requestBindGen args))
+      && not (present (requestBindGen args))
       && Map.null (requestRetainedGenerations args)
     hasSessionScope = not (null (requestInjectVals args))
       || present (requestSessionRoot args) || present (requestSessionArtifacts args)
@@ -190,7 +183,6 @@ emptyWorkerRequest = WorkerRequest
   , requestCellPlan = False
   , requestCellTemplate = Nothing
   , requestCellOut = Nothing
-  , requestTurnPin = Nothing
   , requestHarnessProfile = False
   , requestBuildProductsDir = Nothing
   , requestModuleCandidates = Nothing
@@ -204,7 +196,6 @@ emptyWorkerRequest = WorkerRequest
   , requestRetainedGenerations = Map.empty
   , requestActivationPreview = False
   , requestInspectionStrict = False
-  , requestCellFoldTurn = False
   }
 
 data InspectionRequest
@@ -277,7 +268,6 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
       CheckSource -> request { requestCheckSource = True }
       CellTemplate path -> request { requestCellTemplate = Just path }
       CellOut path -> request { requestCellOut = Just path }
-      TurnPin pin -> request { requestTurnPin = Just pin }
       HarnessProfile -> request { requestHarnessProfile = True }
       BuildProductsDir path -> request { requestBuildProductsDir = Just path }
       ModuleCandidates path -> request { requestModuleCandidates = Just path }
@@ -308,7 +298,6 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
             Map.insert identity generation (requestRetainedGenerations request) }
       ActivationPreview -> request { requestActivationPreview = True }
       InspectionStrict -> request { requestInspectionStrict = True }
-      CellFoldTurn -> request { requestCellFoldTurn = True }
 
 workerRequestFlag :: String
 workerRequestFlag = "--worker-request-v17"
@@ -404,7 +393,6 @@ encodeField field = case field of
   CheckSource -> BS.singleton 52
   CellTemplate value -> taggedText 32 value
   CellOut value -> taggedText 33 value
-  TurnPin value -> taggedText 34 value
   InspectSearch value -> taggedText 35 value
   InspectStructuredInfo query -> BS.singleton 36 <> encodeStructuredInspection query
   InspectStructuredType query -> BS.singleton 37 <> encodeStructuredInspection query
@@ -414,7 +402,6 @@ encodeField field = case field of
   ActivationPreview -> BS.singleton 41
   InspectionStrict -> BS.singleton 42
   InspectScopeBrowse -> BS.singleton 43
-  CellFoldTurn -> BS.singleton 45
 
 encodeSymbolIdentity :: SymbolIdentity -> BS.ByteString
 encodeSymbolIdentity identity =
@@ -514,7 +501,7 @@ pField bytes = do
     52 -> Right (CheckSource, rest)
     32 -> mapParser CellTemplate pText rest
     33 -> mapParser CellOut pText rest
-    34 -> mapParser TurnPin pText rest
+    34 -> retired 34
     35 -> mapParser InspectSearch pText rest
     36 -> mapParser InspectStructuredInfo pStructuredInspection rest
     37 -> mapParser InspectStructuredType pStructuredInspection rest
@@ -527,7 +514,7 @@ pField bytes = do
     41 -> Right (ActivationPreview, rest)
     42 -> Right (InspectionStrict, rest)
     43 -> Right (InspectScopeBrowse, rest)
-    45 -> Right (CellFoldTurn, rest)
+    45 -> retired 45
     _  -> Left ("worker request: unknown field tag " ++ show tag)
   where
     retired tag = Left ("worker request: retired field tag " ++ show tag)

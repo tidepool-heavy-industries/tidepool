@@ -51,7 +51,7 @@ import Tidepool.Binders
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
   , StmtBinders(..), TurnOut(..), renderAskJson, renderVerdictsJson
-  , CheckedBinderPin(..) )
+  )
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..)
@@ -266,12 +266,12 @@ dispatch compiler caches timing args = do
               HostActivationInput -> requestActivationPreview args
                 && length (requestFiles args) == 1
                 && not (requestCellPlan args) && not (requestCheckSource args)
-                && not (requestHarnessProfile args) && not (requestCellFoldTurn args)
+                && not (requestHarnessProfile args)
                 && null (requestTargets args)
         unless (requestTurn args && not (requestCell args) && not (requestClassify args)
           && null (requestInspections args) && not (isJust (requestDeclarationJoin args))
           && not (requestCertifyHomeProducts args) && previewPurpose
-          && not (isJust (requestTurnPin args)) && not (isJust (requestTarget args)))
+          && not (isJust (requestTarget args)))
           (throwIO CheckedPurposeMismatch)
   case admitted of
     Left failure -> reportDiags (Left failure)
@@ -761,9 +761,7 @@ runTurnMode compiler caches args path = do
     let admittedDisplay = exact >>= scopeCheckedDisplay
     forM_ admittedDisplay $ \admission -> validateCheckedDisplayAdmission args admission turnSrc sb
     let outDir     = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (requestOutDir args)
-        bindersStr = fromMaybe
-          (intercalate ", " (sbBinders sb))
-          (requestTurnPin args)
+        bindersStr = intercalate ", " (sbBinders sb)
     if requestActivationPreview args && (sbKind sb /= KBind || length (sbBinders sb) /= 1)
       then fail "activation requires exactly one generated input binder"
       else pure ()
@@ -783,7 +781,7 @@ runTurnMode compiler caches args path = do
                         then map (T.pack . exportItemName) items
                         else map T.pack (sbBinders sb)
         return (TDecl binders items declarationSource)
-      _kind -> compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr [] admittedItem admittedDisplay lastAttempt
+      _kind -> compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr admittedItem admittedDisplay lastAttempt
     outFile <- requireArg "--turn-out" (requestTurnOut args)
     let cbor = encodeTurnOut turnOut
     BS.writeFile outFile cbor
@@ -824,30 +822,15 @@ writeSplicedModule outDir lastAttempt spliced = do
   writeIORef lastAttempt (Just (outDir </> "turn-attempt.hs", spliced))
   return (spliced, modName, modulePath)
 
--- | Compile one already-classified, non-@decl@ turn statement (bind,
--- bind-discard, or expr) through the resident prepared-STG path and return
--- its 'TurnOut'. This is the compile half of 'runTurnMode' for every verdict
--- but @decl@, factored out so 'runCellMode''s single-item fold can drive the
--- SAME compile from a verdict and pin it already has from the whole-cell
--- check — in the same worker invocation, with no separate classify/compile
--- spawn.
-insertCheckedTypeImports :: [String] -> String -> IO String
-insertCheckedTypeImports [] source = pure source
-insertCheckedTypeImports modules source =
-  let marker = T.pack "default (Int, Double, Text)\n"
-      (before, after) = T.breakOn marker (T.pack source)
-  in if T.null after
-       then fail "cell fold: turn template has no import insertion point"
-       else pure (T.unpack before ++ concatMap (\modu -> "import qualified " ++ modu ++ "\n") modules
-         ++ T.unpack after)
-
+-- | Compile one non-declaration turn from authored syntax or an admitted
+-- native recipe. Checked signatures remain compiler payloads, never type text.
 compileClassifiedTurn
   :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
-  -> String -> StmtBinders -> String -> [String] -> Maybe CheckedItemAdmission -> Maybe CheckedDisplayAdmission
+  -> String -> StmtBinders -> String -> Maybe CheckedItemAdmission -> Maybe CheckedDisplayAdmission
   -> IORef (Maybe (FilePath, String))
   -> IO TurnOut
-compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt =
-  compiledTurn <$> compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt [] Nothing
+compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr admitted display lastAttempt =
+  compiledTurn <$> compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr admitted display lastAttempt [] Nothing
 
 data CompiledTurnOutput = CompiledTurnOutput
   { compiledTurn :: TurnOut
@@ -858,9 +841,9 @@ data CompiledTurnOutput = CompiledTurnOutput
 
 compileClassifiedTurnKeeping
   :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
-  -> String -> StmtBinders -> String -> [String] -> Maybe CheckedItemAdmission -> Maybe CheckedDisplayAdmission
+  -> String -> StmtBinders -> String -> Maybe CheckedItemAdmission -> Maybe CheckedDisplayAdmission
   -> IORef (Maybe (FilePath, String)) -> [String] -> Maybe SourcePrologue -> IO CompiledTurnOutput
-compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted display lastAttempt programImports prologue = do
+compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr admitted display lastAttempt programImports prologue = do
     let templates = requestTurnTemplates args
         protectedTemplates = case (display,admitted) of
           (Just authority,Nothing) -> Just (displayTurnTemplates authority)
@@ -909,18 +892,17 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
                 -- the admitted statement or checked signature declarations.
                 withPreview <- maybe (pure withProgram)
                   (\body -> replaceRecipeMarker "{{ACTIVATION_PREVIEW}}" body withProgram) preview
-                tmplWithImports <- insertCheckedTypeImports typeImports withPreview
                 case (display, admitted) of
                   (Just admission, Nothing) -> if requestCell args
-                    then checkedProgramDisplayRecipe admission tmplWithImports
-                    else checkedDisplayRecipe admission tmplWithImports
-                  (Nothing, Nothing) -> pure (spliceTemplate tmplWithImports turnSrc bindersStr)
+                    then checkedProgramDisplayRecipe admission withPreview
+                    else checkedDisplayRecipe admission withPreview
+                  (Nothing, Nothing) -> pure (spliceTemplate withPreview turnSrc bindersStr)
                   (Just _, Just _) -> fail "display and item authority cannot share one recipe"
                   (Nothing, Just admission) -> do
-                    withPrefix <- if null (itemValueImports admission) then pure tmplWithImports else
+                    withPrefix <- if null (itemValueImports admission) then pure withPreview else
                       replaceRecipeMarker "default (Int, Double, Text)\n"
                         (concatMap (\(moduleName',names) -> "import " ++ moduleName' ++ " (" ++ intercalate ", " (map renderImportBinder names) ++ ")\n")
-                          (itemValueImports admission) ++ "default (Int, Double, Text)\n") tmplWithImports
+                          (itemValueImports admission) ++ "default (Int, Double, Text)\n") withPreview
                     checkedRecipeSource admission withPrefix turnSrc
           rendered <- if requestActivationPreview args
             then do
@@ -1081,7 +1063,7 @@ runCellPlanMode args cellPath = do
     plan <- analyzeOrderedCell template source >>= either throwCellSplitError pure
     let text = encodeString . T.pack
         observation = encodeCellOut plan [] [] ""
-        receipt = encodeListLen 7 <> text "TPCELLPLAN1"
+        receipt = encodeListLen 7 <> text "TPCELLPLAN2"
           <> text (shaHex (TE.encodeUtf8 (T.pack source)))
           <> text (shaHex (TE.encodeUtf8 (T.pack template)))
           <> encodeListLen (fromIntegral (length templates))
@@ -1161,8 +1143,7 @@ runLegacyCellMode compiler caches args cellPath = do
         writeFile modulePath finalizedSource
         finalizedResult <- compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)) Set.empty checkPurpose scope modulePath (requestIncludes args) (requestBuildProductsDir args)
         pure (finalized, finalizedSource, finalizedResult)
-    -- Statement preparation checks these rendered pins in their actual value
-    -- modules before any declaration commits or effect runs.
+    -- Presentation observations remain separate from native signature authority.
     expressionEvidence <- cellExpressionEvidence compiled
     let outputBytes = encodeCellOut finalPlan (crCheckedBinderPins compiled)
           (map fst expressionEvidence) finalSource
@@ -1178,7 +1159,7 @@ runLegacyCellMode compiler caches args cellPath = do
       let text = encodeString . T.pack
           signatures = binderSignatures ++ map snd expressionEvidence
           receipt = encodeListLen 10
-            <> text "TPEXACTCHECK" <> text "1" <> text (scopeRequestSha256 receiptScope)
+            <> text "TPEXACTCHECK" <> text "2" <> text (scopeRequestSha256 receiptScope)
             <> text (checkedAdmissionDigest admission) <> text (checkedCellSha256 admission)
             <> text (checkedTemplateSha256 admission) <> text (shaHex outputBytes)
             <> text (shaHex (TE.encodeUtf8 (T.pack finalSource)))
@@ -1186,13 +1167,6 @@ runLegacyCellMode compiler caches args cellPath = do
             <> foldMap encodeCheckedSignature signatures
             <> maybe encodeNull (text . shaHex) plannedReceipt
       BS.writeFile (outDir </> "checked-cell.cbor") (toStrictByteString receipt)
-    -- Fold preparation is optional and cannot change a successful check.
-    -- Its typed outcome distinguishes ineligibility from a real attempt;
-    -- any partial artifacts of a failed attempt remain diagnostic only.
-    foldOutcome <- if requestCellFoldTurn args
-      then attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled admittedScope
-      else pure CellFoldNotRequested
-    BS.writeFile (outDir </> "cell-fold.cbor") (encodeCellFoldOutcome foldOutcome)
     pure (crWarnings compiled)
   case res of
     Left _ -> do
@@ -1232,7 +1206,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
         checkedSource = concat (programSources settled)
         observations = encodeCellOut finalPlan (programPins settled) (programExpressions settled) checkedSource
         text = encodeString . T.pack
-        receipt = encodeListLen 11 <> text "TPEXACTPROGRAM" <> text "1"
+        receipt = encodeListLen 11 <> text "TPEXACTPROGRAM" <> text "2"
           <> text (scopeRequestSha256 exact) <> text (checkedAdmissionDigest admission)
           <> text (checkedCellSha256 admission) <> text (checkedTemplateSha256 admission)
           <> text (shaHex observations) <> text (shaHex (TE.encodeUtf8 (T.pack checkedSource)))
@@ -1245,7 +1219,6 @@ runCellProgramMode compiler caches args cellPath exact planned = do
     out <- requireArg "--cell-out" (requestCellOut args)
     BS.writeFile out observations
     BS.writeFile (outDir </> "checked-cell.cbor") (toStrictByteString receipt)
-    BS.writeFile (outDir </> "cell-fold.cbor") (encodeCellFoldOutcome CellFoldNotRequested)
     sourceNow <- readFile cellPath
     templateNow <- readFile templatePath
     validateCheckedCellAdmission args admission sourceNow templateNow
@@ -1348,7 +1321,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
       validateCheckedItemAdmission localArgs itemAdmission source verdict
       lastAttempt <- newIORef Nothing
       output <- timePhase timing "cell_program_native" $ compileClassifiedTurnKeeping scoped caches localArgs timing directory
-        source verdict (intercalate ", " (sbBinders verdict)) [] (Just itemAdmission) Nothing lastAttempt (priorProgramImports state) (Just (programPrologue state))
+        source verdict (intercalate ", " (sbBinders verdict)) (Just itemAdmission) Nothing lastAttempt (priorProgramImports state) (Just (programPrologue state))
       extended <- retainProgramProducts (requestIncludes args) directory (compiledPipeline output)
         (compiledOriginalProducts output) (compiledModule output) scope
       let turn = compiledTurn output
@@ -1385,7 +1358,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
       createDirectoryIfMissing True directory
       lastAttempt <- newIORef Nothing
       output <- timePhase timing "cell_program_display" $ compileClassifiedTurnKeeping scoped caches localArgs timing directory
-        "" verdict (intercalate ", " (sbBinders verdict)) [] Nothing (Just display) lastAttempt (priorProgramImports state) Nothing
+        "" verdict (intercalate ", " (sbBinders verdict)) Nothing (Just display) lastAttempt (priorProgramImports state) Nothing
       extended <- retainProgramProducts (requestIncludes args) directory (compiledPipeline output)
         (compiledOriginalProducts output) (compiledModule output) scope
       let turn = compiledTurn output
@@ -1850,130 +1823,6 @@ originalDeclarationWrapper template = do
   let stripped = T.replace "{{CELL_PRAGMAS}}" "" prefix
   when ("{{" `T.isInfixOf` T.replace "{{CELL_IMPORTS}}" "" stripped) (fail "original declaration wrapper has an unknown placeholder")
   pure (T.unpack stripped ++ "\n{{TURN}}\n__result :: Int\n__result = (0 :: Int)\n")
-
--- Fold eligibility and attempted compilation are separate from whole-cell
--- checking. An expression or declaration is a successful ineligible outcome.
-data CellFoldIneligibility
-  = FoldEmptyCell | FoldMultipleItems | FoldExpressionItem | FoldDeclarationItem
-
-data CellFoldStage = FoldCheckingEvidence | FoldCompilingTurn | FoldSealingReceipt
-
-data CellFoldOutcome
-  = CellFoldNotRequested
-  | CellFoldIneligible CellFoldIneligibility
-  | CellFoldAttemptedFailed CellFoldStage String
-  | CellFoldCompiled
-
-encodeCellFoldOutcome :: CellFoldOutcome -> BS.ByteString
-encodeCellFoldOutcome outcome = toStrictByteString $
-  encodeListLen 5 <> text "TPCELLFOLD" <> encodeWord 1 <> case outcome of
-    CellFoldNotRequested -> text "not-requested" <> encodeNull <> encodeNull
-    CellFoldIneligible reason -> text "ineligible" <> text (case reason of
-      FoldEmptyCell -> "empty-cell"; FoldMultipleItems -> "multiple-items"
-      FoldExpressionItem -> "expression"; FoldDeclarationItem -> "declaration") <> encodeNull
-    CellFoldAttemptedFailed stage cause -> text "attempted-failed" <> text (case stage of
-      FoldCheckingEvidence -> "checking-evidence"; FoldCompilingTurn -> "compiling-turn"
-      FoldSealingReceipt -> "sealing-receipt") <> text cause
-    CellFoldCompiled -> text "compiled" <> encodeNull <> encodeNull
-  where text = encodeString . T.pack
-
--- A synchronous attempted failure preserves the successful whole-cell result.
--- Asynchronous cancellation propagates through the existing worker boundary.
-attemptCellFoldTurn
-  :: Compiler -> RecoveryCaches -> WorkerRequest -> Bool -> FilePath
-  -> CellSourcePlan -> CheckedEnvironmentResult -> Maybe ExactScope -> IO CellFoldOutcome
-attemptCellFoldTurn compiler caches args timing outDir finalPlan compiled admittedScope =
-  case soleBindItem finalPlan of
-    Nothing -> pure (CellFoldIneligible (case cellPlanItems finalPlan of
-      [] -> FoldEmptyCell
-      [item] -> case sbKind (cellAnalysisVerdict item) of
-        KExpr -> FoldExpressionItem; KDecl -> FoldDeclarationItem
-        KBind -> FoldMultipleItems
-      _ -> FoldMultipleItems))
-    Just item -> do
-      stage <- newIORef FoldCheckingEvidence
-      result <- trySynchronous (attempt stage item)
-      case result of
-        Right () -> pure CellFoldCompiled
-        Left exception -> do
-          failedStage <- readIORef stage
-          pure (CellFoldAttemptedFailed failedStage (take 2048 (show exception)))
-  where
-    attempt stage item = do
-        outFile <- requireArg "--turn-out" (requestTurnOut args)
-        let sb = cellAnalysisVerdict item
-            turnSrc = cellAnalysisSource item
-            pins = itemBinderPins 0 (sbBinders sb) (crCheckedBinderPins compiled)
-        bindersStr <- either fail pure (renderPinnedBinders (sbBinders sb) pins)
-        lastAttempt <- newIORef Nothing
-        writeIORef stage FoldCheckingEvidence
-        admitted <- case admittedScope >>= scopeCheckedCell of
-          Nothing -> pure Nothing
-          Just cellAdmission -> do
-            inventory <- cellCheckedBinderSignatures compiled
-            signatures <- forM (sbBinders sb) $ \binder -> case
-                [signature | signature <- inventory, signatureKey signature == "__tidepool_cell_pin_0_" ++ binder] of
-              [signature] -> pure signature
-              _ -> fail "fold has no unique binder signature authority"
-            receipt <- BS.readFile (outDir </> "checked-cell.cbor")
-            generation <- requireArg "--bind-gen" (requestBindGen args)
-            let admission = CheckedItemAdmission AuthoredCheckedItem (checkedAdmissionDigest cellAdmission) (shaHex receipt) 0
-                  (shaHex (TE.encodeUtf8 (T.pack turnSrc))) "bind" (sbBinders sb)
-                  (checkedTurnTemplates cellAdmission) (checkedInjectedModules cellAdmission)
-                  signatures Nothing Nothing generation (checkedAdmissionDigest cellAdmission) [] Nothing Nothing [] (checkedValueInterfaces cellAdmission)
-            validateCheckedItemAdmission args admission turnSrc sb
-            pure (Just admission)
-        let typeImports = if isJust admitted then [] else nub (concatMap checkedPinImports [pin | Just pin <- pins])
-        writeIORef stage FoldCompilingTurn
-        turnOut <- compileClassifiedTurn compiler caches args timing outDir turnSrc sb bindersStr typeImports admitted Nothing lastAttempt
-        writeIORef stage FoldSealingReceipt
-        BS.writeFile outFile (encodeTurnOut turnOut)
-        forM_ (admittedScope >>= \scope -> (,) scope <$> admitted) $ \(scope,admission) ->
-          case turnOut of
-            TBind _ _ _ _ wrapped -> writeCheckedItemReceipt outDir scope admission (T.unpack wrapped)
-            _ -> fail "checked fold did not produce its bind recipe"
-
--- | The cell's sole item, when the whole-cell check resolved to exactly one
--- item total (so index 0 both in 'cellPlanItems' and in every pin key
--- 'renderCellCheckSource' generated for it) and that item is a bind. A
--- declaration always stages through its own candidate-module path
--- (Rust's @finalize_cell_install@); an expression needs the Rust-built
--- observation wrapper this worker invocation does not have (see
--- 'attemptCellFoldTurn'). Neither is attempted here.
-soleBindItem :: CellSourcePlan -> Maybe CellAnalysisItem
-soleBindItem plan = case cellPlanItems plan of
-  [item] | sbKind (cellAnalysisVerdict item) == KBind -> Just item
-  _ -> Nothing
-
--- | Resolve one item's binder pins by exact key, mirroring the Rust
--- runtime's own @CellCheck::pins_for_item@: each binder's post-zonk type,
--- keyed @__tidepool_cell_pin_\<item\>_\<binder\>@ (see
--- 'Tidepool.Binders.renderCellCheckSource'), in the SAME order as
--- @binders@.
-itemBinderPins :: Int -> [String] -> [CheckedBinderPin] -> [Maybe CheckedBinderPin]
-itemBinderPins index binders pins =
-  [ lookupPin (pinKey binder) | binder <- binders ]
-  where
-    pinKey binder = "__tidepool_cell_pin_" ++ show index ++ "_" ++ binder
-    lookupPin key = case filter ((== key) . checkedPinKey) pins of
-      [pin] -> Just pin
-      _ -> Nothing
-
--- | Render the same @{{BINDERS}}@ substitution the Rust runtime's
--- @run_turn_pinned@ builds: @binder :: Type@ for one binder, @(b1, b2) ::
--- (T1, T2)@ for several — spliced into @pure ({{BINDERS}})@, an ordinary
--- Haskell type annotation that pins the compiled bind's generalization to
--- EXACTLY the type the whole-cell check already inferred. A bind with no
--- binders (a discarding bind, @_ \<- e@) has nothing to pin.
-renderPinnedBinders :: [String] -> [Maybe CheckedBinderPin] -> Either String String
-renderPinnedBinders [] _ = Right ""
-renderPinnedBinders binders pins
-  | any (== Nothing) pins =
-      Left "cell fold: whole-cell check returned no type for a binder"
-  | [binder] <- binders, [Just pin] <- pins = Right (binder ++ " :: " ++ checkedPinType pin)
-  | otherwise = Right
-      ( "(" ++ intercalate ", " binders ++ ") :: ("
-      ++ intercalate ", " [ checkedPinType pin | Just pin <- pins ] ++ ")" )
 
 -- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same
 -- 'StmtBinders' shape 'classifyWithFlags' would have produced, so the rest of

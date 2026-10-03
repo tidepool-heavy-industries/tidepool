@@ -120,10 +120,9 @@ encodeTurnOut turnOut = toStrictByteString $ case turnOut of
         <> encodeAsks aks
         <> encodeString wrapped)
 
--- | Whole-cell analysis wire. Independent from the constructor-metadata wire and
--- deliberately positional like 'TurnOut':
--- @[items, pins, checked_source, prologue]@. The checked source is retained as exact
--- evidence for diagnostic remapping and staged-wrapper review.
+-- | Matched whole-cell observations, version 2. The payload contains items,
+-- diagnostic pins, checked source, the authored prologue and expression plans.
+-- Exact native signatures live in the separately authenticated checked receipt.
 encodeCellOut
   :: CellSourcePlan
   -> [CheckedBinderPin]
@@ -132,7 +131,8 @@ encodeCellOut
   -> ByteString
 encodeCellOut plan pins expressions checkedSource = toStrictByteString $
   let items = cellPlanItems plan in
-  encodeListLen 5
+  encodeListLen 3 <> encodeString "TPCELLOBSERVATIONS" <> encodeWord 2
+  <> encodeListLen 5
   <> encodeListLen (fromIntegral (length items))
   <> foldMap encodeCellItem items
   <> encodeListLen (fromIntegral (length pins))
@@ -149,9 +149,8 @@ encodeCellExpressionPlan CellExpressionPlan
   , expressionPlanPresentation = presentation
   , expressionPlanType = ty
   , expressionPlanHeads = heads
-  , expressionPlanImports = imports
   } =
-  encodeListLen 6
+  encodeListLen 5
   <> encodeString (T.pack key)
   <> encodeString (case liftPlan of
        ExpressionEffectful -> "effectful"
@@ -161,7 +160,6 @@ encodeCellExpressionPlan CellExpressionPlan
        ExpressionOpaque -> "opaque")
   <> encodeString (T.pack ty)
   <> encodeHeads heads
-  <> encodeStringList imports
 
 encodeDeclarationSource :: DeclarationSource -> Encoding
 encodeDeclarationSource (DeclarationSource prologue body) =
@@ -239,13 +237,11 @@ encodeCheckedBinderPin CheckedBinderPin
   { checkedPinKey = key
   , checkedPinType = ty
   , checkedPinHeads = heads
-  , checkedPinImports = imports
   } =
-  encodeListLen 4
+  encodeListLen 3
   <> encodeString (T.pack key)
   <> encodeString (T.pack ty)
   <> encodeHeads heads
-  <> encodeStringList imports
 
 encodeTextList :: [Text] -> Encoding
 encodeTextList xs = encodeListLen (fromIntegral (length xs)) <> foldMap encodeString xs

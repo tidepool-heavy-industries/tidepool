@@ -104,6 +104,20 @@ source-import graph. Retained artifact requirements alone grant no lexical
 selection. Session implementation anchors use their existing independent
 checked-value and lexical authorities, never ordinary source-selection rows.
 
+## Matched cell observation migration
+
+Cell observations use `TPCELLOBSERVATIONS` version 2: the five-section payload
+retains diagnostic types, nominal heads, expression lift/presentation and the
+authored prologue. Binder rows have three fields; expression rows have five.
+Neither carries imports reconstructed from type presentation. Native checked
+signatures supply the exact type authority.
+
+`TPEXACTCHECK` and `TPEXACTPROGRAM` use version 2; parser receipts use
+`TPCELLPLAN2`. The matched Rust/Haskell release rejects older observations and
+receipts. Worker fields 34 (`--turn-pin`) and 45 (`--cell-fold-turn`) are retired
+and rejected explicitly. Whole-cell checking remains the initial admission step
+for host inputs; execution uses admitted item recipes.
+
 ## Checked type signatures
 
 `TPCHECKEDSIGNATURE2` carries a compiler-produced GHC interface declaration,

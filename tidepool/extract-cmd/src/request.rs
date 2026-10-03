@@ -70,7 +70,6 @@ enum Field {
     CheckSource,
     CellTemplate(PathBuf),
     CellOut(OsString),
-    TurnPin(String),
     BuildProductsDir(OsString),
     ModuleCandidates(PathBuf),
     CertifyHomeProducts,
@@ -106,14 +105,6 @@ enum Field {
     /// Inspection source failures reject the whole request with structured
     /// diagnostics instead of becoming per-query `Rejected` results.
     InspectionStrict,
-    /// Ask a `--cell` request to also attempt one item's `--turn`-shaped
-    /// compile (whichever `--turn-template`s and turn-only fields
-    /// accompany it) inside the same worker invocation, when the whole-cell
-    /// check resolves to exactly one non-declaration item. See
-    /// `bridge/haskell/app/Main.hs`'s `runCellMode`. Absent, or when the
-    /// check does not resolve to that shape, no `--turn-out` is written and
-    /// the caller falls back to its own separate `--turn` request.
-    CellFoldTurn,
 }
 
 /// A versioned, typed request for the Haskell compiler worker.
@@ -164,8 +155,9 @@ impl ExtractRequest {
                     request.cell_template(Path::new(value(&mut args, "--cell-template")?))
                 }
                 Some("--cell-out") => request.cell_out(value(&mut args, "--cell-out")?),
-                Some("--cell-fold-turn") => request.cell_fold_turn(),
-                Some("--turn-pin") => request.turn_pin(text_value(&mut args, "--turn-pin")?),
+                Some(option @ ("--cell-fold-turn" | "--turn-pin")) => {
+                    return Err(CliError::new(format!("retired compiler option: {option}")));
+                }
                 Some("--build-products-dir") => {
                     request.build_products_dir(value(&mut args, "--build-products-dir")?)
                 }
@@ -291,7 +283,7 @@ impl ExtractRequest {
                 52 => Field::CheckSource,
                 32 => Field::CellTemplate(PathBuf::from(decoder.os_string()?)),
                 33 => Field::CellOut(decoder.os_string()?),
-                34 => Field::TurnPin(decoder.string()?),
+                34 => return Err(ProtocolError::RetiredFieldTag(34)),
                 35 => Field::InspectSearch(decoder.string()?),
                 36 => Field::InspectStructuredInfo(decoder.structured_inspection()?),
                 37 => Field::InspectStructuredType(decoder.structured_inspection()?),
@@ -302,7 +294,7 @@ impl ExtractRequest {
                 40 => Field::InspectTypeBatch(PathBuf::from(decoder.os_string()?)),
                 41 => Field::ActivationPreview,
                 42 => Field::InspectionStrict,
-                45 => Field::CellFoldTurn,
+                45 => return Err(ProtocolError::RetiredFieldTag(45)),
                 other => return Err(ProtocolError::UnknownFieldTag(other)),
             };
             fields.push(field);
@@ -355,7 +347,6 @@ impl ExtractRequest {
                         | Field::TurnTemplate { .. }
                         | Field::TurnOut(_)
                         | Field::TurnVerdict(_)
-                        | Field::TurnPin(_)
                         | Field::BuildProductsDir(_)
                         | Field::ModuleCandidates(_)
                         | Field::CertifyHomeProducts
@@ -491,14 +482,6 @@ impl ExtractRequest {
 
     pub(crate) fn cell_out(&mut self, value: impl AsRef<OsStr>) {
         self.fields.push(Field::CellOut(value.as_ref().to_owned()));
-    }
-
-    pub(crate) fn turn_pin(&mut self, value: &str) {
-        self.fields.push(Field::TurnPin(value.to_owned()));
-    }
-
-    pub(crate) fn cell_fold_turn(&mut self) {
-        self.fields.push(Field::CellFoldTurn);
     }
 
     pub(crate) fn build_products_dir(&mut self, value: impl AsRef<OsStr>) {
@@ -650,7 +633,6 @@ impl ExtractRequest {
                     flag(&mut flags, "--cell-template", value.as_os_str())
                 }
                 Field::CellOut(value) => flag(&mut flags, "--cell-out", value),
-                Field::TurnPin(value) => flag(&mut flags, "--turn-pin", OsStr::new(value)),
                 Field::BuildProductsDir(value) => flag(&mut flags, "--build-products-dir", value),
                 Field::ModuleCandidates(value) => {
                     flag(&mut flags, "--module-candidates", value.as_os_str())
@@ -710,7 +692,6 @@ impl ExtractRequest {
                 ),
                 Field::ActivationPreview => flags.push("--activation-preview".into()),
                 Field::InspectionStrict => flags.push("--inspection-strict".into()),
-                Field::CellFoldTurn => flags.push("--cell-fold-turn".into()),
             }
         }
         inputs.extend(flags);
@@ -950,7 +931,6 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::CheckSource => out.push(52),
         Field::CellTemplate(value) => tagged_frame(out, 32, value.as_os_str()),
         Field::CellOut(value) => tagged_frame(out, 33, value),
-        Field::TurnPin(value) => tagged_frame(out, 34, OsStr::new(value)),
         Field::BuildProductsDir(value) => tagged_frame(out, 25, value),
         Field::ModuleCandidates(value) => tagged_frame(out, 46, value.as_os_str()),
         Field::CertifyHomeProducts => out.push(50),
@@ -985,7 +965,6 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         }
         Field::ActivationPreview => out.push(41),
         Field::InspectionStrict => out.push(42),
-        Field::CellFoldTurn => out.push(45),
     }
 }
 
@@ -1551,13 +1530,24 @@ mod tests {
 
     #[test]
     fn typed_protocol_rejects_retired_fields_explicitly() {
-        for tag in [6, 9, 10, 14, 39] {
+        for tag in [6, 9, 10, 14, 34, 39, 45] {
             let mut request = MAGIC.to_vec();
             request.extend_from_slice(&1u32.to_le_bytes());
             request.push(tag);
             assert_eq!(
                 ExtractRequest::decode(&request).unwrap_err(),
                 ProtocolError::RetiredFieldTag(tag)
+            );
+        }
+    }
+
+    #[test]
+    fn cli_rejects_retired_cell_fold_and_type_pin_options() {
+        for option in ["--cell-fold-turn", "--turn-pin"] {
+            let error = ExtractRequest::from_cli(&[option.into()]).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("retired compiler option: {option}")
             );
         }
     }
