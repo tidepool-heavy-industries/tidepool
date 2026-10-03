@@ -29,14 +29,32 @@ impl HeadState {
     /// Read HEAD without confusing a failed inspection with detachment.
     pub(crate) fn read(git: &GitCli, cwd: &Path) -> Result<Self, WorktreeError> {
         let _scope = git.read_scope(cwd)?;
-        let oid = GitOid::from_raw(git.try_read(cwd, &["rev-parse", "HEAD"])?.trimmed());
-        match git.read(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
-            Ok(out) => Ok(Self::OnBranch {
-                branch: BranchName::from_raw(out.trimmed()),
-                oid,
+        let out = git.try_read(cwd, &["rev-parse", "HEAD", "--abbrev-ref", "HEAD"])?;
+        let lines = out.lines();
+        match lines.as_slice() {
+            [oid, "HEAD"] => Ok(Self::Detached {
+                oid: GitOid::from_raw(oid),
             }),
-            Err(receipt) if receipt.exit_code == Some(1) => Ok(Self::Detached { oid }),
-            Err(receipt) => Err(WorktreeError::GitFailure(receipt)),
+            [oid, branch] => Ok(Self::OnBranch {
+                branch: BranchName::from_raw(branch),
+                oid: GitOid::from_raw(oid),
+            }),
+            // Git can omit the symbolic result when a branch is named HEAD;
+            // retain symbolic-ref's authoritative shortening in that case.
+            [oid] => match git.read(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
+                Ok(out) => Ok(Self::OnBranch {
+                    branch: BranchName::from_raw(out.trimmed()),
+                    oid: GitOid::from_raw(oid),
+                }),
+                Err(receipt) if receipt.exit_code == Some(1) => Ok(Self::Detached {
+                    oid: GitOid::from_raw(oid),
+                }),
+                Err(receipt) => Err(WorktreeError::GitFailure(receipt)),
+            },
+            _ => Err(crate::storage::storage_failure(
+                cwd,
+                "git rev-parse returned an unexpected HEAD identity",
+            )),
         }
     }
 
@@ -149,6 +167,84 @@ fn stable_sample(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TestRepo;
+
+    #[test]
+    fn combined_head_read_preserves_attached_and_detached_states() {
+        let repo = TestRepo::init().unwrap();
+        let oid = repo.writer().commit_empty("test").unwrap();
+
+        assert_eq!(
+            HeadState::read(repo.git(), repo.path()).unwrap(),
+            HeadState::OnBranch {
+                branch: BranchName::from_raw("main"),
+                oid: oid.clone(),
+            }
+        );
+
+        repo.git()
+            .try_run(repo.path(), &["checkout", "--detach", "-q"])
+            .unwrap();
+        assert_eq!(
+            HeadState::read(repo.git(), repo.path()).unwrap(),
+            HeadState::Detached { oid }
+        );
+    }
+
+    #[test]
+    fn combined_head_read_preserves_short_branch_when_a_tag_shadows_it() {
+        let repo = TestRepo::init().unwrap();
+        let oid = repo.writer().commit_empty("test").unwrap();
+        repo.git().try_run(repo.path(), &["tag", "main"]).unwrap();
+
+        assert_eq!(
+            HeadState::read(repo.git(), repo.path()).unwrap(),
+            HeadState::OnBranch {
+                branch: BranchName::from_raw("heads/main"),
+                oid,
+            }
+        );
+    }
+
+    #[test]
+    fn combined_head_read_keeps_unborn_and_broken_heads_as_git_failures() {
+        let unborn = TestRepo::init().unwrap();
+        assert!(matches!(
+            HeadState::read(unborn.git(), unborn.path()),
+            Err(WorktreeError::GitFailure(_))
+        ));
+
+        let broken = TestRepo::init().unwrap();
+        broken.writer().commit_empty("test").unwrap();
+        std::fs::write(broken.path().join(".git/HEAD"), "not-a-symbolic-ref\n").unwrap();
+        assert!(matches!(
+            HeadState::read(broken.git(), broken.path()),
+            Err(WorktreeError::GitFailure(_))
+        ));
+    }
+
+    #[test]
+    fn combined_head_read_handles_an_ambiguous_head_branch_ref() {
+        let repo = TestRepo::init().unwrap();
+        let oid = repo.writer().commit_empty("test").unwrap();
+        repo.git()
+            .try_run(
+                repo.path(),
+                &["update-ref", "refs/heads/HEAD", oid.as_str()],
+            )
+            .unwrap();
+        repo.git()
+            .try_run(repo.path(), &["symbolic-ref", "HEAD", "refs/heads/HEAD"])
+            .unwrap();
+
+        assert_eq!(
+            HeadState::read(repo.git(), repo.path()).unwrap(),
+            HeadState::OnBranch {
+                branch: BranchName::from_raw("heads/HEAD"),
+                oid,
+            }
+        );
+    }
 
     fn sample_at(oid: &str) -> RepositorySample {
         RepositorySample {
