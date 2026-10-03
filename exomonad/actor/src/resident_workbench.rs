@@ -16035,12 +16035,20 @@ mod request_tests {
     async fn parked_actor_snapshot_answers_uncancelled_type_search() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
-        let step = workbench.begin_fragment_split(
-            context.clone(), source.clone(), Vec::new(), ParsedBlock {
-                ordinal: 1, total: 1,
-                source: "lookupResult <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"pollResponse\"])".into(),
-            }, Some(generated_binds_verdict(&["lookupResult".into()])),
-        ).await.expect("same cancellation fixture fragment parks lookup effect");
+        let step = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source.clone(),
+                Vec::new(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "lookupResult <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"pollResponse\"])".into(),
+                },
+                Some(generated_binds_verdict(&["lookupResult".into()])),
+            )
+            .await
+            .expect("same cancellation fixture fragment parks lookup effect");
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
             panic!("lookup fragment should suspend")
         };
@@ -16054,6 +16062,12 @@ mod request_tests {
             continuation_id.clone(),
             "parked inspection qualification abandoned".into(),
         );
+        let source = RequestWorkbenchScope {
+            response: workbench.response.as_ref(),
+            request: workbench.request,
+            type_modules: &workbench.type_modules,
+        }
+        .source(&workbench.access.source, &context);
         let (view, inputs, prepared) = workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
