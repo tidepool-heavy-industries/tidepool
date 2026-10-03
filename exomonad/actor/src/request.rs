@@ -485,6 +485,187 @@ struct RequestStateTable {
     settlement_notifications: VecDeque<SettlementNotification>,
 }
 
+enum RequestAdmission {
+    Operation {
+        owner: ActorRef,
+        target: ActorRef,
+        label: String,
+        notify_owner: bool,
+        reservation_owner: Option<RequestReservationOwner>,
+    },
+    CommandSettlement {
+        owner: ActorRef,
+        job: String,
+        notify_owner: bool,
+    },
+}
+
+enum RequestSettlement {
+    CommandComplete {
+        report: String,
+        revision: Option<String>,
+    },
+    ReplyComplete(Option<String>),
+    ReplyFailed(String),
+    CancellationAcknowledged,
+}
+
+struct SettlementEffects {
+    notifications: Vec<WatchNotification>,
+}
+
+impl RequestStateTable {
+    fn admit(&mut self, admission: RequestAdmission) -> RequestId {
+        // One process-local sequence issues every request identity. Keep the
+        // distinct initial states in this constructor: command records are
+        // already presented and may be held for a not-yet-registered watch.
+        // A counter wrap would require 2^64 reservations in one process.
+        #[allow(clippy::expect_used)]
+        {
+            self.next_request = self
+                .next_request
+                .checked_add(1)
+                .expect("request identity exhausted");
+        }
+        let id = RequestId(self.next_request);
+        let (
+            owner,
+            target,
+            label,
+            notify_owner,
+            reservation_owner,
+            target_state,
+            command_job,
+            held_for_watch,
+        ) = match admission {
+            RequestAdmission::Operation {
+                owner,
+                target,
+                label,
+                notify_owner,
+                reservation_owner,
+            } => (
+                owner,
+                target,
+                label,
+                notify_owner,
+                reservation_owner,
+                TargetState::Reserved,
+                None,
+                false,
+            ),
+            RequestAdmission::CommandSettlement {
+                owner,
+                job,
+                notify_owner,
+            } => (
+                owner,
+                owner,
+                format!("job {job}"),
+                notify_owner,
+                None,
+                TargetState::Presented,
+                Some(job),
+                !notify_owner,
+            ),
+        };
+        self.requests.insert(
+            id,
+            RequestRecord {
+                sources: Vec::new(),
+                updates: Vec::new(),
+                owner,
+                reservation_owner,
+                invocation_detached: false,
+                target,
+                label,
+                target_state,
+                owner_state: OwnerState::Observing,
+                deadline: None,
+                progress: None,
+                notify_owner,
+                settlement_notified: false,
+                registered_at_unix_ms: unix_time_ms(),
+                reply_preview: None,
+                target_path: None,
+                target_revision: None,
+                command_job,
+                held_for_watch,
+            },
+        );
+        id
+    }
+
+    fn settle(
+        &mut self,
+        request: RequestId,
+        transition: RequestSettlement,
+    ) -> Option<SettlementEffects> {
+        let releases_command = match transition {
+            RequestSettlement::CommandComplete { report, revision } => {
+                let record = self.requests.get_mut(&request)?;
+                if record.command_job.is_none() || record.target_state == TargetState::Closed {
+                    return None;
+                }
+                record.target_state = TargetState::Closed;
+                if record.owner_state == OwnerState::Observing {
+                    record.owner_state = OwnerState::Ready;
+                }
+                record.reply_preview = Some(report);
+                record.target_revision = revision;
+                true
+            }
+            RequestSettlement::ReplyComplete(reply_preview) => {
+                let record = self.requests.get_mut(&request)?;
+                if record.target_state != TargetState::Settling {
+                    return None;
+                }
+                record.target_state = TargetState::Closed;
+                if record.owner_state == OwnerState::Observing {
+                    record.owner_state = OwnerState::Ready;
+                }
+                record.reply_preview = reply_preview;
+                false
+            }
+            RequestSettlement::ReplyFailed(detail) => {
+                if let Some(record) = self.requests.get_mut(&request) {
+                    if record.target_state == TargetState::Settling {
+                        record.target_state = TargetState::Closed;
+                        if record.owner_state == OwnerState::Observing {
+                            record.owner_state = OwnerState::Unavailable(
+                                ResponseFailure::SettlementFailed(detail),
+                            );
+                        }
+                    }
+                }
+                false
+            }
+            RequestSettlement::CancellationAcknowledged => {
+                let record = self.requests.get_mut(&request)?;
+                let TargetState::AcknowledgingCancellation(reason) = record.target_state else {
+                    return None;
+                };
+                record.target_state = TargetState::Closed;
+                if record.owner_state == OwnerState::Observing {
+                    record.owner_state = OwnerState::Unavailable(match reason {
+                        CancellationReason::RequesterCancelled => ResponseFailure::Cancelled,
+                        CancellationReason::DeadlineExpired => ResponseFailure::DeadlineExceeded,
+                    });
+                }
+                false
+            }
+        };
+
+        let notifications = self.reevaluate_watches();
+        if releases_command {
+            // Watch evaluation first copies all notice data out of the record;
+            // only then may a settled, unobserved command record be dropped.
+            release_settled_commands(self);
+        }
+        Some(SettlementEffects { notifications })
+    }
+}
+
 /// One process-local owner for request identity, terminal state, and watch
 /// readiness. Live request inputs and results remain in the resident Haskell
 /// heap; this table stores only exact actor identities and closed transitions.
@@ -795,7 +976,7 @@ impl RequestRegistry {
             session,
         });
         record.publish_source_progress();
-        Ok((revision, reevaluate_watches(&mut state)))
+        Ok((revision, state.reevaluate_watches()))
     }
 
     pub(crate) fn observe_progress(
@@ -1226,42 +1407,13 @@ impl RequestRegistry {
         notify_owner: bool,
         reservation_owner: Option<RequestReservationOwner>,
     ) -> RequestId {
-        let mut state = self.state.lock();
-        // `next_request` is a per-process u64 counter; wraparound needs
-        // 2^64 reservations in one process lifetime and is not reachable.
-        #[allow(clippy::expect_used)]
-        {
-            state.next_request = state
-                .next_request
-                .checked_add(1)
-                .expect("request identity exhausted");
-        }
-        let id = RequestId(state.next_request);
-        state.requests.insert(
-            id,
-            RequestRecord {
-                sources: Vec::new(),
-                updates: Vec::new(),
-                owner,
-                reservation_owner,
-                invocation_detached: false,
-                target,
-                label,
-                target_state: TargetState::Reserved,
-                owner_state: OwnerState::Observing,
-                deadline: None,
-                progress: None,
-                notify_owner,
-                settlement_notified: false,
-                registered_at_unix_ms: unix_time_ms(),
-                reply_preview: None,
-                target_path: None,
-                target_revision: None,
-                command_job: None,
-                held_for_watch: false,
-            },
-        );
-        id
+        self.state.lock().admit(RequestAdmission::Operation {
+            owner,
+            target,
+            label,
+            notify_owner,
+            reservation_owner,
+        })
     }
 
     /// Reserve the settlement of one command job. The record is owned and
@@ -1276,41 +1428,13 @@ impl RequestRegistry {
         job: String,
         notify_owner: bool,
     ) -> RequestId {
-        let mut state = self.state.lock();
-        // Same per-process counter as `reserve_labeled_with_reporting`.
-        #[allow(clippy::expect_used)]
-        {
-            state.next_request = state
-                .next_request
-                .checked_add(1)
-                .expect("request identity exhausted");
-        }
-        let id = RequestId(state.next_request);
-        state.requests.insert(
-            id,
-            RequestRecord {
-                sources: Vec::new(),
-                updates: Vec::new(),
+        self.state
+            .lock()
+            .admit(RequestAdmission::CommandSettlement {
                 owner,
-                reservation_owner: None,
-                invocation_detached: false,
-                target: owner,
-                label: format!("job {job}"),
-                target_state: TargetState::Presented,
-                owner_state: OwnerState::Observing,
-                deadline: None,
-                progress: None,
+                job,
                 notify_owner,
-                settlement_notified: false,
-                registered_at_unix_ms: unix_time_ms(),
-                reply_preview: None,
-                target_path: None,
-                target_revision: None,
-                command_job: Some(job),
-                held_for_watch: !notify_owner,
-            },
-        );
-        id
+            })
     }
 
     /// Settle a command job's completion with its rendered report and the
@@ -1323,22 +1447,12 @@ impl RequestRegistry {
         revision: Option<String>,
     ) -> Vec<WatchNotification> {
         let mut state = self.state.lock();
-        let Some(record) = state.requests.get_mut(&request) else {
-            return Vec::new();
-        };
-        if record.command_job.is_none() || record.target_state == TargetState::Closed {
-            return Vec::new();
-        }
-        record.target_state = TargetState::Closed;
-        if record.owner_state == OwnerState::Observing {
-            record.owner_state = OwnerState::Ready;
-        }
-        record.reply_preview = Some(report);
-        record.target_revision = revision;
-        let notifications = reevaluate_watches(&mut state);
-        // The notice now carries everything the record held.
-        release_settled_commands(&mut state);
-        notifications
+        state
+            .settle(
+                request,
+                RequestSettlement::CommandComplete { report, revision },
+            )
+            .map_or_else(Vec::new, |effects| effects.notifications)
     }
 
     /// Serialize publishers across channel reservation without holding the
@@ -1542,18 +1656,9 @@ impl RequestRegistry {
         reply_preview: Option<String>,
     ) -> Vec<WatchNotification> {
         let mut state = self.state.lock();
-        let Some(record) = state.requests.get_mut(&request) else {
-            return Vec::new();
-        };
-        if record.target_state != TargetState::Settling {
-            return Vec::new();
-        }
-        record.target_state = TargetState::Closed;
-        if record.owner_state == OwnerState::Observing {
-            record.owner_state = OwnerState::Ready;
-        }
-        record.reply_preview = reply_preview;
-        reevaluate_watches(&mut state)
+        state
+            .settle(request, RequestSettlement::ReplyComplete(reply_preview))
+            .map_or_else(Vec::new, |effects| effects.notifications)
     }
 
     pub(crate) fn fail_reply_settlement(
@@ -1562,16 +1667,9 @@ impl RequestRegistry {
         detail: impl Into<String>,
     ) -> Vec<WatchNotification> {
         let mut state = self.state.lock();
-        if let Some(record) = state.requests.get_mut(&request) {
-            if record.target_state == TargetState::Settling {
-                record.target_state = TargetState::Closed;
-                if record.owner_state == OwnerState::Observing {
-                    record.owner_state =
-                        OwnerState::Unavailable(ResponseFailure::SettlementFailed(detail.into()));
-                }
-            }
-        }
-        reevaluate_watches(&mut state)
+        state
+            .settle(request, RequestSettlement::ReplyFailed(detail.into()))
+            .map_or_else(Vec::new, |effects| effects.notifications)
     }
 
     /// The request's target actor, for callers that need to correlate a
@@ -1761,7 +1859,7 @@ impl RequestRegistry {
         });
         // Target ownership stays live until cancellation or exit closes it;
         // releasing the owner's wait must not require target cooperation.
-        (notification, reevaluate_watches(&mut state))
+        (notification, state.reevaluate_watches())
     }
 
     pub(crate) fn observe_reply(
@@ -1816,20 +1914,9 @@ impl RequestRegistry {
         request: RequestId,
     ) -> Vec<WatchNotification> {
         let mut state = self.state.lock();
-        let Some(record) = state.requests.get_mut(&request) else {
-            return Vec::new();
-        };
-        let TargetState::AcknowledgingCancellation(reason) = record.target_state else {
-            return Vec::new();
-        };
-        record.target_state = TargetState::Closed;
-        if record.owner_state == OwnerState::Observing {
-            record.owner_state = OwnerState::Unavailable(match reason {
-                CancellationReason::RequesterCancelled => ResponseFailure::Cancelled,
-                CancellationReason::DeadlineExpired => ResponseFailure::DeadlineExceeded,
-            });
-        }
-        reevaluate_watches(&mut state)
+        state
+            .settle(request, RequestSettlement::CancellationAcknowledged)
+            .map_or_else(Vec::new, |effects| effects.notifications)
     }
 
     pub(crate) fn rollback_cancellation_acknowledgement(&self, request: RequestId) {
@@ -1862,7 +1949,7 @@ impl RequestRegistry {
                 AbandonResponseOutcome::AlreadyTerminal
             }
         };
-        let notifications = reevaluate_watches(&mut state);
+        let notifications = state.reevaluate_watches();
         Ok((outcome, notifications))
     }
 
@@ -2043,7 +2130,7 @@ impl RequestRegistry {
                 record.held_for_watch = false;
             }
         }
-        let notifications = reevaluate_watches(&mut state);
+        let notifications = state.reevaluate_watches();
         Ok((id, notifications))
     }
 
@@ -2222,7 +2309,7 @@ impl RequestRegistry {
         if let Some(record) = state.requests.get_mut(&request) {
             record.notify_owner = true;
         }
-        let notifications = reevaluate_watches(&mut state);
+        let notifications = state.reevaluate_watches();
         release_settled_commands(&mut state);
         Some(notifications)
     }
@@ -2331,7 +2418,7 @@ impl RequestRegistry {
                 record.owner_state = OwnerState::Unavailable(ResponseFailure::RequesterStopped);
             }
         }
-        reevaluate_watches(&mut state)
+        state.reevaluate_watches()
     }
 
     fn transition_request(
@@ -2348,7 +2435,7 @@ impl RequestRegistry {
             return Vec::new();
         }
         transition(record);
-        reevaluate_watches(&mut state)
+        state.reevaluate_watches()
     }
 }
 
@@ -2726,130 +2813,133 @@ fn queue_settlement_notifications(state: &mut RequestStateTable) {
     }
 }
 
-fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
-    queue_settlement_notifications(state);
-    let mut notifications = Vec::new();
-    for (watch_id, watch) in &mut state.watches {
-        if watch.state != WatchState::Pending {
-            continue;
-        }
-        for dependency in &watch.dependencies {
-            let WatchRequirement::ProgressAfter(after) = dependency.requirement else {
-                continue;
-            };
-            let key = (dependency.request, after);
-            if watch.progress.contains_key(&key) {
+impl RequestStateTable {
+    fn reevaluate_watches(&mut self) -> Vec<WatchNotification> {
+        let state = self;
+        queue_settlement_notifications(state);
+        let mut notifications = Vec::new();
+        for (watch_id, watch) in &mut state.watches {
+            if watch.state != WatchState::Pending {
                 continue;
             }
-            let Some(record) = state.requests.get(&dependency.request) else {
-                continue;
-            };
-            if let Some(snapshot) = record
-                .progress
-                .as_ref()
-                .filter(|snapshot| snapshot.revision > after)
-            {
-                watch
+            for dependency in &watch.dependencies {
+                let WatchRequirement::ProgressAfter(after) = dependency.requirement else {
+                    continue;
+                };
+                let key = (dependency.request, after);
+                if watch.progress.contains_key(&key) {
+                    continue;
+                }
+                let Some(record) = state.requests.get(&dependency.request) else {
+                    continue;
+                };
+                if let Some(snapshot) = record
                     .progress
-                    .insert(key, ProgressCapture::Update(snapshot.clone()));
-            } else if record.owner_state != OwnerState::Observing
-                || record.target_state == TargetState::Closed
-            {
-                watch.progress.insert(key, ProgressCapture::Closed);
-            }
-        }
-        let next_state = watch.dependencies.iter().find_map(|dependency| {
-            let record = state.requests.get(&dependency.request)?;
-            match &record.owner_state {
-                OwnerState::Unavailable(failure)
-                    if dependency.requirement
-                        == (WatchRequirement::Response {
-                            allow_failure: false,
-                        }) =>
+                    .as_ref()
+                    .filter(|snapshot| snapshot.revision > after)
                 {
-                    Some(WatchState::Unavailable {
-                        request: dependency.request,
-                        failure: failure.clone(),
-                    })
-                }
-                OwnerState::Abandoned
-                    if dependency.requirement
-                        == (WatchRequirement::Response {
-                            allow_failure: false,
-                        }) =>
+                    watch
+                        .progress
+                        .insert(key, ProgressCapture::Update(snapshot.clone()));
+                } else if record.owner_state != OwnerState::Observing
+                    || record.target_state == TargetState::Closed
                 {
-                    Some(WatchState::Unavailable {
-                        request: dependency.request,
-                        failure: ResponseFailure::Abandoned,
-                    })
+                    watch.progress.insert(key, ProgressCapture::Closed);
                 }
-                _ => None,
             }
-        });
-        let next_state = next_state.or_else(|| {
-            (0..watch.group_count)
-                .all(|group| {
-                    watch.dependencies.iter().any(|dependency| {
-                        if dependency.group != group {
-                            return false;
-                        }
-                        watch_dependency_ready(&state.requests, &watch.progress, dependency)
+            let next_state = watch.dependencies.iter().find_map(|dependency| {
+                let record = state.requests.get(&dependency.request)?;
+                match &record.owner_state {
+                    OwnerState::Unavailable(failure)
+                        if dependency.requirement
+                            == (WatchRequirement::Response {
+                                allow_failure: false,
+                            }) =>
+                    {
+                        Some(WatchState::Unavailable {
+                            request: dependency.request,
+                            failure: failure.clone(),
+                        })
+                    }
+                    OwnerState::Abandoned
+                        if dependency.requirement
+                            == (WatchRequirement::Response {
+                                allow_failure: false,
+                            }) =>
+                    {
+                        Some(WatchState::Unavailable {
+                            request: dependency.request,
+                            failure: ResponseFailure::Abandoned,
+                        })
+                    }
+                    _ => None,
+                }
+            });
+            let next_state = next_state.or_else(|| {
+                (0..watch.group_count)
+                    .all(|group| {
+                        watch.dependencies.iter().any(|dependency| {
+                            if dependency.group != group {
+                                return false;
+                            }
+                            watch_dependency_ready(&state.requests, &watch.progress, dependency)
+                        })
                     })
-                })
-                .then_some(WatchState::Ready)
-        });
-        let Some(next_state) = next_state else {
-            continue;
-        };
-        let (transition, current) = match &next_state {
-            WatchState::Pending => continue,
-            WatchState::Ready => (WatchTransition::Ready, WatchStateProjection::Ready),
-            WatchState::Unavailable { request, failure } => {
-                watch.progress.clear();
-                (
-                    WatchTransition::Unavailable {
-                        request: *request,
-                        failure: failure.clone(),
-                    },
-                    WatchStateProjection::Unavailable {
-                        request: *request,
-                        failure: failure.clone(),
-                    },
-                )
+                    .then_some(WatchState::Ready)
+            });
+            let Some(next_state) = next_state else {
+                continue;
+            };
+            let (transition, current) = match &next_state {
+                WatchState::Pending => continue,
+                WatchState::Ready => (WatchTransition::Ready, WatchStateProjection::Ready),
+                WatchState::Unavailable { request, failure } => {
+                    watch.progress.clear();
+                    (
+                        WatchTransition::Unavailable {
+                            request: *request,
+                            failure: failure.clone(),
+                        },
+                        WatchStateProjection::Unavailable {
+                            request: *request,
+                            failure: failure.clone(),
+                        },
+                    )
+                }
+            };
+            watch.state = next_state;
+            wake_watch_waiters(watch);
+            let occurred_at_unix_ms = unix_time_ms();
+            watch.transitioned_at_unix_ms = Some(occurred_at_unix_ms);
+            if watch.transient {
+                continue;
             }
-        };
-        watch.state = next_state;
-        wake_watch_waiters(watch);
-        let occurred_at_unix_ms = unix_time_ms();
-        watch.transitioned_at_unix_ms = Some(occurred_at_unix_ms);
-        if watch.transient {
-            continue;
+            if let Some(route) = &mut watch.route {
+                route.schedule(*watch_id);
+                continue;
+            }
+            let label = watch.label.clone();
+            let owner = watch.owner;
+            let watch = *watch_id;
+            notifications.push(WatchNotification {
+                owner,
+                watch,
+                label,
+                previous: WatchStateProjection::Pending,
+                current,
+                transition,
+                occurred_at_unix_ms,
+                sequence: ActorEventSequence(0),
+                watermark: ActorEventSequence(0),
+            });
         }
-        if let Some(route) = &mut watch.route {
-            route.schedule(*watch_id);
-            continue;
+        for notification in &mut notifications {
+            let sequence = next_event_sequence(state, notification.owner);
+            notification.sequence = sequence;
+            notification.watermark = sequence;
         }
-        let label = watch.label.clone();
-        let owner = watch.owner;
-        let watch = *watch_id;
-        notifications.push(WatchNotification {
-            owner,
-            watch,
-            label,
-            previous: WatchStateProjection::Pending,
-            current,
-            transition,
-            occurred_at_unix_ms,
-            sequence: ActorEventSequence(0),
-            watermark: ActorEventSequence(0),
-        });
+        notifications
     }
-    for notification in &mut notifications {
-        let sequence = next_event_sequence(state, notification.owner);
-        notification.sequence = sequence;
-        notification.watermark = sequence;
-    }
-    notifications
 }
 
 #[cfg(test)]

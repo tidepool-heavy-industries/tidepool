@@ -1194,6 +1194,211 @@ enum DrainState {
     Draining,
 }
 
+enum MessageDisposition {
+    Consumed,
+    Dispatch(KernelMessage),
+}
+
+async fn handle_parked_message<B: KernelBehavior>(
+    myself: &RactorRef<KernelMessage>,
+    state: &mut LocalActorState<B>,
+    message: KernelMessage,
+) -> Result<(), ActorProcessingErr> {
+    match message {
+        KernelMessage::ActorStepCompleted { step, outcome } => {
+            complete_actor_task(myself, state, step, outcome).await;
+            Ok(())
+        }
+        KernelMessage::DrainMailbox => {
+            state.mailbox_drain_scheduled = false;
+            let ready = state.deferred_mailbox.iter().position(|message| {
+                can_apply_independent_settlement(state, message)
+                    || matches!(message, KernelMessage::Workbench { invocation, .. }
+                        if can_admit_deferred_workbench(state, &invocation.request))
+            });
+            if let Some(index) = ready {
+                let message = state
+                    .deferred_mailbox
+                    .remove(index)
+                    .expect("selected deferred work");
+                match message {
+                    KernelMessage::Workbench {
+                        invocation,
+                        control,
+                        reply,
+                    } => {
+                        start_workbench(myself, state, invocation, control, reply);
+                    }
+                    settlement => apply_hosted_settlement(state, settlement).await,
+                }
+                schedule_deferred_mailbox(myself, state)?;
+            }
+            Ok(())
+        }
+        settlement if can_apply_independent_settlement(state, &settlement) => {
+            apply_hosted_settlement(state, settlement).await;
+            schedule_deferred_mailbox(myself, state)?;
+            Ok(())
+        }
+        KernelMessage::SealHostedWork { reply } => {
+            if !matches!(state.hosted_admission, HostedAdmission::Closing)
+                && !state
+                    .deferred_mailbox
+                    .iter()
+                    .any(|message| matches!(message, KernelMessage::Shutdown { .. }))
+            {
+                state.hosted_admission = HostedAdmission::Sealed;
+                reply
+                    .send(crate::HostedWorkSeal {
+                        actor: state.context.identity,
+                    })
+                    .ok();
+            }
+            Ok(())
+        }
+        KernelMessage::Shutdown { terminal, reply } => {
+            for pending in state.pending_tasks.values() {
+                match pending {
+                    PendingActorTask::Workbench(pending) => {
+                        if let Some(control) = &pending.control {
+                            control.request_cancellation();
+                        }
+                    }
+                    PendingActorTask::Tool(pending) => {
+                        pending.control.request_cancellation();
+                    }
+                    PendingActorTask::Kernel(_) => {}
+                }
+            }
+            state.mailbox_admission.close();
+            state
+                .deferred_mailbox
+                .push_back(KernelMessage::Shutdown { terminal, reply });
+            Ok(())
+        }
+        KernelMessage::ReconcileWorkbenchCancellation {
+            execution,
+            invocation,
+            reply,
+        } => {
+            if pending_cancellation(state, &execution, invocation.as_ref()) {
+                reply
+                    .send(crate::WorkbenchCancellationOutcome::Unconfirmed {
+                        execution: execution.clone(),
+                    })
+                    .ok();
+            } else {
+                state.deferred_mailbox.push_back(
+                    KernelMessage::ReconcileWorkbenchCancellation {
+                        execution,
+                        invocation,
+                        reply,
+                    },
+                );
+            }
+            Ok(())
+        }
+        KernelMessage::ReconcileWorkbenchBoundary { boundary, reply } => {
+            if state.pending_tasks.values().any(|pending| {
+                pending.matches_workbench_boundary(state.context.identity, &boundary)
+            }) {
+                reply
+                    .send(crate::WorkbenchBoundaryReconciliation::Pending)
+                    .ok();
+            } else {
+                state.deferred_mailbox.push_back(
+                    KernelMessage::ReconcileWorkbenchBoundary { boundary, reply },
+                );
+            }
+            Ok(())
+        }
+        KernelMessage::Workbench {
+            invocation,
+            control,
+            reply,
+        } if can_admit_workbench_request(state, &invocation.request) => {
+            if !matches!(state.hosted_admission, HostedAdmission::Open) {
+                let rejection = Err(KernelInvocationFailure::Rejected {
+                    actor: state.context.identity,
+                    detail: "hosted work admission is sealed".into(),
+                });
+                if let Some(control) = control {
+                    control.settle(rejection.clone());
+                    state.mailbox_admission.hosted_cell().complete(&control);
+                }
+                reply.send(rejection).ok();
+            } else {
+                start_workbench(myself, state, invocation, control, reply);
+            }
+            Ok(())
+        }
+        other => {
+            state.deferred_mailbox.push_back(other);
+            Ok(())
+        }
+    }
+}
+fn admit_idle_message<B: KernelBehavior>(
+    myself: &RactorRef<KernelMessage>,
+    state: &mut LocalActorState<B>,
+    message: KernelMessage,
+) -> Result<MessageDisposition, ActorProcessingErr> {
+    let message = match message {
+        message @ KernelMessage::Shutdown { .. } if state.behavior.replacement_staged() => {
+            state.deferred_mailbox.push_back(message);
+            return Ok(MessageDisposition::Consumed);
+        }
+        message @ KernelMessage::RouteReady { .. }
+            if state.replacement.is_some() || state.behavior.replacement_staged() =>
+        {
+            state.deferred_mailbox.push_back(message);
+            return Ok(MessageDisposition::Consumed);
+        }
+        message @ (KernelMessage::Cast { .. }
+        | KernelMessage::Call { .. }
+        | KernelMessage::Source(_))
+            if state.replacement.is_some()
+                || !state.deferred_mailbox.is_empty()
+                || !state.behavior.accepts_mailbox() =>
+        {
+            state.deferred_mailbox.push_back(message);
+            schedule_deferred_mailbox(myself, state)?;
+            return Ok(MessageDisposition::Consumed);
+        }
+        message @ KernelMessage::Workbench { .. }
+            if !state.deferred_mailbox.is_empty()
+                && matches!(&message, KernelMessage::Workbench { invocation, .. }
+                    if state.behavior.serializes_workbench_publication(&invocation.request)) =>
+        {
+            state.deferred_mailbox.push_back(message);
+            schedule_deferred_mailbox(myself, state)?;
+            return Ok(MessageDisposition::Consumed);
+        }
+        KernelMessage::DrainMailbox => {
+            state.mailbox_drain_scheduled = false;
+            if state.replacement.is_some() {
+                return Ok(MessageDisposition::Consumed);
+            }
+            let message = if state.behavior.accepts_mailbox() {
+                state.deferred_mailbox.pop_front()
+            } else if !state.behavior.replacement_staged() {
+                state
+                    .deferred_mailbox
+                    .iter()
+                    .position(|message| deferred_control(message).is_some())
+                    .and_then(|index| state.deferred_mailbox.remove(index))
+            } else {
+                None
+            };
+            let Some(message) = message else {
+                return Ok(MessageDisposition::Consumed);
+            };
+            message
+        }
+        message => message,
+    };
+    Ok(MessageDisposition::Dispatch(message))
+}
 impl<B> Actor for LocalActor<B>
 where
     B: KernelBehavior,
@@ -1314,193 +1519,12 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         if !state.pending_tasks.is_empty() {
-            match message {
-                KernelMessage::ActorStepCompleted { step, outcome } => {
-                    complete_actor_task(&myself, state, step, outcome).await;
-                    return Ok(());
-                }
-                KernelMessage::DrainMailbox => {
-                    state.mailbox_drain_scheduled = false;
-                    let ready = state.deferred_mailbox.iter().position(|message| {
-                        can_apply_independent_settlement(state, message)
-                            || matches!(message, KernelMessage::Workbench { invocation, .. }
-                                if can_admit_deferred_workbench(state, &invocation.request))
-                    });
-                    if let Some(index) = ready {
-                        let message = state
-                            .deferred_mailbox
-                            .remove(index)
-                            .expect("selected deferred work");
-                        match message {
-                            KernelMessage::Workbench {
-                                invocation,
-                                control,
-                                reply,
-                            } => {
-                                start_workbench(&myself, state, invocation, control, reply);
-                            }
-                            settlement => apply_hosted_settlement(state, settlement).await,
-                        }
-                        schedule_deferred_mailbox(&myself, state)?;
-                    }
-                    return Ok(());
-                }
-                settlement if can_apply_independent_settlement(state, &settlement) => {
-                    apply_hosted_settlement(state, settlement).await;
-                    schedule_deferred_mailbox(&myself, state)?;
-                    return Ok(());
-                }
-                KernelMessage::SealHostedWork { reply } => {
-                    if !matches!(state.hosted_admission, HostedAdmission::Closing)
-                        && !state
-                            .deferred_mailbox
-                            .iter()
-                            .any(|message| matches!(message, KernelMessage::Shutdown { .. }))
-                    {
-                        state.hosted_admission = HostedAdmission::Sealed;
-                        reply
-                            .send(crate::HostedWorkSeal {
-                                actor: state.context.identity,
-                            })
-                            .ok();
-                    }
-                    return Ok(());
-                }
-                KernelMessage::Shutdown { terminal, reply } => {
-                    for pending in state.pending_tasks.values() {
-                        match pending {
-                            PendingActorTask::Workbench(pending) => {
-                                if let Some(control) = &pending.control {
-                                    control.request_cancellation();
-                                }
-                            }
-                            PendingActorTask::Tool(pending) => {
-                                pending.control.request_cancellation();
-                            }
-                            PendingActorTask::Kernel(_) => {}
-                        }
-                    }
-                    state.mailbox_admission.close();
-                    state
-                        .deferred_mailbox
-                        .push_back(KernelMessage::Shutdown { terminal, reply });
-                    return Ok(());
-                }
-                KernelMessage::ReconcileWorkbenchCancellation {
-                    execution,
-                    invocation,
-                    reply,
-                } => {
-                    if pending_cancellation(state, &execution, invocation.as_ref()) {
-                        reply
-                            .send(crate::WorkbenchCancellationOutcome::Unconfirmed {
-                                execution: execution.clone(),
-                            })
-                            .ok();
-                    } else {
-                        state.deferred_mailbox.push_back(
-                            KernelMessage::ReconcileWorkbenchCancellation {
-                                execution,
-                                invocation,
-                                reply,
-                            },
-                        );
-                    }
-                    return Ok(());
-                }
-                KernelMessage::ReconcileWorkbenchBoundary { boundary, reply } => {
-                    if state.pending_tasks.values().any(|pending| {
-                        pending.matches_workbench_boundary(state.context.identity, &boundary)
-                    }) {
-                        reply
-                            .send(crate::WorkbenchBoundaryReconciliation::Pending)
-                            .ok();
-                    } else {
-                        state.deferred_mailbox.push_back(
-                            KernelMessage::ReconcileWorkbenchBoundary { boundary, reply },
-                        );
-                    }
-                    return Ok(());
-                }
-                KernelMessage::Workbench {
-                    invocation,
-                    control,
-                    reply,
-                } if can_admit_workbench_request(state, &invocation.request) => {
-                    if !matches!(state.hosted_admission, HostedAdmission::Open) {
-                        let rejection = Err(KernelInvocationFailure::Rejected {
-                            actor: state.context.identity,
-                            detail: "hosted work admission is sealed".into(),
-                        });
-                        if let Some(control) = control {
-                            control.settle(rejection.clone());
-                            state.mailbox_admission.hosted_cell().complete(&control);
-                        }
-                        reply.send(rejection).ok();
-                    } else {
-                        start_workbench(&myself, state, invocation, control, reply);
-                    }
-                    return Ok(());
-                }
-                other => {
-                    state.deferred_mailbox.push_back(other);
-                    return Ok(());
-                }
-            }
+            handle_parked_message(&myself, state, message).await?;
+            return Ok(());
         }
-        let message = match message {
-            message @ KernelMessage::Shutdown { .. } if state.behavior.replacement_staged() => {
-                state.deferred_mailbox.push_back(message);
-                return Ok(());
-            }
-            message @ KernelMessage::RouteReady { .. }
-                if state.replacement.is_some() || state.behavior.replacement_staged() =>
-            {
-                state.deferred_mailbox.push_back(message);
-                return Ok(());
-            }
-            message @ (KernelMessage::Cast { .. }
-            | KernelMessage::Call { .. }
-            | KernelMessage::Source(_))
-                if state.replacement.is_some()
-                    || !state.deferred_mailbox.is_empty()
-                    || !state.behavior.accepts_mailbox() =>
-            {
-                state.deferred_mailbox.push_back(message);
-                schedule_deferred_mailbox(&myself, state)?;
-                return Ok(());
-            }
-            message @ KernelMessage::Workbench { .. }
-                if !state.deferred_mailbox.is_empty()
-                    && matches!(&message, KernelMessage::Workbench { invocation, .. }
-                        if state.behavior.serializes_workbench_publication(&invocation.request)) =>
-            {
-                state.deferred_mailbox.push_back(message);
-                schedule_deferred_mailbox(&myself, state)?;
-                return Ok(());
-            }
-            KernelMessage::DrainMailbox => {
-                state.mailbox_drain_scheduled = false;
-                if state.replacement.is_some() {
-                    return Ok(());
-                }
-                let message = if state.behavior.accepts_mailbox() {
-                    state.deferred_mailbox.pop_front()
-                } else if !state.behavior.replacement_staged() {
-                    state
-                        .deferred_mailbox
-                        .iter()
-                        .position(|message| deferred_control(message).is_some())
-                        .and_then(|index| state.deferred_mailbox.remove(index))
-                } else {
-                    None
-                };
-                let Some(message) = message else {
-                    return Ok(());
-                };
-                message
-            }
-            message => message,
+        let message = match admit_idle_message(&myself, state, message)? {
+            MessageDisposition::Consumed => return Ok(()),
+            MessageDisposition::Dispatch(message) => message,
         };
         match message {
             KernelMessage::AbortReplacement { reply } => {
