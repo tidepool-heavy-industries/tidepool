@@ -4,10 +4,11 @@
 -- never authorize a lexical import or replace a retained native interface.
 module Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
-  , ExecutionSourceRef(..), decodeExecutionSources, decodeExecutionSourceGraph, decodeExecutionSourceReferences, executionIdentityKey
+  , ExecutionSourceRef(..), decodeExecutionSourceGraph, decodeExecutionSourceReferences, executionIdentityKey
   , ExecutionSourceNode(..), ExecutionSourceFailure(..), executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure
   , ExecutionSourceRecipe(..), issueExecutionSourceRecipe
   , executionSourceProspectiveReferences
+  , decodeExecutionSourceDescriptors, readExecutionSourceGraphs, executionSourceGraphsFit
   , executionSourceGraphBytesLimit
   ) where
 
@@ -26,14 +27,21 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Numeric (showHex)
-import System.FilePath (isAbsolute)
+import System.Directory (getFileSize)
+import System.FilePath (isAbsolute, takeDirectory)
+import System.IO (IOMode(ReadMode), withBinaryFile)
 import Tidepool.DependencyEvidence
 import Tidepool.Session (parseSessionModule)
+import Tidepool.Timing (emitCount, readTimingEnabled)
 
 -- Match the certified graph inventory bound in tidepool-toolchain. Metadata
--- and inline candidate manifests retain their separate four MiB envelopes.
+-- and candidate manifests retain their separate four MiB envelopes.
 executionSourceGraphBytesLimit :: Int
 executionSourceGraphBytesLimit = 64 * 1024 * 1024
+
+-- Authored source UTF-8 has the same independent bound as Rust graph admission.
+executionSourceSourceBytesLimit :: Int
+executionSourceSourceBytesLimit = 32 * 1024 * 1024
 
 data ExecutionSourceIdentity = ExecutionSourceIdentity
   { executionUnit :: String, executionModule :: String
@@ -97,7 +105,8 @@ issueExecutionSourceRecipe recipe
       _ -> Left (ExecutionSourceIncomplete ("", "transaction execution recipe"))
   where
     evidence = recipeEvidence recipe
-    limit = 4 * 1024 * 1024
+    limit = executionSourceGraphBytesLimit
+    generatedSource = TE.encodeUtf8 (T.pack (snd (recipeGeneratedOrigin recipe)))
     ownerKeys = map (executionIdentityKey . executionOwnerIdentity) (recipeOwners recipe)
     ownerSet = Set.fromList ownerKeys
     sourceOwners = Set.fromList [(dependencyModuleUnit node,dependencyModuleName node)
@@ -111,9 +120,10 @@ issueExecutionSourceRecipe recipe
       && imports == Set.toAscList (Set.fromList imports)) (recipeExactImports recipe)
     generatedMatches = case [row | row <- dependencySources evidence
         , dependencySourcePath row == "@generated-source"] of
-      [row] -> dependencySourceSha256 row == digest (TE.encodeUtf8 (T.pack (snd (recipeGeneratedOrigin recipe))))
+      [row] -> dependencySourceSha256 row == digest generatedSource
       _ -> False
-    boundedRecipe = all (<= 4096)
+    boundedRecipe = BS.length generatedSource <= executionSourceSourceBytesLimit
+      && all (<= 4096)
       [length (recipeIncludes recipe), length (recipeOwners recipe)
       , length (dependencySources evidence), length (dependencyModules evidence)
       , length (dependencyPackages evidence), length (recipePackages recipe)
@@ -386,21 +396,64 @@ executionSourceOriginalNodeWith prospective graphs = originalNode prospective Se
       [value] -> Right value
       _ -> Left (ExecutionSourceIncomplete key)
 
-decodeExecutionSources :: Decoder s ([ExecutionSourceGraph], [ExecutionSourceRef])
-decodeExecutionSources = do
-  array 2
-  graphs <- bounded 4096 $ do
-    array 2
-    sha <- digestField
-    bytes <- decodeBytes
-    either fail pure (decodeExecutionSourceGraph sha bytes)
-  references <- decodeExecutionSourceReferences
-  unique "original execution graphs" (map executionGraphSha256 graphs)
-  pure (graphs, references)
+executionSourceGraphsLimit :: Int
+executionSourceGraphsLimit = 4096
+
+-- These retained graph bounds are independent of the metadata envelope.
+executionSourceGraphsFit :: [ExecutionSourceGraph] -> Bool
+executionSourceGraphsFit graphs = length graphs <= executionSourceGraphsLimit
+  && sum (map (toInteger . BS.length . executionGraphBytes) graphs)
+    <= toInteger executionSourceGraphBytesLimit
+
+decodeExecutionSourceDescriptors :: Decoder s [(String, FilePath)]
+decodeExecutionSourceDescriptors = do
+  descriptors <- bounded executionSourceGraphsLimit (array 2 >> (,) <$> digestField <*> absolute)
+  unique "original execution graphs" (map fst descriptors)
+  pure descriptors
+
+-- Capture one graph at a time after checking the complete retained byte budget.
+-- The file paths transport bytes; only their authenticated graph digests and
+-- original references can establish product compatibility.
+readExecutionSourceGraphs :: FilePath -> [ExecutionSourceGraph]
+  -> [(String, FilePath)] -> IO [ExecutionSourceGraph]
+readExecutionSourceGraphs manifest known descriptors = do
+  unless (isAbsolute manifest && length descriptors <= executionSourceGraphsLimit
+      && Set.size (Set.fromList (map fst descriptors)) == length descriptors)
+    (fail "invalid original execution graph descriptor inventory")
+  let captured = Map.fromList [(executionGraphSha256 graph,graph) | graph <- known]
+  sizes <- forM descriptors $ \(sha, path) -> do
+    unless (isAbsolute path && takeDirectory path == takeDirectory manifest)
+      (fail "original execution graph is outside its request directory")
+    size <- getFileSize path
+    when (size > toInteger executionSourceGraphBytesLimit)
+      (fail "original execution graphs exceed 64 MiB")
+    case Map.lookup sha captured of
+      Just graph -> unless (size == toInteger (BS.length (executionGraphBytes graph)))
+        (fail "original execution graph size changed")
+      Nothing -> pure ()
+    pure size
+  let new = [(sha,size) | ((sha,_),size) <- zip descriptors sizes, Map.notMember sha captured]
+      retainedBytes = sum (map (toInteger . BS.length . executionGraphBytes) (Map.elems captured))
+  when (Map.size captured + length new > executionSourceGraphsLimit
+      || retainedBytes + sum (map snd new) > toInteger executionSourceGraphBytesLimit)
+    (fail "original execution graphs exceed their retained byte bound")
+  timing <- readTimingEnabled
+  forM (zip descriptors sizes) $ \((sha, path), size) -> do
+    bytes <- withBinaryFile path ReadMode $ \handle -> BS.hGet handle (fromInteger size + 1)
+    unless (toInteger (BS.length bytes) == size)
+      (fail "original execution graph size changed")
+    graph <- case Map.lookup sha captured of
+      Just graph -> do
+        unless (digest bytes == sha) (fail "original execution graph digest differs")
+        pure graph
+      Nothing -> either fail pure (decodeExecutionSourceGraph sha bytes)
+    emitCount timing ("hash_bytes.execution_graph." ++ sha) (fromIntegral (BS.length bytes))
+    pure graph
 
 -- Both candidate parcels and exact-scope graph files consume the same bytes.
 decodeExecutionSourceGraph :: String -> BS.ByteString -> Either String ExecutionSourceGraph
 decodeExecutionSourceGraph sha bytes
+  | BS.length bytes > executionSourceGraphBytesLimit = Left "original execution graphs exceed 64 MiB"
   | digest bytes /= sha = Left "original execution graph digest differs"
   | otherwise = case deserialiseFromBytes (decodeGraph sha bytes) (BL.fromStrict bytes) of
       Left reason -> Left (show reason)
@@ -427,7 +480,7 @@ decodeGraph sha bytes = do
   includes <- bounded 4096 absolute
   array 2
   origin <- absolute
-  source <- text
+  source <- sourceText
   array 6
   safe <- decodeBool
   complete <- decodeBool
@@ -514,6 +567,13 @@ bounded limit item = do
 
 unique :: Ord a => String -> [a] -> Decoder s ()
 unique label values = unless (Set.size (Set.fromList values) == length values) (fail ("duplicate " ++ label))
+
+sourceText :: Decoder s String
+sourceText = do
+  value <- decodeString
+  when (BS.length (TE.encodeUtf8 value) > executionSourceSourceBytesLimit)
+    (fail "original execution source exceeds its 32 MiB UTF-8 bound")
+  pure (T.unpack value)
 
 text :: Decoder s String
 text = T.unpack <$> decodedText

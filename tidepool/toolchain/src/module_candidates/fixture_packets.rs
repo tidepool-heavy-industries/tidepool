@@ -61,8 +61,6 @@ fn source_boot_candidate_packet_producer() {
         (exact_owners.is_empty() && native_owners.is_empty()) || !matches!(fields[6], Value::Null),
         "retained interface/native custody requires an actual delivered scope"
     );
-    let delivery = packet.join("delivery");
-    fs::create_dir(&delivery).unwrap();
     let mut context = ExactDeclarationContext::new(&[], &[], vec![])
         .unwrap()
         .extend_checked_original_products(producer_sha, &[], &BTreeMap::new())
@@ -158,8 +156,9 @@ fn source_boot_candidate_packet_producer() {
                 .filter(|record| requested.contains(&record.module))
                 .map(|record| (record, CandidateOrigin::Ordinary))
                 .collect();
-            let selected = select_records_inner(producer, &include, &delivery, records, None)
-                .expect("production candidate delivery");
+            let selected =
+                select_records_inner(producer, &include, packet.parent().unwrap(), records, None)
+                    .expect("production candidate delivery");
             assert_eq!(
                 selected
                     .by_owner
@@ -170,7 +169,7 @@ fn source_boot_candidate_packet_producer() {
                 "fixture must not silently decline a requested native owner or its interface closure"
             );
             let destination = packet.parent().unwrap().join("module-candidates.cbor");
-            fs::copy(&selected.manifest_path, destination).unwrap();
+            assert_eq!(selected.manifest_path, destination);
         }
     } else {
         assert!(

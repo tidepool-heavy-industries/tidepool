@@ -37,7 +37,7 @@ import qualified Data.Set as Set
 import GHC.Driver.Env (HscEnv)
 import Data.Word (Word64)
 import Numeric (showHex)
-import System.Directory (getFileSize, createDirectory, createDirectoryIfMissing, makeAbsolute, doesFileExist)
+import System.Directory (createDirectory, createDirectoryIfMissing, makeAbsolute, doesFileExist)
 import System.FilePath (isAbsolute, takeDirectory, (</>))
 import System.IO (IOMode(ReadMode), withBinaryFile)
 import System.IO.Error (isAlreadyExistsError)
@@ -53,9 +53,10 @@ import Tidepool.ModuleCandidates
   , candidateCertificatePath, candidateCertificateSha256, candidateCoreDescriptor )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
-  , ExecutionSourceRef(..), ExecutionSourceNode(..), decodeExecutionSourceGraph, decodeExecutionSourceReferences
+  , ExecutionSourceRef(..), ExecutionSourceNode(..), decodeExecutionSourceDescriptors, decodeExecutionSourceReferences
+  , readExecutionSourceGraphs, executionSourceGraphsFit
   , ExecutionSourceFailure(..), executionIdentityKey, executionSourceClosure, executionSourceOriginalNode
-  , executionSourceOriginalClosure, executionSourceGraphBytesLimit )
+  , executionSourceOriginalClosure )
 import Tidepool.PackageWitness
   ( revalidatePackageImports )
 import Tidepool.FinalizedModuleArtifacts
@@ -307,8 +308,7 @@ extendExactExecutionSourcesWithinBudget offeredGraphs offeredRefs scope = do
   retainedReferences <- foldM insertReference Map.empty (scopeExecutionOwners scope ++ map fst available)
   let kept = Set.union (Set.map snd needed) (Set.fromList (map executionGraphSha256 (scopeExecutionGraphs scope)))
       graphs = [graph | (sha,graph) <- Map.toAscList graphMap, sha `Set.member` kept]
-  if length graphs <= 4096 && Map.size references <= 4096
-      && sum (map (BS.length . executionGraphBytes) graphs) <= executionSourceGraphBytesLimit
+  if executionSourceGraphsFit graphs && Map.size references <= 4096
     then pure (Just scope {scopeExecutionGraphs=graphs,scopeExecutionOwners=Map.elems retainedReferences})
     else pure Nothing
   where
@@ -443,19 +443,7 @@ readExactScope path = do
         Right (remaining, result)
           | BL.null remaining -> pure result
           | otherwise -> fail "exact scope has trailing bytes"
-      sizes <- forM descriptors $ \(_, graphPath) -> do
-        unless (takeDirectory graphPath == takeDirectory path)
-          (fail "original execution graph is outside its request directory")
-        getFileSize graphPath
-      when (sum sizes > fromIntegral executionSourceGraphBytesLimit)
-        (fail "original execution graphs exceed 64 MiB")
-      graphs <- forM (zip descriptors sizes) $ \((sha, graphPath), size) -> do
-        graphBytes <- readBoundedFile graphPath (fromIntegral size)
-        unless (toInteger (BS.length graphBytes) == size)
-          (fail "original execution graph size changed")
-        graph <- either fail pure (decodeExecutionSourceGraph sha graphBytes)
-        emitCount timing ("hash_bytes.execution_graph." ++ sha) (fromIntegral (BS.length graphBytes))
-        pure graph
+      graphs <- readExecutionSourceGraphs path [] descriptors
       evidence <- validateInterfaceEvidence scope interfaceEvidence
       validateExecutionSources scope graphs
       let sha = digest bytes
@@ -467,7 +455,7 @@ readExactScope path = do
     pure (either (Left . show) Right captured)
 
 -- A bounded read also closes the stat/read growth race without allocating an
--- unbounded input. Graph sizes are summed before any graph is captured.
+-- unbounded input.
 readBoundedFile :: FilePath -> Int -> IO BS.ByteString
 readBoundedFile path limit = withBinaryFile path ReadMode $ \handle -> do
   bytes <- BS.hGet handle (limit + 1)
@@ -862,9 +850,8 @@ decodeScope = do
   executionToken <- peekTokenType
   (descriptors, executionOwners) <- if executionToken /= TypeNull then do
     array 2
-    graphs <- bounded 4096 (array 2 >> (,) <$> digestField <*> absolute)
+    graphs <- decodeExecutionSourceDescriptors
     references <- decodeExecutionSourceReferences
-    unique "original execution graphs" (map fst graphs)
     pure (graphs, references)
     else decodeNull >> pure ([], [])
   nullPurpose <- (== TypeNull) <$> peekTokenType

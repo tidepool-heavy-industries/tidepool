@@ -211,7 +211,8 @@ import Tidepool.ExactScope
   , canonicalCorePath, canonicalCoreSha256 )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceNode(..), ExecutionSourceIdentity(..)
-  , ExecutionSourceFailure(..), ExecutionSourceRef(..), executionSourceClosure, executionIdentityKey )
+  , ExecutionSourceFailure(..), ExecutionSourceRef(..), executionSourceClosure, executionIdentityKey
+  , executionSourceGraphsFit )
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports
   , validatePackageImportRoot )
@@ -3024,9 +3025,8 @@ certifyModuleCandidates compilerViewDirectory expectedProducer exactScope source
             let producerMatches = case exactScope of
                   Nothing -> True
                   Just scope -> all ((== scopeProducerSha256 scope) . executionGraphProducer) combinedGraphs
-            in producerMatches && Map.size graphInventory <= 4096
+            in producerMatches && executionSourceGraphsFit combinedGraphs
               && length combinedReferences <= 4096
-              && sum (map (BS.length . executionGraphBytes) combinedGraphs) <= 4 * 1024 * 1024
           candidateExecutionMatches candidate = graphInventoryMatches
             && either (const False) (const True) (candidateProof candidate)
           candidateDependencyQualifier CandidateUnqualified = DependencyUnqualified

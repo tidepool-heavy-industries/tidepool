@@ -104,16 +104,17 @@ executionSourceDecodeChecks = do
   refuse "text limit precedes owner limit" "original execution text exceeds bound"
     (unit (T.replicate (4 * 1024 * 1024 + 1) "x"))
   accept "source text at character limit" (source (T.replicate (4 * 1024 * 1024) "x"))
-  refuse "source text beyond character limit" "original execution text exceeds bound"
+  accept "source text above metadata bound"
     (source (T.replicate (4 * 1024 * 1024 + 1) "x"))
   case decodeExecutionSourceGraph (replicate 64 '0') bytes of
     Left "original execution graph digest differs" -> pure ()
     _ -> fail "decoder lost digest rejection precedence"
   let sha = T.pack (shaHex bytes)
-      parcel = encode (TList [TList [TList [TString sha, TBytes bytes], TList [TString sha, TBytes bytes]], TList []])
+      descriptor = TList [TString sha, TString "/decoder-fixture/execution.cbor"]
+      parcel = encode (TList [descriptor, descriptor])
       reference = TList [TString "main", TString "Support", TString (T.replicate 64 "a"),
         TString (T.replicate 64 "a"), TString (T.replicate 64 "a"), TString sha]
-  expectParcelRejection "duplicate original execution graphs" decodeExecutionSources parcel
+  expectParcelRejection "duplicate original execution graphs" decodeExecutionSourceDescriptors parcel
   expectParcelRejection "duplicate original execution references" decodeExecutionSourceReferences (encode (TList [reference, reference]))
   putStrLn "execution source decoder: 21 admission cases passed"
 

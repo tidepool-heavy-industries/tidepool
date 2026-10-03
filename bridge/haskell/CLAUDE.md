@@ -79,14 +79,18 @@ Execution parcels retain `[SHA, absolute graph-file path]` descriptors and exact
 original references. The request owner captures graph files beside the manifest;
 unchanged `TPEXECUTIONSOURCE` bytes remain independent of the metadata envelope.
 Metadata is limited to four MiB. Execution graphs retain their 64 MiB aggregate
-and 4096-graph bounds; advertised invalid or oversized parcels are rejected.
+and 4096-graph bounds. Authored source is bounded separately at 32 MiB of UTF-8;
+other text and metadata keep their existing bounds. Advertised invalid or
+oversized parcels are rejected.
 
 This is a strict matched worker/frontend migration. Earlier exact-scope versions
 2, 4, 6 and 7 are rejected. Deploy both producers and consumers together and
 regenerate fixtures through their owning producers.
 
 Candidate offers use strict `TPMCAN` version 10 with seven fields and sixteen-field
-module rows. Each native row retains its exact canonical requirements and sealed
+module rows. Its execution parcel uses graph-file descriptors beside the candidate
+manifest, with the same graph bounds as exact scopes and a separate four MiB
+metadata limit. This requires a matched producer/consumer deployment. Each native row retains its exact canonical requirements and sealed
 module certificate/Core descriptor. Offers remain cache suggestions: admission
 checks them against the request's independently admitted compiler producer and
 complete selected interface closure before promoting their durable proof.

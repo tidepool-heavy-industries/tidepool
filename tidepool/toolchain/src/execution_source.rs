@@ -1169,6 +1169,32 @@ mod tests {
     }
 
     #[test]
+    fn graph_descriptor_capture_preserves_immutable_bytes_and_refuses_substitution() {
+        let root = tempfile::tempdir().unwrap();
+        let capture = tempfile::tempdir().unwrap();
+        let (graph, _) = test_graph(root.path());
+        let path = graph.capture_descriptor(capture.path()).unwrap();
+        assert_eq!(path.parent(), Some(capture.path()));
+        assert_eq!(std::fs::read(&path).unwrap(), graph.bytes());
+        assert_eq!(graph.capture_descriptor(capture.path()).unwrap(), path);
+
+        std::fs::write(&path, b"substituted graph").unwrap();
+        assert!(graph.capture_descriptor(capture.path()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"substituted graph");
+        std::fs::write(&path, graph.bytes()).unwrap();
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"x").unwrap();
+        drop(file);
+        assert!(graph.capture_descriptor(capture.path()).is_err());
+        std::fs::write(&path, graph.bytes()).unwrap();
+        assert_eq!(graph.capture_descriptor(capture.path()).unwrap(), path);
+    }
+
+    #[test]
     fn source_graph_bounds_decoder_allocation_and_refuses_required_source_edges() {
         let root = tempfile::tempdir().unwrap();
         let (graph, owners) = test_graph(root.path());
@@ -2094,6 +2120,44 @@ impl CertifiedExecutionSourceGraph {
     }
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+    /// Capture unchanged graph bytes beside a request's metadata envelope.
+    /// The descriptor path transports this already authenticated digest.
+    pub(crate) fn capture_descriptor(&self, root: &Path) -> std::io::Result<PathBuf> {
+        let path = root.join(format!("execution-{}.cbor", hex(&self.digest)));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                file.write_all(self.bytes())?;
+            }
+            Err(failure) if failure.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Scope and candidate parcels may share one immutable capture.
+                // Compare in bounded chunks without replacing an earlier file.
+                let mut file = std::fs::File::open(&path)?;
+                let mut buffer = [0; 16 * 1024];
+                for chunk in self.bytes().chunks(buffer.len()) {
+                    file.read_exact(&mut buffer[..chunk.len()])?;
+                    if buffer[..chunk.len()] != *chunk {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "execution graph capture differs",
+                        ));
+                    }
+                }
+                if file.read(&mut buffer[..1])? != 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "execution graph capture has trailing bytes",
+                    ));
+                }
+            }
+            Err(failure) => return Err(failure),
+        }
+        Ok(path)
     }
     pub(crate) fn producer_sha256(&self) -> [u8; 32] {
         self.producer_sha256

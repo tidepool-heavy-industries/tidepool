@@ -29,8 +29,8 @@ import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), RuntimeRep(..), Signature(..), ResultContract(..) )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..)
-  , decodeExecutionSources, executionIdentityKey, executionSourceOriginalClosure
-  , executionSourceGraphBytesLimit )
+  , decodeExecutionSourceDescriptors, decodeExecutionSourceReferences, readExecutionSourceGraphs
+  , executionSourceGraphsFit, executionIdentityKey, executionSourceOriginalClosure )
 
 data ModuleCandidate = ModuleCandidate
   { candidateUnit :: String
@@ -122,18 +122,20 @@ readModuleCandidatesWithGraphs exactGraphs path = do
       BS.hGet handle (fromInteger maxManifestBytes + 1)
     if toInteger (BS.length bytes) > maxManifestBytes
       then pure (Left "candidate manifest exceeds four MiB")
-      else pure $ case deserialiseFromBytes (decodeManifest exactGraphs) (BL.fromStrict bytes) of
-        Left failure -> Left (show failure)
-        Right (remaining, candidates)
-          | BL.null remaining -> Right candidates
-          | otherwise -> Left "candidate manifest has trailing bytes")
+      else case deserialiseFromBytes decodeManifest (BL.fromStrict bytes) of
+        Left failure -> pure (Left (show failure))
+        Right (remaining, (candidates, descriptors, references, producer))
+          | BL.null remaining -> do
+              graphs <- readExecutionSourceGraphs path exactGraphs descriptors
+              pure (attachExecutionSources exactGraphs graphs references producer candidates)
+          | otherwise -> pure (Left "candidate manifest has trailing bytes"))
     :: IO (Either IOException (Either String [ModuleCandidate]))
   pure $ case result of
     Left failure -> Left (show failure)
     Right decoded -> decoded
 
-decodeManifest :: [ExecutionSourceGraph] -> Decoder s [ModuleCandidate]
-decodeManifest exactGraphs = do
+decodeManifest :: Decoder s ([ModuleCandidate], [(String, FilePath)], [ExecutionSourceRef], String)
+decodeManifest = do
   count <- decodeListLen
   magic <- decodeString
   unless (magic == "TPMCAN") (fail "candidate manifest has wrong magic")
@@ -151,32 +153,38 @@ decodeManifest exactGraphs = do
   (candidates,_) <- decodeCandidates total symbols globals maxManifestBytes
   let owners = Set.fromList [(candidateUnit c, candidateModule c) | c <- candidates]
   unless (Set.size owners == length candidates) (fail "duplicate module candidate")
-  do
-    (graphs,references) <- decodeExecutionSources
-    let offered = Map.fromList [(candidateOriginalIdentity candidate,candidate) | candidate <- candidates]
-        available = Map.fromList [(executionGraphSha256 graph,graph) | graph <- exactGraphs ++ graphs]
-        byOwner = Map.fromList [(executionIdentityKey (executionRefIdentity reference),reference)
-          | reference <- references]
-    unless (Map.size available <= 4096
-        && sum (map (BS.length . executionGraphBytes) (Map.elems available)) <= executionSourceGraphBytesLimit)
-      (fail "combined candidate execution graphs exceed bound")
-    forM_ references $ \reference -> do
-      unless (Map.member (executionRefIdentity reference) offered)
-        (fail "candidate execution reference differs from offered original")
-      case Map.lookup (executionRefGraph reference) available of
-        Just graph | any ((== executionRefIdentity reference) . executionOwnerIdentity)
-            (executionGraphOwners graph) -> pure ()
-        _ -> fail "candidate execution reference lacks its original graph owner"
-      either (fail . show) (const (pure ()))
-        (executionSourceOriginalClosure (Map.elems available) [reference])
-    producer <- T.unpack <$> decodeString
-    unless (canonicalDigest producer
-        && all ((== producer) . executionGraphProducer) (Map.elems available))
-      (fail "invalid or conflicting candidate compiler producer")
-    pure [candidate {candidateExecutionSource = CandidateExecutionSource graphs <$>
-        Map.lookup (candidateUnit candidate,candidateModule candidate) byOwner
-        , candidateProducerSha256 = producer}
-      | candidate <- candidates]
+  parcelCount <- decodeListLen
+  unless (parcelCount == 2) (fail "invalid candidate execution parcel")
+  descriptors <- decodeExecutionSourceDescriptors
+  references <- decodeExecutionSourceReferences
+  producer <- T.unpack <$> decodeString
+  unless (canonicalDigest producer) (fail "invalid candidate compiler producer")
+  pure (candidates, descriptors, references, producer)
+
+attachExecutionSources :: [ExecutionSourceGraph] -> [ExecutionSourceGraph]
+  -> [ExecutionSourceRef] -> String -> [ModuleCandidate] -> Either String [ModuleCandidate]
+attachExecutionSources exactGraphs graphs references producer candidates = do
+  let offered = Map.fromList [(candidateOriginalIdentity candidate,candidate) | candidate <- candidates]
+      available = Map.fromList [(executionGraphSha256 graph,graph) | graph <- exactGraphs ++ graphs]
+      byOwner = Map.fromList [(executionIdentityKey (executionRefIdentity reference),reference)
+        | reference <- references]
+  unless (executionSourceGraphsFit (Map.elems available))
+    (Left "combined candidate execution graphs exceed bound")
+  unless (all ((== producer) . executionGraphProducer) (Map.elems available))
+    (Left "invalid or conflicting candidate compiler producer")
+  forM_ references $ \reference -> do
+    unless (Map.member (executionRefIdentity reference) offered)
+      (Left "candidate execution reference differs from offered original")
+    case Map.lookup (executionRefGraph reference) available of
+      Just graph | any ((== executionRefIdentity reference) . executionOwnerIdentity)
+          (executionGraphOwners graph) -> pure ()
+      _ -> Left "candidate execution reference lacks its original graph owner"
+    either (Left . show) (const (pure ()))
+      (executionSourceOriginalClosure (Map.elems available) [reference])
+  pure [candidate {candidateExecutionSource = CandidateExecutionSource graphs <$>
+      Map.lookup (candidateUnit candidate,candidateModule candidate) byOwner
+      , candidateProducerSha256 = producer}
+    | candidate <- candidates]
 
 type InventoryTable a = IntMap.IntMap (a, Integer)
 

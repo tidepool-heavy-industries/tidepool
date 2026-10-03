@@ -101,6 +101,7 @@ rust_filegroup(
         "src/module_candidates.rs": "tidepool/toolchain/src/module_candidates.rs",
         "src/module_candidates/candidate_diagnostics.rs": "tidepool/toolchain/src/module_candidates/candidate_diagnostics.rs",
         "src/module_candidates/codec_measurement.rs": "tidepool/toolchain/src/module_candidates/codec_measurement.rs",
+        "src/module_candidates/fixture_packets.rs": "tidepool/toolchain/src/module_candidates/fixture_packets.rs",
         "src/module_candidates/deployment.rs": "tidepool/toolchain/src/module_candidates/deployment.rs",
         "src/module_candidates/inventory.rs": "tidepool/toolchain/src/module_candidates/inventory.rs",
         "src/module_candidates/shared_evidence.rs": "tidepool/toolchain/src/module_candidates/shared_evidence.rs",

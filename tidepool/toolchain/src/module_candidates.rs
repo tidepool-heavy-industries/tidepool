@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 mod candidate_diagnostics;
 #[cfg(test)]
 mod codec_measurement;
-#[cfg(test)]
-mod fixture_packets;
 pub(crate) mod dependencies;
 pub(crate) mod deployment;
+#[cfg(test)]
+mod fixture_packets;
 mod inventory;
 mod shared_evidence;
 use sha2::{Digest, Sha256};
@@ -1855,9 +1855,9 @@ fn select_records_inner(
         .collect::<BTreeMap<_, _>>()
         .into_values()
         .try_fold(0usize, |total, bytes| total.checked_add(bytes))?;
-    if graph_bytes > MANIFEST_LIMIT {
-        tracing::info!(target: "tidepool_toolchain::module_candidates", reason = ?CandidateExecutionUnavailable::ManifestBound,
-            graph_bytes, limit = MANIFEST_LIMIT, "candidate offer omitted because its execution provenance exceeds the manifest bound");
+    if graph_bytes > crate::execution_source::GRAPH_BYTES_LIMIT {
+        tracing::info!(target: "tidepool_toolchain::module_candidates", reason = ?CandidateExecutionUnavailable::GraphBound,
+            graph_bytes, limit = crate::execution_source::GRAPH_BYTES_LIMIT, "candidate offer omitted because its execution provenance exceeds the retained graph bound");
         return None;
     }
     let (symbols, globals) = inventory.into_wire_tables();
@@ -1877,12 +1877,13 @@ fn select_records_inner(
                     .collect::<BTreeMap<_, _>>()
                     .into_iter()
                     .map(|(digest, graph)| {
-                        Value::Array(vec![
+                        let path = graph.capture_descriptor(&scratch).ok()?;
+                        Some(Value::Array(vec![
                             Value::Text(hex(&digest)),
-                            Value::Bytes(graph.bytes().to_vec()),
-                        ])
+                            Value::Text(path.to_string_lossy().into_owned()),
+                        ]))
                     })
-                    .collect(),
+                    .collect::<Option<Vec<_>>>()?,
             ),
             Value::Array(
                 by_owner
@@ -1943,6 +1944,7 @@ enum CandidateInterfaceUnavailable {
 #[derive(Clone, Copy, Debug)]
 enum CandidateExecutionUnavailable {
     ManifestBound,
+    GraphBound,
 }
 
 fn retain_closed_execution_capabilities(
@@ -3225,6 +3227,23 @@ mod tests {
             selected.by_owner[&("u".into(), "A".into())].product_bytes,
             a.products
         );
+
+        let manifest: Value =
+            ciborium::de::from_reader(fs::File::open(&selected.manifest_path).unwrap()).unwrap();
+        let fields = manifest.as_array().unwrap();
+        assert_eq!(fields.len(), 7);
+        assert_eq!(fields[1].as_text(), Some("10"));
+        let parcel = fields[5].as_array().unwrap();
+        assert_eq!(parcel.len(), 2);
+        let descriptors = parcel[0].as_array().unwrap();
+        assert_eq!(descriptors.len(), 1);
+        let descriptor = descriptors[0].as_array().unwrap();
+        assert_eq!(descriptor.len(), 2);
+        let graph_path = Path::new(descriptor[1].as_text().unwrap());
+        assert_eq!(graph_path.parent(), selected.manifest_path.parent());
+        let captured = fs::read(graph_path).unwrap();
+        assert_eq!(descriptor[0].as_text(), Some(sha(&captured).as_str()));
+        assert_eq!(captured, a.execution_source.as_ref().unwrap().bytes());
 
         // Missing original proof retains the old conservative refusal. A
         // same-name candidate cannot replace the protected dependency.

@@ -2,6 +2,7 @@ module Main (main) where
 
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots)
 import ExactScopeV8Test (exactScopeV8Checks, candidateCanonicalChecks)
+import CandidateGraphDescriptorTest (candidateGraphDescriptorChecks)
 import GenuineCandidateFixture
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope, writeGenuineEmptyMetadataScope
   , writeGenuineCandidateNativeScope )
@@ -25,6 +26,7 @@ import Data.Maybe (catMaybes, isJust, isNothing, maybeToList)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import GHC (runGhc, getSession, setSession, SafeHaskellMode(Sf_None), ms_mod_name, ms_hsc_src, ms_hspp_buf, ms_hspp_file, ms_hspp_opts, parseModule, typecheckModule, TypecheckedModule(..), ParsedModule(..), Target(..))
 import GHC.Core qualified as Core
 import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy, intDataCon)
@@ -217,6 +219,7 @@ main = getArgs >>= \case
   ["--generated-scaffold-retained",scope,seal] -> generatedScaffoldRetained scope seal
   ["--hydrated-site-siblings"] -> hydratedSiteSiblings
   ["--fresh-execution-recipe"] -> freshExecutionRecipeTest
+  ["--candidate-graph-descriptors"] -> withTiming (withScratch candidateGraphDescriptorsAt)
   ["--native-checked-signatures"] -> nativeCheckedSignaturesTest
   ["--host-activation-purpose"] -> hostActivationPurposeTest Nothing
   ["--host-activation-purpose", destination] -> hostActivationPurposeTest (Just destination)
@@ -319,6 +322,30 @@ sourceBootReuseAt work = do
   unless (exit == ExitSuccess) $ fail ("fresh worker reuse failed: " ++ errors)
   _ <- reuseFresh work >>= requireReused "reuse after refusal"
   putStrLn "SOURCE boot cache: cold, resident, warm, fresh-worker, ABI and CPP refusal passed"
+
+-- One GHC capture supplies a genuine graph larger than the metadata envelope.
+-- Candidate and scope delivery use their existing canonical Rust owners.
+candidateGraphDescriptorsAt :: FilePath -> IO ()
+candidateGraphDescriptorsAt work = do
+  forM_ ["NativeScopeBase.hs", "NativeScopeOwner.hs", "NativeScopeCapture.hs"] $ \file ->
+    copyFile ("test-source-boot/fixtures" </> file) (work </> file)
+  let source = work </> "NativeScopeCapture.hs"
+      scopeRoot = work </> "native-scope-request"
+      scopePath = scopeRoot </> "native-scope.cbor"
+      owners = Set.fromList ["NativeScopeBase", "NativeScopeOwner"]
+  BS.appendFile source (BSC.pack ("\n--" ++ replicate (4*1024*1024) ' ' ++ "\n"))
+  createDirectory scopeRoot
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile
+    Nothing source [work] (Just (work </> "build-products"))
+  writeGenuineCandidateNativeScope (Set.toAscList owners) (Set.toAscList owners)
+    work source [work] scopePath original
+  candidateGraphDescriptorChecks scopePath (manifest work)
+  candidateCanonicalChecks scopePath (manifest work)
+  accepted <- runPipelineSelected (PreparedProducts (Just (manifest work))) source [work]
+  unless (Set.fromList (map candidateModule (pprAcceptedCandidates accepted)) == owners
+      && Set.null (owners `Set.intersection` Set.fromList (preparedNames accepted))) $
+    fail "genuine graph above four MiB lost actual candidate reuse"
+  putStrLn "candidate graph descriptors: genuine bounded offer and actual dependency reuse passed"
 
 -- Load provenance is local to a request; retained owners and source changes
 -- must still govern the next exact frontend.
@@ -2206,6 +2233,33 @@ freshExecutionRecipeTest = withScratch $ \work -> do
       refused value = case issueExecutionSourceRecipe value of Left _ -> True; _ -> False
   BS.writeFile supportPath (BSC.pack supportSource)
   graph <- issue recipe
+  -- The graph envelope is independent of both metadata and authored source.
+  -- Reuse this fixed recipe and its compiler evidence; no extra GHC cycle.
+  let sourceRecipe value = recipe
+        { recipeGeneratedOrigin=(fst (recipeGeneratedOrigin recipe),value)
+        , recipeEvidence=evidence {dependencySources=
+            [if dependencySourcePath row == "@generated-source"
+              then row {dependencySourceSha256=digest (TE.encodeUtf8 (T.pack value))}
+              else row | row <- dependencySources evidence]}}
+      largeSource = source ++ replicate (4*1024*1024) ' '
+      excessiveSource = replicate (8*1024*1024+1) '\x1f600'
+  large <- issue (sourceRecipe largeSource)
+  unless (BS.length (executionGraphBytes large) > 4*1024*1024) $
+    fail "valid graph above metadata budget was withheld by local recipe issuance"
+  unless (case issueExecutionSourceRecipe (sourceRecipe excessiveSource) of
+      Right Nothing -> True; _ -> False) $
+    fail "local recipe issuer accepted source above its 32 MiB UTF-8 bound"
+  (_,graphTerm) <- either (fail . show) pure
+    (deserialiseFromBytes decodeTerm (BSL.fromStrict (executionGraphBytes graph)))
+  let oversizedSourceGraph = case graphTerm of
+        TList fields -> TList [case (index,field) of
+          (6,TList [origin,_]) -> TList [origin,TString (T.pack excessiveSource)]
+          _ -> field | (index,field) <- zip [0::Int ..] fields]
+        other -> other
+      oversizedSourceBytes = toStrictByteString (encodeTerm oversizedSourceGraph)
+  unless (case decodeExecutionSourceGraph (digest oversizedSourceBytes) oversizedSourceBytes of
+      Left reason -> "32 MiB UTF-8 bound" `isInfixOf` reason; _ -> False) $
+    fail "authenticated graph decoder accepted source above its UTF-8 bound"
   let reference = ExecutionSourceRef support (executionGraphSha256 graph)
   selected <- either (fail . show) pure (executionSourceProspectiveReferences [graph] [] [reference])
   unless (selected == [reference]) $ fail "fresh supported recipe did not issue exact original"
@@ -2239,6 +2293,9 @@ freshExecutionRecipeTest = withScratch $ \work -> do
         [(ExactIfaceArtifact "main" "Support" "" sha [],"",sha)] Map.empty [] [original]
         [] [] Nothing Nothing Nothing Nothing Nothing Nothing Set.empty
       oversized = graph {executionGraphBytes=BS.replicate (executionSourceGraphBytesLimit+1) 0}
+  unless (case decodeExecutionSourceGraph (executionGraphSha256 graph)
+      (executionGraphBytes oversized) of Left _ -> True; _ -> False) $
+    fail "direct graph decoder admitted an oversized byte envelope"
   bounded <- either (fail . show) pure
     (extendExactExecutionSourcesWithinBudget [oversized] [reference] scope)
   unless (isNothing bounded && case extendExactExecutionSources [oversized] [reference] scope of
