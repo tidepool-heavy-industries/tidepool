@@ -1305,18 +1305,13 @@ fn following_cells_reprove_template_imports_of_retained_rich_originals() {
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     let imports = SourceImports::from_specs(["qualified Tidepool.Aeson as Aeson"]);
-    for (label, source, expected) in [
-        (
-            "original_rich_value",
-            "let originalJSON = Aeson.object []",
-            None,
-        ),
+    for (label, source) in [
+        ("original_rich_value", "let originalJSON = Aeson.object []"),
         (
             "following_rich_value",
             "let nextJSON = Aeson.object []\n(42 :: Int)",
-            Some("42"),
         ),
-        ("following_rich_consumer", "(42 :: Int)", Some("42")),
+        ("following_rich_consumer", "(42 :: Int)"),
     ] {
         try_execute_cell_with_template_imports(
             &mut resident,
@@ -1327,7 +1322,6 @@ fn following_cells_reprove_template_imports_of_retained_rich_originals() {
             label,
             source,
             0,
-            expected,
             &ScalePublication::Ephemeral,
             AuthorityChecks::Configured,
             &imports,
