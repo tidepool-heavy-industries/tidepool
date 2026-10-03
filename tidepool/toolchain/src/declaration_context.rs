@@ -1063,6 +1063,9 @@ impl ExactCompilationRequest {
             // This helper is selected by executable scaffolding. Its native
             // custody does not introduce an authored import into later cells.
             .filter(|owner| owner.unit != "main" || owner.module != "Tidepool.Internal.Resume")
+            // Selected originals may be source roots without any fresh product;
+            // their adjacency comes from the validated current-source receipt.
+            .chain(selected_originals.keys().cloned())
             .collect::<Vec<_>>();
         let implementations = context
             .artifact_view()
@@ -3400,41 +3403,61 @@ mod tests {
     #[test]
     fn source_selected_original_receipt_preserves_native_custody_and_requires_current_reproof() {
         let directory = tempfile::tempdir().unwrap();
-        let (mut request, context, receipt) =
-            source_selected_receipt(directory.path(), false, None);
+        let (mut request, context, receipt) = source_selected_receipt(directory.path(), true, None);
         let admission = request.validate_receipt(&receipt, None, &context).unwrap();
-        assert_eq!(admission.selected_originals.len(), 1);
+        assert_eq!(admission.selected_originals.len(), 2);
         assert_eq!(
             admission.home_imports().unwrap()[&identity("main", "Consumer")],
             vec![identity("main", "A")]
         );
+        assert_eq!(
+            admission.home_imports().unwrap()[&identity("main", "A")],
+            vec![identity("main", "B")]
+        );
         let originals = context
             .artifact_view()
             .entries_for_owners([identity("main", "A"), identity("main", "B")].into_iter());
-        let ArtifactPayload::Original(product) = &originals[&identity("main", "A")].payload else {
-            panic!("original fixture");
-        };
+        let products =
+            ["A", "B"].map(
+                |module| match &originals[&identity("main", module)].payload {
+                    ArtifactPayload::Original(product) => product.clone(),
+                    _ => panic!("original fixture"),
+                },
+            );
         let effective = request
-            .admit_program_support(Arc::clone(&context), &[product.clone()], &[admission])
+            .admit_program_support(Arc::clone(&context), &products, &[admission])
             .unwrap();
         let after = effective
             .artifact_view()
-            .entries_for_owners([identity("main", "A")].into_iter());
-        assert!(Arc::ptr_eq(
-            &originals[&identity("main", "A")],
-            &after[&identity("main", "A")]
-        ));
+            .entries_for_owners([identity("main", "A"), identity("main", "B")].into_iter());
+        for module in ["A", "B"] {
+            assert!(Arc::ptr_eq(
+                &originals[&identity("main", module)],
+                &after[&identity("main", module)]
+            ));
+        }
         assert!(effective.lexical_graph().is_empty());
         assert!(context.lexical_graph().is_empty());
-        assert!(request.program_source_lexical().is_empty());
-        assert!(effective
+        assert_eq!(
+            request.program_source_lexical(),
+            &[
+                ExactLexicalNode {
+                    owner: identity("main", "A"),
+                    imports: vec![identity("main", "B")],
+                },
+                ExactLexicalNode {
+                    owner: identity("main", "B"),
+                    imports: vec![],
+                },
+            ]
+        );
+        let (_, lexical) = effective
             .retain_value_source_surface(
                 request.program_support.as_ref().unwrap(),
                 request.program_source_lexical(),
             )
-            .unwrap()
-            .1
-            .is_empty());
+            .unwrap();
+        assert_eq!(lexical, request.program_source_lexical());
         assert_eq!(
             request
                 .program_support
@@ -3444,7 +3467,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.descriptor.owner.clone())
                 .collect::<Vec<_>>(),
-            vec![identity("main", "A")]
+            vec![identity("main", "A"), identity("main", "B")]
         );
         request
             .validate_receipt(&receipt, None, &effective)

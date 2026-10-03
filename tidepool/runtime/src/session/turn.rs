@@ -7303,7 +7303,12 @@ mod tests {
             .filter(|(name, _)| name == "historical" || name == "local")
             .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(private_winners.len(), 2);
-        let intent = resident.freeze_private_execution(&execution).unwrap();
+        let intent = resident
+            .freeze_private_execution(
+                &execution,
+                crate::session::ExecutionPublicationIntent::CompletedCell,
+            )
+            .unwrap();
         let crate::session::ExecutionPublication::Declarations(base) = resident
             .restage_ephemeral_execution_publication(intent)
             .unwrap()

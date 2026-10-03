@@ -1,5 +1,7 @@
 capturedValue <- pure (x :: Int)
-let capturedGetter = capturedValue + 1
+privateCapturedHelper :: Int -> Int
+privateCapturedHelper value = value + 1
+let capturedGetter = privateCapturedHelper capturedValue
 do
   inheritedRefusal <- attemptUnfold (batch ("embedded-captured" :: CampaignLabel)
     ("inherited-refusal" :: ForkGroupLabel))
@@ -34,3 +36,4 @@ do
     (Left (UnfoldUncapturedContext _), Left (UnfoldDeferredInvocationOwned _), Right (42, 42)) ->
       error "intentional captured parent Haskell execution failure" >> pure True
     _ -> error "captured same-cell reply contract failed" >> pure True
+capturedSuffix <- pure (99 :: Int)

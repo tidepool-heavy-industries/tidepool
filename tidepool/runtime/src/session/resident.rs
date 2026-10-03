@@ -2817,6 +2817,7 @@ where
     pub fn freeze_private_execution(
         &mut self,
         admission: &super::PrivateExecutionAdmission,
+        publication: super::ExecutionPublicationIntent,
     ) -> Result<Arc<super::FinalExecutionIntent>, SessionError> {
         self.settle_dropped_custody();
         let scope = admission.private_scope();
@@ -2834,8 +2835,12 @@ where
                 })
             })
             .collect();
-        self.state
-            .freeze_execution_intent(admission, writes, snapshot.source_instances)
+        self.state.freeze_execution_intent_for(
+            admission,
+            writes,
+            snapshot.source_instances,
+            publication,
+        )
     }
 
     pub fn restage_execution_publication(
@@ -8721,7 +8726,12 @@ mod authored_publication_tests {
             .certified_authored_arc_at(d_generation)
             .unwrap();
         let d_owner = original_d.product().owner().clone();
-        let intent = session.freeze_private_execution(&d).unwrap();
+        let intent = session
+            .freeze_private_execution(
+                &d,
+                crate::session::ExecutionPublicationIntent::CompletedCell,
+            )
+            .unwrap();
         let ExecutionPublication::Declarations(base) = session
             .restage_execution_publication(owner.clone(), intent)
             .unwrap()
@@ -8789,7 +8799,12 @@ mod authored_publication_tests {
             *original_d.product(),
             "capture preserves full immutable original D"
         );
-        let intent = session.freeze_private_execution(&e).unwrap();
+        let intent = session
+            .freeze_private_execution(
+                &e,
+                crate::session::ExecutionPublicationIntent::CompletedCell,
+            )
+            .unwrap();
         let ExecutionPublication::Declarations(base) = session
             .restage_execution_publication(owner, intent)
             .unwrap()

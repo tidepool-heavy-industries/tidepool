@@ -404,6 +404,7 @@ pub struct ModuleCandidateOffer {
     checked_cell: Option<crate::checked_cell::CheckedCellSpecification>,
     planned_cell: Option<crate::checked_cell::CheckedPlannedCellSpecification>,
     checked_values: Option<Arc<crate::checked_cell::CheckedValueInputs>>,
+    checked_publication_context: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
     checked_item: Option<crate::checked_cell::CheckedItemOffer>,
     checked_display: Option<crate::checked_cell::CheckedDisplayOffer>,
 }
@@ -544,10 +545,10 @@ fn immutable_candidates_in_context(
                 .map(|owner| (owner.unit.clone(), owner.module.clone())),
         );
     }
-    let exclusions = module_candidates::ExactCandidateExclusions::new(protected, reserved)
+    let exclusions = module_candidates::ExactCandidateContext::new(protected, reserved)
         .with_originals(context.recovery_products());
     Ok(
-        module_candidates::select_configured_disjoint(producer, include, scratch, &exclusions)?
+        module_candidates::select_configured_in_context(producer, include, scratch, &exclusions)?
             .map(Arc::new),
     )
 }
@@ -722,6 +723,7 @@ impl ModuleCandidateOffer {
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
+            checked_publication_context: None,
             checked_item: None,
             checked_display: None,
         })
@@ -745,6 +747,7 @@ impl ModuleCandidateOffer {
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
+            checked_publication_context: None,
             checked_item: None,
             checked_display: None,
         })
@@ -777,7 +780,12 @@ impl ModuleCandidateOffer {
         let Value::Array(fields) = &mut authorization else {
             unreachable!("closed cell authorization")
         };
-        let context = checked_value_context(context, &checked_values, retained_interfaces)?;
+        let publication_context = checked_offer_context(context)?;
+        let context = checked_value_context(
+            Some(publication_context.clone()),
+            &checked_values,
+            retained_interfaces,
+        )?;
         let checked_values = crate::checked_cell::CheckedValueInputs::capture(checked_values)?;
         fields.push(checked_values.baseline_authorization());
         let authorization =
@@ -813,6 +821,7 @@ impl ModuleCandidateOffer {
             checked_cell: Some(specification),
             planned_cell: None,
             checked_values: Some(checked_values),
+            checked_publication_context: Some(publication_context),
             checked_item: None,
             checked_display: None,
         })
@@ -846,7 +855,12 @@ impl ModuleCandidateOffer {
         }
         let extension = planned.authorization(&specification, producer, include, scratch)?;
         let mut authorization = specification.manifest_value()?;
-        let context = checked_value_context(context, &values, retained_interfaces)?;
+        let publication_context = checked_offer_context(context)?;
+        let context = checked_value_context(
+            Some(publication_context.clone()),
+            &values,
+            retained_interfaces,
+        )?;
         let inputs = crate::checked_cell::CheckedValueInputs::capture(values)?;
         let Value::Array(fields) = &mut authorization else {
             unreachable!("closed authorization")
@@ -891,6 +905,7 @@ impl ModuleCandidateOffer {
             checked_cell: Some(specification),
             planned_cell: Some(planned),
             checked_values: Some(inputs),
+            checked_publication_context: Some(publication_context),
             checked_item: None,
             checked_display: None,
         })
@@ -1060,6 +1075,7 @@ impl ModuleCandidateOffer {
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
+            checked_publication_context: None,
             checked_item: Some(checked_item),
             checked_display: None,
         })
@@ -1155,6 +1171,7 @@ impl ModuleCandidateOffer {
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
+            checked_publication_context: None,
             checked_item: None,
             checked_display: Some(display),
         })
@@ -1235,6 +1252,11 @@ impl ModuleCandidateOffer {
             &self.producer,
             exact.semantic_sha256,
             exact.context.clone(),
+            self.checked_publication_context.clone().ok_or_else(|| {
+                CompileError::ExtractFailed(
+                    "checked declaration publication baseline is absent".into(),
+                )
+            })?,
             &exact.request_sha256,
             specification,
             exact.validate_outputs_with_planned(
@@ -1337,6 +1359,13 @@ impl ModuleCandidateOffer {
                             .original_home_imports()
                             .map(|(owner, _)| owner.clone()),
                     )
+                    .chain(
+                        original
+                            .certificate
+                            .source_lexical_imports()
+                            .iter()
+                            .map(|node| node.owner.clone()),
+                    )
                     .collect::<BTreeSet<_>>();
                 for (owner, imports) in original.certificate.original_home_imports() {
                     let imports = imports
@@ -1350,6 +1379,22 @@ impl ModuleCandidateOffer {
                     {
                         return Err(CompileError::ExtractFailed(
                             "program changed an admitted original import".into(),
+                        ));
+                    }
+                }
+                for node in original.certificate.source_lexical_imports() {
+                    let imports = node
+                        .imports
+                        .iter()
+                        .filter(|owner| selected.contains(*owner))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if lexical
+                        .insert(node.owner.clone(), imports.clone())
+                        .is_some_and(|old| old != imports)
+                    {
+                        return Err(CompileError::ExtractFailed(
+                            "program changed authenticated inherited source imports".into(),
                         ));
                     }
                 }
@@ -1450,6 +1495,9 @@ impl ModuleCandidateOffer {
             &self.producer,
             initial.semantic_sha256,
             initial.context.clone(),
+            self.checked_publication_context.clone().ok_or_else(|| {
+                CompileError::ExtractFailed("checked program publication baseline is absent".into())
+            })?,
             &initial.request_sha256,
             specification,
             admissions,
@@ -1587,6 +1635,7 @@ impl ModuleCandidateOffer {
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
+            checked_publication_context: None,
             checked_item: None,
             checked_display: None,
         }

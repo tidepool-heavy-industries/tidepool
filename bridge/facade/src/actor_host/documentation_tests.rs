@@ -457,50 +457,6 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
 }
 
 #[tokio::test]
-async fn notebook_failed_cells_preserve_completed_native_prefix() {
-    let campaign = TestCampaign::start().await;
-    let policy = campaign.root_installation.policy.as_ref();
-    let failed = super::test_campaign::dispatch_haskell_script_result(
-        policy,
-        include_str!("notebook_prefix_failure.hs"),
-    )
-    .await
-    .expect_err("the pattern match fails after completed native bindings");
-    let exomonad_actor::ResidentToolError::Invocation(
-        exomonad_actor::KernelInvocationFailure::Workbench(failure),
-    ) = failed
-    else {
-        panic!("native failure classification required: {failed}");
-    };
-    assert_eq!(
-        failure
-            .diagnostic
-            .as_ref()
-            .expect("native failure diagnostic")
-            .phase,
-        tidepool_toolchain::failclass::Phase::Run,
-    );
-    for binding in ["actorsBeforeFailure", "prefixValue"] {
-        assert!(
-            failure.receipts.iter().any(|receipt| receipt
-                .installed_bindings
-                .iter()
-                .any(|name| name == binding)),
-            "{failure}"
-        );
-    }
-    let recovered = committed(policy, "prefixValue").await;
-    assert_eq!(recovered["items"][0]["output"], "41", "{recovered}");
-    for binding in ["impossible", "tailValue"] {
-        let missing = dispatch_haskell_script(policy, binding).await;
-        assert_eq!(missing["status"], "rejected", "{missing}");
-        assert!(missing.to_string().contains("not in scope"), "{missing}");
-    }
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-#[tokio::test]
 async fn notebook_cell_prologue_applies_to_check_stage_and_execution() {
     let campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();

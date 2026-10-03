@@ -4,9 +4,11 @@
 use super::*;
 use crate::artifacts::SealedTurnProducts;
 use crate::declaration_context::ExactSourceAdmission;
+use std::collections::BTreeMap;
 
 pub(super) fn admit_authored_artifact_closure(
     products: &[CertifiedRecoveryProduct],
+    selected_owner: &ExactModuleIdentity,
     toolchain_identity_sha256: [u8; 32],
     evidence: &[crate::cache::ModuleEvidence],
     source_admission: Option<&ExactSourceAdmission>,
@@ -17,6 +19,7 @@ pub(super) fn admit_authored_artifact_closure(
         tempfile::TempDir,
         Vec<DeclarationArtifact>,
         Vec<ExactInterfaceOwner>,
+        Vec<ExactLexicalNode>,
         Vec<crate::recovery_artifacts::CertifiedJoinedInterface>,
     ),
     CompileError,
@@ -47,6 +50,7 @@ pub(super) fn admit_authored_artifact_closure(
     .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
     let mut artifacts = Vec::with_capacity(products.len());
     let mut original_imports = Vec::new();
+    let mut source_lexical_imports = Vec::new();
     for (product, reference) in products.iter().zip(&references) {
         let owner = product.owner();
         let identity = ExactModuleIdentity {
@@ -133,12 +137,210 @@ pub(super) fn admit_authored_artifact_closure(
         });
     }
     if let Some(admitted) = source_admission {
-        original_imports.extend(admitted.selected_originals.iter().map(|(owner, selected)| {
-            ExactInterfaceOwner {
-                owner: owner.clone(),
-                requirements: selected.imports().to_vec(),
+        let mut available_owners = products
+            .iter()
+            .map(|product| ExactModuleIdentity {
+                unit: product.owner().unit.clone(),
+                module: product.owner().module.clone(),
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        if let Some(context) = context {
+            available_owners.extend(
+                context
+                    .artifact_view()
+                    .descriptors()
+                    .into_iter()
+                    .map(|descriptor| descriptor.owner),
+            );
+        }
+        let source_imports = admitted.home_imports()?;
+        if tracing::enabled!(
+            target: "tidepool_toolchain::planned_source_admission",
+            tracing::Level::DEBUG
+        ) {
+            let witness_source = bounded_source_path(admitted.witness.source_path());
+            let source_owner = admitted
+                .evidence
+                .modules
+                .iter()
+                .find(|module| {
+                    !module.boot && module.source.as_path() == admitted.witness.source_path()
+                })
+                .map(|module| ExactModuleIdentity {
+                    unit: module.unit.clone(),
+                    module: module.module.clone(),
+                });
+            let witness_source_owner_count = admitted
+                .evidence
+                .modules
+                .iter()
+                .filter(|module| {
+                    !module.boot && module.source.as_path() == admitted.witness.source_path()
+                })
+                .count();
+            let evidence_source_owners = admitted
+                .evidence
+                .modules
+                .iter()
+                .take(64)
+                .map(|module| {
+                    (
+                        module.unit.as_str(),
+                        module.module.as_str(),
+                        module.boot,
+                        bounded_source_path(&module.source),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let exact_import_owners = admitted.exact_imports.keys().take(64).collect::<Vec<_>>();
+            let selected_original_owners = admitted
+                .selected_originals
+                .keys()
+                .take(64)
+                .collect::<Vec<_>>();
+            let direct_imports = source_owner
+                .as_ref()
+                .and_then(|owner| source_imports.get(owner))
+                .cloned()
+                .unwrap_or_default();
+            let inherited = context
+                .map(|context| {
+                    context
+                        .lexical_graph()
+                        .iter()
+                        .map(|node| node.owner.clone())
+                        .collect::<std::collections::BTreeSet<_>>()
+                })
+                .unwrap_or_default();
+            let available_owner_keys = available_owners.iter().take(64).collect::<Vec<_>>();
+            let inherited_owner_keys = inherited.iter().take(64).collect::<Vec<_>>();
+            let home_import_rows = source_imports
+                .iter()
+                .take(64)
+                .map(|(owner, requirements)| {
+                    (
+                        owner,
+                        requirements.iter().take(64).collect::<Vec<_>>(),
+                        requirements.len().saturating_sub(64),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let inherited_lexical_rows = context
+                .map(|context| {
+                    context
+                        .lexical_graph()
+                        .iter()
+                        .take(64)
+                        .map(|node| {
+                            (
+                                &node.owner,
+                                node.imports.iter().take(64).collect::<Vec<_>>(),
+                                node.imports.len().saturating_sub(64),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let missing_adjacency = direct_imports
+                .iter()
+                .filter(|owner| {
+                    available_owners.contains(*owner)
+                        && !source_imports.contains_key(*owner)
+                        && !inherited.contains(*owner)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let adjacency_status = direct_imports
+                .iter()
+                .map(|owner| {
+                    (
+                        owner,
+                        source_imports.contains_key(owner),
+                        available_owners.contains(owner),
+                        inherited.contains(owner),
+                    )
+                })
+                .take(16)
+                .collect::<Vec<_>>();
+            tracing::debug!(
+                target: "tidepool_toolchain::planned_source_admission",
+                witness_source = %witness_source,
+                source_owner = ?source_owner,
+                witness_source_owner_count,
+                evidence_source_owner_count = admitted.evidence.modules.len(),
+                evidence_source_owners = ?evidence_source_owners,
+                evidence_source_owners_omitted = admitted.evidence.modules.len().saturating_sub(64),
+                exact_import_owners = ?exact_import_owners,
+                exact_import_owners_omitted = admitted.exact_imports.len().saturating_sub(64),
+                selected_original_owners = ?selected_original_owners,
+                selected_original_owners_omitted = admitted.selected_originals.len().saturating_sub(64),
+                available_owner_count = available_owners.len(),
+                available_owner_keys = ?available_owner_keys,
+                available_owner_keys_omitted = available_owners.len().saturating_sub(64),
+                inherited_owner_count = inherited.len(),
+                inherited_owner_keys = ?inherited_owner_keys,
+                inherited_owner_keys_omitted = inherited.len().saturating_sub(64),
+                inherited_lexical_rows = ?inherited_lexical_rows,
+                inherited_lexical_rows_omitted = context
+                    .map(|context| context.lexical_graph().len().saturating_sub(64))
+                    .unwrap_or_default(),
+                home_import_owner_count = source_imports.len(),
+                home_import_owners = ?source_imports.keys().take(64).collect::<Vec<_>>(),
+                home_import_owners_omitted = source_imports.len().saturating_sub(64),
+                home_import_rows = ?home_import_rows,
+                home_import_rows_omitted = source_imports.len().saturating_sub(64),
+                source_owner_direct_import_count = direct_imports.len(),
+                source_owner_direct_imports = ?direct_imports.iter().take(16).collect::<Vec<_>>(),
+                source_owner_direct_imports_omitted = direct_imports.len().saturating_sub(16),
+                source_owner_adjacency_status = ?adjacency_status,
+                missing_adjacency_count = missing_adjacency.len(),
+                missing_adjacency = ?missing_adjacency.iter().take(16).collect::<Vec<_>>(),
+                missing_adjacency_omitted = missing_adjacency.len().saturating_sub(16),
+                "validated planned declaration source imports"
+            );
+        }
+        merge_admitted_source_imports(&mut original_imports, &source_imports, &available_owners)?;
+        let mut implementations = context
+            .into_iter()
+            .flat_map(|context| context.artifact_view().descriptors())
+            .map(|descriptor| (descriptor.owner, descriptor.kind))
+            .collect::<BTreeMap<_, _>>();
+        for product in products {
+            let owner = ExactModuleIdentity {
+                unit: product.owner().unit.clone(),
+                module: product.owner().module.clone(),
+            };
+            if implementations
+                .insert(
+                    owner,
+                    crate::artifact_inventory::ArtifactKind::OriginalModule,
+                )
+                .is_some_and(|prior| {
+                    prior != crate::artifact_inventory::ArtifactKind::OriginalModule
+                })
+            {
+                return Err(contract(
+                    "planned source owner has a conflicting session artifact kind",
+                ));
             }
-        }));
+        }
+        let inherited = context
+            .map(|context| {
+                context
+                    .lexical_graph()
+                    .iter()
+                    .filter(|node| !node.owner.module.starts_with("Tidepool.Session."))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        source_lexical_imports = inherited_source_lexical_imports(
+            selected_owner,
+            &source_imports,
+            &inherited,
+            &implementations,
+            &available_owners,
+        )?;
     }
     let joined_interfaces =
         context.map_or_else(Vec::new, |context| context.joined_interfaces().to_vec());
@@ -151,7 +353,94 @@ pub(super) fn admit_authored_artifact_closure(
                 .filter(|artifact| artifact.product.is_none()),
         );
     }
-    Ok((scratch, artifacts, original_imports, joined_interfaces))
+    Ok((
+        scratch,
+        artifacts,
+        original_imports,
+        source_lexical_imports,
+        joined_interfaces,
+    ))
+}
+
+/// Add only source adjacency authenticated by the current exact admission.
+/// Interface requirements establish artifact dependencies, not lexical edges.
+fn merge_admitted_source_imports(
+    original_imports: &mut Vec<ExactInterfaceOwner>,
+    admitted: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+    available_owners: &std::collections::BTreeSet<ExactModuleIdentity>,
+) -> Result<(), CompileError> {
+    let mut merged = BTreeMap::new();
+    for row in original_imports.drain(..) {
+        let mut requirements = row.requirements;
+        requirements.sort();
+        requirements.dedup();
+        if merged.insert(row.owner, requirements).is_some() {
+            return Err(contract(
+                "planned source closure has duplicate import owners",
+            ));
+        }
+    }
+    for (owner, imports) in admitted {
+        if !available_owners.contains(owner) {
+            continue;
+        }
+        let mut imports = imports.clone();
+        imports.sort();
+        imports.dedup();
+        if merged
+            .get(owner)
+            .is_some_and(|existing| existing != &imports)
+        {
+            return Err(contract(
+                "planned source imports differ from exact admission",
+            ));
+        }
+        merged.entry(owner.clone()).or_insert(imports);
+    }
+    *original_imports = merged
+        .into_iter()
+        .map(|(owner, requirements)| ExactInterfaceOwner {
+            owner,
+            requirements,
+        })
+        .collect();
+    Ok(())
+}
+
+fn bounded_source_path(path: &Path) -> String {
+    let rendered = path.to_string_lossy();
+    if rendered.chars().count() <= 256 {
+        rendered.into_owned()
+    } else {
+        format!("{}…", rendered.chars().take(256).collect::<String>())
+    }
+}
+
+fn inherited_source_lexical_imports(
+    selected_owner: &ExactModuleIdentity,
+    admitted: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+    inherited: &[ExactLexicalNode],
+    implementations: &BTreeMap<ExactModuleIdentity, crate::artifact_inventory::ArtifactKind>,
+    available_owners: &std::collections::BTreeSet<ExactModuleIdentity>,
+) -> Result<Vec<ExactLexicalNode>, CompileError> {
+    let roots = admitted
+        .get(selected_owner)
+        .ok_or_else(|| contract("planned original lacks its admitted source import row"))?;
+    let closure = source_lexical_closure(roots, admitted, inherited, implementations)?;
+    if closure
+        .lexical
+        .iter()
+        .any(|node| !available_owners.contains(&node.owner))
+    {
+        return Err(contract(
+            "reachable original source import lacks its exact artifact owner",
+        ));
+    }
+    Ok(closure
+        .lexical
+        .into_iter()
+        .filter(|node| !admitted.contains_key(&node.owner))
+        .collect())
 }
 
 #[derive(Deserialize)]
@@ -379,9 +668,10 @@ pub(crate) fn certify_same_offer_planned_declaration(
             "planned original sealed product has a different source digest",
         ));
     }
-    let (_scratch, artifacts, original_imports, joined_interfaces) =
+    let (_scratch, artifacts, original_imports, source_lexical_imports, joined_interfaces) =
         admit_authored_artifact_closure(
             &products,
+            &original_owner,
             toolchain_identity_sha256,
             evidence,
             Some(source_admission),
@@ -424,12 +714,192 @@ pub(crate) fn certify_same_offer_planned_declaration(
         source_sha256,
         toolchain_identity_sha256,
         original_imports,
+        source_lexical_imports,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn module(module: &str) -> ExactModuleIdentity {
+        ExactModuleIdentity {
+            unit: "main".into(),
+            module: module.into(),
+        }
+    }
+
+    #[test]
+    fn planned_source_closure_uses_admitted_retained_owner_adjacency() {
+        let root = module("Authored");
+        let retained = module("CheckedHomeValue");
+        let child = module("CurrentSourceChild");
+        let mut imports = vec![ExactInterfaceOwner {
+            owner: root.clone(),
+            requirements: vec![retained.clone()],
+        }];
+        let admitted = BTreeMap::from([
+            (root.clone(), vec![retained.clone()]),
+            (retained.clone(), vec![child.clone()]),
+            (child.clone(), vec![]),
+        ]);
+        let available = [root.clone(), retained.clone(), child.clone()]
+            .into_iter()
+            .collect();
+
+        merge_admitted_source_imports(&mut imports, &admitted, &available).unwrap();
+
+        let by_owner = imports
+            .into_iter()
+            .map(|row| (row.owner, row.requirements))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(by_owner[&retained], vec![child.clone()]);
+        assert_eq!(by_owner[&child], Vec::<ExactModuleIdentity>::new());
+        let lexical = source_lexical_surface(&[root], &by_owner, &[], &BTreeMap::new()).unwrap();
+        assert!(lexical.lexical.iter().any(|node| node.owner == retained));
+        assert!(lexical.lexical.iter().any(|node| node.owner == child));
+    }
+
+    #[test]
+    fn planned_certificate_carries_only_reachable_authenticated_inherited_rows() {
+        let root = module("Tidepool.Session.Lib.G3");
+        let retained = module("CheckedHomeValue");
+        let child = module("InheritedChild");
+        let unrelated = module("UnrelatedRetainedValue");
+        let admitted = BTreeMap::from([(root.clone(), vec![retained.clone()])]);
+        let inherited = vec![
+            ExactLexicalNode {
+                owner: retained.clone(),
+                imports: vec![child.clone()],
+            },
+            ExactLexicalNode {
+                owner: child.clone(),
+                imports: vec![],
+            },
+            ExactLexicalNode {
+                owner: unrelated.clone(),
+                imports: vec![],
+            },
+        ];
+        let implementations = BTreeMap::from([(
+            root.clone(),
+            crate::artifact_inventory::ArtifactKind::OriginalModule,
+        )]);
+        let available = [
+            root.clone(),
+            retained.clone(),
+            child.clone(),
+            unrelated.clone(),
+        ]
+        .into_iter()
+        .collect();
+
+        let closure = inherited_source_lexical_imports(
+            &root,
+            &admitted,
+            &inherited,
+            &implementations,
+            &available,
+        )
+        .unwrap();
+
+        assert_eq!(
+            closure,
+            vec![
+                ExactLexicalNode {
+                    owner: retained.clone(),
+                    imports: vec![module("InheritedChild")],
+                },
+                ExactLexicalNode {
+                    owner: child,
+                    imports: vec![],
+                },
+            ]
+        );
+        assert!(!closure.iter().any(|node| node.owner == unrelated));
+
+        let missing =
+            inherited_source_lexical_imports(&root, &admitted, &[], &implementations, &available);
+        assert!(
+            missing.is_err(),
+            "an artifact without its lexical proof is insufficient"
+        );
+
+        let wrong_unit = ExactModuleIdentity {
+            unit: "other".into(),
+            module: retained.module.clone(),
+        };
+        let wrong_adjacency = BTreeMap::from([(root.clone(), vec![wrong_unit.clone()])]);
+        let wrong_available = [root.clone(), wrong_unit].into_iter().collect();
+        assert!(inherited_source_lexical_imports(
+            &root,
+            &wrong_adjacency,
+            &inherited,
+            &implementations,
+            &wrong_available,
+        )
+        .is_err());
+
+        let conflicting = BTreeMap::from([
+            (root.clone(), vec![retained.clone()]),
+            (retained.clone(), vec![]),
+        ]);
+        assert!(inherited_source_lexical_imports(
+            &root,
+            &conflicting,
+            &inherited,
+            &implementations,
+            &available,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn planned_source_closure_still_refuses_missing_or_conflicting_adjacency() {
+        let root = module("Authored");
+        let retained = module("CheckedHomeValue");
+        let authored = ExactInterfaceOwner {
+            owner: root.clone(),
+            requirements: vec![retained.clone()],
+        };
+        let available = [root.clone(), retained.clone()].into_iter().collect();
+
+        let mut missing = vec![authored.clone()];
+        merge_admitted_source_imports(&mut missing, &BTreeMap::new(), &available).unwrap();
+        let missing = missing
+            .into_iter()
+            .map(|row| (row.owner, row.requirements))
+            .collect();
+        assert!(source_lexical_surface(&[root.clone()], &missing, &[], &BTreeMap::new()).is_err());
+
+        let mut conflicting = vec![authored];
+        let admitted = BTreeMap::from([(root, vec![])]);
+        assert!(merge_admitted_source_imports(&mut conflicting, &admitted, &available).is_err());
+    }
+
+    #[test]
+    fn planned_source_closure_ignores_adjacency_without_an_exact_artifact_owner() {
+        let root = module("Authored");
+        let retained = module("CheckedHomeValue");
+        let absent = module("UnretainedSource");
+        let mut imports = vec![ExactInterfaceOwner {
+            owner: root.clone(),
+            requirements: vec![retained.clone()],
+        }];
+        let admitted = BTreeMap::from([
+            (root.clone(), vec![retained.clone()]),
+            (retained.clone(), vec![absent.clone()]),
+            (absent.clone(), vec![]),
+        ]);
+        let available = [root.clone(), retained.clone()].into_iter().collect();
+
+        merge_admitted_source_imports(&mut imports, &admitted, &available).unwrap();
+        let by_owner = imports
+            .into_iter()
+            .map(|row| (row.owner, row.requirements))
+            .collect::<BTreeMap<_, _>>();
+        assert!(source_lexical_surface(&[root], &by_owner, &[], &BTreeMap::new()).is_err());
+    }
 
     fn identity(module: &str, namespace: ExportNamespace, occurrence: &str) -> ExportIdentity {
         ExportIdentity {

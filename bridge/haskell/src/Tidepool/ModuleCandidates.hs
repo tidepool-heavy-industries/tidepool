@@ -4,7 +4,7 @@ module Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..)
   , CandidateGroup(..), CandidateGlobal(..)
   , CandidateExecutionSource, candidateExecutionSources, candidateOriginalIdentity
-  , readModuleCandidates ) where
+  , readModuleCandidates, readModuleCandidatesWithGraphs ) where
 
 import Codec.CBOR.Decoding
   ( Decoder, TokenType(..), decodeBool, decodeListLen, decodeNull
@@ -96,13 +96,19 @@ maxCandidates :: Int
 maxCandidates = 128
 
 readModuleCandidates :: FilePath -> IO (Either String [ModuleCandidate])
-readModuleCandidates path = do
+readModuleCandidates = readModuleCandidatesWithGraphs []
+
+-- Exact-scope graphs have already passed their digest and producer checks.
+-- Their inventory closes provenance; it does not grant lexical admission.
+readModuleCandidatesWithGraphs
+  :: [ExecutionSourceGraph] -> FilePath -> IO (Either String [ModuleCandidate])
+readModuleCandidatesWithGraphs exactGraphs path = do
   result <- try (do
     bytes <- withBinaryFile path ReadMode $ \handle ->
       BS.hGet handle (fromInteger maxManifestBytes + 1)
     if toInteger (BS.length bytes) > maxManifestBytes
       then pure (Left "candidate manifest exceeds four MiB")
-      else pure $ case deserialiseFromBytes decodeManifest (BL.fromStrict bytes) of
+      else pure $ case deserialiseFromBytes (decodeManifest exactGraphs) (BL.fromStrict bytes) of
         Left failure -> Left (show failure)
         Right (remaining, candidates)
           | BL.null remaining -> Right candidates
@@ -112,8 +118,8 @@ readModuleCandidates path = do
     Left failure -> Left (show failure)
     Right decoded -> decoded
 
-decodeManifest :: Decoder s [ModuleCandidate]
-decodeManifest = do
+decodeManifest :: [ExecutionSourceGraph] -> Decoder s [ModuleCandidate]
+decodeManifest exactGraphs = do
   count <- decodeListLen
   magic <- decodeString
   unless (magic == "TPMCAN") (fail "candidate manifest has wrong magic")
@@ -134,9 +140,12 @@ decodeManifest = do
   do
     (graphs,references) <- decodeExecutionSources
     let offered = Map.fromList [(candidateOriginalIdentity candidate,candidate) | candidate <- candidates]
-        available = Map.fromList [(executionGraphSha256 graph,graph) | graph <- graphs]
+        available = Map.fromList [(executionGraphSha256 graph,graph) | graph <- exactGraphs ++ graphs]
         byOwner = Map.fromList [(executionIdentityKey (executionRefIdentity reference),reference)
           | reference <- references]
+    unless (Map.size available <= 4096
+        && sum (map (BS.length . executionGraphBytes) (Map.elems available)) <= fromInteger maxManifestBytes)
+      (fail "combined candidate execution graphs exceed bound")
     forM_ references $ \reference -> do
       unless (Map.member (executionRefIdentity reference) offered)
         (fail "candidate execution reference differs from offered original")
@@ -145,7 +154,7 @@ decodeManifest = do
             (executionGraphOwners graph) -> pure ()
         _ -> fail "candidate execution reference lacks its original graph owner"
       either (fail . show) (const (pure ()))
-        (executionSourceOriginalClosure graphs [reference])
+        (executionSourceOriginalClosure (Map.elems available) [reference])
     pure [candidate {candidateExecutionSource = CandidateExecutionSource graphs <$>
         Map.lookup (candidateUnit candidate,candidateModule candidate) byOwner}
       | candidate <- candidates]

@@ -48,6 +48,62 @@ pub(super) fn configure_shell_workspace(config: &mut ActorHostConfig) {
     );
 }
 
+/// Install the real notebook and lookup surfaces with Jev in the notebook row.
+pub(super) fn configure_notebook_lookup_workspace(config: &mut ActorHostConfig) {
+    let authored = config.workspace.join(".exomonad");
+    std::fs::create_dir_all(&authored).unwrap();
+    std::fs::write(
+        authored.join("AgentSpec.hs"),
+        include_str!("fixtures/notebook_lookup_agent_spec.hs"),
+    )
+    .unwrap();
+    std::fs::write(
+        authored.join("config.toml"),
+        "[defaults]\nmodel='test-model'\n[haskell]\nsource_roots=['.']\nmodules=['AgentSpec']\nspec='AgentSpec.agentSpec'\n",
+    )
+    .unwrap();
+    commit_workspace(&config.workspace);
+    config.workspace_inputs = Some(
+        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+            .unwrap(),
+    );
+}
+
+/// Install a Jev-capable notebook row with a deterministic in-process backend.
+pub(super) fn configure_notebook_jev_workspace(config: &mut ActorHostConfig) {
+    config.jev = Some(Arc::new(FixtureJev) as exomonad_actor::JevBackendHandle);
+    let authored = config.workspace.join(".exomonad");
+    std::fs::create_dir_all(&authored).unwrap();
+    std::fs::write(
+        authored.join("AgentSpec.hs"),
+        include_str!("fixtures/notebook_jev_agent_spec.hs"),
+    )
+    .unwrap();
+    std::fs::write(
+        authored.join("config.toml"),
+        "[defaults]\nmodel='test-model'\n[haskell]\nsource_roots=['.']\nmodules=['AgentSpec']\nspec='AgentSpec.agentSpec'\n",
+    )
+    .unwrap();
+    commit_workspace(&config.workspace);
+    config.workspace_inputs = Some(
+        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+            .unwrap(),
+    );
+}
+
+struct FixtureJev;
+
+impl exomonad_actor::JevBackend for FixtureJev {
+    fn ask(
+        &self,
+        _request: String,
+    ) -> futures_util::future::BoxFuture<'_, Result<String, exomonad_actor::JevCallFailure>> {
+        Box::pin(async {
+            Ok(r#"{"model":"fixture","answers":{"value":{"type":"choice","choice":"yes","probabilities":{"yes":1.0,"no":0.0},"confidence":1.0}},"usage":{}}"#.into())
+        })
+    }
+}
+
 pub(super) struct TestCampaign {
     pub config: ActorHostConfig,
     pub _repository: exomonad_worktree::testing::TestRepo,
@@ -436,4 +492,47 @@ pub(super) async fn dispatch_haskell_script_result(
         .await
         .expect("recorded tool completion");
     result
+}
+
+pub(super) async fn dispatch_structured_tool(
+    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
+    name: &str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    let call_id = uuid::Uuid::new_v4().simple().to_string();
+    let result = endpoint
+        .dispatch_boxed(ToolInvocation {
+            context: Some(ToolInvocationContext::external(
+                "actor-host-vertical".into(),
+                call_id.clone(),
+                call_id.clone(),
+                Some(call_id.clone()),
+                Some(name.into()),
+            )),
+            name: name.into(),
+            arguments: ToolArguments::Structured(arguments),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{name} tool failed: {error}"));
+    endpoint
+        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
+            "actor-host-vertical".into(),
+            call_id.clone(),
+            call_id,
+        ))
+        .await
+        .expect("recorded tool completion");
+    result
+}
+
+pub(super) async fn dispatch_lookup(
+    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
+    queries: &[&str],
+) -> serde_json::Value {
+    dispatch_structured_tool(
+        endpoint,
+        "lookup",
+        serde_json::json!({ "queries": queries }),
+    )
+    .await
 }

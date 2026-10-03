@@ -527,12 +527,19 @@ impl KernelContext {
         };
         let spawned = match lifetime {
             crate::WorkerLifetime::InvocationOwned | crate::WorkerLifetime::ActorOwned => {
-                self.myself
-                    .spawn_linked(name, LocalActor::<C>(PhantomData), arguments)
-                    .await
+                Box::pin(
+                    self.myself
+                        .spawn_linked(name, LocalActor::<C>(PhantomData), arguments),
+                )
+                .await
             }
             crate::WorkerLifetime::SwarmOwned => {
-                LocalActor::<C>::spawn(name, LocalActor::<C>(PhantomData), arguments).await
+                Box::pin(LocalActor::<C>::spawn(
+                    name,
+                    LocalActor::<C>(PhantomData),
+                    arguments,
+                ))
+                .await
             }
         };
         let (address, task) = match spawned {

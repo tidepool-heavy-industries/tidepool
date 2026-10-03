@@ -2665,6 +2665,7 @@ fn validate_exact_cached_closure(
     >,
 ) -> CertResult<()> {
     use crate::cache::ImportQualifier;
+    use crate::module_candidates::dependencies::CandidateDependencyInventory;
     let mut protected = BTreeSet::new();
     for entry in context.interface_owners() {
         protected.insert((entry.owner.unit, entry.owner.module));
@@ -2701,6 +2702,8 @@ fn validate_exact_cached_closure(
             return Err(CertificationError::Mismatch("duplicate receipt module"));
         }
     }
+    // An offered dependency rejected by the worker cannot satisfy this receipt.
+    let mut accepted_candidates = BTreeMap::new();
     for (key, module) in &accepted {
         if module.origin != ProductOrigin::Cached {
             continue;
@@ -2708,17 +2711,50 @@ fn validate_exact_cached_closure(
         let bundle = candidates
             .and_then(|set| set.by_owner.get(key))
             .ok_or(CertificationError::Mismatch("selected candidate"))?;
+        if bundle.owner.unit != module.unit
+            || bundle.owner.module != module.module
+            || module.module_version.as_ref() != Some(&bundle.owner.module_version)
+            || module.skinny_iface_sha256 != bundle.owner.skinny_iface_sha256
+            || module.product_sha256 != bundle.owner.product_sha256
+        {
+            return Err(CertificationError::Mismatch(
+                "cached candidate dependency body/version",
+            ));
+        }
+        if protected.contains(key) {
+            return Err(CertificationError::Mismatch(
+                "cached candidate overlaps exact owner",
+            ));
+        }
+        accepted_candidates.insert(key.clone(), bundle);
+    }
+    let originals = context.recovery_products();
+    let inventory = CandidateDependencyInventory::from_candidates(
+        accepted_candidates.values().copied(),
+        &originals,
+    );
+    for (key, bundle) in &accepted_candidates {
         let identity = crate::declaration_join::ExactModuleIdentity {
             unit: key.0.clone(),
             module: key.1.clone(),
         };
-        if protected.contains(key)
-            || exact_imports
-                .get(&identity)
-                .is_some_and(|rows| !rows.is_empty())
-        {
+        let original_dependencies = match &bundle.original_execution {
+            Some(proof) => inventory
+                .direct_originals(&bundle.owner, &proof.graph)
+                .map_err(|_| {
+                    CertificationError::Mismatch("cached candidate exact dependency closure")
+                })?,
+            None => BTreeMap::new(),
+        };
+        let exact_edges = exact_imports
+            .get(&identity)
+            .into_iter()
+            .flatten()
+            .map(|owner| (owner.unit.clone(), owner.module.clone()))
+            .collect::<BTreeSet<_>>();
+        if exact_edges != original_dependencies.keys().cloned().collect() {
             return Err(CertificationError::Mismatch(
-                "cached candidate overlaps exact owner or imports",
+                "cached candidate exact dependency authority",
             ));
         }
         let current = evidence
@@ -2762,27 +2798,67 @@ fn validate_exact_cached_closure(
                 &mut package_validation,
             )
             .map_err(|_| CertificationError::Mismatch("cached candidate package witness"))?;
+        let mut ordinary_imports = Vec::new();
         for edge in &original.imports {
-            if edge.selected.is_none() {
+            let original_matches = original_dependencies
+                .keys()
+                .filter(|(unit, module)| {
+                    module == &edge.module
+                        && !edge.boot
+                        && match &edge.qualifier {
+                            ImportQualifier::Unqualified => true,
+                            ImportQualifier::ThisUnit(qualified) => qualified == unit,
+                            ImportQualifier::OtherUnit(_) => false,
+                        }
+                })
+                .collect::<Vec<_>>();
+            if let [original_key] = original_matches.as_slice() {
+                if let Some(path) = &edge.selected {
+                    let selected = std::fs::canonicalize(path).map_err(|_| {
+                        CertificationError::Mismatch("cached candidate selected home path")
+                    })?;
+                    let count = bundle
+                        .evidence
+                        .modules
+                        .iter()
+                        .filter(|row| {
+                            row.unit == original_key.0
+                                && row.module == original_key.1
+                                && !row.boot
+                                && std::fs::canonicalize(&row.source).ok().as_ref()
+                                    == Some(&selected)
+                        })
+                        .count();
+                    if count != 1 {
+                        return Err(CertificationError::Mismatch(
+                            "cached candidate selected home owner",
+                        ));
+                    }
+                } else if crate::module_candidates::package_edge_matches(edge, &package_roots) {
+                    return Err(CertificationError::Mismatch(
+                        "cached candidate ambiguous original edge",
+                    ));
+                }
+                // Exact source evidence removes these edges; its separately
+                // checked receipt proves current lexical/source authority.
+                continue;
+            }
+            ordinary_imports.push(edge);
+            let Some(path) = &edge.selected else {
                 if !crate::module_candidates::package_edge_matches(edge, &package_roots) {
                     return Err(CertificationError::Mismatch(
                         "cached candidate package edge",
                     ));
                 }
                 continue;
-            }
+            };
             if edge.boot {
                 return Err(CertificationError::Mismatch(
                     "cached candidate home body edge",
                 ));
             }
-            let selected = edge
-                .selected
-                .as_ref()
-                .and_then(|path| std::fs::canonicalize(path).ok())
-                .ok_or(CertificationError::Mismatch(
-                    "cached candidate selected home path",
-                ))?;
+            let selected = std::fs::canonicalize(path)
+                .map_err(|_| CertificationError::Mismatch("cached candidate selected home path"))?;
             let source_rows = bundle
                 .evidence
                 .modules
@@ -2804,29 +2880,13 @@ fn validate_exact_cached_closure(
                 ));
             };
             let dependency_key = (selected_owner.unit.clone(), selected_owner.module.clone());
-            if protected.contains(&dependency_key) {
-                return Err(CertificationError::Mismatch(
-                    "cached candidate imports exact owner",
-                ));
-            }
-            let dependency = candidates
-                .and_then(|set| set.by_owner.get(&dependency_key))
-                .ok_or(CertificationError::Mismatch(
-                    "cached candidate dependency is not offered",
-                ))?;
-            let dependency_receipt =
-                accepted
+            let dependency =
+                accepted_candidates
                     .get(&dependency_key)
                     .ok_or(CertificationError::Mismatch(
                         "cached candidate dependency is not accepted",
                     ))?;
-            if dependency.source != selected
-                || dependency_receipt.origin != ProductOrigin::Cached
-                || dependency_receipt.module_version.as_ref()
-                    != Some(&dependency.owner.module_version)
-                || dependency_receipt.skinny_iface_sha256 != dependency.owner.skinny_iface_sha256
-                || dependency_receipt.product_sha256 != dependency.owner.product_sha256
-            {
+            if dependency.source != selected {
                 return Err(CertificationError::Mismatch(
                     "cached candidate dependency body/version",
                 ));
@@ -2847,6 +2907,19 @@ fn validate_exact_cached_closure(
                     "cached candidate dependency current path",
                 ));
             }
+        }
+        if ordinary_imports.len() != current.imports.len()
+            || ordinary_imports
+                .iter()
+                .zip(&current.imports)
+                .any(|(old, new)| {
+                    old.qualifier != new.qualifier
+                        || old.module != new.module
+                        || old.boot != new.boot
+                        || old.selected != new.selected
+                })
+        {
+            return Err(CertificationError::Mismatch("candidate direct imports"));
         }
     }
     Ok(())
@@ -3068,32 +3141,34 @@ pub(crate) fn certify_products(
                     if ready_source_sha(final_evidence, &key.0, &key.1)? != accepted.source_sha256 {
                         return Err(CertificationError::Mismatch("candidate current source"));
                     }
-                    let original_imports = bundle
-                        .evidence
-                        .modules
-                        .iter()
-                        .find(|row| row.unit == key.0 && row.module == key.1 && !row.boot)
-                        .map(|row| &row.imports);
-                    let current_imports = final_evidence
-                        .modules
-                        .iter()
-                        .find(|row| row.unit == key.0 && row.module == key.1 && !row.boot)
-                        .map(|row| &row.imports);
-                    if original_imports.is_none()
-                        || original_imports.map(|rows| rows.len())
-                            != current_imports.map(|rows| rows.len())
-                        || original_imports
-                            .unwrap()
+                    if exact.is_none() {
+                        let original_imports = bundle
+                            .evidence
+                            .modules
                             .iter()
-                            .zip(current_imports.unwrap())
-                            .any(|(old, new)| {
-                                old.qualifier != new.qualifier
-                                    || old.module != new.module
-                                    || old.boot != new.boot
-                                    || old.selected != new.selected
-                            })
-                    {
-                        return Err(CertificationError::Mismatch("candidate direct imports"));
+                            .find(|row| row.unit == key.0 && row.module == key.1 && !row.boot)
+                            .map(|row| &row.imports);
+                        let current_imports = final_evidence
+                            .modules
+                            .iter()
+                            .find(|row| row.unit == key.0 && row.module == key.1 && !row.boot)
+                            .map(|row| &row.imports);
+                        if original_imports.is_none()
+                            || original_imports.map(|rows| rows.len())
+                                != current_imports.map(|rows| rows.len())
+                            || original_imports
+                                .unwrap()
+                                .iter()
+                                .zip(current_imports.unwrap())
+                                .any(|(old, new)| {
+                                    old.qualifier != new.qualifier
+                                        || old.module != new.module
+                                        || old.boot != new.boot
+                                        || old.selected != new.selected
+                                })
+                        {
+                            return Err(CertificationError::Mismatch("candidate direct imports"));
+                        }
                     }
                     // `bundle.product` is a clone of the exact parsed original.
                     (
@@ -5428,7 +5503,7 @@ mod tests {
                 &imports
             ),
             Err(CertificationError::Mismatch(
-                "cached candidate dependency body/version"
+                "cached candidate dependency is not accepted"
             ))
         ));
         receipt.modules[1].origin = ProductOrigin::Cached;
@@ -5479,7 +5554,7 @@ mod tests {
                 &BTreeMap::new()
             ),
             Err(CertificationError::Mismatch(
-                "cached candidate overlaps exact owner or imports"
+                "cached candidate overlaps exact owner"
             ))
         ));
         let inherited = empty
@@ -5496,7 +5571,7 @@ mod tests {
                 &BTreeMap::new()
             ),
             Err(CertificationError::Mismatch(
-                "cached candidate imports exact owner"
+                "cached candidate dependency is not accepted"
             ))
         ));
         let identity = |name: &str| crate::declaration_join::ExactModuleIdentity {
@@ -5507,9 +5582,228 @@ mod tests {
         assert!(matches!(
             validate_exact_cached_closure(Some(&candidates), &receipt, &empty, &current, &imports),
             Err(CertificationError::Mismatch(
-                "cached candidate overlaps exact owner or imports"
+                "cached candidate exact dependency authority"
             ))
         ));
+    }
+
+    fn cached_dependency_graph(
+        root: &Path,
+        evidence: &DependencyEvidence,
+        mut owners: Vec<CachedHomeOwner>,
+    ) -> Arc<crate::execution_source::CertifiedExecutionSourceGraph> {
+        use crate::execution_source::{ExecutionSourceAdmission, ExecutionSourceGraphInput};
+        let source_path = root.join("Target.hs");
+        std::fs::write(&source_path, "target").unwrap();
+        owners.push(CachedHomeOwner {
+            unit: "main".into(),
+            module: "Target".into(),
+            module_version: ModuleVersion([4; 32]),
+            skinny_iface_sha256: [5; 32],
+            product_sha256: [6; 32],
+        });
+        let fresh = owners
+            .iter()
+            .map(|owner| crate::declaration_join::ExactModuleIdentity {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+            })
+            .collect();
+        let graph = crate::execution_source::CertifiedExecutionSourceGraph::admit(
+            ExecutionSourceGraphInput {
+                producer: crate::artifact_inventory::CanonicalProducerIdentity::from_test_sha256(
+                    [3; 32],
+                ),
+                semantic_sha256: None,
+                include: &[],
+                source_path: &source_path,
+                source: "target",
+                evidence,
+                exact_imports: &BTreeMap::new(),
+                owners: &owners,
+                fresh_owners: &fresh,
+                retained_sources: &BTreeMap::new(),
+                packages: &BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let ExecutionSourceAdmission::Available(graph) = graph else {
+            panic!("dependency fixture graph unavailable");
+        };
+        graph
+    }
+
+    #[test]
+    fn exact_cached_closure_admits_checked_original_across_receipts() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut candidates, mut receipt, mut current, _, b) = cached_closure_pair(root.path());
+        let a_key = ("main".into(), "A".into());
+        let b_key = ("main".into(), "B".into());
+        let b_graph = cached_dependency_graph(
+            root.path(),
+            &candidates.by_owner[&b_key].evidence,
+            vec![b.owner().clone()],
+        );
+        let seal = bind_home_execution_source(
+            b.certification_bytes(),
+            b.owner(),
+            b_graph.digest(),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        let b = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            b.owner().clone(),
+            b.interface_bytes().to_vec(),
+            b.product_bytes().to_vec(),
+            b.package_imports_bytes().to_vec(),
+            seal,
+        )
+        .with_execution_source(b_graph.clone())
+        .unwrap();
+        let context = crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products([3; 32], &[b.clone()], &BTreeMap::new())
+            .unwrap();
+        assert!(context.lexical_graph().is_empty());
+        let accepted_b = receipt.modules.pop().unwrap();
+        current.modules[1].imports.clear();
+        current.modules.retain(|module| module.module != "B");
+        current
+            .sources
+            .retain(|source| source.path != candidates.by_owner[&b_key].source);
+        current.resolutions.clear();
+        let identity = |name: &str| crate::declaration_join::ExactModuleIdentity {
+            unit: "main".into(),
+            module: name.into(),
+        };
+        let imports = BTreeMap::from([(identity("A"), vec![identity("B")])]);
+        let a_owner = candidates.by_owner[&a_key].owner.clone();
+        let a_evidence = candidates.by_owner[&a_key].evidence.clone();
+        let graph = cached_dependency_graph(
+            root.path(),
+            &a_evidence,
+            vec![a_owner.clone(), b.owner().clone()],
+        );
+        assert_ne!(graph.digest(), b_graph.digest());
+        candidates
+            .by_owner
+            .get_mut(&a_key)
+            .unwrap()
+            .original_execution = Some(crate::module_candidates::OriginalCandidateExecution {
+            graph: graph.clone(),
+        });
+        validate_exact_cached_closure(Some(&candidates), &receipt, &context, &current, &imports)
+            .unwrap();
+        receipt.modules.push(accepted_b);
+        assert!(matches!(
+            validate_exact_cached_closure(
+                Some(&candidates),
+                &receipt,
+                &context,
+                &current,
+                &imports
+            ),
+            Err(CertificationError::Mismatch(
+                "cached candidate overlaps exact owner"
+            ))
+        ));
+        receipt.modules.pop();
+        // A retained dependency additionally binds B's separately issued graph.
+        let retained = crate::execution_source::test_graph_requiring_original(
+            &graph,
+            b.owner(),
+            b_graph.digest(),
+        );
+        candidates
+            .by_owner
+            .get_mut(&a_key)
+            .unwrap()
+            .original_execution =
+            Some(crate::module_candidates::OriginalCandidateExecution { graph: retained });
+        validate_exact_cached_closure(Some(&candidates), &receipt, &context, &current, &imports)
+            .unwrap();
+        // Available native originals alone never grant their lexical imports.
+        assert!(matches!(
+            validate_exact_cached_closure(
+                Some(&candidates),
+                &receipt,
+                &context,
+                &current,
+                &BTreeMap::new()
+            ),
+            Err(CertificationError::Mismatch(
+                "cached candidate exact dependency authority"
+            ))
+        ));
+        for component in 0..3 {
+            let mut changed = b.owner().clone();
+            match component {
+                0 => changed.module_version = ModuleVersion([9; 32]),
+                1 => changed.skinny_iface_sha256 = [9; 32],
+                _ => changed.product_sha256 = [9; 32],
+            }
+            let graph =
+                cached_dependency_graph(root.path(), &a_evidence, vec![a_owner.clone(), changed]);
+            candidates
+                .by_owner
+                .get_mut(&a_key)
+                .unwrap()
+                .original_execution =
+                Some(crate::module_candidates::OriginalCandidateExecution { graph });
+            assert!(matches!(
+                validate_exact_cached_closure(
+                    Some(&candidates),
+                    &receipt,
+                    &context,
+                    &current,
+                    &imports
+                ),
+                Err(CertificationError::Mismatch(
+                    "cached candidate exact dependency closure"
+                ))
+            ));
+        }
+        candidates
+            .by_owner
+            .get_mut(&a_key)
+            .unwrap()
+            .original_execution =
+            Some(crate::module_candidates::OriginalCandidateExecution { graph });
+        let empty =
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
+        // B remains offered, but its rejected receipt cannot satisfy A's graph.
+        assert!(matches!(
+            validate_exact_cached_closure(Some(&candidates), &receipt, &empty, &current, &imports),
+            Err(CertificationError::Mismatch(
+                "cached candidate exact dependency closure"
+            ))
+        ));
+        let mut wrong_graph = b_graph.digest();
+        wrong_graph[0] ^= 1;
+        let graph = candidates.by_owner[&a_key]
+            .original_execution
+            .as_ref()
+            .unwrap()
+            .graph
+            .clone();
+        let graph =
+            crate::execution_source::test_graph_requiring_original(&graph, b.owner(), wrong_graph);
+        candidates
+            .by_owner
+            .get_mut(&a_key)
+            .unwrap()
+            .original_execution =
+            Some(crate::module_candidates::OriginalCandidateExecution { graph });
+        assert!(
+            validate_exact_cached_closure(
+                Some(&candidates),
+                &receipt,
+                &context,
+                &current,
+                &imports
+            )
+            .is_err()
+        );
     }
 
     #[test]

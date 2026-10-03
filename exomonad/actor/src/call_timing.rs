@@ -126,6 +126,35 @@ impl CallTimingRegistration {
     pub(crate) fn sync_scope<T>(&self, body: impl FnOnce() -> T) -> T {
         CURRENT.sync_scope(Arc::clone(&self.0), body)
     }
+
+    /// Time one synchronous compiler request made by a blocking worker.
+    /// Record each actual batch at its boundary, including lookup fallbacks
+    /// and discovery requests.
+    #[track_caller]
+    pub(crate) fn timed_compile_sync<T>(&self, body: impl FnOnce() -> T) -> T {
+        let caller = std::panic::Location::caller();
+        let started = Instant::now();
+        let result = self.sync_scope(body);
+        let elapsed_ms = started.elapsed().as_millis();
+        saturating_add(&self.0.compile_ms, elapsed_ms);
+        let round = self.0.compile_count.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::info!(
+            target: "exomonad_actor::call_timing",
+            compile_round = round,
+            execution = self.0.execution.as_ref().map(|id| id.as_str()),
+            compile_ms = elapsed_ms,
+            caller_file = caller.file(),
+            caller_line = caller.line(),
+            "compiler round timing"
+        );
+        result
+    }
+}
+
+pub(crate) fn current_registration() -> Option<CallTimingRegistration> {
+    CURRENT
+        .try_with(|totals| CallTimingRegistration(Arc::clone(totals)))
+        .ok()
 }
 
 impl CallScope {
@@ -214,6 +243,9 @@ mod tests {
                 add_jev_ms(40);
                 add_exec_ms(50);
                 timed_compile(async { 1 + 1 }).await
+                    + current_registration()
+                        .expect("current call registration")
+                        .timed_compile_sync(|| 2 + 2)
             })
             .await;
         assert_eq!(scope.totals.checkout_wait_ms.load(Ordering::Relaxed), 10);
@@ -221,7 +253,7 @@ mod tests {
         assert_eq!(scope.totals.jev_ms.load(Ordering::Relaxed), 70);
         assert_eq!(scope.totals.jev_count.load(Ordering::Relaxed), 2);
         assert_eq!(scope.totals.exec_ms.load(Ordering::Relaxed), 50);
-        assert_eq!(scope.totals.compile_count.load(Ordering::Relaxed), 1);
+        assert_eq!(scope.totals.compile_count.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]

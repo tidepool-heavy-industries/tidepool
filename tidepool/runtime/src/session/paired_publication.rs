@@ -45,6 +45,14 @@ struct AuthoredWrite {
     retractions: Vec<ExportIdentity>,
 }
 
+/// Which completed work may become public after one cell settles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionPublicationIntent {
+    CompletedCell,
+    /// Native binding winners survive failure; authored declarations remain private.
+    CommittedNativePrefix,
+}
+
 /// Immutable final execution writes. A public retry changes only its merge
 /// baseline, never this private suffix, exact winners, leases, or reserved ID.
 /// The private scope keeps live roots owned until publication or abandonment.
@@ -55,6 +63,7 @@ pub struct FinalExecutionIntent {
     _private_scope_lease: Option<Arc<super::RuntimeLexicalScopeLease>>,
     admitted: PublicVisibilitySnapshot,
     private: PublicVisibilitySnapshot,
+    publication: ExecutionPublicationIntent,
     private_base: Option<DeclarationTip>,
     writes: Vec<AuthoredWrite>,
     write_ids: Vec<SessionVarId>,
@@ -425,6 +434,21 @@ impl PersistentSession {
         write_ids: Vec<SessionVarId>,
         source_keys: Vec<SourceLeaseKey>,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
+        self.freeze_execution_intent_for(
+            admission,
+            write_ids,
+            source_keys,
+            ExecutionPublicationIntent::CompletedCell,
+        )
+    }
+
+    pub(super) fn freeze_execution_intent_for(
+        &mut self,
+        admission: &super::PrivateExecutionAdmission,
+        write_ids: Vec<SessionVarId>,
+        source_keys: Vec<SourceLeaseKey>,
+        publication: ExecutionPublicationIntent,
+    ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
         if !Arc::ptr_eq(&admission.owner, self.admission_owner())
             || admission.owner_epoch != self.admission_owner().epoch()
             || admission.view().session() != self.lib().session_id()
@@ -466,10 +490,13 @@ impl PersistentSession {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>();
-            if writes != intent.write_ids || keys != intent.source_keys {
+            if writes != intent.write_ids
+                || keys != intent.source_keys
+                || publication != intent.publication
+            {
                 return Err(invalid_at(
                     &self.lib().root,
-                    "execution final intent is already frozen with different writes",
+                    "execution final intent is already frozen with different writes or publication boundary",
                 ));
             }
             return Ok(intent.clone());
@@ -482,6 +509,7 @@ impl PersistentSession {
             Some(admission.scope_lease.clone()),
             admission.durable_owner.clone(),
             &admission.completed_values.lock(),
+            publication,
         )?;
         assert!(
             admission.final_intent.set(intent.clone()).is_ok(),
@@ -502,6 +530,7 @@ impl PersistentSession {
             SessionVarId,
             super::admission::CertifiedPrivateValueWrite,
         >,
+        publication: ExecutionPublicationIntent,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
         if private_scope == admitted.scope || !self.scope_tree().is_live(private_scope) {
             return Err(SessionError::DeadScope(private_scope));
@@ -527,7 +556,11 @@ impl PersistentSession {
         };
         let private_base = tip(lib, admitted.declaration_tip)?;
         let mut writes = Vec::new();
-        for generation in &chain[start..] {
+        let declaration_suffix = match publication {
+            ExecutionPublicationIntent::CompletedCell => &chain[start..],
+            ExecutionPublicationIntent::CommittedNativePrefix => &[],
+        };
+        for generation in declaration_suffix {
             let evidence = lib
                 .log
                 .certified_authored_arc_at(*generation)
@@ -631,6 +664,7 @@ impl PersistentSession {
             _private_scope_lease: private_scope_lease,
             admitted: admitted.clone(),
             private,
+            publication,
             private_base,
             writes,
             _completed_values: write_ids
@@ -756,6 +790,7 @@ impl PersistentSession {
             None,
             Some(owner.clone()),
             &std::collections::HashMap::new(),
+            ExecutionPublicationIntent::CompletedCell,
         )?;
         self.restage_declaration_publication(owner, intent)
     }
@@ -918,6 +953,12 @@ impl DeclarationPublicationBase {
         });
         family_closure.sort();
         family_closure.dedup();
+        let private_tip = match self.intent.publication {
+            ExecutionPublicationIntent::CompletedCell => self.intent.private.declaration_tip,
+            ExecutionPublicationIntent::CommittedNativePrefix => {
+                self.intent.admitted.declaration_tip
+            }
+        };
         let input = DeclarationJoinInput {
             expected_public_version: self.expected_public_version.clone(),
             public_module: self
@@ -931,8 +972,8 @@ impl DeclarationPublicationBase {
                 .as_ref()
                 .map(|tip| anchor(tip.generation))
                 .transpose()?,
-            private_tip: (self.intent.private.declaration_tip != Generation(0))
-                .then(|| anchor(self.intent.private.declaration_tip))
+            private_tip: (private_tip != Generation(0))
+                .then(|| anchor(private_tip))
                 .transpose()?,
             writes,
             reserved: ReservedJoin {
@@ -1349,6 +1390,64 @@ mod tests {
             panic!("fixture has no declaration writes");
         };
         base.stage().unwrap()
+    }
+
+    #[test]
+    fn native_prefix_intent_is_frozen_with_its_publication_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let lib = SessionLib::open(
+            SessionId(4490),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_isolated_scope();
+        let execution = session.begin_ephemeral_private_execution(public).unwrap();
+        let value =
+            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "prefix", 41);
+        let id = value.id;
+        session.bind_in(execution.private_scope(), value).unwrap();
+        let intent = session
+            .freeze_execution_intent_for(
+                &execution,
+                vec![id],
+                vec![],
+                ExecutionPublicationIntent::CommittedNativePrefix,
+            )
+            .unwrap();
+        assert_eq!(
+            intent.publication,
+            ExecutionPublicationIntent::CommittedNativePrefix
+        );
+        assert!(session
+            .freeze_execution_intent(&execution, vec![id], vec![])
+            .is_err());
+        let staged = ephemeral_binding_stage(&mut session, intent.clone());
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(staged, &PublicationDecision::new())
+                .unwrap(),
+            PublicManifestCommit::Ephemeral
+        );
+        assert_eq!(
+            session
+                .bindings()
+                .resolve_in(session.scope_tree(), public, "prefix")
+                .map(|entry| entry.id),
+            Some(id)
+        );
+        assert!(Arc::ptr_eq(
+            &session
+                .freeze_execution_intent_for(
+                    &execution,
+                    vec![id],
+                    vec![],
+                    ExecutionPublicationIntent::CommittedNativePrefix
+                )
+                .unwrap(),
+            &intent
+        ));
     }
 
     #[test]

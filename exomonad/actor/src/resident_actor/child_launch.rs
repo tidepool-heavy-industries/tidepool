@@ -73,7 +73,7 @@ where
         admission,
     } = prepared;
     let context = &continuation.context;
-    let result = async {
+    let result = Box::pin(async {
         let ChildLaunchAdmission {
             child,
             checkpoint_admission,
@@ -294,7 +294,7 @@ where
                 actor: child, allocated_label, admitted_worktree, checkpoint_descriptor,
                 checkpoint_admission, source_layers, helper_branch, bound_worktrees,
             })
-    }.await;
+    }).await;
     CompletedChildLaunch {
         continuation,
         result,

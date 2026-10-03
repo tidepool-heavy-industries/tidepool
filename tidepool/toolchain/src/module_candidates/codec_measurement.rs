@@ -456,7 +456,7 @@ fn retained_shared_evidence_inventory_measurement() {
                 .into_iter()
                 .map(|record| (record, CandidateOrigin::Ordinary))
                 .collect(),
-            Some(&ExactCandidateExclusions::new(
+            Some(&ExactCandidateContext::new(
                 BTreeSet::new(),
                 BTreeSet::new(),
             )),

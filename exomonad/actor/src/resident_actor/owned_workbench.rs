@@ -1,5 +1,7 @@
 //! Single-admission preparation and watch tasks retain one execution cursor.
 
+use tidepool_runtime::session::ExecutionPublicationIntent;
+
 mod reload;
 
 use super::*;
@@ -1829,19 +1831,40 @@ where
         behavior: &mut Self,
         kernel: &KernelContext,
         owned: OwnedExecution<H, O>,
-        result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+        mut result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> Result<WorkbenchAdvance<Self>, KernelInvocationFailure> {
         owned.state.effects.invocation_work.close();
-        // Completed machine items belong to the continuing lexical session
-        // even when a later item fails. Publish their fixed private intent,
-        // retaining the original whole-cell result for context and child gates.
-        // The same publication decision still vetoes admitted cancellation.
-        if owned.private.is_some() && private_publication_required(&result) {
+        // Error paths bypass response rendering, but publication requires the
+        // same checked item kinds as a successful response.
+        let receipts = match &mut result {
+            Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
+            | Ok(KernelStep::Stop {
+                output: response, ..
+            }) => &mut response.items,
+            Err(failure) => &mut failure.receipts,
+        };
+        annotate_workbench_receipts(
+            receipts,
+            owned
+                .state
+                .cursor
+                .cell_check
+                .as_ref()
+                .map(|checked| checked.items.as_slice()),
+        );
+        // Native prefixes survive failure; declarations require whole-cell success.
+        // Cancellation retains the original publication decision's veto.
+        if let Some(publication) = owned
+            .private
+            .as_ref()
+            .and_then(|_| private_publication_intent(&result))
+        {
             return Ok(WorkbenchAdvance::Park(Self::publish_owned_execution_task(
                 owned,
                 behavior.environment.clone(),
                 kernel.clone(),
                 result,
+                publication,
             )));
         }
         owned
@@ -1882,6 +1905,7 @@ where
         environment: ResidentEnvironment<H, O>,
         kernel: KernelContext,
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+        publication: ExecutionPublicationIntent,
     ) -> OwnedWorkbenchTask<Self> {
         let runner = environment.runner.clone();
         Self::owned_step_task(
@@ -1896,7 +1920,9 @@ where
                 Box::pin(async move {
                     let actor = context.actor;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %actor, phase = "private_publish_started", "workbench phase");
-                    let published = runner.publish_private_execution(context, private).await;
+                    let published = runner
+                        .publish_private_execution(context, private, publication)
+                        .await;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %actor, phase = "private_publish_completed", "workbench phase");
                     published
                 })
@@ -2075,13 +2101,17 @@ where
     }
 }
 
-fn private_publication_required(
+fn private_publication_intent(
     result: &Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
-) -> bool {
+) -> Option<ExecutionPublicationIntent> {
     let completed_prefix = |receipts: &[WorkbenchItemReceipt]| {
         receipts
             .iter()
-            .any(|receipt| receipt.status == WorkbenchItemStatus::Committed)
+            .any(|receipt| {
+                receipt.status == WorkbenchItemStatus::Committed
+                    && receipt.kind != Some(WorkbenchCellItemKind::Declaration)
+            })
+            .then_some(ExecutionPublicationIntent::CommittedNativePrefix)
     };
     let response = match result {
         Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
@@ -2092,8 +2122,8 @@ fn private_publication_required(
     };
     match response.status {
         WorkbenchRunStatus::Rejected => completed_prefix(&response.items),
-        WorkbenchRunStatus::RequestCancelled => false,
-        _ => true,
+        WorkbenchRunStatus::RequestCancelled => None,
+        _ => Some(ExecutionPublicationIntent::CompletedCell),
     }
 }
 
@@ -2107,8 +2137,13 @@ fn private_publication_bindings(
         }) => &response.items,
         Err(failure) => &failure.receipts,
     };
+    let publication = private_publication_intent(result);
     receipts
         .iter()
+        .filter(|receipt| {
+            publication != Some(ExecutionPublicationIntent::CommittedNativePrefix)
+                || receipt.kind != Some(WorkbenchCellItemKind::Declaration)
+        })
         .flat_map(|receipt| receipt.installed_bindings.iter().cloned())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()

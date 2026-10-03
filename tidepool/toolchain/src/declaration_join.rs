@@ -169,6 +169,8 @@ pub struct CertifiedAuthoredDeclaration {
     /// SHA-256 of the bound compiler producer identity used for these bytes.
     toolchain_identity_sha256: [u8; 32],
     original_imports: Vec<ExactInterfaceOwner>,
+    /// Reachable inherited lexical rows used by this exact source admission.
+    source_lexical_imports: Vec<ExactLexicalNode>,
 }
 
 /// Shared source selection derived from one immutable original certificate.
@@ -201,6 +203,35 @@ pub(crate) fn source_lexical_surface(
         ExactModuleIdentity,
         crate::artifact_inventory::ArtifactKind,
     >,
+) -> Result<OriginalSourceLexicalSurface, CompileError> {
+    source_lexical_surface_inner(roots, imports, inherited, implementations, false)
+}
+
+/// Resolve only the lexical rows reachable from these exact source roots.
+/// Unlike `source_lexical_surface`, this omits unrelated inherited rows so a
+/// certificate can persist the authority it used without promoting the whole
+/// request baseline.
+pub(crate) fn source_lexical_closure(
+    roots: &[ExactModuleIdentity],
+    imports: &std::collections::BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+    inherited: &[ExactLexicalNode],
+    implementations: &std::collections::BTreeMap<
+        ExactModuleIdentity,
+        crate::artifact_inventory::ArtifactKind,
+    >,
+) -> Result<OriginalSourceLexicalSurface, CompileError> {
+    source_lexical_surface_inner(roots, imports, inherited, implementations, true)
+}
+
+fn source_lexical_surface_inner(
+    roots: &[ExactModuleIdentity],
+    imports: &std::collections::BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+    inherited: &[ExactLexicalNode],
+    implementations: &std::collections::BTreeMap<
+        ExactModuleIdentity,
+        crate::artifact_inventory::ArtifactKind,
+    >,
+    reachable_only: bool,
 ) -> Result<OriginalSourceLexicalSurface, CompileError> {
     use std::collections::{BTreeMap, BTreeSet};
     let shared_edges = |edges: &[ExactModuleIdentity]| {
@@ -281,6 +312,14 @@ pub(crate) fn source_lexical_surface(
         }
         pending.extend(edges);
     }
+    let lexical = if reachable_only {
+        lexical
+            .into_iter()
+            .filter(|(owner, _)| visited.contains(owner))
+            .collect()
+    } else {
+        lexical
+    };
     Ok(OriginalSourceLexicalSurface {
         roots,
         lexical: lexical
@@ -291,6 +330,86 @@ pub(crate) fn source_lexical_surface(
 }
 
 impl CertifiedAuthoredDeclaration {
+    #[cfg(test)]
+    pub(crate) fn test_certificate(
+        owner: ExactModuleIdentity,
+        roots: Vec<ExactModuleIdentity>,
+        source_lexical_imports: Vec<ExactLexicalNode>,
+        retained_owners: Vec<ExactModuleIdentity>,
+    ) -> Self {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut owners = vec![owner.clone()];
+        owners.extend(roots.iter().cloned());
+        owners.extend(retained_owners);
+        let owners = owners.into_iter().collect::<BTreeSet<_>>();
+        let mut entries = Vec::new();
+        for artifact_owner in owners {
+            let bytes = artifact_owner.module.as_bytes().to_vec();
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            let home_owner = tidepool_repr::execution_schema::CachedHomeOwner {
+                unit: artifact_owner.unit.clone(),
+                module: artifact_owner.module.clone(),
+                module_version: tidepool_repr::execution_schema::ModuleVersion([1; 32]),
+                skinny_iface_sha256: digest,
+                product_sha256: digest,
+            };
+            let certification = crate::certified_products::encode_home_certification(
+                &home_owner,
+                &[],
+                &BTreeMap::new(),
+            )
+            .expect("synthetic test product certification");
+            let product = CertifiedRecoveryProduct::from_certification(
+                home_owner,
+                bytes.clone(),
+                bytes,
+                Vec::new(),
+                certification,
+            );
+            let requirements = if artifact_owner == owner {
+                roots.clone()
+            } else {
+                Vec::new()
+            };
+            entries.push(
+                crate::artifact_inventory::ArtifactEntry::original([2; 32], product, requirements)
+                    .expect("synthetic test artifact entry"),
+            );
+        }
+        let inventory = crate::artifact_inventory::ArtifactInventory::default();
+        let artifacts = inventory
+            .admit(&inventory.empty_view(), entries)
+            .expect("synthetic test artifact inventory");
+        Self {
+            product: artifacts
+                .entries()
+                .into_iter()
+                .find_map(|entry| match &entry.payload {
+                    crate::artifact_inventory::ArtifactPayload::Original(product)
+                        if product.owner().unit == owner.unit
+                            && product.owner().module == owner.module =>
+                    {
+                        Some(product.clone())
+                    }
+                    _ => None,
+                })
+                .expect("synthetic authored original"),
+            artifacts,
+            lexical_exports: Vec::new(),
+            introduced_exports: Vec::new(),
+            instances: InstanceInventory::default(),
+            family_closure: Vec::new(),
+            source_sha256: [4; 32],
+            toolchain_identity_sha256: [2; 32],
+            original_imports: vec![ExactInterfaceOwner {
+                owner,
+                requirements: roots,
+            }],
+            source_lexical_imports,
+        }
+    }
+
     /// Preserve strict shared-source traversal while excluding only certified
     /// session implementation anchors from lexical selection.
     pub fn shared_source_lexical_surface(
@@ -311,7 +430,26 @@ impl CertifiedAuthoredDeclaration {
             .into_iter()
             .map(|descriptor| (descriptor.owner, descriptor.kind))
             .collect();
-        original_source_lexical_surface(&original, &imports, inherited, &implementations)
+        let mut inherited_by_owner = std::collections::BTreeMap::new();
+        for node in inherited.iter().chain(&self.source_lexical_imports) {
+            if inherited_by_owner
+                .insert(node.owner.clone(), node.imports.clone())
+                .is_some_and(|previous| previous != node.imports)
+            {
+                return Err(contract(
+                    "inherited source lexical authority has conflicting import edges",
+                ));
+            }
+        }
+        let inherited = inherited_by_owner
+            .into_iter()
+            .map(|(owner, imports)| ExactLexicalNode { owner, imports })
+            .collect::<Vec<_>>();
+        original_source_lexical_surface(&original, &imports, &inherited, &implementations)
+    }
+
+    pub(crate) fn source_lexical_imports(&self) -> &[ExactLexicalNode] {
+        &self.source_lexical_imports
     }
     pub fn product(&self) -> &CertifiedRecoveryProduct {
         &self.product
@@ -516,9 +654,14 @@ fn certify_authored_declaration_inner(
         return Err(contract("certified authored source digest differs"));
     }
 
-    let (_scratch, artifacts, original_imports, joined_interfaces) =
+    let selected_owner = ExactModuleIdentity {
+        unit: selected.owner().unit.clone(),
+        module: selected.owner().module.clone(),
+    };
+    let (_scratch, artifacts, original_imports, source_lexical_imports, joined_interfaces) =
         planned::admit_authored_artifact_closure(
             &products,
+            &selected_owner,
             toolchain_identity_sha256,
             &evidence,
             compiled.exact_source_admission.as_ref(),
@@ -600,6 +743,7 @@ fn certify_authored_declaration_inner(
         source_sha256,
         toolchain_identity_sha256,
         original_imports,
+        source_lexical_imports,
     })
 }
 
@@ -1214,6 +1358,67 @@ mod tests {
             &imports,
             &conflicting,
             &implementations
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn source_lexical_closure_keeps_reachable_inherited_rows_only() {
+        use std::collections::BTreeMap;
+        let owner = |module: &str| ExactModuleIdentity {
+            unit: "main".into(),
+            module: module.into(),
+        };
+        let root = owner("G3");
+        let inherited = owner("CheckedHomeValue");
+        let child = owner("InheritedChild");
+        let unrelated = owner("UnrelatedRetainedValue");
+        let imports = BTreeMap::from([(root.clone(), vec![inherited.clone()])]);
+        let inherited_lexical = [
+            ExactLexicalNode {
+                owner: inherited.clone(),
+                imports: vec![child.clone()],
+            },
+            ExactLexicalNode {
+                owner: child.clone(),
+                imports: vec![],
+            },
+            ExactLexicalNode {
+                owner: unrelated.clone(),
+                imports: vec![],
+            },
+        ];
+
+        let closure = source_lexical_closure(
+            &imports[&root],
+            &imports,
+            &inherited_lexical,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            closure.lexical,
+            vec![
+                ExactLexicalNode {
+                    owner: inherited,
+                    imports: vec![owner("InheritedChild")],
+                },
+                ExactLexicalNode {
+                    owner: child,
+                    imports: vec![],
+                },
+            ]
+        );
+        assert!(!closure.lexical.iter().any(|node| node.owner == unrelated));
+        assert!(source_lexical_closure(
+            &imports[&root],
+            &imports,
+            &[ExactLexicalNode {
+                owner: unrelated,
+                imports: vec![],
+            }],
+            &BTreeMap::new(),
         )
         .is_err());
     }

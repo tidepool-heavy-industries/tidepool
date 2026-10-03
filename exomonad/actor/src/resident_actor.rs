@@ -4351,6 +4351,7 @@ where
                         continuation,
                         request,
                         environment.usage_pointers.clone(),
+                        control.clone(),
                     )
                     .await
             }),
@@ -7058,8 +7059,9 @@ where
         let workbench = self.environment.runner.application_workbench();
         let guard = workbench.actor_initialization_cleanup(context.clone());
         let registration = guard.registration();
+        // Keep initialization state out of the enclosing task-local scope future.
         let result = registration
-            .scope(self.initialize_inner(kernel, context, boot))
+            .scope(Box::pin(self.initialize_inner(kernel, context, boot)))
             .await;
         if result.is_ok() {
             workbench
@@ -7377,13 +7379,13 @@ where
                 .await?;
             None
         };
-        self.stabilize_program(
+        Box::pin(self.stabilize_program(
             kernel,
             context,
             &crate::CallAncestry::begin(context.actor),
             outcome,
             prepared,
-        )
+        ))
         .await
     }
 
@@ -13361,20 +13363,20 @@ fn committed_declaration_warnings(
     (warnings, diagnostics)
 }
 
-fn workbench_response(
-    status: WorkbenchRunStatus,
-    mut items: Vec<WorkbenchItemReceipt>,
-    next_index: usize,
-    total: usize,
-    cell_check: Option<&[tidepool_runtime::session::CellAnalysisItem]>,
-) -> WorkbenchResponse {
-    let receipt_kind = |kind| match kind {
+fn receipt_kind(kind: TurnKind) -> WorkbenchCellItemKind {
+    match kind {
         TurnKind::Decl => WorkbenchCellItemKind::Declaration,
         TurnKind::Bind => WorkbenchCellItemKind::Statement,
         TurnKind::Expr => WorkbenchCellItemKind::Expression,
-    };
+    }
+}
+
+fn annotate_workbench_receipts(
+    items: &mut [WorkbenchItemReceipt],
+    cell_check: Option<&[tidepool_runtime::session::CellAnalysisItem]>,
+) {
     if let Some(checked) = cell_check {
-        for receipt in &mut items {
+        for receipt in items {
             if let Some(item) = checked.get(receipt.index) {
                 receipt.kind = Some(receipt_kind(item.verdict.kind));
                 receipt.span = Some(item.span);
@@ -13390,6 +13392,16 @@ fn workbench_response(
             }
         }
     }
+}
+
+fn workbench_response(
+    status: WorkbenchRunStatus,
+    mut items: Vec<WorkbenchItemReceipt>,
+    next_index: usize,
+    total: usize,
+    cell_check: Option<&[tidepool_runtime::session::CellAnalysisItem]>,
+) -> WorkbenchResponse {
+    annotate_workbench_receipts(&mut items, cell_check);
     let essential = items.iter().rposition(|item| {
         matches!(
             item.status,

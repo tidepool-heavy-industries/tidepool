@@ -141,7 +141,7 @@ import Data.Foldable (toList)
 import Data.Word (Word64)
 import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellDisplayTarget(..), CellGenericDeclaration(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations, omitCellDisplayDeclarations)
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations)
-import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
+import Tidepool.HomeProducts (hydrateCandidateHomeProductsWithOriginals)
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
   ( PlannedDeclarationInventory, transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted, transformProgramDeclarationImports, hydratePlannedDeclarationInventory )
@@ -178,23 +178,23 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), ProductAvailability(..)
   , sourceEvidenceWithFingerprint )
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope
+  ( ExactIfaceArtifact(..), freshExactState, hydrateExactScope
   , readVerifiedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, revalidateExactScope, scopeValueInterfaces
+  ( ExactScope(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation, scopeExecutionNativeOwners )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceNode(..), ExecutionSourceIdentity(..)
-  , ExecutionSourceFailure(..), executionSourceClosure, executionIdentityKey )
+  , ExecutionSourceFailure(..), ExecutionSourceRef(..), executionSourceClosure, executionIdentityKey )
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports
   , validatePackageImportRoot )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..)
-  , readModuleCandidates, candidateExecutionSources )
+  , readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity )
 
 -- | Selects the compiler representation produced at the internal GHC API
 -- boundary. Metadata consumers stop at the checked environment.
@@ -758,8 +758,8 @@ data PipelineVariant = PipelineVariant
   , pvDownsweepExcludes :: [ModuleName]
     -- ^ Modules @depanal@ must NOT try to summarise (the session path's
     -- source-less @Val.G\<g\>@ ifaces). Empty on the normal path.
-  , pvPlan :: Bool -> ModuleGraph -> Maybe SourceSelectedOriginals -> Ghc CompilePlan
-    -- ^ @pvPlan timingEnabled downsweepGraph@.
+  , pvPlan :: Bool -> ModuleGraph -> Maybe ExactScope -> Ghc CompilePlan
+    -- ^ @pvPlan timingEnabled downsweepGraph selectedExactScope@.
   , pvTransformParsed :: HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
   }
 
@@ -1587,7 +1587,9 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
       Nothing -> pure Nothing
       Just scope -> withSourceSelectionRefusal
         (selectCurrentSourceOriginals scope (pvGeneratedScaffold variant) modGraphRaw)
-    let (freshGraph, exactImports) = sourceEvidenceGraph (pvExactScope variant) modGraphRaw
+    selectedExact <- traverse (either (liftIO . fail) pure . extendSourceSelectedOriginals sourceSelection)
+      (pvExactScope variant)
+    let (freshGraph, exactImports) = sourceEvidenceGraph selectedExact modGraphRaw
         exactCompilation = (\scope -> ExactCompilation scope requestIdentity path exactImports sourceSelection)
           <$> pvExactScope variant
     when (any (\(_, imports) -> any (\(_, _, boot, _) -> boot) imports) exactImports) $
@@ -1598,7 +1600,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
              , iface <- scopeValueInterfaces scope])
     acceptedCandidates <- case candidateManifest of
       Nothing -> pure Map.empty
-      Just manifest -> certifyModuleCandidates (pvExactScope variant)
+      Just manifest -> certifyModuleCandidates selectedExact
         sourceFreeOwners manifest modGraphRaw path
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
     -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
@@ -1608,7 +1610,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
     setupT1 <- monotonicTime
     endResourceTiming setupResources "compile" "ghc_setup"
     liftIO (emitPhase timing "ghc_setup" (elapsedMs sessionT0 setupT1))
-    originalPlan <- pvPlan variant timing modGraphRaw sourceSelection
+    originalPlan <- pvPlan variant timing modGraphRaw selectedExact
     certifiedEnv <- getSession
     let acceptedNames = Map.keysSet acceptedCandidates
         loadRequired = any ((== CandidateLoadForExecution) . admittedCandidateLoading)
@@ -1635,7 +1637,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                      cpAfterLoad originalPlan
                      current <- getSession
                      -- Exact hydration owns the lexical graph; installing
-                     -- ordinary disjoint candidates cannot replace it.
+                     -- source-selected candidates preserve that authority.
                      when (isNothing (pvExactScope variant)) $
                        setSession current { hsc_mod_graph = modGraphRaw }
                      forM_ (Set.toAscList acceptedNames) $ \name ->
@@ -2737,7 +2739,7 @@ data AdmittedSourceCandidate = AdmittedSourceCandidate
 
 data CandidateAdmissionReason
   = CandidateManifestDecode | CandidateMissingSummary | CandidateMissingNode
-  | CandidateTarget | CandidateExactOwner | CandidateExactImport | CandidateUnit
+  | CandidateTarget | CandidateExactOwner | CandidateUnit
   | CandidateImportTuple | CandidateUntrackedExecution | CandidateExecutionBoot
   | CandidatePreprocessor | CandidateSourcePath | CandidateSourceRead
   | CandidateSourceSha | CandidateSummaryHash | CandidateNativeRead | CandidateNativeSha
@@ -2754,7 +2756,8 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
   let record owner reason detail = when timing $ liftIO $
         modifyIORef' observations (Map.insert owner (reason, fmap (take 192) detail))
       recordCandidate candidate = record (candidateUnit candidate, candidateModule candidate)
-  decoded <- liftIO (readModuleCandidates manifest)
+  decoded <- liftIO (readModuleCandidatesWithGraphs
+    (maybe [] scopeExecutionGraphs exactScope) manifest)
   result <- case decoded of
     Left reason -> do
       record ("", "<manifest>") CandidateManifestDecode (Just reason)
@@ -2778,27 +2781,95 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
           bootModules = Map.fromList
             [ (mkModuleName (dependencyModuleName node),node)
             | node <- dependencyModules current, dependencyModuleBoot node ]
+          originalOwners = maybe Set.empty (Set.fromList . map fst . scopeLexical) exactScope
+          protectedRoots = Set.union sourceFreeOwners (Set.fromList
+            [mkModuleName name | scope <- maybe [] pure exactScope
+              , admission <- maybe [] pure (scopeCheckedCell scope)
+              , name <- checkedReservedModules admission])
+          offered = [candidate | candidate <- candidates
+            , mkModuleName (candidateModule candidate) `Set.notMember` protectedRoots
+            , mkModuleName (candidateModule candidate) /= targetName]
+          parcels = [parcel | candidate <- offered, Just parcel <- [candidateExecutionSources candidate]]
+          graphInventory = Map.fromList [(executionGraphSha256 graph',graph')
+            | graph' <- maybe [] scopeExecutionGraphs exactScope ++ concatMap fst parcels]
+          combinedGraphs = Map.elems graphInventory
+          combinedReferences = maybe [] scopeExecutionOwners exactScope ++ map snd parcels
+          combinedNative = maybe [] scopeExecutionNativeOwners exactScope ++ map candidateOriginalIdentity offered
+          candidateProofs = Map.fromList [(candidateOriginalIdentity candidate,proveCandidate candidate)
+            | candidate <- offered]
+          candidateProof candidate = Map.findWithDefault (Right [])
+            (candidateOriginalIdentity candidate) candidateProofs
+          proveCandidate candidate = case candidateExecutionSources candidate of
+            Nothing -> Right []
+            Just (_,reference) -> do
+              nodes <- executionSourceClosure combinedGraphs combinedReferences combinedNative
+                [executionIdentityKey (executionRefIdentity reference)]
+              let roots = [node | node <- nodes
+                    , executionNodeIdentity node == candidateOriginalIdentity candidate]
+              case roots of
+                [root] | dependencyModuleSource (executionNodeModule root) == candidateSource candidate
+                    && executionNodeSourceSha256 root == candidateSourceSha256 candidate -> Right nodes
+                _ -> Left (ExecutionSourceChanged (candidateUnit candidate,candidateModule candidate))
+          provenOriginals candidate = case candidateProof candidate of
+            Left _ -> Map.empty
+            Right nodes ->
+              let direct = Set.fromList (concat
+                    [executionNodeRequirements node | node <- nodes
+                    , executionNodeIdentity node == candidateOriginalIdentity candidate])
+              in Map.fromList [(key,node) | node <- nodes
+                , let key = executionIdentityKey (executionNodeIdentity node)
+                , key `Set.member` direct, key `Set.member` originalOwners]
+          exactImportKey candidate qualifier name =
+            let key = (candidateUnit candidate,name)
+                local = qualifier == "none" || qualifier == "this:" ++ candidateUnit candidate
+            in if local && key `Set.member` originalOwners then Just key else Nothing
+          -- A historical source path can become pathless only after the
+          -- recipe resolves the complete dependency tuple to this original.
+          normalizeImport candidate qualifier name boot selected =
+            case exactImportKey candidate qualifier name of
+              Nothing -> Just (qualifier,name,boot,selected)
+              Just key -> do
+                child <- Map.lookup key (provenOriginals candidate)
+                unless (not boot && maybe True
+                  (== dependencyModuleSource (executionNodeModule child)) selected) Nothing
+                pure (qualifier,name,False,Nothing)
           candidateImportsMatch candidate node =
-            sort (map importTuple (candidateImports candidate)) ==
-              sort (map evidenceTuple (dependencyModuleImports node))
-          candidateExecutionMatches candidate = case (exactScope,candidateExecutionSources candidate) of
-            (Just scope,Just (graphs,_)) ->
-              let combined = Map.fromList [(executionGraphSha256 value,executionGraphBytes value)
-                    | value <- scopeExecutionGraphs scope ++ graphs]
-              in all ((== scopeProducerSha256 scope) . executionGraphProducer) graphs
-                && Map.size combined <= 4096
-                && length (scopeExecutionOwners scope)
-                  + length [value | value <- candidates, isJust (candidateExecutionSources value)] <= 4096
-                && sum (map BS.length (Map.elems combined)) <= 4 * 1024 * 1024
-            _ -> True
-          importTuple imported =
-            (qualifierText (candidateImportQualifier imported)
-            , candidateImportModule imported
-            , candidateImportBoot imported
-            , candidateImportSelected imported)
-          evidenceTuple imported =
-            (dependencyImportQualifier imported, dependencyImportName imported
-            , dependencyImportBoot imported, dependencyImportSelected imported)
+            let historical = mapM (\imported -> normalizeImport candidate
+                  (qualifierText (candidateImportQualifier imported))
+                  (candidateImportModule imported) (candidateImportBoot imported)
+                  (candidateImportSelected imported)) (candidateImports candidate)
+                currentImports = mapM (\imported -> normalizeImport candidate
+                  (dependencyImportQualifier imported) (dependencyImportName imported)
+                  (dependencyImportBoot imported) (dependencyImportSelected imported))
+                  (dependencyModuleImports node)
+                hidden imported = case candidateImportQualifier imported of
+                  CandidateUnqualified -> local
+                  CandidateThisUnit unit | unit == candidateUnit candidate -> local
+                  _ -> False
+                  where local = mkModuleName (candidateImportModule imported) `Set.member` sourceFreeOwners
+                          && (candidateUnit candidate,candidateImportModule imported) `Set.notMember` originalOwners
+            in not (any hidden (candidateImports candidate))
+              && case (historical,currentImports) of
+                (Just expected,Just actual) ->
+                  let originalEdge (qualifier,name,_,_) = isJust (exactImportKey candidate qualifier name)
+                      ordinary = sort . filter (not . originalEdge)
+                      actualOriginals = Set.fromList [(candidateUnit candidate,name)
+                        | edge@(_,name,_,_) <- actual, originalEdge edge]
+                  -- Exact-produced evidence separates original imports from
+                  -- ordinary source rows. Unchanged source bytes preserve the
+                  -- authored qualifiers; the recipe binds their exact owners.
+                  in ordinary expected == ordinary actual
+                    && actualOriginals == Map.keysSet (provenOriginals candidate)
+                _ -> False
+          graphInventoryMatches =
+            let producerMatches = case exactScope of
+                  Nothing -> True
+                  Just scope -> all ((== scopeProducerSha256 scope) . executionGraphProducer) combinedGraphs
+            in producerMatches && Map.size graphInventory <= 4096
+              && length combinedReferences <= 4096
+              && sum (map (BS.length . executionGraphBytes) combinedGraphs) <= 4 * 1024 * 1024
+          candidateExecutionMatches candidate = graphInventoryMatches
+            && either (const False) (const True) (candidateProof candidate)
           qualifierText CandidateUnqualified = "none"
           qualifierText (CandidateThisUnit unit) = "this:" ++ unit
           qualifierText (CandidateOtherUnit unit) = "other:" ++ unit
@@ -2809,9 +2880,7 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
               [reason | (rejected, reason) <-
                 [ (ms_mod_name summary == targetName, CandidateTarget)
                 , (not (candidateExecutionMatches candidate), CandidateExecutionProof)
-                , (ms_mod_name summary `Set.member` sourceFreeOwners, CandidateExactOwner)
-                , (any (\(_, imported) -> unLoc imported `Set.member` sourceFreeOwners)
-                    (ms_textual_imps summary ++ ms_srcimps summary), CandidateExactImport)
+                , (ms_mod_name summary `Set.member` protectedRoots, CandidateExactOwner)
                 , (candidateUnit candidate /= unitString (moduleUnit (ms_mod summary)), CandidateUnit)
                 , (not (candidateImportsMatch candidate node), CandidateImportTuple)
                 , (hasUntrackedCompileTimeExecution (ms_hspp_opts summary), CandidateUntrackedExecution)
@@ -2844,9 +2913,17 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
                         recorded <- and <$> mapM (fmap (either (const False) (const True))
                           . validatePackageImportRoot env) (packageInterfaces roots)
                         selectedImports <- forM (ms_textual_imps summary ++ ms_srcimps summary) $ \(qualifier, name) -> do
-                          resolved <- findImportedModule env (unLoc name) qualifier
+                          let qualifierKey = case qualifier of
+                                NoPkgQual -> "none"
+                                ThisPkg unit -> "this:" ++ unitString unit
+                                OtherPkg unit -> "other:" ++ unitString unit
+                              exact = exactImportKey candidate qualifierKey (moduleNameString (unLoc name))
+                          resolved <- case exact >>= (`Map.lookup` provenOriginals candidate) of
+                            Just _ -> pure Nothing
+                            Nothing -> Just <$> findImportedModule env (unLoc name) qualifier
                           case resolved of
-                            Found _ owner
+                            Nothing -> pure (Right Nothing)
+                            Just (Found _ owner)
                               | isHomeUnit (hsc_home_unit env) (moduleUnit owner)
                                 || owner == gHC_PRIM ->
                                   pure (Right Nothing)
@@ -2885,8 +2962,15 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
               Just node -> all (`Map.member` selected) (requiredHome node)
                 && all (`Map.member` bootSummaries) (requiredBoot node)
               Nothing -> False
-          shrink selected = Map.filterWithKey (\name (_, _, node, _) ->
-            all (`Map.member` selected) (requiredHome node)
+          dependencyClosed selected candidate node =
+            all (\imported -> case exactImportKey candidate
+                (dependencyImportQualifier imported) (dependencyImportName imported) of
+              Just key -> Map.member key (provenOriginals candidate)
+              Nothing -> isNothing (dependencyImportSelected imported)
+                || Map.member (mkModuleName (dependencyImportName imported)) selected)
+              (dependencyModuleImports node)
+          shrink selected = Map.filterWithKey (\name (candidate, _, node, _) ->
+            dependencyClosed selected candidate node
               && all (bootClosed selected) (requiredBoot node)
               && (not (Map.member name bootSummaries) || bootClosed selected name)) selected
           closed selected = let smaller = shrink selected in
@@ -2895,8 +2979,9 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
           artifact (candidate, _, node, _) = ExactIfaceArtifact
             (candidateUnit candidate) (candidateModule candidate)
             (candidateInterface candidate) (candidateInterfaceSha256 candidate)
-            [ (candidateUnit candidate, moduleNameString requirement)
-            | requirement <- requiredHome node ]
+            (Set.toAscList (Set.fromList
+              ([(candidateUnit candidate, moduleNameString requirement) | requirement <- requiredHome node]
+                ++ Map.keys (provenOriginals candidate))))
       forM_ (Map.elems (Map.difference initial admitted)) $ \(candidate, _, _, _) ->
         recordCandidate candidate CandidateClosedHome Nothing
       let recordAdmitted reason detail = forM_ (Map.elems admitted) $ \(candidate, _, _, _) ->
@@ -2904,8 +2989,26 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
       if Map.null admitted
         then pure Map.empty
         else do
-          loaded <- liftIO $ readExactIfaceArtifacts env
-            (map artifact (Map.elems admitted))
+          let candidates' = map artifact (Map.elems admitted)
+              originals = maybe [] (map (\(iface,_,_) -> iface) . scopeInterfaces) exactScope
+              values = maybe [] scopeValueInterfaces exactScope
+          captured <- liftIO $ readVerifiedExactIfaceClosureWithCheckedValues env
+            (candidates' ++ originals) values
+          let loaded = captured >>= \verified -> selectVerifiedExactInterfaces verified candidates'
+              originalInterfaces = captured >>= \verified -> selectVerifiedExactInterfaces verified originals
+              installLexical candidateGraph hydrated = case (exactScope,captured,originalInterfaces) of
+                (Nothing,_,_) -> pure (Right hydrated)
+                (Just scope,Right verified,Right originalIfaces) -> case
+                    checkedValueImportAuthorityFromVerified verified values of
+                  Left reason -> pure (Left reason)
+                  Right checked -> do
+                    let byOwner = Map.fromList [((exactUnit iface,exactModule iface),iface)
+                          | (iface,_) <- originalIfaces]
+                        lexical = [(iface,imports) | (key,imports) <- scopeLexical scope
+                          , Just iface <- [Map.lookup key byOwner]]
+                    installExactLexicalGraphWithScaffold candidateGraph lexical checked
+                      noGeneratedScaffoldImports hydrated
+                _ -> pure (Left "candidate original interface closure unavailable")
           case loaded of
             Left reason -> recordAdmitted CandidateInterfaceRead (Just reason) >> pure Map.empty
             Right interfaces
@@ -2923,8 +3026,9 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
                   -- Original native products use the extraction profile. GHC's
                   -- separate source load keeps its interpreter profile and
                   -- provisions every executable needed by a splice.
-                  hydratedResult <- hydrateCandidateHomeProducts env { hsc_mod_graph = nativeGraph }
-                    canonicalLoadGraph interfaces
+                  hydratedResult <- hydrateCandidateHomeProductsWithOriginals env { hsc_mod_graph = nativeGraph }
+                    canonicalLoadGraph interfaces (either (const []) id originalInterfaces)
+                    installLexical
                     [nativeSummary summary | (_,summary,_,_) <- Map.elems admitted] selectedBoots
                   case hydratedResult of
                     Left reason -> recordAdmitted CandidateHydration (Just reason) >> pure Map.empty
@@ -3012,14 +3116,14 @@ dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
       qualifierKey NoPkgQual = "none"
       qualifierKey (ThisPkg unit) = "this:" ++ unitString unit
       qualifierKey (OtherPkg unit) = "other:" ++ unitString unit
-  selectedPairs <- forM
-    graphSummaries $ \summary ->
-      case ml_hs_file (ms_location summary) of
-        Nothing -> pure Nothing
-        Just source -> do
-          absolute <- makeAbsolute source
-          pure (Just ((ms_mod_name summary, ms_hsc_src summary == HsBootFile), normalise absolute))
-  let selected = Map.fromList [pair | Just pair <- selectedPairs]
+  summarySources <- forM graphSummaries $ \summary ->
+    case ml_hs_file (ms_location summary) of
+      Nothing -> pure Nothing
+      Just source -> Just . normalise <$> makeAbsolute source
+  let selected = Map.fromList
+        [ ((ms_mod_name summary, ms_hsc_src summary == HsBootFile), source)
+        | (summary, Just source) <- zip graphSummaries summarySources
+        ]
       homeSelection NoPkgQual name boot = Map.lookup (name, boot) selected
       homeSelection (ThisPkg unit) name boot
         | unit == homeUnitId (hsc_home_unit env) = Map.lookup (name, boot) selected
@@ -3059,20 +3163,17 @@ dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
       , dependencyResolutionSelected = chosen
       , dependencyResolutionCandidates = nub throughSelected
       }
-  moduleNodes <- forM graphSummaries $ \summary -> do
+  moduleNodes <- forM (zip graphSummaries summarySources) $ \(summary, sourcePath) -> do
     let name = ms_mod_name summary
         isBoot = ms_hsc_src summary == HsBootFile
         directImports = sort . Set.toList . Set.fromList $
           [ (qualifier, unLoc imported, False) | (qualifier, imported) <- ms_textual_imps summary ] ++
           [ (qualifier, unLoc imported, True) | (qualifier, imported) <- ms_srcimps summary ]
-    source <- case ml_hs_file (ms_location summary) of
-      Nothing -> pure ""
-      Just path -> normalise <$> makeAbsolute path
     pure DependencyModule
       { dependencyModuleUnit = unitString (moduleUnit (ms_mod summary))
       , dependencyModuleName = moduleNameString name
       , dependencyModuleBoot = isBoot
-      , dependencyModuleSource = source
+      , dependencyModuleSource = maybe "" id sourcePath
       , dependencyModuleImports =
           [ DependencyImport (qualifierKey qualifier) (moduleNameString imported) boot
               (homeSelection qualifier imported boot)
@@ -3472,7 +3573,7 @@ normalVariant purpose path = do
    , pvGeneratedScaffold = generatedRecipe purpose
    , pvDownsweepExcludes = []
    , pvTransformParsed = transformFor purpose targetModName'
-   , pvPlan = \_timing modGraphRaw _sourceSelection -> pure CompilePlan
+   , pvPlan = \_timing modGraphRaw _selectedExact -> pure CompilePlan
       { cpLoadGraph = modGraphRaw
       , cpLoadTargets = Nothing
       , cpAfterLoad = pure ()
@@ -3650,7 +3751,6 @@ selectCurrentSourceOriginals admitted recipe sourceGraph = do
                   , isNothing (dependencyImportSelected edge)]) }
             selected = SourceSelectedOriginals
               [(executionNodeIdentity node,executionGraphSha256 (executionNodeGraph node)) | node <- nodes] evidence
-        _ <- either (liftIO . fail) pure (extendSourceSelectedOriginals (Just selected) admitted)
         setSession initial
         pure (Just selected)
   where
@@ -3960,8 +4060,7 @@ sessionVariant purpose scope path = do
    , pvTransformParsed = \env summary parsed -> do
        captured <- readIORef completedValuesRef
        transformWithCompletedValues captured purpose targetModName' env summary parsed
-   , pvPlan = \timing modGraphRaw sourceSelection -> do
-      selectedExact <- traverse (either (liftIO . fail) pure . extendSourceSelectedOriginals sourceSelection) exact
+   , pvPlan = \timing modGraphRaw selectedExact -> do
       let directSummaries = [ ms | ModuleNode _ ms <- mgModSummaries' modGraphRaw ]
           importsOf ms = [ unLoc lmn | (_, lmn) <- ms_textual_imps ms ]
           -- Everything that (directly or transitively) imports an injected
