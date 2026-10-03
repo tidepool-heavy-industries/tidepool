@@ -145,11 +145,19 @@ impl InputFixture {
                 LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             )
             .unwrap();
+        let previous_context = resident.run_context();
+        let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+        resident
+            .set_run_context(SessionRunContext {
+                lexical_scope: execution.private_scope(),
+                ..previous_context
+            })
+            .unwrap();
         let (bound, receiver, reservation) = compile_checked_binding(
             &mut resident,
             &self.recipe,
             include_str!("fixtures/activation-input-receiver.hs"),
-            None,
+            execution.clone(),
         );
         assert_eq!(bound.len(), 2, "receiver and native Unit reply bindings");
         for name in ["activationReceiver", "activationUnitReply"] {
@@ -159,13 +167,13 @@ impl InputFixture {
             receiver.asks.is_empty(),
             "pure receiver setup has no request sites"
         );
-        let execution = receiver
+        let checked_execution = receiver
             .certification
             .as_ref()
             .and_then(|certificate| certificate.checked_execution.as_ref())
             .expect("receiver setup has its checked native output proof");
-        assert!(execution.matches_target(&receiver.prepared));
-        let interface = execution
+        assert!(checked_execution.matches_target(&receiver.prepared));
+        let interface = checked_execution
             .value_interface_certificate()
             .expect("receiver setup issued its exact value-interface certificate");
         assert!(interface.is_checked_output());
@@ -185,12 +193,50 @@ impl InputFixture {
             matches!(outcome, ResidentOutcome::BindingsCommitted { .. }),
             "projected native binding completion: {outcome:?}"
         );
+        let intent = resident
+            .freeze_private_execution(
+                &execution,
+                crate::session::ExecutionPublicationIntent::CompletedCell,
+            )
+            .expect("freeze the checked receiver binding pair");
+        assert_eq!(intent.native_write_ids().len(), 2);
+        let publication = resident
+            .restage_ephemeral_execution_publication(intent)
+            .expect("stage receiver publication into ROOT");
+        let ticket = match publication {
+            crate::session::ExecutionPublication::Bindings(base) => base.stage().unwrap(),
+            crate::session::ExecutionPublication::Declarations(base) => {
+                let crate::session::CertifiedDeclarationPublication::Accepted(accepted) =
+                    base.certify().expect("certify receiver Value publication")
+                else {
+                    panic!("receiver Value publication must be accepted");
+                };
+                accepted.stage().unwrap()
+            }
+        };
+        assert_eq!(
+            resident
+                .publish_staged_public_manifest(ticket, &crate::session::PublicationDecision::new())
+                .expect("commit the checked receiver binding pair to ROOT"),
+            crate::session::PublicManifestCommit::Ephemeral,
+        );
+        resident.set_run_context(previous_context).unwrap();
+        resident.retire_scope(execution.private_scope());
         let retained = resident
             .state
             .retained_checked_value_artifact(interface.owner())
             .expect("receiver settlement retained the checked value-interface proof");
         assert!(Arc::ptr_eq(retained, &interface));
+        let published = resident
+            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .unwrap();
         for binder in &bound {
+            assert!(
+                published.bindings.iter().any(|(name, id)| {
+                    name == &binder.name && *id == SessionVarId::from_extract(binder.var_id)
+                }),
+                "ROOT must select the original checked receiver binding ID"
+            );
             assert!(resident
                 .state
                 .bindings()
@@ -517,7 +563,7 @@ fn compile_checked_binding(
     resident: &mut TestSession,
     recipe: &InputRecipe,
     source: &str,
-    execution: Option<Arc<crate::session::PrivateExecutionAdmission>>,
+    execution: Arc<crate::session::PrivateExecutionAdmission>,
 ) -> (
     Vec<BoundBinder>,
     CompiledTurn,
@@ -553,25 +599,16 @@ fn compile_checked_binding(
         injected_modules: view.injected_module_names(),
         reserved_declaration_modules: Vec::new(),
     });
-    let admission = match execution {
-        Some(execution) => resident.admit_cell_for_execution(
+    let admission = resident
+        .admit_cell_for_execution(
             execution,
             0,
             specification.clone(),
             specification.specification_digest(),
             recipe.digest(),
             view.include_paths(&recipe.include),
-        ),
-        None => resident.admit_cell_in(
-            scope,
-            0,
-            specification.clone(),
-            specification.specification_digest(),
-            recipe.digest(),
-            view.include_paths(&recipe.include),
-        ),
-    }
-    .expect("admit checked fixture bindings with their selected interfaces");
+        )
+        .expect("admit checked fixture bindings with their selected interfaces");
     let view = admission.view();
     let includes = admission.include_paths().to_vec();
     let include = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
@@ -644,7 +681,7 @@ fn original_value_probe(
     // The actual checked bind evaluates the original input and its display.
     let source = format!("originalInputProbe <- pure (({source}), T.pack (P.show ({source})))");
     let (bound, compiled, reservation) =
-        compile_checked_binding(resident, recipe, &source, Some(execution));
+        compile_checked_binding(resident, recipe, &source, execution);
     assert_eq!(bound.len(), 1);
     let ResidentOutcome::Completed { result, .. } = resident
         .run_bind_with_sites(
