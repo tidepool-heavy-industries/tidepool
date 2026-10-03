@@ -15990,6 +15990,48 @@ mod request_tests {
     }
 
     #[tokio::test]
+    async fn actor_empty_snapshot_answers_uncancelled_type_search() {
+        let (machines, context, source, _root) = actor_lookup_registry_fixture();
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        let (view, inputs, prepared) = workbench
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let view = actor_compile_view(session, context, &source, &[])?;
+                let inputs = session
+                    .capture_inspection_inputs(view.session_view())
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                let prepared = source.prepare_effectful(&view, &context.haskell_effects_alias)?;
+                Ok((view, inputs, prepared))
+            })
+            .await
+            .expect("original actor inspection view captures without native values");
+        assert!(inputs.view().reachable_values().is_empty());
+        assert!(inputs.view().exact_declaration_context().is_none());
+        assert!(!prepared.include.is_empty());
+        let results = inspect_lookup_queries(
+            &view,
+            Some(&inputs),
+            &prepared.preamble,
+            &prepared.imports,
+            &prepared.include,
+            &prepared.injected,
+            &context.haskell_effects_alias,
+            &[InspectionQuery::TypeSearch("Int -> Int".into())],
+            None,
+        )
+        .expect("uncancelled actor type search must return its actual worker response");
+        assert!(
+            matches!(&results[..], [tidepool_runtime::session::InspectionResult::TypeMatches { matches, .. }]
+            if matches.iter().any(|entry| entry.name == "id"
+                && entry.module.as_deref() == Some("GHC.Internal.Base")
+                && entry.quality == tidepool_runtime::session::TypeMatchQuality::Usable)),
+            "actor context must expose imported id for concrete Int -> Int: {results:#?}"
+        );
+    }
+
+    #[tokio::test]
     async fn cancelled_lookup_interrupts_its_started_compiler_request_and_recovers() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
         let workbench = Arc::new(ResidentActorWorkbench::new(
