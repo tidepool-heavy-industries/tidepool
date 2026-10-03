@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 
+#[cfg(test)]
+mod display_callback_tests;
 mod structured_introspection;
 pub(crate) mod to_haskell;
 
