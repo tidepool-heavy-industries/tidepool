@@ -43,12 +43,12 @@ finite observation. `ReplyAvailable` carries a typed result and its evidence;
 dependency must succeed. Polling a settled watch repeatedly returns its state
 without consuming it. Compose dependencies before registration.
 
-`pollWatch joined` displays the retained state. Truncated output offers
-`cellDisplay.more` without polling again. Bind evidence you need to keep:
+`pollWatch joined` returns the retained state without rendering its payload.
+Bind evidence you need to keep, then use `display` when you want to inspect it:
 
 ```haskell
 joinedState <- pollWatch joined
-inspectFull joinedState
+display joinedState
 ```
 
 Expansion does not poll or repeat effects. For a smaller task-specific view of
@@ -59,7 +59,7 @@ reportPairView :: WatchState (Settlement Text, Settlement Text)
                -> WatchState (Either ResponseFailure Text, Either ResponseFailure Text)
 reportPairView = fmap (\(left, right) -> (settledValue left, settledValue right))
 joinedState <- pollWatch joined
-inspectFull (reportPairView joinedState)
+display (reportPairView joinedState)
 ```
 
 `fmap` transforms only a ready value; pending and unavailable states survive.

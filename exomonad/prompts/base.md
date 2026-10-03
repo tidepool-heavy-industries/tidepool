@@ -101,12 +101,11 @@ execution does not authorize replay. A recovery receipt saying "not submitted"
 requires waiting for its recovery notice before resubmission. Keep
 `respond value` as one single-line unit with nothing after it.
 
-Displays are bounded; retain full evidence and project useful fields.
-`cellDisplay.more` pages retained display without replay. In a cell,
-`cellDisplay` denotes the preceding cell's final display. Ordinary data types
-need no deriving clause for display; function fields are opaque. A `Display`
-instance (`Tidepool.Inspection`) sets how a type reads in cells and settlement
-notices; `Show` stays the constructor form.
+Cell expressions and bindings retain typed values without rendering them. Use
+`display value` for bounded structured output; it returns a `DisplayHandle` whose
+field keys can be expanded independently with `expand`. Ordinary data types need
+no deriving clause for explicit display; unsupported fields are opaque. Use
+`display (show value)` for Haskell's textual `Show` form.
 
 # Evidence and semantic judgment
 

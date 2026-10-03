@@ -113,14 +113,12 @@ result <- Cmd.run [bash|git status --short|]
 let changed = T.lines <$> Cmd.stdout result
 ```
 
-An unbound command statement shows its observation. A command result bound in a
-cell shows a compact job, exit-status and stream-byte summary; the complete
-observation remains available through the binding. Displaying or reading it
-again does not execute the command.
-Inside an effectful block, `print value` emits bounded `Display` output in execution
-order, including output before a later failure. It uses the existing Console effect;
-it is not Prelude's `Show`-based IO print. State-machine actors log this output without
-waking a model. Large values still need projections or explicit pages.
+Command event output remains visible in execution order, including output before
+a later failure. A command result bound in a cell retains its complete observation;
+project the fields you need and use `display result` for bounded structured output.
+`display` returns a handle whose fields can be expanded independently. State-machine
+actors log this explicit display without waking a model. Use `display (show value)`
+when you need Haskell's textual `Show` form. Large values still need projections.
 Use `Cmd.quiet action` when an unbound command's observation is unnecessary, or
 when suppressing routine presentation inside a larger effectful computation.
 Quiet is scoped to that action and does not hide a stopped computation or its
@@ -212,12 +210,11 @@ owned invocation stops its unfinished commands.
 `Cmd.cancel job` requests cancellation; status/await reports outcome and cleanup.
 Live handles do not promise recovery after host restart.
 
-Completed Haskell results capture up to 1 MiB per stream. Automatic display has
-a shared 64 KiB budget per Haskell tool response; shortening display does not
-discard captured data. `inspectFull` also has a display allowance; use pages or
-Haskell projections for larger values. Foreground observations skip fully
-displayed pages; shortened captures remain
-available for explicit navigation. Explicit reads do not consume output. Read without executing again:
+Completed Haskell results capture up to 1 MiB per stream. Explicit display is
+bounded; shortening it does not discard captured data. Use Haskell projections
+for larger values. Foreground observations skip output already delivered through
+the command event stream; shortened captures remain available for explicit
+navigation. Explicit reads do not consume output. Read without executing again:
 
 ```haskell
 page <- Cmd.output (Cmd.job result)

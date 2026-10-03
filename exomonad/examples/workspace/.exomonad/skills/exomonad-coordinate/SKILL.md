@@ -46,7 +46,7 @@ by the collector:
 import qualified Tidepool.Actor as Actor
 let router = batchRouter localBatch
 state <- readWork router
-inspectFull (workSnapshotSummary candidateOutcomeSummary state)
+display (workSnapshotSummary candidateOutcomeSummary state)
 ```
 
 `workSnapshotSummary :: (value -> Text) -> WorkState value -> Text` shows source
@@ -77,7 +77,7 @@ cleanup owner to release workers you no longer need, retaining uncertain members
 retiredWork <- finishWorkBatch localBatch
 let Just group = forkGroupHandle worker
 released <- releaseGroup group
-inspectFull released
+display released
 ```
 
 Retain the cleanup receipt; a blocked step leaves that work with its current owner.
@@ -151,7 +151,7 @@ immediate children within their invocation instead. On an actionable notice, rea
 ```haskell
 let router = batchRouter localBatch
 state <- readWork router
-inspectFull (workSnapshotSummary candidateOutcomeSummary state)
+display (workSnapshotSummary candidateOutcomeSummary state)
 ```
 
 `unfoldWork` hands settlement delivery to the collector, suppressing each child's
