@@ -96,6 +96,8 @@ mod observation_budget_tests;
 mod overlay_resource;
 #[cfg(test)]
 mod packaged_catalog_tests;
+#[cfg(test)]
+mod prepared_display_tests;
 pub(crate) use overlay_resource::valid_artifact_path;
 #[cfg(all(test, feature = "codex-compat"))]
 mod source_reload_tests;
