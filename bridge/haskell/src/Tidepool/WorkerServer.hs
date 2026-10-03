@@ -114,15 +114,15 @@ captureOutput action = mask $ \restore -> do
       throwIO failure
   result <- try $ restore $ do
     exitCode <- runRedirected outHandle errHandle action
+    closeFailures <- attemptAll [hClose outHandle, hClose errHandle]
+    throwFirst closeFailures
     captured <- readCapturedResponse outPath errPath
     pure $ case captured of
       Right (out, err) -> (exitCodeToInt exitCode, out, err)
       Left message -> (1, TE.encodeUtf8 (T.pack
         (renderDiagsJson ReportWorkerFailure [Diag Nothing DiagError message])), BS.empty)
-  cleanupFailures <- attemptAll
-    [ hClose outHandle, hClose errHandle
-    , removeFile outPath, removeFile errPath
-    ]
+  ignoreFailures [hClose outHandle, hClose errHandle]
+  cleanupFailures <- attemptAll [removeFile outPath, removeFile errPath]
   case result of
     Left (failure :: SomeException) -> throwIO failure
     Right value -> throwFirst cleanupFailures >> pure value

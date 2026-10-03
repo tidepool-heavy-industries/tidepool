@@ -2,18 +2,23 @@
 
 module Main (main) where
 
-import Control.Exception (AsyncException(..), SomeException, bracket, catch, throwIO)
+import Control.Exception (AsyncException(..), IOException, bracket, catch, finally, throwIO, try)
 import Control.Monad (unless, void)
 import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import Data.Word (Word32)
+import Data.IORef (newIORef, atomicModifyIORef')
 import System.Directory (createDirectory, getTemporaryDirectory, listDirectory, removeFile, removeDirectoryRecursive)
 import System.Environment (getArgs, getExecutablePath, setEnv)
 import System.Exit (ExitCode(..))
-import System.IO (Handle, hClose, hFlush, openTempFile, stdout, stderr)
+import System.IO (Handle, hClose, hFlush, openTempFile, stdin, stdout, stderr)
 import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, terminateProcess, waitForProcess)
+import System.IO.Error (isResourceExhaustedError)
 import System.Timeout (timeout)
+import System.Posix.Resource
+  ( Resource(..), ResourceLimit(..), getResourceLimit, setResourceLimit )
+import GHC.IO.Handle (hDuplicate)
 import Tidepool.WorkerServer (runWorkerLoop)
 
 limit :: Int
@@ -23,7 +28,15 @@ main :: IO ()
 main = getArgs >>= \case
   ["--worker", scratch] -> do
     setEnv "TMPDIR" scratch
-    runWorkerLoop (\transaction -> transaction handler `catch` \(_ :: SomeException) -> pure ())
+    runWorkerLoop (\transaction -> transaction handler `catch` catchThreadKilled)
+  ["--worker-one-fd-slot", scratch] -> do
+    setEnv "TMPDIR" scratch
+    first <- newIORef True
+    runWorkerLoop $ \transaction -> do
+      limited <- atomicModifyIORef' first (\isFirst -> (False, isFirst))
+      if limited
+        then withOneFreeFd (transaction handler `catch` catchResourceExhaustion)
+        else transaction handler `catch` catchThreadKilled
   [] -> bracket temporary removeDirectoryRecursive check
   _ -> fail "unexpected worker response test arguments"
   where
@@ -112,6 +125,78 @@ check scratch = do
       leftovers <- listDirectory scratch
       unless (null leftovers) (fail ("capture tempfiles retained: " ++ show leftovers))
       putStrLn "worker response bounds and cleanup: 1 passed"
+  checkPartialAcquisition scratch
+
+checkPartialAcquisition :: FilePath -> IO ()
+checkPartialAcquisition scratch = do
+  executable <- getExecutablePath
+  bracket (createProcess (proc executable ["--worker-one-fd-slot", scratch])
+      { std_in = CreatePipe, std_out = CreatePipe, std_err = NoStream })
+    (\(_, _, _, child) -> terminateProcess child >> void (waitForProcess child)) $
+    \(inputHandle, outputHandle, _, child) -> do
+      input <- maybe (fail "missing limited worker stdin pipe") pure inputHandle
+      output <- maybe (fail "missing limited worker stdout pipe") pure outputHandle
+      BS.hPut input (BS.singleton 1)
+      hFlush input
+      ack <- exact output 1
+      unless (ack == BS.singleton 1) (fail "missing limited transaction acknowledgement")
+      BS.hPut input (BS.singleton 1 <> frame "." <> put32 1 <> frame "partial-open")
+      hFlush input
+      ackPartial <- timeout 10000000 (exact output 1)
+      unless (ackPartial == Just (BS.singleton 1))
+        (fail "second tempfile acquisition did not unwind the transaction")
+      BS.hPut input (BS.singleton 1)
+      hFlush input
+      ackNext <- exact output 1
+      unless (ackNext == BS.singleton 1) (fail "worker did not accept a later transaction")
+      forRequest input output "next-request" $ \code out err ->
+        unless (code == 0 && out == "complete-next-request" && BS.null err)
+          (fail "partial capture acquisition leaked resources")
+      BS.hPut input (BS.singleton 0)
+      hFlush input
+      ackRecovered <- exact output 1
+      unless (ackRecovered == BS.singleton 1) (fail "missing post-recovery acknowledgement")
+      hClose input
+      status <- waitForProcess child
+      unless (status == ExitSuccess) (fail "worker failed after partial acquisition recovery")
+      leftovers <- listDirectory scratch
+      unless (null leftovers) (fail ("partial acquisition retained tempfiles: " ++ show leftovers))
+
+catchThreadKilled :: AsyncException -> IO ()
+catchThreadKilled ThreadKilled = pure ()
+catchThreadKilled failure = throwIO failure
+
+catchResourceExhaustion :: IOException -> IO ()
+catchResourceExhaustion failure
+  | isResourceExhaustedError failure = pure ()
+  | otherwise = throwIO failure
+
+-- The worker child leaves exactly one descriptor slot available, so capture
+-- opens its stdout file and fails while acquiring the stderr file.
+withOneFreeFd :: IO a -> IO a
+withOneFreeFd action = do
+  (oldSoft, hard) <- getResourceLimit ResourceOpenFiles
+  let testSoft = ResourceLimit 64
+  setResourceLimit ResourceOpenFiles (min testSoft hard) hard
+  held <- fillUntilExhausted []
+  action `finally` do
+    mapM_ hClose held
+    setResourceLimit ResourceOpenFiles oldSoft hard
+  where
+    fillUntilExhausted held = do
+      result <- tryDuplicate
+      case result of
+        Right handle -> fillUntilExhausted (handle : held)
+        Left failure
+          | isResourceExhaustedError failure -> case held of
+              one : rest -> hClose one >> pure rest
+              [] -> throwIO failure
+          | otherwise -> throwIO failure
+    tryDuplicate = do
+      result <- try (hDuplicate stdin)
+      case result of
+        Left failure -> pure (Left (failure :: IOException))
+        Right handle -> pure (Right handle)
 
 forRequest :: Handle -> Handle -> String -> (Word32 -> BS.ByteString -> BS.ByteString -> IO ()) -> IO ()
 forRequest input output label assertion = do
