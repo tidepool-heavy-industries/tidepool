@@ -105,10 +105,10 @@ import Tidepool.CheckedRecipe
   , checkedItemCompilePurpose, checkedRecipeSource, replaceRecipeMarker, writeCheckedItemReceipt )
 import Tidepool.ExtractUtil (capitalize, shaHex, trySynchronous)
 import Tidepool.WorkerDiagnostics
-  ( throwCellSplitError, sourceFailureDiagnostics, renderInspectionDiagnostics
-  , reportDiags, reportDiagsWithWarnings )
-import Tidepool.ExtractRequest (RequestShapeError(..), validateRequestShape, InspectionRequest(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
-import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
+  ( throwCellSplitError, sourceFailureDiagnostics, reportDiags, reportDiagsWithWarnings )
+import Tidepool.ExtractRequest (RequestShapeError(..), validateRequestShape, WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
+import Tidepool.Introspection (encodeInspectionResults, runInspection)
+import Tidepool.InspectionRunner (isInspectionTypeQuery, runInspectionRequests)
 import Tidepool.ExactScope
   ( ExactCompilation(..), ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
   , originalGroupFromProjected, originalGroupFromCandidate
@@ -334,67 +334,18 @@ runDeclarationOperation args manifest = do
 runInspectionMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
 runInspectionMode compiler args _path = do
   res <- trySynchronous $ do
-    let queries = requestInspections args
     out <- maybe (fail "inspection request is missing its output path") pure (requestInspectOut args)
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
-    if length queries /= length (requestFiles args)
-      then fail "inspection request must carry exactly one source per query"
-      else pure ()
-    results <- case requestInspectTypeBatch args of
-      Nothing -> runSingletons scope queries
-      Just batchPath
-        | length queries > 1 && all isInspectionTypeQuery queries -> do
-            -- Validate producer infrastructure outside the SourceError catch:
-            -- only a compiler rejection of readable authored source may fall
-            -- back to the preserved singleton modules.
-            _ <- BS.readFile batchPath
-            compiled <- try (compiler CheckedEnvironment Set.empty GeneralCompile scope batchPath (requestIncludes args) (requestBuildProductsDir args))
-            case compiled of
-              Left exception
-                | requestInspectionStrict args -> throwIO exception
-                | otherwise -> case sourceFailureDiagnostics exception of
-                    Just _ -> runSingletons scope queries
-                    Nothing -> throwIO exception
-              Right successful -> inspect successful queries
-        | otherwise -> fail "inspection type batch requires at least two type queries and no other query kinds"
+        compile purpose path = compiler CheckedEnvironment Set.empty purpose scope path
+          (requestIncludes args) (requestBuildProductsDir args)
+        inspect successful = runInspection
+          (crHscEnv successful)
+          (crTargetTcGblEnv successful)
+          (crTargetRdrEnv successful)
+          (crInspectionProbes successful)
+    results <- runInspectionRequests args compile inspect
     BS.writeFile out (encodeInspectionResults results)
   reportDiags res
-  where
-    inspect successful queries = runInspection
-      (crHscEnv successful)
-      (crTargetTcGblEnv successful)
-      (crTargetRdrEnv successful)
-      (crInspectionProbes successful)
-      queries
-
-    -- A source path identifies an exact generated source in this request.
-    -- The producer shares it only for queries with identical scope/imports;
-    -- wildcard-normalized searches use their own source and compile purpose.
-    runSingletons scope queries = snd <$> foldM inspectNext (Map.empty, []) (zip (requestFiles args) queries)
-      where
-        inspectNext (environments, answers) (path, query) = do
-          let normalizesWildcards = case query of
-                InspectTypeSearch _ -> True
-                _ -> False
-              purpose = if normalizesWildcards then LookupTypeCompile else GeneralCompile
-              key = (normalizesWildcards, path)
-          compiled <- case Map.lookup key environments of
-            Just previous -> pure previous
-            Nothing -> try (compiler CheckedEnvironment Set.empty purpose scope path (requestIncludes args) (requestBuildProductsDir args))
-          result <- case compiled of
-            Left exception
-              | requestInspectionStrict args -> throwIO exception
-              | otherwise -> case sourceFailureDiagnostics exception of
-                  Just diagnostics ->
-                    pure [InspectionRejected (renderInspectionDiagnostics diagnostics)]
-                  Nothing -> throwIO exception
-            Right successful -> inspect successful [query]
-          pure (Map.insert key compiled environments, answers ++ result)
-
-isInspectionTypeQuery :: InspectionRequest -> Bool
-isInspectionTypeQuery query = case query of
-  InspectTypeOf _ -> True
-  _ -> False
 
 
 -- | Whether a generic extraction needs stable session values in scope.
