@@ -17,7 +17,7 @@ import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, te
 import System.IO.Error (IOErrorType(ResourceExhausted), ioeGetErrorType)
 import System.Timeout (timeout)
 import System.Posix.Resource
-  ( Resource(..), ResourceLimit(..), getResourceLimit, setResourceLimit )
+  ( Resource(..), ResourceLimit(..), ResourceLimits(..), getResourceLimit, setResourceLimit )
 import GHC.IO.Handle (hDuplicate)
 import Tidepool.WorkerServer (runWorkerLoop)
 
@@ -175,13 +175,16 @@ catchResourceExhaustion failure
 -- opens its stdout file and fails while acquiring the stderr file.
 withOneFreeFd :: IO a -> IO a
 withOneFreeFd action = do
-  (oldSoft, hard) <- getResourceLimit ResourceOpenFiles
-  let testSoft = ResourceLimit 64
-  setResourceLimit ResourceOpenFiles (min testSoft hard) hard
+  ResourceLimits oldSoft hard <- getResourceLimit ResourceOpenFiles
+  testSoft <- case hard of
+    ResourceLimit maximum -> pure (ResourceLimit (min 64 maximum))
+    ResourceLimitInfinity -> pure (ResourceLimit 64)
+    ResourceLimitUnknown -> fail "cannot determine open-file hard limit for worker test"
+  setResourceLimit ResourceOpenFiles (ResourceLimits testSoft hard)
   held <- fillUntilExhausted []
   action `finally` do
     mapM_ hClose held
-    setResourceLimit ResourceOpenFiles oldSoft hard
+    setResourceLimit ResourceOpenFiles (ResourceLimits oldSoft hard)
   where
     fillUntilExhausted held = do
       result <- tryDuplicate
