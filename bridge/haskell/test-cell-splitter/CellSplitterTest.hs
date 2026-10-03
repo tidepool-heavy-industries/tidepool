@@ -74,6 +74,7 @@ main :: IO ()
 main = getArgs >>= \case
   "--quasiquote-benchmark" : iterations : files -> quasiQuoteOccurrenceBenchmark iterations files
   ["--quasiquote-occurrences"] -> quasiQuoteOccurrenceChecks
+  ["--untracked-compile-time"] -> untrackedCompileTimeCompilation >> putStrLn "untracked compile-time: origin and cold/warm checks passed"
   ["--compiler-boundaries"] -> compilerBoundaryChecks
   ["--checked-admission"] -> checkedAdmissionChecks
   ["--cell-accumulation"] -> cellProgramStateChecks
