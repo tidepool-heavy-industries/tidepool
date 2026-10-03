@@ -40,6 +40,7 @@ main = do
   exactBudgetRetainsUnknownSuffixes
   tinyGrantsRetainConstructorNames
   oversizedConstructorNamesMakeProgressWithoutHidingFields
+  oversizedFieldNamesRetainTheirSuffixAndValue
   unavailableDetailDoesNotReplaceSupportedText
 
 applicationsParenthesizeOnlyAboveApplicationPrecedence :: IO ()
@@ -291,6 +292,28 @@ oversizedConstructorNamesMakeProgressWithoutHidingFields = do
   where
     requireExpansion key state = maybe (fail "constructor cursor was lost") pure
       (expandDisplayState 8192 key state)
+
+oversizedFieldNamesRetainTheirSuffixAndValue :: IO ()
+oversizedFieldNamesRetainTheirSuffixAndValue = do
+  let field = Text.replicate 100 "x"
+      state = newDisplayState 32 (Constructor "Outer" [(field, TextLeaf "A"), ("right", TextLeaf "B")])
+      visiblePrefix = "Outer {" <> Text.take 23 field <> "}"
+  assertEqual "a field prefix stays within its page allowance" visiblePrefix (displayStateText state)
+  case displayStateKeys state of
+    [(nameKey, _), (valueKey, _), (restKey, _)] -> do
+      value <- requireExpansion valueKey state
+      assertEqual "the field value is reachable before its name finishes" "A" (displayStateText value)
+      suffix <- requireExpansion nameKey value
+      assertEqual "the true field-name suffix is retained" (Text.drop 23 field <> " = ") (displayStateText suffix)
+      siblings <- requireExpansion restKey suffix
+      assertEqual "following fields remain independently available" " {right = B}" (displayStateText siblings)
+    _ -> fail "a clipped field prefix lost its name, value, or siblings"
+  let lazyState = newDisplayState 32 (Constructor "Outer" [(field, undefined)])
+  _ <- evaluate (Text.length (displayStateText lazyState))
+  assertEqual "a clipped field prefix does not force its value" 3 (length (displayStateKeys lazyState))
+  where
+    requireExpansion key state = maybe (fail "field cursor was lost") pure
+      (expandDisplayState 256 key state)
 
 unavailableDetailDoesNotReplaceSupportedText :: IO ()
 unavailableDetailDoesNotReplaceSupportedText = do

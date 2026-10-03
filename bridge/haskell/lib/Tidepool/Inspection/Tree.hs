@@ -250,7 +250,17 @@ preview budget depth next label tree
                   (shown, omitted, following, childUnavailable) = preview allowance (depth + 1) key (label <> "." <> field) child
                   marker = if null omitted then "" else "…"
                   piece = value <> prefix <> shown <> marker
-              in walk piece (keys ++ omitted) following (unavailable || childUnavailable) rest
+              in if T.length prefix > room value
+                then fieldPrefix value keys key unavailable prefix field child rest
+                else walk piece (keys ++ omitted) following (unavailable || childUnavailable) rest
+        fieldPrefix value keys key unavailable prefix field child rest =
+              let (shown, remaining, prefixUnavailable) = renderTree (room value) (TextLeaf prefix)
+                  (prefixKeys, following) = case remaining of
+                    Nothing -> ([], key)
+                    Just suffix -> ([(ExpansionKey key, label <> ".field-name", suffix)], key + 1)
+                  childKey = (ExpansionKey following, label <> "." <> field, child)
+                  restKey = (ExpansionKey (following + 1), label <> ".fields", Constructor "" rest)
+              in (bounded (value <> shown) closing, keys ++ prefixKeys ++ [childKey, restKey], following + 2, unavailable || prefixUnavailable)
         room value = budget - T.length value - T.length closing - 1
         bounded value suffix = T.take budget (value <> suffix)
     sequenceChildren opening closing count items = walk opening [] next False count items
