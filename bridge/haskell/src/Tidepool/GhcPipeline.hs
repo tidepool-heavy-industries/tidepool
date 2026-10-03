@@ -32,7 +32,7 @@ import GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..))
 import GHC.Driver.Hooks (hscCompileCoreExprHook, hscFrontendHook, runPhaseHook)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import qualified GHC.Data.Maybe as MaybeErr
-import GHC.Driver.Backend (backendGeneratesCode, backendWritesFiles, backendCanReuseLoadedCode, noBackend)
+import GHC.Driver.Backend (backendGeneratesCode, backendWritesFiles, backendCanReuseLoadedCode)
 import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit, hscSetFlags, runHsc')
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags, hsc_FC, hsc_targets, hsc_hooks, hsc_interp))
 import GHC.Driver.Monad (reflectGhc, reifyGhc, Session(..))
@@ -144,7 +144,8 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef,
 import Numeric (showHex)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName, takeFileName, normalise, pathSeparator, (</>))
-import System.Directory (canonicalizePath, makeAbsolute, doesFileExist, getModificationTime, getTemporaryDirectory)
+import System.Directory (canonicalizePath, makeAbsolute, doesFileExist, getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
+import System.Posix.Temp (mkdtemp)
 import System.IO (hPutStrLn, stderr, readFile', IOMode(ReadMode), withBinaryFile)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, forM_, when, unless, filterM)
@@ -157,7 +158,7 @@ import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteC
   , NativeParsedModule, unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import Tidepool.HomeProducts
-  ( hydrateCandidateHomeProductsWithOriginals, hydrateCandidateExecutable
+  ( hydrateCandidateHomeProductsWithOriginals, materializeCandidateCompilerView
   , validateCandidateInterfaceRequirements )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
@@ -1535,7 +1536,7 @@ type GutsMemo = Map.Map ModuleName GutsMemoEntry
 runCompileCycle
   :: PipelineSelection result -> Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
   -> RetainedContext -> Maybe String -> Bool -> Word64 -> Double -> Maybe ResourceTimingStart -> PipelineVariant -> FilePath -> Ghc result
-runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing requestIdentity sessionT0 setupResources variant path = withCycleHooks $ do
+runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing requestIdentity sessionT0 setupResources variant path = withCycleHooks $ withCompilerViewDirectory $ \compilerViewDirectory -> do
     forM_ (compilerProducerFor variant) $ \producer ->
       forM_ (pvExactScope variant) $ \scope ->
         unless (producer == scopeProducerSha256 scope)
@@ -1637,7 +1638,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
              , iface <- scopeValueInterfaces scope])
     acceptedCandidates <- case candidateManifest of
       Nothing -> pure Map.empty
-      Just manifest -> certifyModuleCandidates (compilerProducerFor variant) selectedExact
+      Just manifest -> certifyModuleCandidates compilerViewDirectory (compilerProducerFor variant) selectedExact
         sourceFreeOwners manifest modGraphRaw path
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
     -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
@@ -1695,8 +1696,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                                          pure ()
                                    _ -> liftIO $ ioError $ userError
                                      "source-selected native candidate lacks its current GHC executable"
-                           installed <- getSession
-                           setSession (hscUpdateHPT (\hpt -> addToHpt hpt name hmi) installed)
+                           installPreparedInterface name hmi
                  , cpTier = OptimizeEveryModule }
     liftIO (emitCount timing "candidate_executable_required"
       (toInteger (length [() | candidate <- Map.elems acceptedCandidates
@@ -1715,7 +1715,9 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
     -- (Opt_UseBytecodeRatherThanObjects).
     let canonicalizeLoadSummary summary =
           let original = ms_hspp_opts summary
-          in summary { ms_hspp_opts = (canonicalizeDFlags original)
+              selected = maybe summary admittedCandidateView
+                (Map.lookup (ms_mod_name summary) acceptedCandidates)
+          in selected { ms_hspp_opts = (canonicalizeDFlags original)
                { backend = backend original, ghcLink = ghcLink original } }
     targetName <- liftIO (targetModuleNameFor path)
     let plannedLoadGraph = cpLoadGraph plan
@@ -2885,6 +2887,7 @@ data AdmittedSourceCandidate = AdmittedSourceCandidate
   , admittedCandidateRoots :: PackageImportEvidence
   , admittedCandidateLoading :: CandidateLoading
   , admittedCandidateProof :: CanonicalInterfaceProof
+  , admittedCandidateView :: ModSummary
   }
 
 data CandidateAdmissionReason
@@ -2899,9 +2902,9 @@ data CandidateAdmissionReason
   deriving (Eq, Ord, Show)
 
 certifyModuleCandidates
-  :: Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> FilePath -> ModuleGraph -> FilePath
+  :: FilePath -> Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> FilePath -> ModuleGraph -> FilePath
   -> Ghc (Map.Map ModuleName AdmittedSourceCandidate)
-certifyModuleCandidates expectedProducer exactScope sourceFreeOwners manifest graph targetPath = do
+certifyModuleCandidates compilerViewDirectory expectedProducer exactScope sourceFreeOwners manifest graph targetPath = do
   timing <- liftIO readTimingEnabled
   observations <- liftIO (newIORef Map.empty)
   let record owner reason detail = when timing $ liftIO $
@@ -3201,20 +3204,24 @@ certifyModuleCandidates expectedProducer exactScope sourceFreeOwners manifest gr
                         Left reason -> recordAdmitted CandidateHydration (Just reason) >> pure Map.empty
                         Right hydrated -> do
                           setSession hydrated { hsc_mod_graph = hsc_mod_graph env }
-                          forM_ (Map.toAscList admitted) $ \(name,(_,summary,_,_)) ->
-                            when (backendGeneratesCode (backend (ms_hspp_opts summary))) $ do
-                              executableEnvironment <- getSession
+                          views <- fmap Map.fromList $ forM
+                            (zip [0..] (Map.toAscList admitted)) $ \(index,(name,(_,summary,_,_))) -> do
+                              currentEnvironment <- getSession
                               let originalFlags = ms_hspp_opts summary
-                                  executableSummary = summary {ms_hspp_opts =
+                                  executable = backendGeneratesCode (backend originalFlags)
+                                  canonicalSummary' = summary {ms_hspp_opts =
                                     (canonicalizeDFlags originalFlags)
                                       {backend = backend originalFlags, ghcLink = ghcLink originalFlags}}
-                              home <- liftIO $ hydrateCandidateExecutable executableEnvironment (proofs Map.! name) executableSummary
-                              setSession (hscUpdateHPT (\hpt -> addToHpt hpt name home) executableEnvironment)
-                              liftIO $ emitCount timing "candidate_finalized_core_bytecode" 1
+                              view <- liftIO $ materializeCandidateCompilerView compilerViewDirectory
+                                index executable currentEnvironment (proofs Map.! name) canonicalSummary'
+                              when executable $ liftIO $
+                                emitCount timing "candidate_finalized_core_make_view" 1
+                              pure (name,view)
                           recordAdmitted CandidateAccepted Nothing
                           pure (Map.mapWithKey (\name (candidate, summary, _, roots) -> AdmittedSourceCandidate
                             candidate roots (if backendGeneratesCode (backend (ms_hspp_opts summary))
-                              then CandidateLoadForExecution else CandidateInterfaceOnly) (proofs Map.! name)) admitted)
+                              then CandidateLoadForExecution else CandidateInterfaceOnly)
+                            (proofs Map.! name) (views Map.! name)) admitted)
   when timing $ liftIO $ do
     observed <- readIORef observations
     let counts = Map.fromListWith (+)
@@ -3826,6 +3833,15 @@ withCycleHooks action = reifyGhc $ \session -> bracket
   (\(hooks, logger) -> reflectGhc
     (getSession >>= \env -> setSession env {hsc_hooks=hooks, hsc_logger=logger}) session)
   (const (reflectGhc action session))
+
+-- Make owns temporary interface cleanup. Every candidate view is staged in
+-- this private request directory, retained through deferred target checking,
+-- then removed on success, refusal or cancellation.
+withCompilerViewDirectory :: (FilePath -> Ghc a) -> Ghc a
+withCompilerViewDirectory action = reifyGhc $ \session -> bracket
+  (getTemporaryDirectory >>= \directory -> mkdtemp (directory </> "tidepool-compiler-view.XXXXXX"))
+  removeDirectoryRecursive
+  (\directory -> reflectGhc (action directory) session)
 
 -- GHC's whole-module pipeline consults targets to choose bytecode generation.
 -- Restore only this field in the current environment, retaining the load's HPT.

@@ -7,6 +7,7 @@ module Tidepool.FinalizedCore
   , isUnsupportedFinalizedCore
   , captureFinalizedCore
   , decodeFinalizedCore
+  , attachFinalizedCore
   , finalizedCoreSiteInstances
   ) where
 
@@ -41,7 +42,7 @@ import GHC.Unit.Module.Env (mkModuleEnv)
 import GHC.Unit.Module.Location (ModLocation)
 import GHC.Unit.Module.ModDetails (md_types, md_insts)
 import GHC.Unit.Module.ModGuts (CgGuts(..))
-import GHC.Unit.Module.ModIface (mi_module, mi_iface_hash, mi_final_exts)
+import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_iface_hash, mi_final_exts, set_mi_extra_decls)
 import GHC.Unit.Module.WholeCoreBindings (WholeCoreBindings(..), emptyIfaceForeign)
 import GHC.Unit.Types (Module, UnitId)
 import GHC.Utils.Binary
@@ -187,42 +188,62 @@ validateFinalized env finalized
 -- environment; it performs neither source compilation nor Template Haskell.
 decodeFinalizedCore :: HscEnv -> HomeModInfo -> ModLocation -> BS.ByteString
   -> IO (Either FinalizedCoreFailure FinalizedModule)
-decodeFinalizedCore env home location bytes
+decodeFinalizedCore env home location bytes = do
+  admitted <- readFinalizedCore env home bytes
+  case admitted of
+    Left failure -> pure (Left failure)
+    Right (core, tycons) -> do
+      reconstructed <- trySynchronous $ do
+        types <- newIORef (md_types (hm_details home))
+        let knotted = env { hsc_type_env_vars = knotVarsFromModuleEnv
+              (mkModuleEnv [(coreOwner core, types)]) }
+            whole = WholeCoreBindings (coreBindings core) (coreOwner core)
+              location emptyIfaceForeign
+        bindings <- initIfaceCheck (text "tidepool finalized Core") knotted
+          (typecheckWholeCoreBindings types whole)
+        pure (FinalizedModule home CgGuts
+          { cg_module = coreOwner core
+          , cg_tycons = tycons
+          , cg_binds = bindings
+          , cg_ccs = []
+          , cg_foreign = NoStubs
+          , cg_foreign_files = []
+          , cg_dep_pkgs = Set.fromList (corePackages core)
+          , cg_modBreaks = Nothing
+          , cg_spt_entries = []
+          })
+      pure $ case reconstructed of
+        Left failure -> Left (FinalizedCoreDecodeFailure (displayException failure))
+        Right finalized -> Right finalized
+
+-- The demanding owner must verify the companion's certified SHA before this
+-- operation. Interface fingerprints deliberately exclude defining Core.
+-- GHC make can hydrate these native bindings under its dependency HPT without
+-- another frontend or an intermediate Core decode/re-encode.
+attachFinalizedCore :: HscEnv -> HomeModInfo -> BS.ByteString
+  -> IO (Either FinalizedCoreFailure ModIface)
+attachFinalizedCore env home bytes = fmap
+  (fmap (\(core, _) -> set_mi_extra_decls (Just (coreBindings core)) (hm_iface home)))
+  (readFinalizedCore env home bytes)
+
+readFinalizedCore :: HscEnv -> HomeModInfo -> BS.ByteString
+  -> IO (Either FinalizedCoreFailure (FinalizedCore, [TyCon]))
+readFinalizedCore env home bytes
   | BS.length bytes > finalizedCoreLimit = pure (Left FinalizedCoreTooLarge)
   | otherwise = do
       decoded <- trySynchronous $ do
         handle <- unsafeUnpackBinBuffer bytes
         core <- getWithUserData (hsc_NC env) handle
-        if coreMagic core /= "TPFINALCORE" || coreVersion core /= 1
+        pure $ if coreMagic core /= "TPFINALCORE" || coreVersion core /= 1
             || coreEmptyMetadata core /= 0
-          then pure (Left FinalizedCoreFormatMismatch)
+          then Left FinalizedCoreFormatMismatch
           else if coreCompiler core /= cProjectVersion
-            then pure (Left FinalizedCoreCompilerMismatch)
+            then Left FinalizedCoreCompilerMismatch
           else if coreOwner core /= mi_module (hm_iface home)
-          then pure (Left FinalizedCoreOwnerMismatch)
+            then Left FinalizedCoreOwnerMismatch
           else if coreInterfaceHash core /= mi_iface_hash (mi_final_exts (hm_iface home))
-            then pure (Left FinalizedCoreInterfaceMismatch)
-            else case traverse (resolveTyCon home) (coreTyCons core) of
-              Left failure -> pure (Left failure)
-              Right tycons -> do
-                types <- newIORef (md_types (hm_details home))
-                let knotted = env { hsc_type_env_vars = knotVarsFromModuleEnv
-                      (mkModuleEnv [(coreOwner core, types)]) }
-                    whole = WholeCoreBindings (coreBindings core) (coreOwner core)
-                      location emptyIfaceForeign
-                bindings <- initIfaceCheck (text "tidepool finalized Core") knotted
-                  (typecheckWholeCoreBindings types whole)
-                pure (Right (FinalizedModule home CgGuts
-                  { cg_module = coreOwner core
-                  , cg_tycons = tycons
-                  , cg_binds = bindings
-                  , cg_ccs = []
-                  , cg_foreign = NoStubs
-                  , cg_foreign_files = []
-                  , cg_dep_pkgs = Set.fromList (corePackages core)
-                  , cg_modBreaks = Nothing
-                  , cg_spt_entries = []
-                  }))
+            then Left FinalizedCoreInterfaceMismatch
+          else (core,) <$> traverse (resolveTyCon home) (coreTyCons core)
       pure $ case decoded of
         Left failure -> Left (FinalizedCoreDecodeFailure (displayException failure))
         Right result -> result
