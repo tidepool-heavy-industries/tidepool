@@ -1274,13 +1274,17 @@ async fn resident_await_watch_case(case: WatchCase) {
                         None,
                     )),
                     name: exomonad_actor::HASKELL_TOOL.into(),
-                    arguments: ToolArguments::Raw(binding.clone()),
+                    arguments: ToolArguments::Raw(format!("Cmd.await {binding} >> pure ()")),
                 })
                 .await
                 .expect("the binding remains usable after the failed cell")
                 .into_json()
                 .expect("serialize retained binding response");
             assert_eq!(binding_read["status"], "committed", "{binding_read:?}");
+            assert_eq!(
+                binding_read["items"][0]["operations"][0]["effect"], "command job",
+                "{binding_read:?}"
+            );
             forest.shutdown().await;
             task.expect("structured actor task")
                 .await
@@ -1317,9 +1321,9 @@ async fn resident_await_watch_case(case: WatchCase) {
                 return;
             }
             if retain_command_binding {
-                let binding = settled["items"][0]["output"]
+                let binding = settled["items"][0]["installedBindings"][0]
                     .as_str()
-                    .expect("the authored result is the retained binding reference");
+                    .expect("the host returns the retained binding reference");
                 assert!(!binding.contains("session_id:"), "{settled:?}");
                 assert_eq!(
                     settled["items"][0]["installedBindings"],
@@ -1327,8 +1331,8 @@ async fn resident_await_watch_case(case: WatchCase) {
                     "the host tracks the binding on the item that requested it: {settled:?}"
                 );
                 assert_eq!(
-                    settled["items"][0]["output"], binding,
-                    "the authored Haskell result explicitly selects the retained reference"
+                    settled["items"][0]["output"], "",
+                    "binding the job does not implicitly display or return it"
                 );
                 let operations = settled["items"][0]["operations"]
                     .as_array()
@@ -1345,6 +1349,27 @@ async fn resident_await_watch_case(case: WatchCase) {
                         .iter()
                         .all(|operation| operation["display"].is_null()),
                     "the effect receipt carries no display output: {settled:?}"
+                );
+                let binding_read = policy
+                    .dispatch_boxed(ToolInvocation {
+                        context: Some(ToolInvocationContext::external(
+                            "await-watch-test".into(),
+                            "turn-after-retain".into(),
+                            "read-retained-binding".into(),
+                            Some("read-retained-binding".into()),
+                            None,
+                        )),
+                        name: exomonad_actor::HASKELL_TOOL.into(),
+                        arguments: ToolArguments::Raw(format!("Cmd.await {binding} >> pure ()")),
+                    })
+                    .await
+                    .expect("the retained binding can be used by a later cell")
+                    .into_json()
+                    .expect("serialize retained binding response");
+                assert_eq!(binding_read["status"], "committed", "{binding_read:?}");
+                assert_eq!(
+                    binding_read["items"][0]["operations"][0]["effect"], "command job",
+                    "{binding_read:?}"
                 );
                 forest.shutdown().await;
                 return;
