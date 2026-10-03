@@ -691,12 +691,17 @@ decodeScope = do
           (fail "invalid completed original declaration identity")
         pure (Just ((unit,ownerModule),fingerprint))
     signature = do
-      array 3
+      array 5
+      magic <- nonempty
+      unless (magic == "TPCHECKEDSIGNATURE2") (fail "checked signature version")
       key <- nonempty
       rendering <- nonempty
-      names <- bounded 65536 (array 5 >> (CheckedSignatureName <$> nonempty <*> nonempty <*> nonempty <*> nonempty <*> nonempty))
-      unique "checked signature qualifiers" (map signatureQualifier names)
-      pure (CheckedSignature key rendering names)
+      interface <- decodeBytes
+      unless (not (BS.null interface) && BS.length interface <= 4 * 1024 * 1024)
+        (fail "checked signature interface bound")
+      names <- bounded 65536 (array 4 >> (CheckedSignatureName <$> nonempty <*> nonempty <*> nonempty <*> nonempty))
+      unique "checked signature Names" names
+      pure (CheckedSignature key rendering interface names)
 
 identity :: Decoder s SymbolIdentity
 identity = do

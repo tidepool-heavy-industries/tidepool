@@ -16,116 +16,141 @@ import qualified Data.Map.Strict as Map
 import Tidepool.ExactHydration (OriginalInterfaceArtifacts, originalInterfaceSha256)
 import Data.Maybe (catMaybes)
 import Numeric (showHex)
-import Control.Monad (forM, unless)
+import Control.Monad (forM, forM_, unless)
 import Data.IORef
-import Data.List (elemIndex, find, nubBy, sortOn)
+import Data.List (elemIndex, sortOn)
 import qualified Data.Text as T
 import Data.Generics (everywhereM, mkM)
 import GHC
-import GHC.Core.Type (tyConsOfType, coreView)
+import GHC.Core.Type (coreView)
+import GHC.Core.TyCo.FVs (tyCoVarsOfType)
+import GHC.Types.Var.Set (isEmptyVarSet)
+import GHC.CoreToIface (toIfaceType)
+import GHC.Iface.Syntax (IfaceDecl(..), IfaceIdDetails(..), freeNamesIfDecl)
+import GHC.Iface.Binary (putWithUserData, getWithUserData, TraceBinIFace(..), CompressionIFace(..))
+import GHC.IfaceToCore (tcIfaceDecl)
+import GHC.Utils.Binary (openBinMem, withBinBuffer, unsafeUnpackBinBuffer)
 import GHC.Core.TyCo.Rep (Type(..), TyLit(..))
 import GHC.Data.FastString (unpackFS)
 import GHC.Types.Var (VarBndr(..), ForAllTyFlag(..), Specificity(..), FunTyFlag(..), isTyVar, varType)
 import Tidepool.TypePolicy (stabilizeEffectRows)
 import GHC.Core.TyCon (tyConName)
-import GHC.Driver.Env (lookupType, hsc_home_unit)
-import GHC.Driver.Env.Types (hsc_unit_env)
+import GHC.Driver.Env (lookupType, hsc_home_unit, hsc_NC)
 import GHC.Iface.Env (lookupOrig)
 import GHC.Iface.Load (importDecl)
-import GHC.Tc.Utils.Monad (initIfaceLoad)
+import GHC.Tc.Utils.Monad (initIfaceLoad, initIfaceLcl)
 import qualified GHC.Data.Maybe as MErr
 import GHC.Types.Name (nameModule_maybe, nameOccName, wiredInNameTyThing_maybe)
 import GHC.Types.Name.Occurrence
-  ( isDataOcc, mkDataOcc, mkTcOcc, occNameString )
-import GHC.Types.Name.Ppr (mkNamePprCtx)
-import GHC.Types.Name.Reader (RdrName(..), GlobalRdrEnv, emptyGlobalRdrEnv, rdrNameOcc)
+  ( isDataOcc, isTcOcc, mkVarOcc, occNameString )
+import GHC.Types.Name.Reader (rdrNameOcc)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
-import GHC.Unit.Types (stringToUnit, unitString)
-import GHC.Unit.Home (isHomeUnit)
+import GHC.Unit.Types (unitString)
+import GHC.Unit.Home (isHomeUnit, mkHomeModule)
 import GHC.Utils.Outputable hiding ((<>), text)
+import qualified GHC.Utils.Outputable as Outputable
 
--- The rendering is parser input. Each external type-level Name has a private
--- qualifier, independent of lexical imports or the user's pretty-print scope.
+-- The human-readable type is presentation only. The compiler consumes its own
+-- binary IfaceType and resolves its Names against the admitted environment.
+-- The payload is producer-pinned by the enclosing checked receipt.
 data CheckedSignature = CheckedSignature
   { signatureKey :: String
-  , signatureType :: String
+  , signaturePresentation :: String
+  , signatureInterface :: BS.ByteString
   , signatureNames :: [CheckedSignatureName]
   } deriving (Eq, Ord, Show)
 
 data CheckedSignatureName = CheckedSignatureName
-  { signatureQualifier :: String
-  , signatureUnit :: String
+  { signatureUnit :: String
   , signatureModule :: String
   , signatureNamespace :: String
   , signatureOccurrence :: String
   } deriving (Eq, Ord, Show)
 
-captureCheckedSignature :: HscEnv -> String -> Type -> CheckedSignature
-captureCheckedSignature env key ty = CheckedSignature key rendered inventory
+interfaceNames :: IfaceDecl -> [CheckedSignatureName]
+interfaceNames = sortOn id . map identity . nonDetEltsUniqSet . freeNamesIfDecl
   where
-    originalNames = sortOn identity $ nubBy (==)
-      [ tyConName constructor
-      | constructor <- nonDetEltsUniqSet (tyConsOfType ty)
-      , Just _ <- [nameModule_maybe (tyConName constructor)] ]
-    identity :: Name -> (String, String, String, String)
     identity name = case nameModule_maybe name of
-      Just owner -> (unitString (moduleUnit owner), moduleNameString (moduleName owner),
-        namespace name, occNameString (nameOccName name))
-      Nothing -> ("", "", namespace name, occNameString (nameOccName name))
-    namespace :: Name -> String
-    namespace name = if isDataOcc (nameOccName name) then "data" else "type"
-    inventory =
-      [ CheckedSignatureName ("TidepoolCheckedName" ++ show index) unit owner nameSpace occurrence
-      | (index, name) <- zip [(0 :: Int)..] originalNames
-      , let (unit, owner, nameSpace, occurrence) = identity name ]
-    names = (mkNamePprCtx (PromTickCtx True True) (hsc_unit_env env) (emptyGlobalRdrEnv :: GlobalRdrEnv))
-      { queryQualifyName = \owner occurrence ->
-          case find (\entry -> signatureUnit entry == unitString (moduleUnit owner)
-              && signatureModule entry == moduleNameString (moduleName owner)
-              && signatureOccurrence entry == occNameString occurrence
-              && signatureNamespace entry == if isDataOcc occurrence then "data" else "type") inventory of
-            Just entry -> NameQual (mkModuleName (signatureQualifier entry))
-            Nothing -> NameUnqual }
-    rendered = renderWithContext
-      (defaultSDocContext { sdocStyle = mkUserStyle names AllTheWay }) (ppr ty)
+      Just owner -> CheckedSignatureName
+        (unitString (moduleUnit owner)) (moduleNameString (moduleName owner))
+        (if isDataOcc occurrence then "data" else if isTcOcc occurrence then "type" else "var")
+        (occNameString occurrence)
+        where occurrence = nameOccName name
+      Nothing -> error "checked interface type contains a non-external Name"
+
+captureCheckedSignature :: HscEnv -> String -> Type -> IO CheckedSignature
+captureCheckedSignature env key ty = do
+  unless (isEmptyVarSet (tyCoVarsOfType ty)) (fail "checked signature contains free type/coercion variables")
+  binder <- initIfaceLoad env (lookupOrig
+    (mkHomeModule (hsc_home_unit env) (mkModuleName "Tidepool.CheckedAnnotation")) (mkVarOcc key))
+  let interface = IfaceId binder (toIfaceType ty) IfVanillaId []
+      inventory = interfaceNames interface
+  unless (length inventory <= 65536) (fail "checked signature Name bound")
+  buffer <- openBinMem 1024
+  putWithUserData QuietBinIFace NormalCompression buffer interface
+  bytes <- withBinBuffer buffer (pure . BS.copy)
+  unless (BS.length bytes <= 4 * 1024 * 1024) (fail "checked signature interface bound")
+  pure (CheckedSignature key (renderWithContext defaultSDocContext (ppr ty)) bytes inventory)
 
 encodeCheckedSignature :: CheckedSignature -> Encoding
-encodeCheckedSignature signature = encodeListLen 3
-  <> text (signatureKey signature) <> text (signatureType signature)
+encodeCheckedSignature signature = encodeListLen 5
+  <> text "TPCHECKEDSIGNATURE2" <> text (signatureKey signature)
+  <> text (signaturePresentation signature) <> encodeBytes (signatureInterface signature)
   <> encodeListLen (fromIntegral (length (signatureNames signature)))
-  <> foldMap (\entry -> encodeListLen 5
-      <> text (signatureQualifier entry) <> text (signatureUnit entry)
-      <> text (signatureModule entry) <> text (signatureNamespace entry)
-      <> text (signatureOccurrence entry)) (signatureNames signature)
+  <> foldMap (\entry -> encodeListLen 4
+      <> text (signatureUnit entry) <> text (signatureModule entry)
+      <> text (signatureNamespace entry) <> text (signatureOccurrence entry)) (signatureNames signature)
   where text = encodeString . T.pack
 
--- Only the compiler-generated signature binder is rewritten. Authored
--- signatures, expressions and the reader environment retain ordinary lookup.
+resolveCheckedSignature :: HscEnv -> CheckedSignature -> IO Type
+resolveCheckedSignature env signature = do
+  unless (not (BS.null bytes) && BS.length bytes <= 4 * 1024 * 1024)
+    (fail "checked signature interface bound")
+  buffer <- unsafeUnpackBinBuffer bytes
+  interface <- getWithUserData (hsc_NC env) buffer
+  case interface of
+    IfaceId {ifName = binder, ifIdDetails = IfVanillaId, ifIdInfo = []}
+      | occNameString (nameOccName binder) == signatureKey signature
+      , nameModule_maybe binder == Just (mkHomeModule (hsc_home_unit env)
+          (mkModuleName "Tidepool.CheckedAnnotation")) -> pure ()
+    _ -> fail "checked signature contains a non-signature declaration"
+  unless (interfaceNames interface == signatureNames signature)
+    (fail "checked signature interface Name inventory mismatch")
+  -- Resolve the complete interface dependency inventory before type hydration.
+  -- A hidden home dependency must already have been admitted; package Names
+  -- retain normal interface loading under the pinned package environment.
+  forM_ (nonDetEltsUniqSet (freeNamesIfDecl interface)) $ \name -> do
+    owner <- maybe (fail "checked signature contains a local Name") pure (nameModule_maybe name)
+    found <- case wiredInNameTyThing_maybe name of
+      Just thing -> pure (Just thing)
+      Nothing -> lookupType env name
+    exists <- case found of
+      Just _ -> pure True
+      Nothing | isHomeUnit (hsc_home_unit env) (moduleUnit owner) -> pure False
+      Nothing -> initIfaceLoad env (importDecl name) >>= \loaded -> pure $ case loaded of
+        MErr.Succeeded _ -> True
+        MErr.Failed _ -> False
+    unless exists (fail ("checked signature Name is unavailable in the admitted environment: "
+      ++ unitString (moduleUnit owner) ++ ":" ++ moduleNameString (moduleName owner)
+      ++ ":" ++ occNameString (nameOccName name)))
+  resolved <- initIfaceLoad env $ initIfaceLcl
+    (mkHomeModule (hsc_home_unit env) (mkModuleName "Tidepool.CheckedAnnotation"))
+    (Outputable.text "checked signature") NotBoot (tcIfaceDecl True interface)
+  case resolved of
+    AnId identifier -> do
+      let ty = idType identifier
+      unless (isEmptyVarSet (tyCoVarsOfType ty)) (fail "checked signature resolved free type/coercion variables")
+      pure ty
+    _ -> fail "checked signature did not resolve to an Id"
+  where bytes = signatureInterface signature
+
+-- Only compiler-generated signature binders acquire exact Types. Authored
+-- source continues through ordinary GHC renaming and lexical lookup.
 rewriteCheckedAnnotations
   :: HscEnv -> [(String, CheckedSignature)] -> ParsedModule -> IO ParsedModule
 rewriteCheckedAnnotations env annotations parsed = do
-  resolved <- forM annotations $ \(binder, signature) -> do
-    names <- forM (signatureNames signature) $ \entry -> do
-      let owner = mkModule (stringToUnit (signatureUnit entry))
-            (mkModuleName (signatureModule entry))
-      occurrence <- case signatureNamespace entry of
-        "type" -> pure (mkTcOcc (signatureOccurrence entry))
-        "data" -> pure (mkDataOcc (signatureOccurrence entry))
-        _ -> fail "checked signature has an invalid namespace"
-      name <- initIfaceLoad env (lookupOrig owner occurrence)
-      found <- case wiredInNameTyThing_maybe name of
-        Just thing -> pure (Just thing)
-        Nothing -> lookupType env name
-      exists <- case found of
-        Just _ -> pure True
-        Nothing | isHomeUnit (hsc_home_unit env) (moduleUnit owner) -> pure False
-        Nothing -> initIfaceLoad env (importDecl name) >>= \loaded -> pure $ case loaded of
-          MErr.Succeeded _ -> True
-          MErr.Failed _ -> False
-      unless exists (fail ("checked signature Name is unavailable in the admitted environment: "
-        ++ signatureUnit entry ++ ":" ++ signatureModule entry ++ ":" ++ signatureNamespace entry ++ ":" ++ signatureOccurrence entry))
-      pure (entry, name)
-    pure (binder, names)
+  resolved <- forM annotations $ \(binder, signature) ->
+    (,) binder <$> resolveCheckedSignature env signature
   counts <- newIORef []
   rewritten <- everywhereM (mkM (rewriteSignature counts resolved)) (pm_parsed_source parsed)
   seen <- readIORef counts
@@ -133,31 +158,21 @@ rewriteCheckedAnnotations env annotations parsed = do
     (fail "generated checked annotation is missing or duplicated")
   pure parsed { pm_parsed_source = rewritten }
   where
-    rewriteSignature :: IORef [String] -> [(String, [(CheckedSignatureName, Name)])] -> Sig GhcPs -> IO (Sig GhcPs)
+    rewriteSignature :: IORef [String] -> [(String, Type)] -> Sig GhcPs -> IO (Sig GhcPs)
     rewriteSignature counts resolved signature@(TypeSig extension binders ty) =
-      case [(binder,names) | (binder, names) <- resolved,
+      case [(binder, exact) | (binder, exact) <- resolved,
           map (occNameString . rdrNameOcc . unLoc) binders == [binder]] of
         [] -> pure signature
-        [(binder,names)] -> do
+        [(binder, exact)] -> do
           modifyIORef' counts (binder :)
-          TypeSig extension binders <$> everywhereM (mkM (rewriteType names)) ty
+          pure (TypeSig extension binders (replaceBody exact ty))
         _ -> fail "duplicate checked annotation binder"
     rewriteSignature _ _ signature = pure signature
+    replaceBody :: Type -> LHsSigWcType GhcPs -> LHsSigWcType GhcPs
+    replaceBody exact (HsWC extension (L location (HsSig signatureExtension _ body))) =
+      HsWC extension (L location (HsSig signatureExtension (HsOuterImplicit noExtField) (fmap (const (XHsType exact)) body)))
 
-    rewriteType :: [(CheckedSignatureName, Name)] -> HsType GhcPs -> IO (HsType GhcPs)
-    rewriteType names ty@(HsTyVar extension promotion located) = case unLoc located of
-      Qual qualifier occurrence -> case
-          [name | (entry, name) <- names,
-            signatureQualifier entry == moduleNameString qualifier,
-            signatureOccurrence entry == occNameString occurrence] of
-        [name] -> pure (HsTyVar extension promotion (fmap (const (Exact name)) located))
-        [] -> fail "generated checked annotation contains an unproved Name"
-        _ -> fail "generated checked annotation has ambiguous Name authority"
-      _ -> pure ty
-    rewriteType _ ty = pure ty
-
-
--- The parser rendering is useful presentation, but equality is the complete
+-- The rendering is presentation only; canonical equality is the complete
 -- ordered GHC type structure and the interfaces of its exact original Names.
 -- Unsealed witnesses remain transaction-local until product publication.
 data CheckedTypeWitness = CheckedTypeWitness
@@ -170,14 +185,15 @@ data CheckedTypeWitness = CheckedTypeWitness
 instance Show CheckedTypeWitness where
   show witness = "CheckedTypeWitness " ++ show (witnessSignature witness)
 
-captureCheckedTypeWitness :: HscEnv -> Type -> Maybe CheckedTypeWitness
+captureCheckedTypeWitness :: HscEnv -> Type -> IO (Maybe CheckedTypeWitness)
 captureCheckedTypeWitness env original = case evalStateT (shape 0 [] stable) (0 :: Int) of
-  Left _ -> Nothing
-  Right (encoded, owners) ->
+  Left _ -> pure Nothing
+  Right (encoded, owners) -> do
     let bytes = toStrictByteString encoded
-    in if BS.length bytes > 4 * 1024 * 1024 then Nothing else Just
-      (CheckedTypeWitness (captureCheckedSignature env "activation-input" stable) bytes
-        (Map.elems (Map.fromList [(ownerIdentity owner, owner) | owner <- owners])) Nothing)
+    if BS.length bytes > 4 * 1024 * 1024 then pure Nothing else do
+      signature <- captureCheckedSignature env "activation-input" stable
+      pure (Just (CheckedTypeWitness signature bytes
+        (Map.elems (Map.fromList [(ownerIdentity owner, owner) | owner <- owners])) Nothing))
   where
     stable = stabilizeEffectRows original
     ownerIdentity owner = (unitString (moduleUnit owner), moduleNameString (moduleName owner))

@@ -91,6 +91,25 @@ source-import graph. Retained artifact requirements alone grant no lexical
 selection. Session implementation anchors use their existing independent
 checked-value and lexical authorities, never ordinary source-selection rows.
 
+## Checked type signatures
+
+`TPCHECKEDSIGNATURE2` carries a compiler-produced GHC interface declaration,
+its exact external Name inventory, and separate presentation text. Generated
+annotations use a placeholder which is replaced with `XHsType` before renaming;
+the presentation text is never parsed to reconstruct the type. GHC supplies the
+interface codec and type hydration, including binder kinds and coercions.
+
+The enclosing checked receipt pins producer identity and the complete payload.
+Only those admitted bytes reach the native GHC decoder. Before hydration, the
+worker verifies the signature declaration identity and its complete Name census
+against the receipt; home Names must already exist in the admitted environment.
+The canonical activation witness remains a separate semantic equality contract:
+GHC binary bytes are not a canonical type fingerprint.
+
+This is a strict internal migration. Old three-field printed signatures are
+rejected. Deploy the Rust consumer and Haskell worker together and regenerate
+compiler-produced artifacts through their owning producers.
+
 ## Regenerate fixtures
 
 After changing translation or serialization, regenerate through the canonical
@@ -134,10 +153,11 @@ process lifecycle. It either starts this worker for one typed request or keeps
 one worker alive with `--worker-loop-v2`. `Tidepool.WorkerServer` owns only the
 framed stdin/stdout loop; `Tidepool.GhcPipeline` owns the resident compiler
 state. `Main` decodes a typed request and dispatches compiler operations; it is
-not a second CLI or workflow engine. Transaction-local target and
-`Tidepool.Session.*` modules are removed from the shared memo when the
-transaction closes; reusable library interfaces remain warm. Transactions and
-their requests are serialized and carry their own CWD and compiler options.
+not a second CLI or workflow engine. Compiler-valued caches and recovery graphs belong to one admitted transaction
+and are released when it closes. A synchronous failed compilation clears those
+graphs before a permitted retry; cancellation terminates the transaction.
+Transactions and their requests are serialized and carry their own CWD and
+compiler options.
 
 The worker process environment is fixed at startup. Restart the daemon after
 changing extractor diagnostic variables, GHC configuration, or its watched

@@ -36,7 +36,7 @@ checkedAdmissionChecks = withScratch $ \root -> do
         inventory ["Val7"] [] [] Nothing
       item = CheckedItemAdmission AuthoredCheckedItem "item-admission" "cell-receipt" 2
         (digest source) "bind" ["café"] inventory ["Val7"]
-        [CheckedSignature "__tidepool_cell_pin_2_café" "Int" []]
+        [CheckedSignature "__tidepool_cell_pin_2_café" "Int" (BS.singleton 0) []]
         Nothing Nothing 7 "prefix" [] Nothing Nothing [] []
       display = CheckedDisplayAdmission "display-admission" "cell-receipt" 2
         "observation" 6 7 "prefix" 32 [] inventory ["Val7"] [] "rendered" Nothing [] []
@@ -73,7 +73,7 @@ checkedAdmissionChecks = withScratch $ \root -> do
   expectFailure "injected order" itemError (validateCheckedItemAdmission (args { requestInjectVals = ["Val7", "Val7"] }) item source verdict)
   expectFailure "generation" itemError (validateCheckedItemAdmission (args { requestBindGen = Just 8 }) item source verdict)
   expectFailure "verdict" itemError (validateCheckedItemAdmission args item source (StmtBinders KExpr [] []))
-  expectFailure "signature key" itemError (validateCheckedItemAdmission args (item { itemSignatures = [CheckedSignature "wrong" "Int" []] }) source verdict)
+  expectFailure "signature key" itemError (validateCheckedItemAdmission args (item { itemSignatures = [CheckedSignature "wrong" "Int" (BS.singleton 0) []] }) source verdict)
   let reserved = "let __tidepool_checked_annotation_0 = 1"
   expectFailure "reserved annotation" "authored checked item uses a compiler-reserved annotation name"
     (validateCheckedItemAdmission args (item { itemSourceDigest = digest reserved }) reserved verdict)

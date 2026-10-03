@@ -370,7 +370,8 @@ cellExpressionEvidence result = forM expressionIds $ \identifier -> do
         , expressionPlanHeads = nominalHeadsOfType stableType
         , expressionPlanImports = cellPinTypeImports names stableType
         }
-  pure (plan, captureCheckedSignature (crHscEnv result) occurrence stableType)
+  signature <- captureCheckedSignature (crHscEnv result) occurrence stableType
+  pure (plan, signature)
   where
     environment = crTargetTcGblEnv result
     names = mkNamePprCtx (PromTickCtx True True)
@@ -405,8 +406,8 @@ cellCheckedBinderSignatures result = forM identifiers $ \identifier -> do
     (stabilizeCellEvidenceType supply (stabilizeEffectRows (idType identifier)))
   when (zonkAnyTyCon `elementOfUniqSet` tyConsOfType stable) $
     fail "checked binder still contains an unresolved internal type"
-  pure (captureCheckedSignature (crHscEnv result)
-    (occNameString (nameOccName (idName identifier))) stable)
+  captureCheckedSignature (crHscEnv result)
+    (occNameString (nameOccName (idName identifier))) stable
   where
     identifiers = Map.elems $ Map.fromList
       [(occNameString (nameOccName (idName identifier)), identifier)

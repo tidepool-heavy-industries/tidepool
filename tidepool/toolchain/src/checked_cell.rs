@@ -79,11 +79,11 @@ pub struct ExactSignatureName {
 }
 
 /// A compiler-issued native IfaceType and its original external Names.
-/// `source` is presentation text; compilation consumes the opaque payload.
+/// `presentation` is human-readable text; compilation consumes the opaque payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactCheckedSignature {
     key: String,
-    source: String,
+    presentation: String,
     iface: Arc<[u8]>,
     names: Vec<ExactSignatureName>,
 }
@@ -304,8 +304,8 @@ impl ExactCheckedSignature {
     pub fn key(&self) -> &str {
         &self.key
     }
-    pub fn source(&self) -> &str {
-        &self.source
+    pub fn presentation(&self) -> &str {
+        &self.presentation
     }
     pub fn names(&self) -> &[ExactSignatureName] {
         &self.names
@@ -2606,7 +2606,7 @@ fn encode_signature(signature: &ExactCheckedSignature) -> Value {
     array([
         text("TPCHECKEDSIGNATURE2"),
         text(&signature.key),
-        text(&signature.source),
+        text(&signature.presentation),
         Value::Bytes(signature.iface.to_vec()),
         Value::Array(
             signature
@@ -2934,7 +2934,7 @@ fn decode_signature(value: &Value) -> Result<ExactCheckedSignature, CompileError
     }
     Ok(ExactCheckedSignature {
         key,
-        source: string(&fields[2])?.to_owned(),
+        presentation: string(&fields[2])?.to_owned(),
         iface: iface.clone().into(),
         names,
     })
@@ -3067,7 +3067,7 @@ mod tests {
         );
         let signature = decode_signature(&wire).unwrap();
         assert_eq!(signature.key(), "pin");
-        assert_eq!(signature.source(), "UI presentation");
+        assert_eq!(signature.presentation(), "UI presentation");
         assert_eq!(signature.iface.as_ref(), &[1, 2, 3]);
         assert_eq!(signature.names()[1].unit(), "main");
         assert_eq!(signature.names()[1].module(), "Owner");
@@ -3508,7 +3508,7 @@ mod tests {
                 expression: None,
                 signatures: vec![ExactCheckedSignature {
                     key: "__tidepool_cell_pin_0_sessionInput".into(),
-                    source: "Int".into(),
+                    presentation: "Int".into(),
                     // Nonexecuting role-validation fixture, not a GHC payload.
                     iface: vec![1].into(),
                     names: Vec::new(),

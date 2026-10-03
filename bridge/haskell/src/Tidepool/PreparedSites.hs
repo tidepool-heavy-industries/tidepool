@@ -196,7 +196,7 @@ elaboratePreparedSites :: HscEnv -> SiteAuthority -> Map String Id -> [CoreBind]
   -> IO ([CoreBind], [YieldSite], [PreparedSite], TypeGraph, [SiteRejection])
 elaboratePreparedSites env authority siblings bindings = do
   uniques <- mkSplitUniqSupply 's'
-  let (bindings', final) = runState (traverse rewriteBind bindings)
+  (bindings', final) <- runStateT (traverse rewriteBind bindings)
         (ElaborationState uniques mempty [] [] emptyTypeGraphBuilder [])
   pure ( bindings'
        , reverse (esSites final)
@@ -261,8 +261,9 @@ elaboratePreparedSites env authority siblings bindings = do
                 Right (wireType, siteInputs) -> do
                   missing <- traverse freshEvidence (spMissingEvidence plan)
                   ordinal <- nextOrdinal originName
+                  witnesses <- liftIO (traverse (captureCheckedTypeWitness env) siteInputs)
                   let site = (buildYieldSite spec originName ordinal (spAnswer plan) siteInputs)
-                        { ysInputTypeWitnesses = map (captureCheckedTypeWitness env) siteInputs }
+                        { ysInputTypeWitnesses = witnesses }
                       literal = mkCoreConApps intDataCon
                         [Lit (LitNumber LitNumInt (fromIntegral (ysSite site)))]
                   current <- get

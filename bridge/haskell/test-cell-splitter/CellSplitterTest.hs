@@ -1318,18 +1318,18 @@ mixedInspectionCompilation = bracket temporary removeDirectoryRecursive $ \root 
     , "__tidepool_inspect_0 = (7 :: Int)"
     , "__tidepool_inspect_1 = True"
     ]
-  withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
-    checked <- runRequest $ \compiler ->
-      compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
-    inspected <- runInspection
-      (crHscEnv checked) (crTargetTcGblEnv checked)
-      (crTargetRdrEnv checked) (crInspectionProbes checked)
-      [InspectTypeOf "7", InspectNameInfo "missingInspectionName", InspectTypeOf "True"]
-    case inspected of
-      [InspectionType "7" first _, InspectionNotFound "missingInspectionName", InspectionType "True" second _] -> do
-        assertContains "first query uses probe zero" "Int" first
-        assertContains "non-type query leaves the second probe ordinal unchanged" "Bool" second
-      other -> fail ("mixed inspection returned an unexpected result: " ++ show other)
+  withResidentPipelineSelectedRequests [root] $ \runRequest ->
+    runRequest (pure ()) $ \compiler -> do
+      checked <- compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+      inspected <- runInspection
+        (crHscEnv checked) (crTargetTcGblEnv checked)
+        (crTargetRdrEnv checked) (crInspectionProbes checked)
+        [InspectTypeOf "7", InspectNameInfo "missingInspectionName", InspectTypeOf "True"]
+      case inspected of
+        [InspectionType "7" first _, InspectionNotFound "missingInspectionName", InspectionType "True" second _] -> do
+          assertContains "first query uses probe zero" "Int" first
+          assertContains "non-type query leaves the second probe ordinal unchanged" "Bool" second
+        other -> fail ("mixed inspection returned an unexpected result: " ++ show other)
   where
     temporary = do
       parent <- getTemporaryDirectory

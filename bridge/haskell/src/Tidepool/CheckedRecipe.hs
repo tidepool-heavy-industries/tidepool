@@ -102,14 +102,14 @@ checkedRecipeSource admission template source = case itemKind admission of
     unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` template)
       (fail "checked bind requires canonical recipe version one")
     let aliases = checkedRecipeAnnotations admission
-        declarations = intercalate "; " [alias ++ " :: (" ++ signatureType signature ++ "); "
-          ++ alias ++ " = " ++ binder | ((alias,signature),binder) <- zip aliases (itemBinders admission)]
+        declarations = intercalate "; " [alias ++ " :: (); "
+          ++ alias ++ " = " ++ binder | ((alias,_),binder) <- zip aliases (itemBinders admission)]
         result = intercalate ", " (map fst aliases)
     amended <- if null aliases then pure template else replaceRecipeMarker "{{TURN_STMT}}"
       ("{{TURN_STMT}}\n; let { " ++ declarations ++ " }\n") template
     pure (spliceTemplate amended source result)
   "expr" -> case checkedRecipeAnnotations admission of
-    [(alias,signature)] -> do
+    [(alias,_)] -> do
       observation <- maybe (fail "checked expression has no owning observation name") pure (itemObservationName admission)
       unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` template)
         (fail "checked expression capture requires canonical bind recipe version two")
@@ -119,7 +119,7 @@ checkedRecipeSource admission template source = case itemKind admission of
             Just "pure" -> "let { " ++ observation ++ " = (\\() -> " ++ alias ++ ") }"
             _ -> ""
       when (null liftStatement) (fail "checked expression has no certified lift plan")
-      let statement = "let { " ++ alias ++ " :: (" ++ signatureType signature ++ "); "
+      let statement = "let { " ++ alias ++ " :: (); "
             ++ alias ++ " = (\n" ++ source ++ "\n) }\n; " ++ liftStatement
       pure (spliceTemplate template statement observation)
     _ -> fail "checked expression has no unique full signature"

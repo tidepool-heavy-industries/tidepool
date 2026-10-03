@@ -1001,8 +1001,8 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
       (requestRetainedGenerations args) (pprAcceptedCandidates prepared) (compilationScope <$> pprExactCompilation prepared)
     when (maybe False ((== HostActivationInput) . itemPurpose) admitted) $ do
       input <- either fail pure (activationPreviewInputType (prTargetTcGblEnv result))
-      witness <- maybe (fail "activation input type has no complete canonical witness") pure
-        (captureCheckedTypeWitness hscEnv input)
+      witness <- captureCheckedTypeWitness hscEnv input
+        >>= maybe (fail "activation input type has no complete canonical witness") pure
       sealed <- sealCheckedTypeWitness originalInterfaces witness
         >>= maybe (fail "activation input type lacks an original owner interface seal") pure
       encoded <- maybe (fail "activation input type witness is unsealed") pure (encodeCheckedTypeWitness sealed)

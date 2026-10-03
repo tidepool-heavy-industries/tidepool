@@ -1,6 +1,7 @@
 module CellProgramStateTest (cellProgramStateChecks) where
 
 import Control.Monad (unless)
+import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Tidepool.Binders
@@ -22,7 +23,7 @@ cellProgramStateChecks = do
       lastPlan = plan [item 5 KExpr]
       pin key = CheckedBinderPin key "Int" [] []
       expression key = CellExpressionPlan key ExpressionPure ExpressionRendered "Int" [] []
-      signature key ty = CheckedSignature key ty []
+      signature key ty = CheckedSignature key ty (BS.singleton 0) []
       signatures1 = [signature "pin-0" "Int",signature "expr-1" "Bool"]
       signatures2 = [signature "expr-4" "Char",signature "pin-0" "Duplicate"]
       expressions1 = [expression "expr-1"]
@@ -42,7 +43,7 @@ cellProgramStateChecks = do
     (programCheckedSignatures first == signatures1
       && programExpressions middle == expressions1
       && programCheckedSignatures final == signatures1 ++ signatures2
-      && [signatureType value | value <- programCheckedSignatures final, signatureKey value == "pin-0"]
+      && [signaturePresentation value | value <- programCheckedSignatures final, signatureKey value == "pin-0"]
         == ["Int","Duplicate"])
   assert "observations preserve legacy list append bytes"
     (encodeCellOut (plan (cellPlanItems firstPlan ++ cellPlanItems declaration ++ cellPlanItems lastPlan))

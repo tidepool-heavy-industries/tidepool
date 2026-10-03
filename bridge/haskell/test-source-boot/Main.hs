@@ -19,16 +19,17 @@ import Data.Maybe (catMaybes, isJust, isNothing, maybeToList)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
-import GHC (runGhc, setSession, ms_mod_name, ms_hsc_src, parseModule, typecheckModule, Target(..))
+import GHC (runGhc, setSession, ms_mod_name, ms_hsc_src, parseModule, typecheckModule, ParsedModule, TypecheckedModule(..), Target(..))
 import GHC.Core qualified as Core
 import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy)
 import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
+import GHC.Core.TyCo.Compare (eqType)
 import GHC.Builtin.Types (liftedTypeKind)
 import GHC.Types.Var (mkTyVar, VarBndr(..))
 import GHC.Types.Name.Occurrence (mkTyVarOcc)
 import GHC.Types.SrcLoc (noSrcSpan)
 import Language.Haskell.Syntax.Specificity (ForAllTyFlag(..), Specificity(..))
-import GHC.Types.Id (idName, setIdName)
+import GHC.Types.Id (idName, idType, setIdName)
 import GHC.Types.Literal (Literal(..), LitNumType(..))
 import GHC.Types.Name (getOccString, nameOccName, nameSrcSpan, mkExternalName, mkInternalName)
 import GHC.Types.Avail (availNames)
@@ -43,7 +44,7 @@ import GHC.Unit.Finder.Types (FinderCache(..))
 import GHC.Unit.Module.Location (ml_hi_file)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Builtin.Names (gHC_PRIM)
-import GHC.Tc.Types (tcg_imports)
+import GHC.Tc.Types (tcg_imports, tcg_type_env)
 import GHC.Unit.Module.Deps (imp_mods)
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
 import GHC.Types.SourceFile (HscSource(..))
@@ -119,7 +120,7 @@ import Tidepool.Session (sessionHiPath)
 import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), captureCheckedSignature, encodeCheckedSignature
-  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness)
+  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, rewriteCheckedAnnotations)
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
 import Tidepool.Binders (BoundBinder(..))
 import Tidepool.ExecutionSource
@@ -185,6 +186,7 @@ main = getArgs >>= \case
   ["--generated-scaffold-retained",scope,seal] -> generatedScaffoldRetained scope seal
   ["--hydrated-site-siblings"] -> hydratedSiteSiblings
   ["--fresh-execution-recipe"] -> freshExecutionRecipeTest
+  ["--native-checked-signatures"] -> nativeCheckedSignaturesTest
   ["--host-activation-purpose"] -> hostActivationPurposeTest Nothing
   ["--host-activation-purpose", destination] -> hostActivationPurposeTest (Just destination)
   ["--candidate-execution-sources"] -> candidateExecutionSourcesTest
@@ -1750,6 +1752,44 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
 
 -- Pure issuer and scope-budget controls; the runtime suite separately drives
 -- cold parser -> whole checked program -> per-item original certification.
+nativeCheckedSignaturesTest :: IO ()
+nativeCheckedSignaturesTest = withScratch $ \work -> do
+  let target = work </> "CheckedNativeSignatures.hs"
+  forM_ ["CheckedNativeTypeOwner.hs", "CheckedNativeSignatures.hs"] $ \file ->
+    copyFile ("test-source-boot/fixtures" </> file) (work </> file)
+  libdir <- getLibdir
+  withResidentPipelineSelected [work] $ \compile -> do
+    checked <- compile CheckedEnvironment Set.empty GeneralCompile Nothing target [work] Nothing
+    let original = Map.fromList
+          [(getOccString identifier, idType identifier)
+          | identifier <- typeEnvIds (tcg_type_env (crTargetTcGblEnv checked))
+          , "__tidepool_cell_pin_" `isPrefixOf` getOccString identifier]
+    unless (Map.size original == 7) (fail "native signature fixture lost a case")
+    signatures <- forM (Map.toList original) $ \(key, ty) -> do
+      signature <- captureCheckedSignature (crHscEnv checked) key ty
+      pure (key, signature { signaturePresentation = "not Haskell syntax !!!" })
+    summary <- case [summary | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph (crHscEnv checked))
+      , ms_mod_name summary == mkModuleName "CheckedNativeSignatures"] of
+      [value] -> pure value
+      _ -> fail "native signature target summary missing"
+    runGhc (Just libdir) $ do
+      setSession (crHscEnv checked)
+      parsed <- parseModule summary
+      rewritten <- liftIO (rewriteCheckedAnnotations (crHscEnv checked) signatures parsed)
+      rechecked <- typecheckModule rewritten
+      let (environment, _) = tm_internals_ rechecked
+          actual = Map.fromList [(getOccString identifier, idType identifier)
+            | identifier <- typeEnvIds (tcg_type_env environment)]
+      liftIO $ forM_ (Map.toList original) $ \(key, expected) ->
+        unless (maybe False (eqType expected) (Map.lookup key actual))
+          (fail ("native signature changed exact type: " ++ key))
+      let damaged = [(key, signature { signatureNames = [] }) | (key, signature) <- signatures]
+      refused <- liftIO (try (rewriteCheckedAnnotations (crHscEnv checked) damaged parsed)
+        :: IO (Either SomeException ParsedModule))
+      liftIO $ unless (case refused of Left _ -> True; Right _ -> False)
+        (fail "native signature admitted a substituted Name inventory")
+  putStrLn "native checked signatures: 7 type shapes and substituted authority refusal passed"
+
 hostActivationPurposeTest :: Maybe FilePath -> IO ()
 hostActivationPurposeTest destination = withScratch $ \work -> do
   let previewMarker = "{{ACTIVATION_PREVIEW}}"
@@ -1763,11 +1803,11 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   let sha = TString (T.replicate 64 "a")
       empty = TList []
       text = TString . T.pack
-      signature = TList [text "__tidepool_cell_pin_0_sessionInput",text "Int",empty]
+      signature = TList [text "TPCHECKEDSIGNATURE2",text "__tidepool_cell_pin_0_sessionInput",text "Int",TBytes (BS.singleton 0),empty]
       authorization = [text "host-activation-input1",sha,sha,TInt 0,sha,text "bind"
         ,TList [text "sessionInput"],TList [TList [text "bind",sha]],empty,TList [signature]
         ,TNull,TInt 1,sha,empty,TNull,TNull,empty,empty,TList [text work]]
-      hostManifest auth = TList [text "TPEXACTSCOPE",text "5",sha,sha,empty,empty,empty
+      hostManifest auth = TList [text "TPEXACTSCOPE",text "6",sha,sha,empty,empty,empty
         ,TList [empty,empty],TList auth]
       path = work </> "host-scope.cbor"
       decode auth = BS.writeFile path (toStrictByteString (encodeTerm (hostManifest auth))) >> readExactScope path
@@ -1791,11 +1831,12 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   writeFile sourcePath originalSource
   original <- runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile Nothing sourcePath [work] Nothing
   inputType <- maybe (fail "host input fixture has no inferred type") pure (crResultType original)
-  let checkedSignature = captureCheckedSignature (crHscEnv original) "__tidepool_cell_pin_0_sessionInput" inputType
+  capturedSignature <- captureCheckedSignature (crHscEnv original) "__tidepool_cell_pin_0_sessionInput" inputType
+  let checkedSignature = capturedSignature { signaturePresentation = "presentation is not Haskell syntax !" }
   encodedSignature <- either (fail . show) (pure . snd)
     (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString (encodeCheckedSignature checkedSignature))))
   _ <- decode (replace 9 (TList [encodedSignature]) authorization) >>= either fail pure
-  checkedSource <- either fail pure (replaceTemplateMarker "{{CHECKED_TYPE}}" (signatureType checkedSignature) inputTemplate)
+  checkedSource <- either fail pure (replaceTemplateMarker "{{CHECKED_TYPE}}" "()" inputTemplate)
   writeFile sourcePath checkedSource
   let session = emptySessionScope {ssRoot=work,ssExactScope=Just path}
       purpose = HostActivationInputCompile [("__tidepool_checked_annotation_0",
@@ -1811,8 +1852,8 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
     fail "host checked annotation changed the inferred input"
   actualInput <- either fail pure (activationPreviewInputType (crTargetTcGblEnv checked))
   originalInterfaces <- newOriginalInterfaceArtifacts (crHscEnv checked) Map.empty work
-  let witness ty = maybe (fail "complete fixture type has no canonical witness") pure
-        (captureCheckedTypeWitness (crHscEnv checked) ty)
+  let witness ty = captureCheckedTypeWitness (crHscEnv checked) ty
+        >>= maybe (fail "complete fixture type has no canonical witness") pure
       sealedBytes ty = do
         raw <- witness ty
         sealed <- sealCheckedTypeWitness originalInterfaces raw
@@ -1838,7 +1879,8 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
         (mkVisFunTyMany (mkTyVarTy variable) (mkTyVarTy variable))
   alphaFirst <- sealedBytes (alphaType firstVariable)
   alphaSecond <- sealedBytes (alphaType secondVariable)
-  unless (isNothing (captureCheckedTypeWitness (crHscEnv checked) (mkTyVarTy firstVariable))) $
+  freeWitness <- captureCheckedTypeWitness (crHscEnv checked) (mkTyVarTy firstVariable)
+  unless (isNothing freeWitness) $
     fail "canonical type witness admitted a free type variable"
   let ownerPath = work </> "HostActivationOwner.hs"
       ownerWitness fixture = do
@@ -1846,7 +1888,8 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
         produced <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile Nothing ownerPath [work] Nothing
         let pipeline = pprPipelineResult produced
         ty <- maybe (fail "owner fixture has no input type") pure (prResultType pipeline)
-        raw <- maybe (fail "owner fixture has no canonical witness") pure (captureCheckedTypeWitness (prHscEnv pipeline) ty)
+        raw <- captureCheckedTypeWitness (prHscEnv pipeline) ty
+          >>= maybe (fail "owner fixture has no canonical witness") pure
         artifacts <- newOriginalInterfaceArtifacts (prHscEnv pipeline) (pprProductInterfaces produced) work
         sealed <- sealCheckedTypeWitness artifacts raw
           >>= maybe (fail "owner fixture lacks its original interface") pure
