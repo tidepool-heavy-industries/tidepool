@@ -32,6 +32,125 @@ pub struct ExactDeclarationContext {
     lexical: Vec<ExactLexicalNode>,
 }
 
+/// Trusted source recipe associated with request-local native type custody.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RequestHelperRecipe {
+    #[default]
+    None,
+    ActorReply,
+}
+
+impl RequestHelperRecipe {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ActorReply => "actor-reply",
+        }
+    }
+}
+
+/// Request-local compiler inputs. Persistent publication retains declarations
+/// separately, so native request annotations cannot enter a lexical snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExactCompileContext {
+    declarations: Arc<ExactDeclarationContext>,
+    request_types: Option<Arc<crate::checked_cell::RequestTypeSignatures>>,
+    request_helper_recipe: RequestHelperRecipe,
+}
+
+impl ExactCompileContext {
+    pub fn new(declarations: Arc<ExactDeclarationContext>) -> Self {
+        Self {
+            declarations,
+            request_types: None,
+            request_helper_recipe: RequestHelperRecipe::None,
+        }
+    }
+
+    pub fn declarations(&self) -> &Arc<ExactDeclarationContext> {
+        &self.declarations
+    }
+
+    pub fn request_types(&self) -> Option<&Arc<crate::checked_cell::RequestTypeSignatures>> {
+        self.request_types.as_ref()
+    }
+
+    pub fn with_request_types(
+        mut self,
+        signatures: Arc<crate::checked_cell::RequestTypeSignatures>,
+    ) -> Self {
+        self.request_types = Some(signatures);
+        self
+    }
+
+    pub fn with_request_helper_recipe(mut self, recipe: RequestHelperRecipe) -> Self {
+        self.request_helper_recipe = recipe;
+        self
+    }
+
+    pub fn request_helper_recipe(&self) -> RequestHelperRecipe {
+        self.request_helper_recipe
+    }
+
+    pub(crate) fn with_declarations(mut self, declarations: Arc<ExactDeclarationContext>) -> Self {
+        self.declarations = declarations;
+        self
+    }
+
+    fn authorization(&self, purpose: Option<Value>) -> Option<Value> {
+        match &self.request_types {
+            Some(signatures) => Some(Value::Array(vec![
+                text("request-types2"),
+                signatures.authorization_value(),
+                text(self.request_helper_recipe.as_str()),
+                purpose.unwrap_or(Value::Null),
+            ])),
+            None => purpose,
+        }
+    }
+
+    pub(crate) fn prepare_compilation(
+        &self,
+        root: &Path,
+        producer: &[u8],
+    ) -> Result<ExactCompilationRequest, CompileError> {
+        self.prepare_compilation_with_authorization(root, producer, None)
+    }
+
+    pub(crate) fn prepare_compilation_with_authorization(
+        &self,
+        root: &Path,
+        producer: &[u8],
+        authorization: Option<Value>,
+    ) -> Result<ExactCompilationRequest, CompileError> {
+        self.declarations.prepare_compilation_with_authorization(
+            root,
+            producer,
+            self.authorization(authorization),
+        )
+    }
+
+    pub(crate) fn prepare_compilation_authorizing(
+        &self,
+        root: &Path,
+        producer: &[u8],
+        authorize: impl FnOnce([u8; 32]) -> Result<Value, CompileError>,
+    ) -> Result<ExactCompilationRequest, CompileError> {
+        self.declarations
+            .prepare_compilation_authorizing(root, producer, |semantic| {
+                Ok(self
+                    .authorization(Some(authorize(semantic)?))
+                    .expect("purpose authorization"))
+            })
+    }
+}
+
+impl From<Arc<ExactDeclarationContext>> for ExactCompileContext {
+    fn from(declarations: Arc<ExactDeclarationContext>) -> Self {
+        Self::new(declarations)
+    }
+}
+
 const EXACT_SCOPE_BYTES_LIMIT: usize = 4 << 20;
 const EXACT_SCOPE_GRAPHS_LIMIT: usize = 4096;
 

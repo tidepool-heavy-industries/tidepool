@@ -251,6 +251,8 @@ pub struct ActorWorkbenchSource {
     spec: Option<Arc<str>>,
     workspace_modules: Arc<[String]>,
     installed_effect_support: Arc<[exomonad_tool::ToolEffectKey]>,
+    request_evidence: Option<Arc<tidepool_runtime::session::SiteTypeEvidence>>,
+    request_helper_recipe: tidepool_toolchain::declaration_context::RequestHelperRecipe,
 }
 
 /// One prepared import environment for evaluation and inspection. Name
@@ -303,6 +305,8 @@ impl ActorWorkbenchSource {
             spec: None,
             workspace_modules: Arc::from([]),
             installed_effect_support: Arc::from([]),
+            request_evidence: None,
+            request_helper_recipe: Default::default(),
         }
     }
 
@@ -1444,8 +1448,10 @@ impl RequestWorkbenchScope<'_> {
     ) -> ActorWorkbenchSource {
         let mut source = source.clone();
         source.preamble = match (self.response, self.request) {
-            (Some(response), Some(request)) => {
-                response.request_preamble(&source.preamble, request, &context.haskell_effects_alias)
+            (Some(_), Some(request)) => {
+                source.request_helper_recipe =
+                    tidepool_toolchain::declaration_context::RequestHelperRecipe::ActorReply;
+                source.request_preamble(request, &context.haskell_effects_alias)
             }
             (None, None) => source.preamble.to_string(),
             _ => unreachable!("request workbench scope is constructed atomically"),
@@ -2447,8 +2453,6 @@ impl<H, O> ResidentActorRunner<H, O> {
         self
     }
 
-    /// Install the composition root's child-session factory. Omitted, every
-    /// launch keeps running on the session that admitted it — today's
     /// Install the composition root's child-session factory. Omitted, every
     /// launch keeps running on the session that admitted it.
     #[must_use]
@@ -4094,9 +4098,11 @@ where
             })
         });
         let mut source = self.access.source.clone();
-        if let (Some(response), Some(request)) = (&self.response, self.request) {
-            source.preamble = response
-                .request_preamble(&source.preamble, request, &context.haskell_effects_alias)
+        if let (Some(_), Some(request)) = (&self.response, self.request) {
+            source.request_helper_recipe =
+                tidepool_toolchain::declaration_context::RequestHelperRecipe::ActorReply;
+            source.preamble = source
+                .request_preamble(request, &context.haskell_effects_alias)
                 .into();
         }
         source.preamble = actor_preamble(&source.preamble, &context).into();
@@ -4499,11 +4505,11 @@ where
         self.access
             .with_machine(context, move |session, context, _| {
                 source.preamble = match (response.as_ref(), request) {
-                    (Some(response), Some(request)) => response.request_preamble(
-                        &source.preamble,
-                        request,
-                        &context.haskell_effects_alias,
-                    ),
+                    (Some(_), Some(request)) => {
+                        source.request_helper_recipe =
+                            tidepool_toolchain::declaration_context::RequestHelperRecipe::ActorReply;
+                        source.request_preamble(request, &context.haskell_effects_alias)
+                    }
                     (None, None) => source.preamble.to_string(),
                     _ => unreachable!("request workbench scope is constructed atomically"),
                 }
@@ -9609,8 +9615,10 @@ where
         )
     })?;
     source.preamble = match (response, request) {
-        (Some(response), Some(request)) => {
-            response.request_preamble(&source.preamble, request, &context.haskell_effects_alias)
+        (Some(_), Some(request)) => {
+            source.request_helper_recipe =
+                tidepool_toolchain::declaration_context::RequestHelperRecipe::ActorReply;
+            source.request_preamble(request, &context.haskell_effects_alias)
         }
         (None, None) => source.preamble.to_string(),
         _ => unreachable!("request workbench scope is constructed atomically"),
@@ -9633,7 +9641,7 @@ where
         context
             .compile_view(session_view)?
             .with_workbench_imports(&source.workbench_imports)
-            .with_type_modules(type_modules)
+            .with_request_helper_recipe(source.request_helper_recipe)
     } else {
         let session_view = session
             .compile_view_in(context.placement.lexical_scope)
@@ -9646,7 +9654,7 @@ where
         context
             .compile_view(session_view)?
             .with_workbench_imports(&source.workbench_imports)
-            .with_type_modules(type_modules)
+            .with_request_helper_recipe(source.request_helper_recipe)
     };
     Ok((
         source,
@@ -9818,7 +9826,7 @@ where
     Ok(context
         .compile_view(session_view)?
         .with_workbench_imports(&source.workbench_imports)
-        .with_type_modules(type_modules))
+        .with_request_helper_recipe(source.request_helper_recipe))
 }
 
 /// Compile one fresh, payload-independent value interface. Its binder is
@@ -12753,7 +12761,7 @@ mod request_tests {
         let (view, inputs, prepared) = workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
-                let view = actor_compile_view(session, context, &source, &[])?;
+                let view = actor_compile_view(session, context, &source)?;
                 let inputs = session
                     .capture_inspection_inputs(view.session_view())
                     .map_err(|error| {
@@ -12822,13 +12830,12 @@ mod request_tests {
         let source = RequestWorkbenchScope {
             response: workbench.response.as_ref(),
             request: workbench.request,
-            type_modules: &workbench.type_modules,
         }
         .source(&workbench.access.source, &context);
         let (view, inputs, prepared) = workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
-                let view = actor_compile_view(session, context, &source, &[])?;
+                let view = actor_compile_view(session, context, &source)?;
                 let inputs = session
                     .capture_inspection_inputs(view.session_view())
                     .map_err(|error| {
