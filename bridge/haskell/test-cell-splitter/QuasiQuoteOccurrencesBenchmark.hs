@@ -11,7 +11,7 @@ import GHC.Data.FastString (mkFastString)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Driver.Session (parseDynamicFilePragma, xopt_set)
-import GHC.LanguageExtensions.Type (Extension(..))
+import GHC.LanguageExtensions (Extension(..))
 import GHC.Parser qualified as Parser
 import GHC.Parser.Header (getOptions)
 import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)

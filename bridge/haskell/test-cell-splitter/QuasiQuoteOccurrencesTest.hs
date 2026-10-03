@@ -9,7 +9,7 @@ import GHC.Data.FastString (mkFastString)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Driver.Session (DynFlags, xopt_set, xopt_unset)
-import GHC.LanguageExtensions.Type (Extension(..))
+import GHC.LanguageExtensions (Extension(..))
 import GHC.Parser qualified as Parser
 import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
 import GHC.Types.Name.Reader (RdrName)
