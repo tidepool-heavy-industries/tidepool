@@ -1283,6 +1283,7 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
     , "import MetadataDependency"
     , "__tidepool_inspect_0 = value"
     , "__tidepool_inspect_1 = True"
+    , "publicValue = value"
     ]
   evictions <- newIORef []
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
@@ -1302,7 +1303,7 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
           assertContains "non-type query does not advance the type probe ordinal" "Bool" secondRendered
           assertContains "inspection resolves a local probe without a target HPT interface"
             "Box Int" rendered
-          unless (any ((== "__tidepool_inspect_0") . infoName) entries) $
+          unless (any ((== "publicValue") . infoName) entries) $
             fail "metadata inspection could not browse the checked target module"
         _ -> fail ("metadata inspection returned an unexpected result: " ++ show inspected)
       assertEqual "exactly one checked target" 1

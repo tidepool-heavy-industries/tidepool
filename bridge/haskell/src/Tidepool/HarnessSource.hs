@@ -64,7 +64,7 @@ harnessProfilePragmaLine =
   "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}"
 
 -- Every caller input is protected, including inputs unused by this mode.
--- An absent unused input remains absent; it does not make preparation fail early.
+-- Missing unused inputs do not make preparation fail early.
 requestSourceIdentities :: [FilePath] -> IO (Set.Set (DeviceID, FileID))
 requestSourceIdentities paths = snd <$> foldM add (Set.empty, Set.empty) paths
   where
