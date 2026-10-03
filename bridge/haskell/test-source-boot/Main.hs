@@ -146,6 +146,7 @@ import Tidepool.ExecutionSource
   ( ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
   , executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure, executionIdentityKey
   , ExecutionSourceFailure(..), ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences
+  , decodeExecutionSourceGraph
   , executionSourceGraphBytesLimit )
 
 counterValues :: String -> String -> [Integer]
