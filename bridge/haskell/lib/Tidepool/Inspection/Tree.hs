@@ -213,6 +213,8 @@ expandDisplayState budget selected (DisplayState _ branches next previouslyUnava
 -- The per-field allowance prevents a large first field from hiding a sibling.
 -- The depth and item caps stop before inspecting collapsed values. Sequence
 -- traversal looks at a bounded prefix, never its length or complete spine.
+-- Branch labels describe the current frontier; pagination never appends its
+-- history to a label and therefore does not exhaust the metadata allowance.
 preview :: Int -> Int -> Int -> Text -> DisplayTree -> (Text, [(ExpansionKey, Text, DisplayTree)], Int, Bool)
 preview budget depth next label tree
   | budget <= 0 || depth >= 2 = ("", [(ExpansionKey next, label, tree)], next + 1, False)
@@ -229,8 +231,8 @@ preview budget depth next label tree
         let (value, remaining, unavailable) = renderTree budget (TextLeaf name)
             (nameBranches, following) = case remaining of
               Nothing -> ([], next)
-              Just suffix -> ([(ExpansionKey next, label <> ".constructor", suffix)], next + 1)
-        in (value, nameBranches ++ [(ExpansionKey following, label <> ".fields", Constructor "" fields)], following + 1, unavailable)
+              Just suffix -> ([(ExpansionKey next, "constructor", suffix)], next + 1)
+        in (value, nameBranches ++ [(ExpansionKey following, "fields", Constructor "" fields)], following + 1, unavailable)
     ordinary valueTree =
         let (value, remaining, unavailable) = renderTree budget valueTree
         in case remaining of
@@ -240,14 +242,14 @@ preview budget depth next label tree
       where
         walk value keys key unavailable pending
           | room value <= 0 =
-              (bounded value closing, keys ++ [(ExpansionKey key, label <> ".fields", Constructor "" pending)], key + 1, unavailable)
+              (bounded value closing, keys ++ [(ExpansionKey key, "fields", Constructor "" pending)], key + 1, unavailable)
           | otherwise = case pending of
               [] -> (bounded value closing, keys, key, unavailable)
               (field, child) : rest -> renderChild value keys key unavailable field child rest
         renderChild value keys key unavailable field child rest =
               let prefix = (if value == opening then "" else ", ") <> field <> " = "
                   allowance = max 0 (min 128 (room (value <> prefix)))
-                  (shown, omitted, following, childUnavailable) = preview allowance (depth + 1) key (label <> "." <> field) child
+                  (shown, omitted, following, childUnavailable) = preview allowance (depth + 1) key field child
                   marker = if null omitted then "" else "…"
                   piece = value <> prefix <> shown <> marker
               in if T.length (T.take (room value + 1) prefix) > room value
@@ -257,9 +259,9 @@ preview budget depth next label tree
               let (shown, remaining, prefixUnavailable) = renderTree (room value) (TextLeaf prefix)
                   (prefixKeys, following) = case remaining of
                     Nothing -> ([], key)
-                    Just suffix -> ([(ExpansionKey key, label <> ".field-name", suffix)], key + 1)
-                  childKey = (ExpansionKey following, label <> "." <> field, child)
-                  restKey = (ExpansionKey (following + 1), label <> ".fields", Constructor "" rest)
+                    Just suffix -> ([(ExpansionKey key, "field name", suffix)], key + 1)
+                  childKey = (ExpansionKey following, field, child)
+                  restKey = (ExpansionKey (following + 1), "fields", Constructor "" rest)
               in (bounded (value <> shown) closing, keys ++ prefixKeys ++ [childKey, restKey], following + 2, unavailable || prefixUnavailable)
         room value = budget - T.length value - T.length closing - 1
         bounded value suffix = T.take budget (value <> suffix)
@@ -267,13 +269,13 @@ preview budget depth next label tree
       where
         walk value keys key unavailable index pending
           | index >= 8 || budget - T.length value - T.length closing <= 2 =
-              (T.take budget (value <> "…" <> closing), keys ++ [(ExpansionKey key, label <> ".remainder", Sequence opening closing pending)], key + 1, unavailable)
+              (T.take budget (value <> "…" <> closing), keys ++ [(ExpansionKey key, "remainder", Sequence opening closing pending)], key + 1, unavailable)
           | otherwise = case pending of
               [] -> (T.take budget (value <> closing), keys, key, unavailable)
               child : rest -> renderChild value keys key unavailable index child rest
         renderChild value keys key unavailable index child rest =
               let separator = if index == count then "" else ", "
                   allowance = max 0 (min 128 (budget - T.length value - T.length separator - T.length closing - 1))
-                  (shown, omitted, following, childUnavailable) = preview allowance (depth + 1) key (label <> "[" <> T.pack (show index) <> "]") child
+                  (shown, omitted, following, childUnavailable) = preview allowance (depth + 1) key ("[" <> T.pack (show index) <> "]") child
                   marker = if null omitted then "" else "…"
               in walk (value <> separator <> shown <> marker) (keys ++ omitted) following (unavailable || childUnavailable) (index + 1) rest

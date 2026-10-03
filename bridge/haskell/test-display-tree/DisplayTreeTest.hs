@@ -31,6 +31,7 @@ main = do
   independentSiblingsKeepTheirKeys
   collapsedFieldsRemainLazy
   infiniteSequencesHaveBoundedFrontiers
+  continuedFrontierLabelsStayBounded
   unsupportedFieldsRemainOpaque
   structuralGenericUsesFieldNames
   recursiveGenericDisplayIsProductive
@@ -187,6 +188,30 @@ infiniteSequencesHaveBoundedFrontiers = do
   let state = newDisplayState 1024 (Sequence "[" "]" (repeat (TextLeaf "1")))
   assertEqual "bounded sequence preview" "[1, 1, 1, 1, 1, 1, 1, 1…]" (displayStateText state)
   assertEqual "one retained sequence remainder" 1 (length (displayStateKeys state))
+
+continuedFrontierLabelsStayBounded :: IO ()
+continuedFrontierLabelsStayBounded = do
+  let sequenceState = newDisplayState 1024 (Sequence "[" "]" (replicate 10000 (TextLeaf "1")))
+      chain = Constructor "Node" [("next", chain)]
+  pages <- finish 0 sequenceState
+  assertEqual "all finite sequence pages remain expandable" 1251 pages
+  follow 1500 (newDisplayState 1024 chain)
+  where
+    assertLabels state = assertTrue "frontier metadata stays small across pages"
+      (all ((<= 16) . Text.length . snd) (displayStateKeys state))
+    finish count state = do
+      assertLabels state
+      case displayStateKeys state of
+        [] -> pure (count + 1 :: Int)
+        [(key, _)] -> requireExpansion key state >>= finish (count + 1)
+        _ -> fail "a scalar sequence acquired unrelated expansion keys"
+    follow count state = do
+      assertLabels state
+      if count <= (0 :: Int) then pure () else case displayStateKeys state of
+        [(key, _)] -> requireExpansion key state >>= follow (count - 1)
+        _ -> fail "recursive field lost its single frontier"
+    requireExpansion key state = maybe (fail "frontier cursor was lost") pure
+      (expandDisplayState 1024 key state)
 
 newtype Unsupported = Unsupported Int
 
