@@ -1706,6 +1706,34 @@ fn recovery_keeps_unverifiable_children_unavailable_without_fencing_the_root() {
 }
 
 #[test]
+fn recovery_retries_socket_cleanup_after_a_durable_retirement_marker() {
+    let run = tempfile::tempdir().unwrap();
+    let actor = run.path().join("1-1");
+    let socket_root = actor.join("sockets");
+    std::fs::create_dir_all(&socket_root).unwrap();
+    std::fs::write(socket_root.join("stale.sock"), b"stale").unwrap();
+    tidepool_atomic_write::write_durable(
+        &actor.join(PROCESS_RECOVERY_RECORD),
+        &serde_json::to_vec(&ProcessRecoveryRecord {
+            version: 1,
+            launch_id: "root-launch".into(),
+            recovery_secret: "retired".into(),
+            supervisor_socket: socket_root.join("supervisor.sock"),
+            socket_root: socket_root.clone(),
+            retired: true,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let report = stop_predecessor_processes(run.path()).unwrap();
+
+    assert_eq!(report.stopped, 0, "retired evidence must not stop twice");
+    assert!(report.root_available());
+    assert!(!socket_root.exists());
+}
+
+#[test]
 fn recovery_fails_closed_when_root_process_evidence_is_missing() {
     let run = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(run.path().join("1-1")).unwrap();
