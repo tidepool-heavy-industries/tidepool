@@ -32,7 +32,7 @@ exactScopeV8Checks manifest = do
   unless (Map.keysSet (scopeInterfaceEvidence scope) == Set.fromList
       [(exactUnit iface,exactModule iface) | (iface,_,_) <- scopeInterfaces scope])
     (fail "genuine v8 context lost its typed interface evidence")
-  let proofs = scopeCanonicalInterfaces scope
+  let proofs = scopeDurableInterfaces scope
       candidates = [(product',proof) | product' <- scopeProducts scope
         , Just proof <- [Map.lookup (originalUnit product',originalModule product') proofs]
         , Just _ <- [canonicalCoreArtifact proof]

@@ -18,7 +18,7 @@ import Control.Exception
   , toException, IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (intercalate, nub, isPrefixOf)
-import Data.Maybe (fromMaybe, mapMaybe, isJust)
+import Data.Maybe (fromMaybe, mapMaybe, isJust, isNothing)
 import Data.Word (Word64)
 import Data.Bits (shiftR)
 import Control.Monad (replicateM, foldM, forM, forM_, when, unless, void)
@@ -54,8 +54,9 @@ import Tidepool.Binders
   )
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
-  , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..)
+  , CompilePurpose(..), PipelineResult(..)
   , withResidentPipelineSelectedRequests, withExactInterfaceTransaction
+  , captureCompilerProducerIdentity, runPipelineSessionSelectedWithProducer
   , checkCellInstances, cellGeneratedInstanceRecipe
   , cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, stripMonadHead, generatedScaffoldRecipe, activationPreviewInputType )
@@ -210,7 +211,8 @@ main = do
       -- One-shot path: 'main' runs this branch exactly once per process, so
       -- a cache created here is already "fresh per invocation".
       caches <- freshRecoveryCaches
-      runWorkerInvocation runPipelineSessionSelected caches rawWorkerRequest >>= exitWith
+      producer <- captureCompilerProducerIdentity
+      runWorkerInvocation (runPipelineSessionSelectedWithProducer producer) caches rawWorkerRequest >>= exitWith
 
 -- | Decode a Rust worker request and run one compilation. Direct and daemon transports use
 -- the same versioned payload and therefore the same dispatch path.

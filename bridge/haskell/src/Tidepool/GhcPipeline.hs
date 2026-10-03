@@ -6,6 +6,8 @@ module Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , runPipelineSelected, runPipelineSessionSelected
   , runPipelineSelectedRetaining
+  , CompilerProducerIdentity, captureCompilerProducerIdentity
+  , runPipelineSessionSelectedWithProducer
   , CompilePurpose(..), PipelineResult(..)
   , generatedScaffoldRecipe
   , FinalizedModule, finalizedHomeModInfo, finalizedTidyGuts
@@ -82,6 +84,7 @@ import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Crypto.Hash.SHA256 as SHA256
+import Data.Char (digitToInt)
 import qualified Data.Graph as Graph
 import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable
@@ -632,8 +635,29 @@ runPipelineSelected selection path includes =
 runPipelineSelectedRetaining
   :: PipelineSelection result -> Set.Set SymbolIdentity -> FilePath -> [FilePath] -> IO result
 runPipelineSelectedRetaining selection retained path includes = do
+  producer <- captureCompilerProducerIdentity
   variant <- normalVariant GeneralCompile path
-  runCompile selection retained variant path includes Nothing
+  runCompile selection retained variant {pvCompilerProducer = producer} path includes Nothing
+
+-- The process owner supplies this configuration before any authored compiler
+-- effect runs. A resident compiler retains it across requests and recovery;
+-- candidates and mutable source code cannot replace their own authority.
+newtype CompilerProducerIdentity = CompilerProducerIdentity String
+  deriving (Eq, Show)
+
+captureCompilerProducerIdentity :: IO (Maybe CompilerProducerIdentity)
+captureCompilerProducerIdentity = lookupEnv "TIDEPOOL_COMPILER_PRODUCER" >>= traverse decode
+  where
+    decode raw
+      | length raw /= 64 || any (`notElem` ("0123456789abcdef" :: String)) raw
+          || all (== '0') raw = fail "invalid compiler launch producer identity"
+      | otherwise = pure (CompilerProducerIdentity (concatMap byteHex
+          (BS.unpack (SHA256.hash (BS.pack (pairs raw))))))
+    pairs [] = []
+    pairs (first:second:remaining) =
+      fromIntegral (16 * digitToInt first + digitToInt second) : pairs remaining
+    pairs _ = error "validated compiler producer has odd length"
+    byteHex byte = let rendered = showHex byte "" in replicate (2-length rendered) '0' ++ rendered
 
 -- ---------------------------------------------------------------------------
 -- The shared compile loop and its two seams
@@ -660,6 +684,7 @@ data PipelineVariant = PipelineVariant
     -- ^ Prefix on this variant's own error messages.
   , pvExactScope :: Maybe ExactScope
     -- ^ Admitted immutable declaration owners, independent of live values.
+  , pvCompilerProducer :: Maybe CompilerProducerIdentity
   , pvGeneratedScaffold :: Maybe GeneratedScaffoldRecipe
     -- ^ The protected target and its compiler-owned support import.
   , pvDownsweepExcludes :: [ModuleName]
@@ -675,6 +700,11 @@ candidateManifestFor :: PipelineSelection result -> Maybe FilePath
 candidateManifestFor (PreparedProducts path) = path
 candidateManifestFor (CheckedEnvironmentProducts path) = Just path
 candidateManifestFor _ = Nothing
+
+compilerProducerFor :: PipelineVariant -> Maybe String
+compilerProducerFor variant = case pvCompilerProducer variant of
+  Just (CompilerProducerIdentity producer) -> Just producer
+  Nothing -> scopeProducerSha256 <$> pvExactScope variant
 
 exactCompileCycle :: PipelineSelection result -> PipelineVariant -> Bool
 exactCompileCycle selection variant =
@@ -881,6 +911,7 @@ data CanonicalFrontendFailure
   = CustomLoadPhaseHook
   | CustomLoadFrontendHook
   | UnsupportedLoadBackend
+  | CompilerProducerScopeMismatch
   | LoadedFinalizationOwnerMismatch
   | MissingLoadedFrontend
   | MissingLoadedFinalization
@@ -972,10 +1003,17 @@ runPipelineSessionSelected
   :: PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
   -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
 runPipelineSessionSelected selection retained purpose mscope path includes buildProductsDir = do
+  producer <- captureCompilerProducerIdentity
+  runPipelineSessionSelectedWithProducer producer selection retained purpose mscope path includes buildProductsDir
+
+runPipelineSessionSelectedWithProducer
+  :: Maybe CompilerProducerIdentity -> PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
+  -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
+runPipelineSessionSelectedWithProducer producer selection retained purpose mscope path includes buildProductsDir = do
   variant <- case mscope of
     Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
     _ -> normalVariant purpose path
-  runCompile selection retained variant path includes buildProductsDir
+  runCompile selection retained variant {pvCompilerProducer = producer} path includes buildProductsDir
 
 -- ---------------------------------------------------------------------------
 -- Resident compilation state
@@ -1490,6 +1528,10 @@ runCompileCycle
   :: PipelineSelection result -> Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
   -> RetainedContext -> Maybe String -> Bool -> Word64 -> Double -> Maybe ResourceTimingStart -> PipelineVariant -> FilePath -> Ghc result
 runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing requestIdentity sessionT0 setupResources variant path = withCycleHooks $ do
+    forM_ (compilerProducerFor variant) $ \producer ->
+      forM_ (pvExactScope variant) $ \scope ->
+        unless (producer == scopeProducerSha256 scope)
+          (liftIO (throwIO CompilerProducerScopeMismatch))
     memoTrace <- liftIO readMemoTraceEnabled
     let preparation = selectionKind selection
         captureProducts = capturesProductInterfaces selection
@@ -3357,6 +3399,7 @@ withResidentPipelineSelectedRequests
   -> (RequestRunner -> IO a)
   -> IO a
 withResidentPipelineSelectedRequests baseIncludes useRequests = do
+  producer <- captureCompilerProducerIdentity
   timing <- readTimingEnabled
   (libdir, startupMs) <- timeSection getLibdir
   emitPhase timing "startup" startupMs
@@ -3401,7 +3444,7 @@ withResidentPipelineSelectedRequests baseIncludes useRequests = do
                     evictTargetMemo targetModName' memoRef
                     (writeIORef retainedRef (retainedContext retained) >>
                       reflectGhc
-                        (residentCompileOne selection cache memoRef retainedRef stateOriginRef dflags' baseImportPaths
+                        (residentCompileOne producer selection cache memoRef retainedRef stateOriginRef dflags' baseImportPaths
                           timing requestIdentity purpose mscope path extraIncludes buildProductsDir)
                         session)
                       `finally` writeIORef retainedRef emptyRetainedContext)
@@ -3473,16 +3516,17 @@ type RequestRunner = forall requestResult.
 -- Reads the context that the request runner wrote into the plugin's cell
 -- once at cycle start, then shares that value with memo validation.
 residentCompileOne
-  :: PipelineSelection result -> ModIfaceCache -> IORef GutsMemo -> IORef RetainedContext -> IORef ResidentStateOrigin -> DynFlags -> [FilePath]
+  :: Maybe CompilerProducerIdentity -> PipelineSelection result -> ModIfaceCache -> IORef GutsMemo -> IORef RetainedContext -> IORef ResidentStateOrigin -> DynFlags -> [FilePath]
   -> Bool -> Word64 -> CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath
   -> Ghc result
-residentCompileOne selection cache memoRef retainedRef stateOriginRef baseDFlags baseImportPaths timing requestIdentity purpose mscope path extraIncludes buildProductsDir = do
+residentCompileOne producer selection cache memoRef retainedRef stateOriginRef baseDFlags baseImportPaths timing requestIdentity purpose mscope path extraIncludes buildProductsDir = do
   sessionT0 <- monotonicTime
   setupResources <- beginResourceTiming timing
   retained <- liftIO (readIORef retainedRef)
-  variant <- liftIO $ case mscope of
+  selectedVariant <- liftIO $ case mscope of
     Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
     _                                        -> normalVariant purpose path
+  let variant = selectedVariant {pvCompilerProducer = producer}
   previousOrigin <- liftIO (readIORef stateOriginRef)
   let currentOrigin = residentStateOrigin selection variant
       reset = case (previousOrigin,currentOrigin) of
@@ -3654,6 +3698,7 @@ normalVariant purpose path = do
   pure PipelineVariant
    { pvLabel = "runPipeline"
    , pvExactScope = Nothing
+   , pvCompilerProducer = Nothing
    , pvGeneratedScaffold = generatedRecipe purpose
    , pvGeneratedInstanceCheck = generatedInstanceRecipe purpose
    , pvDownsweepExcludes = []
@@ -4146,6 +4191,7 @@ sessionVariant purpose scope path = do
   pure PipelineVariant
    { pvLabel = "runSessionPipeline"
    , pvExactScope = exact
+   , pvCompilerProducer = Nothing
    , pvGeneratedScaffold = generatedRecipe purpose
    , pvGeneratedInstanceCheck = generatedInstanceRecipe purpose
    , pvDownsweepExcludes = excludedOwners

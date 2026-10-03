@@ -2337,7 +2337,7 @@ impl Worker {
         prepared: &PreparedWorker,
         build_products_namespace: BuildProductsNamespace,
     ) -> Result<Self, FrontendError> {
-        let mut command = prepared.command();
+        let mut command = prepared.command()?;
         command
             .arg("--worker-loop-v2")
             .stdin(Stdio::piped())
