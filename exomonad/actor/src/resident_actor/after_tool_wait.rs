@@ -3,11 +3,31 @@
 use super::*;
 use tidepool_runtime::session::workbench::WorkbenchToolCall;
 
+pub(super) fn result_payload(
+    call: &WorkbenchToolCall,
+    handle: &str,
+    ordinal: u64,
+    output: &str,
+    value: Option<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "call": { "name": call.name, "arguments": call.arguments },
+        "result": {
+            "name": call.name,
+            "handle": handle,
+            "ordinal": ordinal,
+            "output": output,
+            "value": value.unwrap_or(serde_json::Value::Null),
+        },
+    })
+}
+
 pub(super) struct AfterToolFrame {
     tools: crate::InstalledToolLease,
     dispatch: Arc<RootCustody>,
     call: WorkbenchToolCall,
     output: String,
+    value: Option<serde_json::Value>,
     ordinal: u64,
     handle: String,
     provenance: String,
@@ -24,6 +44,7 @@ pub(super) fn capture(
     dispatch: Arc<RootCustody>,
     call: WorkbenchToolCall,
     output: String,
+    value: Option<serde_json::Value>,
     ordinal: u64,
     remaining: usize,
 ) -> AfterToolFrame {
@@ -39,6 +60,7 @@ pub(super) fn capture(
         dispatch,
         call,
         output,
+        value,
         ordinal,
         handle: format!("toolResult{ordinal}"),
         provenance,
@@ -95,15 +117,36 @@ impl AfterToolFrame {
     }
 
     pub(super) fn payload(&self) -> serde_json::Value {
-        serde_json::json!({
-            "call": { "name": self.call.name, "arguments": self.call.arguments },
-            "result": {
-                "name": self.call.name,
-                "handle": self.handle,
-                "ordinal": self.ordinal,
-                "output": self.output,
-            },
-        })
+        result_payload(
+            &self.call,
+            &self.handle,
+            self.ordinal,
+            &self.output,
+            self.value.clone(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn after_tool_result_keeps_semantic_value_and_presentation_separate() {
+        let call = WorkbenchToolCall::for_tool("inspect".into(), serde_json::json!({}));
+        let value = serde_json::json!({"ready": true, "count": 4});
+        let payload = result_payload(
+            &call,
+            "toolResult8",
+            8,
+            "four entries are ready",
+            Some(value.clone()),
+        );
+        assert_eq!(payload["result"]["value"], value);
+        assert_eq!(payload["result"]["output"], "four entries are ready");
+
+        let notebook = result_payload(&call, "toolResult9", 9, "notebook output", None);
+        assert!(notebook["result"]["value"].is_null());
     }
 }
 

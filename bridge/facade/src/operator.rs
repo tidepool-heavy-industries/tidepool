@@ -753,6 +753,7 @@ mod artifact_tests {
                     source_items: Vec::new(),
                     status: WorkbenchItemStatus::Committed,
                     output: format!("private result {index}"),
+                    value: None,
                     diagnostics: Vec::new(),
                     failure_layer: None,
                     warnings: Vec::new(),

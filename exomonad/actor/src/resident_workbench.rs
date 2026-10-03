@@ -1383,6 +1383,7 @@ impl ResidentWorkbenchFragment {
 pub enum ToolDispatchReply {
     Success {
         output: serde_json::Value,
+        presentation: String,
     },
     Refused {
         #[serde(flatten)]
@@ -1409,12 +1410,28 @@ pub enum ToolDispatchError {
 }
 
 impl ToolDispatchReply {
-    pub fn into_output(self) -> Result<serde_json::Value, ToolDispatchError> {
+    pub fn into_output(self) -> Result<(serde_json::Value, String), ToolDispatchError> {
         match self {
-            Self::Success { output } => Ok(output),
+            Self::Success {
+                output,
+                presentation,
+            } => Ok((output, presentation)),
             Self::Refused { error } => Err(error),
         }
     }
+}
+
+/// Decode the dispatcher result after the handler has completed. A malformed
+/// success envelope is an uncertain post-execution failure; only an explicit
+/// typed refusal maps to the pre-execution refusal variant.
+fn decode_tool_dispatch_reply(
+    text: &str,
+) -> Result<ToolDispatchReply, ResidentActorWorkbenchError> {
+    serde_json::from_str(text).map_err(|error| {
+        ResidentActorWorkbenchError::ActorProtocol(format!(
+            "invalid tool dispatch reply: {error}"
+        ))
+    })
 }
 impl ToolDispatchError {
     pub fn tool(&self) -> &str {
@@ -1466,6 +1483,7 @@ impl RequestWorkbenchScope<'_> {
 pub(crate) enum ResidentWorkbenchStep {
     Committed {
         output: String,
+        value: Option<serde_json::Value>,
         warnings: Vec<String>,
         installed_bindings: Vec<String>,
     },
@@ -4797,6 +4815,7 @@ where
                 .await?;
             return Ok(ResidentWorkbenchStep::Committed {
                 output: declaration_receipt(&binders, prologue_only, commit.generation.0),
+                value: None,
                 warnings: Vec::new(),
                 installed_bindings: binders,
             });
@@ -5458,6 +5477,7 @@ where
             ) {
                 Ok(generation) => ResidentWorkbenchStep::Committed {
                     output: declaration_receipt(&receipt.binders, false, generation.0),
+                    value: None,
                     warnings: Vec::new(),
                     installed_bindings: receipt.binders.clone(),
                 },
@@ -5644,6 +5664,7 @@ where
                     ) {
                         Ok(generation) => Ok(ResidentWorkbenchStep::Committed {
                             output: declaration_receipt(&receipt.binders, false, generation.0),
+                            value: None,
                             warnings: Vec::new(),
                             installed_bindings: receipt.binders.clone(),
                         }),
@@ -5901,6 +5922,7 @@ where
     match outcome {
         ResidentOutcome::Completed { output, result } => {
             fragment.output.extend(output);
+            let mut semantic_value = None;
             let mut installed_bindings: Vec<String> = match &fragment.display {
                 WorkbenchDisplay::Binding { binders, .. } => {
                     binders.iter().map(|binder| binder.name.clone()).collect()
@@ -5959,20 +5981,12 @@ where
                     }
                     let text = String::from_value(result.value(), result.table())?;
                     if matches!(&fragment.display, WorkbenchDisplay::ToolDispatch) {
-                        let reply: ToolDispatchReply =
-                            serde_json::from_str(&text).map_err(|error| {
-                                ResidentActorWorkbenchError::ActorProtocol(format!(
-                                    "invalid tool dispatch reply: {error}"
-                                ))
-                            })?;
-                        let output = reply
+                        let reply = decode_tool_dispatch_reply(&text)?;
+                        let (value, presentation) = reply
                             .into_output()
                             .map_err(ResidentActorWorkbenchError::ToolDispatch)?;
-                        serde_json::from_value::<String>(output).map_err(|error| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "installed tool output must be rendered Text: {error}"
-                            ))
-                        })?
+                        semantic_value = Some(value);
+                        presentation
                     } else {
                         text
                     }
@@ -5985,6 +5999,7 @@ where
             transcript.push_str(&receipt);
             Ok(ResidentWorkbenchStep::Committed {
                 output: transcript,
+                value: semantic_value,
                 warnings: fragment.warnings,
                 installed_bindings,
             })
@@ -6014,6 +6029,7 @@ where
             fragment.output.push(receipt);
             Ok(ResidentWorkbenchStep::Committed {
                 output: fragment.output.join("\n"),
+                value: None,
                 warnings: fragment.warnings,
                 installed_bindings,
             })
@@ -10804,11 +10820,12 @@ mod tool_dispatch_tests {
     #[test]
     fn dispatch_envelope_preserves_authored_output_and_decodes_typed_refusals() {
         let output = serde_json::json!({"status": "refused", "output": [1, true, null]});
+        let presentation = "presented independently";
         let reply: ToolDispatchReply = serde_json::from_value(serde_json::json!({
-            "status": "success", "output": output,
+            "status": "success", "output": output, "presentation": presentation,
         }))
         .unwrap();
-        assert_eq!(reply.into_output().unwrap(), output);
+        assert_eq!(reply.into_output().unwrap(), (output, presentation.into()));
         for (kind, unknown) in [("unknown_tool", true), ("invalid_input", false)] {
             let mut payload = serde_json::json!({
                 "status": "refused", "kind": kind, "error": "correct the call", "tool": "echo",
@@ -10841,6 +10858,36 @@ mod tool_dispatch_tests {
         ] {
             assert!(serde_json::from_value::<ToolDispatchReply>(payload).is_err());
         }
+    }
+
+    #[test]
+    fn successful_dispatch_keeps_semantics_separate_from_presentation() {
+        let semantic = serde_json::json!({"ok": true, "count": 3});
+        let reply: ToolDispatchReply = serde_json::from_value(serde_json::json!({
+            "status": "success",
+            "output": semantic,
+            "presentation": "three items were accepted",
+        }))
+        .unwrap();
+
+        let (value, presentation) = reply.into_output().unwrap();
+        assert_eq!(value, semantic);
+        assert_eq!(presentation, "three items were accepted");
+    }
+
+    #[test]
+    fn malformed_completed_reply_is_not_a_dispatch_refusal() {
+        let error = decode_tool_dispatch_reply(r#"{"status":"success","output":{"ok":true}}"#)
+            .unwrap_err();
+        assert!(matches!(error, ResidentActorWorkbenchError::ActorProtocol(_)));
+
+        let error = decode_tool_dispatch_reply(
+            r#"{"status":"refused","kind":"invalid_input","error":"bad input","tool":"inspect","detail":"wrong type"}"#,
+        )
+        .unwrap()
+        .into_output()
+        .unwrap_err();
+        assert!(matches!(error, ToolDispatchError::InvalidInput { .. }));
     }
 }
 

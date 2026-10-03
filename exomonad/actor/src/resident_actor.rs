@@ -2321,6 +2321,7 @@ fn workbench_failure_after_operations(
             // can say plainly, since a reader sees this receipt without
             // necessarily reading `detail`.
             output: failure_layer_output_hint(failure_layer),
+            value: None,
             warnings: Vec::new(),
             installed_bindings: Vec::new(),
             operations,
@@ -9731,6 +9732,7 @@ where
         dispatch: Arc<RootCustody>,
         call: &tidepool_runtime::session::workbench::WorkbenchToolCall,
         output: String,
+        value: Option<serde_json::Value>,
     ) -> String {
         use crate::after_tool::{Annotation, Disposition, Invocation};
 
@@ -9766,15 +9768,13 @@ where
             // it and names it back when it prunes. It is defined only if the slot
             // actually prunes.
             let handle = format!("toolResult{ordinal}");
-            let payload = serde_json::json!({
-                "call": { "name": call.name, "arguments": call.arguments },
-                "result": {
-                    "name": call.name,
-                    "handle": handle,
-                    "ordinal": ordinal,
-                    "output": output,
-                },
-            });
+            let payload = after_tool_wait::result_payload(
+                call,
+                &handle,
+                ordinal,
+                &output,
+                value,
+            );
             let started = std::time::Instant::now();
             let wait = crate::after_tool::wait();
             let observation = self.runtime_observation.clone();
@@ -10188,6 +10188,7 @@ where
                             source_items: Vec::new(),
                             status: WorkbenchItemStatus::Committed,
                             output,
+                            value: None,
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
                             operations: Vec::new(),
@@ -10278,6 +10279,7 @@ where
                             status: WorkbenchItemStatus::Rejected,
                             output: "unfold admission ended without committing every fork group"
                                 .into(),
+                            value: None,
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
                             operations: std::mem::take(&mut cursor.unit.operations),
@@ -10576,6 +10578,7 @@ where
                 match step {
                     ResidentWorkbenchStep::Committed {
                         output,
+                        value,
                         warnings,
                         installed_bindings,
                     } => {
@@ -10639,6 +10642,7 @@ where
                             source_items: Vec::new(),
                             status: WorkbenchItemStatus::Committed,
                             output,
+                            value: value.clone(),
                             warnings,
                             installed_bindings,
                             operations: Vec::new(),
@@ -10660,6 +10664,7 @@ where
                                         dispatch,
                                         call,
                                         std::mem::take(&mut receipt.output),
+                                        receipt.value.clone(),
                                         self.after_tool.begin(),
                                         cursor.unit.display_remaining,
                                     );
@@ -10690,6 +10695,7 @@ where
                                         dispatch,
                                         &call,
                                         receipt.output,
+                                        receipt.value.clone(),
                                     )
                                     .await;
                             }
@@ -10732,6 +10738,7 @@ where
                             source_items: Vec::new(),
                             status: WorkbenchItemStatus::Rejected,
                             output,
+                            value: None,
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
                             operations: std::mem::take(&mut cursor.unit.operations),
@@ -10786,6 +10793,7 @@ where
                             source_items: Vec::new(),
                             status: WorkbenchItemStatus::Committed,
                             output: "Reply submitted.".to_owned(),
+                            value: None,
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
                             operations: std::mem::take(&mut cursor.unit.operations),
@@ -10983,6 +10991,7 @@ where
                             source_items: Vec::new(),
                             status: WorkbenchItemStatus::Committed,
                             output: String::new(),
+                            value: None,
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
                             operations: std::mem::take(&mut cursor.unit.operations),
@@ -12613,6 +12622,7 @@ where
                         source_items: Vec::new(),
                         status: WorkbenchItemStatus::Committed,
                         output: output.page.text,
+                        value: None,
                         diagnostics: Vec::new(),
                         failure_layer: None,
                         warnings: Vec::new(),
@@ -14941,6 +14951,7 @@ fn cell_check_rejection(
             source_items: Vec::new(),
             status: WorkbenchItemStatus::NotRun,
             output: String::new(),
+            value: None,
             warnings: Vec::new(),
             installed_bindings: Vec::new(),
             operations: Vec::new(),
@@ -15131,6 +15142,7 @@ fn workbench_response(
                 .unwrap_or_default(),
             status: WorkbenchItemStatus::NotRun,
             output: String::new(),
+            value: None,
             warnings: Vec::new(),
             installed_bindings: Vec::new(),
             operations: Vec::new(),
@@ -15395,6 +15407,7 @@ mod tests {
             source_items: Vec::new(),
             status: WorkbenchItemStatus::Committed,
             output: "effect already completed".into(),
+            value: None,
             warnings: Vec::new(),
             installed_bindings: Vec::new(),
             operations: Vec::new(),
@@ -15895,6 +15908,7 @@ mod tests {
                     source_items: Vec::new(),
                     status: WorkbenchItemStatus::Committed,
                     output: "42".into(),
+                    value: None,
                     warnings: Vec::new(),
                     installed_bindings: Vec::new(),
                     operations: vec![WorkbenchOperationReceipt {
@@ -16554,6 +16568,7 @@ mod tests {
             source_items: Vec::new(),
             status: WorkbenchItemStatus::Committed,
             output: "[bound prior]".into(),
+            value: None,
             warnings: Vec::new(),
             installed_bindings: vec!["prior".into()],
             operations: Vec::new(),
@@ -16572,6 +16587,7 @@ mod tests {
                     source_items: Vec::new(),
                     status: WorkbenchItemStatus::Rejected,
                     output: "<cell item 2>: runtime error: pattern match failure: Just x".into(),
+                    value: None,
                     warnings: Vec::new(),
                     installed_bindings: Vec::new(),
                     operations: Vec::new(),
@@ -16668,6 +16684,7 @@ mod tests {
                 source_items: Vec::new(),
                 status: WorkbenchItemStatus::Committed,
                 output: "[bound request]".into(),
+                value: None,
                 warnings,
                 installed_bindings: vec!["request".into()],
                 operations: Vec::new(),

@@ -420,6 +420,10 @@ pub struct WorkbenchItemReceipt {
     pub source_items: Vec<WorkbenchCellSourceItem>,
     pub status: WorkbenchItemStatus,
     pub output: String,
+    /// Structured semantic value returned by an installed tool. Notebook and
+    /// system workbench items have no semantic tool value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
     /// The compiler diagnostics behind this unit's `output` and `warnings`,
     /// kept as data: severity, the coordinate the rendered header shows, and
     /// the message body. Populated on the compile-rejection paths (cell check
@@ -1825,6 +1829,7 @@ mod tests {
                 source_items: Vec::new(),
                 status: WorkbenchItemStatus::Committed,
                 output: "bound `answer`".into(),
+                value: None,
                 diagnostics: Vec::new(),
                 failure_layer: None,
                 warnings: Vec::new(),

@@ -2495,6 +2495,7 @@ pub(crate) mod tests {
                 source_items: Vec::new(),
                 status: WorkbenchItemStatus::Rejected,
                 output: output.clone(),
+                value: None,
                 diagnostics: Vec::new(),
                 warnings: vec![],
                 installed_bindings: vec![],
@@ -2639,6 +2640,7 @@ pub(crate) mod tests {
                 source_items: Vec::new(),
                 status: WorkbenchItemStatus::Rejected,
                 output: rendered.into(),
+                value: None,
                 diagnostics: vec![
                     StructuredDiagnostic {
                         severity: DiagnosticLevel::Error,

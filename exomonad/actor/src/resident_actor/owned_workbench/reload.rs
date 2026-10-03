@@ -463,6 +463,7 @@ fn reload_result(
             source_items: Vec::new(),
             status: WorkbenchItemStatus::Committed,
             output,
+            value: None,
             warnings: Vec::new(),
             installed_bindings: Vec::new(),
             operations: Vec::new(),
