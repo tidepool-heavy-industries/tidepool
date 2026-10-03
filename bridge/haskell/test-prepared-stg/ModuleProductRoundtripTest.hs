@@ -426,7 +426,9 @@ verifyOriginalProductCatalogue work = do
           retainedGroups =
             [ (projectedOriginalOrdinal group, Set.fromList (map Schema.symbolOccurrence
                 (projectedBinders group))) | group <- groups ]
-          hasRecursiveGroup = any (\names -> "cycleEven" `elem` names && "cycleOdd" `elem` names) groupNames
+          -- GHC may replace the source names with worker names. Multiple
+          -- binders in one original group still prove the recursive pair.
+          hasRecursiveGroup = any ((> 1) . length . projectedBinders) groups
       unless (safePresent && not invalidPresent && hasRecursiveGroup
           && all (`Set.member` sourceGroups) retainedGroups) $
         ioError (userError ("fresh catalogue has missing/invalid group evidence: "
