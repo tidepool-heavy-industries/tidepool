@@ -66,15 +66,18 @@ harnessProfilePragmaLine =
 -- Every caller input is protected, including inputs unused by this mode.
 -- An absent unused input remains absent; it does not make preparation fail early.
 requestSourceIdentities :: [FilePath] -> IO (Set.Set (DeviceID, FileID))
-requestSourceIdentities = foldM add Set.empty
+requestSourceIdentities paths = snd <$> foldM add (Set.empty, Set.empty) paths
   where
-    add identities path = do
-      status <- try (getFileStatus path) :: IO (Either IOException FileStatus)
-      case status of
-        Left exception
-          | isDoesNotExistError exception -> pure identities
-          | otherwise -> ioError exception
-        Right existing -> pure (Set.insert (deviceID existing, fileID existing) identities)
+    add state@(seen, identities) path
+      | Set.member path seen = pure state
+      | otherwise = do
+          status <- try (getFileStatus path) :: IO (Either IOException FileStatus)
+          let nextSeen = Set.insert path seen
+          case status of
+            Left exception
+              | isDoesNotExistError exception -> pure (nextSeen, identities)
+              | otherwise -> ioError exception
+            Right existing -> pure (nextSeen, Set.insert (deviceID existing, fileID existing) identities)
 
 -- Existing destination links must not turn scratch rewriting into caller mutation.
 rejectSourceAlias :: Set.Set (DeviceID, FileID) -> FilePath -> IO ()
