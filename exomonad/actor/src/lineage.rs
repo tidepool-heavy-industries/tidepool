@@ -39,7 +39,7 @@ impl ActorLineageRegistry {
         let Some((leaf, prefix)) = requested.segments().split_last() else {
             return Err(ActorPathError::EmptyPath);
         };
-        let allocated = lowest_available(&state.occupied, prefix, leaf)?;
+        let allocated = lowest_available(|path| state.occupied.contains(path), prefix, leaf)?;
         state.occupied.insert(allocated.clone());
         Ok(ActorPathReservation {
             requested,
@@ -60,7 +60,7 @@ impl ActorLineageRegistry {
             });
         }
         let requested_path = ActorPath::new(vec![requested.clone()])?;
-        let allocated = lowest_available(&state.occupied, &[], &requested)?;
+        let allocated = lowest_available(|path| state.occupied.contains(path), &[], &requested)?;
         state.occupied.insert(allocated.clone());
         state.campaigns.insert((root, requested), allocated.clone());
         Ok(ActorPathReservation {
@@ -77,32 +77,7 @@ impl ActorLineageRegistry {
         children: &[ActorPathSegment],
     ) -> Result<Vec<ActorPathReservation>, ActorPathError> {
         let group_path = parent.child(group)?;
-        let mut frequencies = BTreeMap::<&ActorPathSegment, usize>::new();
-        for child in children {
-            *frequencies.entry(child).or_default() += 1;
-        }
-        let mut ordinals = BTreeMap::<&ActorPathSegment, usize>::new();
-        let mut state = self.state.lock();
-        let mut provisional = state.occupied.clone();
-        let mut reservations = Vec::with_capacity(children.len());
-        for child in children {
-            let ordinal = ordinals.entry(child).or_default();
-            *ordinal += 1;
-            let requested_leaf = if frequencies[child] > 1 {
-                child.numbered(*ordinal)?
-            } else {
-                child.clone()
-            };
-            let requested = group_path.child(requested_leaf.clone())?;
-            let allocated = lowest_available(&provisional, group_path.segments(), &requested_leaf)?;
-            provisional.insert(allocated.clone());
-            reservations.push(ActorPathReservation {
-                requested,
-                allocated,
-            });
-        }
-        state.occupied = provisional;
-        Ok(reservations)
+        self.reserve_group_children(&group_path, children)
     }
 
     /// Reserve children directly beneath an already assembled group path.
@@ -117,7 +92,7 @@ impl ActorLineageRegistry {
         }
         let mut ordinals = BTreeMap::<&ActorPathSegment, usize>::new();
         let mut state = self.state.lock();
-        let mut provisional = state.occupied.clone();
+        let mut allocated_paths = BTreeSet::new();
         let mut reservations = Vec::with_capacity(children.len());
         for child in children {
             let ordinal = ordinals.entry(child).or_default();
@@ -128,14 +103,19 @@ impl ActorLineageRegistry {
                 child.clone()
             };
             let requested = group.child(requested_leaf.clone())?;
-            let allocated = lowest_available(&provisional, group.segments(), &requested_leaf)?;
-            provisional.insert(allocated.clone());
+            let allocated = lowest_available(
+                |path| state.occupied.contains(path) || allocated_paths.contains(path),
+                group.segments(),
+                &requested_leaf,
+            )?;
+            allocated_paths.insert(allocated.clone());
             reservations.push(ActorPathReservation {
                 requested,
                 allocated,
             });
         }
-        state.occupied = provisional;
+        // Publish only after every path validates; errors leave retained history intact.
+        state.occupied.extend(allocated_paths);
         Ok(reservations)
     }
 
@@ -2070,7 +2050,7 @@ fn publish_if_ready(group: &mut ForkGroup) {
 }
 
 fn lowest_available(
-    occupied: &BTreeSet<ActorPath>,
+    occupied: impl Fn(&ActorPath) -> bool,
     prefix: &[ActorPathSegment],
     leaf: &ActorPathSegment,
 ) -> Result<ActorPath, ActorPathError> {
@@ -2081,7 +2061,7 @@ fn lowest_available(
             .chain(std::iter::once(leaf.clone()))
             .collect(),
     )?;
-    if !occupied.contains(&candidate) {
+    if !occupied(&candidate) {
         return Ok(candidate);
     }
     for ordinal in 1.. {
@@ -2093,7 +2073,7 @@ fn lowest_available(
                 .chain(std::iter::once(numbered))
                 .collect(),
         )?;
-        if !occupied.contains(&candidate) {
+        if !occupied(&candidate) {
             return Ok(candidate);
         }
     }
@@ -2828,6 +2808,98 @@ mod tests {
             )
             .unwrap();
         assert_eq!(paths[0].allocated.to_string(), "compiler/runtime/tests-1");
+    }
+
+    #[test]
+    fn sibling_collisions_include_retained_paths_and_the_current_batch() {
+        let registry = ActorLineageRegistry::default();
+        let group = ActorPath::parse("compiler/runtime").unwrap();
+        for path in ["compiler/runtime/parser-1", "compiler/runtime/parser-1-1"] {
+            registry.retain_external(ActorPath::parse(path).unwrap());
+        }
+        let children = [segment("parser"), segment("parser"), segment("parser-1")];
+        let paths = registry.reserve_group_children(&group, &children).unwrap();
+        assert_eq!(
+            paths
+                .iter()
+                .map(|r| (r.requested.to_string(), r.allocated.to_string()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "compiler/runtime/parser-1".to_owned(),
+                    "compiler/runtime/parser-1-2".to_owned()
+                ),
+                (
+                    "compiler/runtime/parser-2".to_owned(),
+                    "compiler/runtime/parser-2".to_owned()
+                ),
+                (
+                    "compiler/runtime/parser-1".to_owned(),
+                    "compiler/runtime/parser-1-3".to_owned()
+                ),
+            ]
+        );
+        let next = registry.reserve_group_children(&group, &children).unwrap();
+        assert_eq!(
+            next.iter()
+                .map(|r| r.allocated.to_string())
+                .collect::<Vec<_>>(),
+            [
+                "compiler/runtime/parser-1-4",
+                "compiler/runtime/parser-2-1",
+                "compiler/runtime/parser-1-5",
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_sibling_numbering_does_not_publish_earlier_reservations() {
+        let registry = ActorLineageRegistry::default();
+        let retained = ActorPath::parse("compiler/runtime/retained").unwrap();
+        registry.retain_external(retained.clone());
+        let long = segment(&"a".repeat(tidepool_repr::actor_path::MAX_ACTOR_PATH_SEGMENT_BYTES));
+        assert!(matches!(
+            registry.reserve_children(
+                &ActorPath::parse("compiler").unwrap(),
+                segment("runtime"),
+                &[segment("valid"), long.clone(), long],
+            ),
+            Err(ActorPathError::SegmentTooLong { .. })
+        ));
+        assert_eq!(registry.state.lock().occupied, BTreeSet::from([retained]));
+        let paths = registry
+            .reserve_group_children(
+                &ActorPath::parse("compiler/runtime").unwrap(),
+                &[segment("valid")],
+            )
+            .unwrap();
+        assert_eq!(paths[0].allocated.to_string(), "compiler/runtime/valid");
+    }
+
+    #[test]
+    fn failed_collision_suffix_does_not_publish_earlier_reservations() {
+        let registry = ActorLineageRegistry::default();
+        let group = ActorPath::new(vec![
+            segment(&"a".repeat(
+                tidepool_repr::actor_path::MAX_ACTOR_PATH_SEGMENT_BYTES
+            ));
+            4
+        ])
+        .unwrap();
+        let remaining =
+            tidepool_repr::actor_path::MAX_ACTOR_PATH_BYTES - group.to_string().len() - 1;
+        let long = segment(&"b".repeat(remaining));
+        let retained = group.child(long.clone()).unwrap();
+        registry.retain_external(retained.clone());
+        assert!(matches!(
+            registry.reserve_group_children(&group, &[segment("valid"), long]),
+            Err(ActorPathError::PathTooLong { .. })
+        ));
+        assert_eq!(registry.state.lock().occupied, BTreeSet::from([retained]));
+        let paths = registry
+            .reserve_group_children(&group, &[segment("valid")])
+            .unwrap();
+        assert_eq!(paths[0].allocated, group.child(segment("valid")).unwrap());
     }
 
     #[test]
