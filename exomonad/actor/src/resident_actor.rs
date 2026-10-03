@@ -11537,6 +11537,11 @@ where
                     ))),
                 }
             }
+            if matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_))) {
+                // Admission must return before the host starts consuming deployment
+                // events. Keep prepared effects in their original custody until Resume.
+                return Ok(KernelStep::ContinueLater(()));
+            }
             let boot = self.boot.take().ok_or_else(|| KernelBehaviorError {
                 detail: "resident actor boot was consumed twice".into(),
             })?;
@@ -12660,6 +12665,19 @@ where
                 return Ok(KernelStep::Continue(()));
             }
             let context = self.context(kernel.identity());
+            if self.root_startup.is_none()
+                && self.descriptor.fork_boundary().is_none()
+                && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))
+            {
+                let boot = self
+                    .boot
+                    .take()
+                    .expect("prepared startup retained until resume");
+                return self
+                    .initialize(kernel, &context, boot)
+                    .await
+                    .map_err(Self::failure);
+            }
             let PendingActorProgram {
                 outcome, cleanup, ..
             } = self
