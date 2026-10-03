@@ -123,6 +123,7 @@ import Tidepool.Effects
 import Tidepool.Agent.Contract
   ( AsServerT
   , CompiledTools (..)
+  , ToolDispatchSuccess (..)
   , ToolDeclaration (..)
   , HasAgentApi
   , ToolName
@@ -412,7 +413,7 @@ answerCall (ToolRounds cap) compiled served toolName args
       result <- dispatch compiled toolName args
       pure (case result of
         Left problem -> (ToolRefused (renderToolDispatchError problem), served)
-        Right result -> (ToolAnswered (dispatchOutput result), served + 1))
+        Right result -> (ToolAnswered (toJSON (dispatchPresentation result)), served + 1))
 
 -- | Project the authored 'ToolAnswer' onto the wire's @ok@ + @body@ pair and
 -- drive the turn on. A refusal crosses as the plain text the child reads, not
