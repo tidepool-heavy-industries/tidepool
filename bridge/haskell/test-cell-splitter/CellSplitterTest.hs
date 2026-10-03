@@ -4,6 +4,7 @@
 module Main where
 
 import Control.Monad (forM_, unless, when)
+import qualified Data.Map.Strict as Map
 import Control.Exception (SomeException, bracket, finally, fromException, throwIO, try)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef)
@@ -78,6 +79,8 @@ main = getArgs >>= \case
 runAllTests :: IO ()
 runAllTests = do
   certificationRequestValidation
+  requestShapeValidation
+  requestFieldOrdering
   checkingSourceRequestRoundTrip
   libdir <- getLibdir
   runGhc (Just libdir) $ do
@@ -400,6 +403,49 @@ certificationRequestValidation = do
     case workerRequestFromArgv (workerArgv fields) of
       Left _ -> pure ()
       other -> fail ("home-product certification accepted ambiguous input: " ++ show other)
+
+requestShapeValidation :: IO ()
+requestShapeValidation = do
+  let request fields = case workerRequestFromArgv (workerArgv fields) of
+        Right (Just decoded) -> pure decoded
+        other -> fail ("request shape fixture failed to decode: " ++ show other)
+      cases =
+        [ ("source check accepts its narrow form", [Input "Probe.hs", CheckSource], Right ())
+        , ("source check rejects product output", [Input "Probe.hs", CheckSource, OutputDir "out"], Left InvalidSourceCheckShape)
+        , ("source check rejects notebook mode", [Input "Probe.hs", CheckSource, Cell], Left InvalidSourceCheckShape)
+        , ("cell plan accepts its narrow form", [Input "Cell.hs", CellPlan], Right ())
+        , ("cell plan rejects multiple files", [Input "A.hs", Input "B.hs", CellPlan], Left InvalidCellPlanShape)
+        , ("cell plan rejects candidate authority", [Input "Cell.hs", CellPlan, ModuleCandidates "scope"], Left InvalidCellPlanShape)
+        , ("source-check precedence is retained", [Input "Cell.hs", CheckSource, CellPlan], Left InvalidSourceCheckShape)
+        ]
+  forM_ cases $ \(label, fields, expected) -> do
+    decoded <- request fields
+    assertEqual label expected (validateRequestShape decoded)
+
+requestFieldOrdering :: IO ()
+requestFieldOrdering = do
+  let identity = SymbolIdentity "main" "Producer" "value" "value" Nothing
+      fields =
+        [ Input "first.hs", Targets ["a", "b"], Include "one", InjectVal "Val1"
+        , TurnTemplate "first" "one.tpl", InspectType "Int", RetainedGeneration identity 1
+        , TurnVerdict "old"
+        , Input "second.hs", Targets ["c", "d"], Include "two", InjectVal "Val2"
+        , TurnTemplate "second" "two.tpl", InspectInfo "answer"
+        , RetainedGeneration identity 2, TurnVerdict "new"
+        ]
+  case workerRequestFromArgv (workerArgv fields) of
+    Right (Just request) -> do
+      assertEqual "input order" ["first.hs", "second.hs"] (requestFiles request)
+      assertEqual "target groups retain order" ["a", "b", "c", "d"] (requestTargets request)
+      assertEqual "include order" ["one", "two"] (requestIncludes request)
+      assertEqual "injected value order" ["Val1", "Val2"] (requestInjectVals request)
+      assertEqual "template order" [("first", "one.tpl"), ("second", "two.tpl")] (requestTurnTemplates request)
+      assertEqual "inspection order" [InspectTypeOf "Int", InspectNameInfo "answer"] (requestInspections request)
+      assertEqual "duplicate map key remains last-write-wins" (Just 2)
+        (Map.lookup identity (requestRetainedGenerations request))
+      assertEqual "duplicate scalar remains last-write-wins" (Just "new")
+        (requestTurnVerdict request)
+    other -> fail ("ordered request failed to decode: " ++ show other)
 
 multilineLetPlacement :: DynFlags -> IO ()
 multilineLetPlacement flags = do

@@ -9,6 +9,8 @@ module Tidepool.ExtractRequest
   , StructuredNameNamespace(..)
   , InspectionProvenance(..)
   , WorkerRequest(..)
+  , RequestShapeError(..)
+  , validateRequestShape
   , workerRequestFromArgv
   , workerArgv
   , workerRequestFlag
@@ -17,6 +19,7 @@ module Tidepool.ExtractRequest
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import Data.List (foldl')
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Bits ((.|.), shiftL, shiftR)
@@ -127,6 +130,44 @@ data WorkerRequest = WorkerRequest
   }
   deriving (Eq, Show)
 
+data RequestShapeError = InvalidSourceCheckShape | InvalidCellPlanShape
+  deriving (Eq, Show)
+
+-- Keep mode shape policy pure. Manifest contents and exact-scope authority are
+-- admitted by Main at the point where their I/O is performed.
+validateRequestShape :: WorkerRequest -> Either RequestShapeError ()
+validateRequestShape args
+  | requestCheckSource args && not validSourceCheck = Left InvalidSourceCheckShape
+  | requestCellPlan args && not validCellPlan = Left InvalidCellPlanShape
+  | otherwise = Right ()
+  where
+    validSourceCheck = length (requestFiles args) == 1 && not (requestCell args)
+      && not (requestCellPlan args) && not (requestTurn args) && not (requestClassify args)
+      && null (requestInspections args) && not hasSessionScope
+      && not (present (requestDeclarationJoin args)) && not (present (requestDeclarationJoinOut args))
+      && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
+      && not (requestHarnessProfile args) && not (requestCellFoldTurn args)
+      && not (present (requestOutDir args)) && not (present (requestTarget args))
+      && null (requestTargets args) && not (present (requestBindGen args))
+      && null (requestTurnTemplates args) && not (present (requestTurnOut args))
+      && not (present (requestTurnVerdict args)) && not (present (requestTurnPin args))
+      && not (present (requestCellOut args)) && not (present (requestCellTemplate args))
+      && not (present (requestClassifyOut args)) && not (present (requestInspectOut args))
+      && not (present (requestInspectTypeBatch args)) && not (present (requestSessionArtifacts args))
+      && not (present (requestSessionIncarnation args))
+      && not (requestTargetModuleOnly args) && not (requestInspectionStrict args)
+      && Map.null (requestRetainedGenerations args)
+    validCellPlan = length (requestFiles args) == 1 && not (requestCell args)
+      && not (requestTurn args) && not (requestClassify args)
+      && null (requestInspections args) && not (present (requestSessionArtifacts args))
+      && not (present (requestDeclarationJoin args)) && not (present (requestModuleCandidates args))
+      && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
+      && not (requestCellFoldTurn args) && not (present (requestBindGen args))
+      && Map.null (requestRetainedGenerations args)
+    hasSessionScope = not (null (requestInjectVals args))
+      || present (requestSessionRoot args) || present (requestSessionArtifacts args)
+    present = maybe False (const True)
+
 emptyWorkerRequest :: WorkerRequest
 emptyWorkerRequest = WorkerRequest
   { requestOutDir = Nothing
@@ -204,22 +245,30 @@ data StructuredInspection = StructuredInspection
   deriving (Eq, Show)
 
 requestFromFields :: [RequestField] -> WorkerRequest
-requestFromFields = foldl apply emptyWorkerRequest
+requestFromFields = finish . foldl' apply emptyWorkerRequest
   where
+    finish request = request
+      { requestTargets = reverse (requestTargets request)
+      , requestIncludes = reverse (requestIncludes request)
+      , requestFiles = reverse (requestFiles request)
+      , requestInjectVals = reverse (requestInjectVals request)
+      , requestTurnTemplates = reverse (requestTurnTemplates request)
+      , requestInspections = reverse (requestInspections request)
+      }
     apply request field = case field of
-      Input path -> request { requestFiles = requestFiles request ++ [path] }
+      Input path -> request { requestFiles = path : requestFiles request }
       OutputDir path -> request { requestOutDir = Just path }
       Target name -> request { requestTarget = Just name }
-      Targets names -> request { requestTargets = requestTargets request ++ names }
+      Targets names -> request { requestTargets = foldl' (flip (:)) (requestTargets request) names }
       TargetModuleOnly -> request { requestTargetModuleOnly = True }
-      Include path -> request { requestIncludes = requestIncludes request ++ [path] }
+      Include path -> request { requestIncludes = path : requestIncludes request }
       BindGen generation -> request { requestBindGen = Just generation }
       SessionRoot path -> request { requestSessionRoot = Just path }
       SessionIncarnation incarnation -> request { requestSessionIncarnation = Just incarnation }
-      InjectVal name -> request { requestInjectVals = requestInjectVals request ++ [name] }
+      InjectVal name -> request { requestInjectVals = name : requestInjectVals request }
       Turn -> request { requestTurn = True }
       TurnTemplate kind path -> request
-        { requestTurnTemplates = requestTurnTemplates request ++ [(kind, path)] }
+        { requestTurnTemplates = (kind, path) : requestTurnTemplates request }
       TurnOut path -> request { requestTurnOut = Just path }
       TurnVerdict verdict -> request { requestTurnVerdict = Just verdict }
       Classify -> request { requestClassify = True }
@@ -238,21 +287,21 @@ requestFromFields = foldl apply emptyWorkerRequest
       DeclarationJoin path -> request { requestDeclarationJoin = Just path }
       DeclarationJoinOut path -> request { requestDeclarationJoinOut = Just path }
       InspectType expression -> request
-        { requestInspections = requestInspections request ++ [InspectTypeOf expression] }
+        { requestInspections = InspectTypeOf expression : requestInspections request }
       InspectInfo name -> request
-        { requestInspections = requestInspections request ++ [InspectNameInfo name] }
+        { requestInspections = InspectNameInfo name : requestInspections request }
       InspectBrowse name -> request
-        { requestInspections = requestInspections request ++ [InspectModule name False] }
+        { requestInspections = InspectModule name False : requestInspections request }
       InspectBrowseExpanded name -> request
-        { requestInspections = requestInspections request ++ [InspectModule name True] }
+        { requestInspections = InspectModule name True : requestInspections request }
       InspectScopeBrowse -> request
-        { requestInspections = requestInspections request ++ [InspectScope] }
+        { requestInspections = InspectScope : requestInspections request }
       InspectSearch query -> request
-        { requestInspections = requestInspections request ++ [InspectTypeSearch query] }
+        { requestInspections = InspectTypeSearch query : requestInspections request }
       InspectStructuredInfo query -> request
-        { requestInspections = requestInspections request ++ [InspectStructuredInfoOf query] }
+        { requestInspections = InspectStructuredInfoOf query : requestInspections request }
       InspectStructuredType query -> request
-        { requestInspections = requestInspections request ++ [InspectStructuredTypeOf query] }
+        { requestInspections = InspectStructuredTypeOf query : requestInspections request }
       InspectOut path -> request { requestInspectOut = Just path }
       InspectTypeBatch path -> request { requestInspectTypeBatch = Just path }
       RetainedGeneration identity generation -> request

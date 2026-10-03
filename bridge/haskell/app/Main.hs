@@ -264,33 +264,10 @@ dispatch
   :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
 dispatch compiler caches timing args = do
   admitted <- trySynchronous $ do
-    when (requestCheckSource args) $
-      unless (length (requestFiles args) == 1 && not (requestCell args)
-          && not (requestCellPlan args) && not (requestTurn args) && not (requestClassify args)
-          && null (requestInspections args) && not (hasSessionScope args)
-          && not (isJust (requestDeclarationJoin args)) && not (isJust (requestDeclarationJoinOut args))
-          && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
-          && not (requestHarnessProfile args) && not (requestCellFoldTurn args)
-          && not (isJust (requestOutDir args)) && not (isJust (requestTarget args))
-          && null (requestTargets args) && not (isJust (requestBindGen args))
-          && null (requestTurnTemplates args) && not (isJust (requestTurnOut args))
-          && not (isJust (requestTurnVerdict args)) && not (isJust (requestTurnPin args))
-          && not (isJust (requestCellOut args)) && not (isJust (requestCellTemplate args))
-          && not (isJust (requestClassifyOut args)) && not (isJust (requestInspectOut args))
-          && not (isJust (requestInspectTypeBatch args)) && not (isJust (requestSessionArtifacts args))
-          && not (isJust (requestSessionIncarnation args))
-          && not (requestTargetModuleOnly args) && not (requestInspectionStrict args)
-          && Map.null (requestRetainedGenerations args))
-        (fail "source checking cannot carry product or notebook authority")
-    when (requestCellPlan args) $
-      unless (length (requestFiles args) == 1 && not (requestCell args)
-          && not (requestTurn args) && not (requestClassify args)
-          && null (requestInspections args) && not (isJust (requestSessionArtifacts args))
-          && not (isJust (requestDeclarationJoin args)) && not (isJust (requestModuleCandidates args))
-          && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
-          && not (requestCellFoldTurn args) && not (isJust (requestBindGen args))
-          && Map.null (requestRetainedGenerations args))
-        (throwIO InvalidCellPlanRequest)
+    case validateRequestShape args of
+      Left InvalidSourceCheckShape -> fail "source checking cannot carry product or notebook authority"
+      Left InvalidCellPlanShape -> throwIO InvalidCellPlanRequest
+      Right () -> pure ()
     forM_ (requestSessionArtifacts args) $ \manifest -> do
       scope <- readExactScope manifest >>= either fail pure
       forM_ (scopeIncludePaths scope) $ \includes ->
