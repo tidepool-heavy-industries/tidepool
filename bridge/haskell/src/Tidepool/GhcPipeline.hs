@@ -25,7 +25,7 @@ module Tidepool.GhcPipeline
   ) where
 
 import GHC hiding (typeKind)
-import GHC.Driver.Main (hscDesugar, hscDesugar', hscSimplify, hscMaybeWriteIface, batchMsg, hscTidy)
+import GHC.Driver.Main (hscDesugar, hscDesugar', hscSimplify, hscMaybeWriteIface, batchMsg, hscTidy, hscCompileCoreExpr')
 import GHC.Driver.Pipeline (compileOne')
 import GHC.Driver.Pipeline.Execute (runPhase)
 import GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..))
