@@ -219,11 +219,11 @@ awaitAnyProgressSited :: forall progress. Int -> [(Progress progress, ProgressCu
 awaitAnyProgressSited _ [] = pure []
 awaitAnyProgressSited site sources =
   Await [map dependency sources] $ \watchId _ ->
-    traverseObservedProgress <$> mapM (observe watchId) sources
+    traverseObservedProgress <$> mapM
+      (\(Progress (RequestId requestId), ProgressCursor revision) ->
+        send (ObserveWatchProgressWith site watchId requestId revision)) sources
   where
     dependency (Progress request, cursor) = AwaitProgress request cursor
-    observe watchId (Progress (RequestId requestId), ProgressCursor revision) =
-      send (ObserveWatchProgressWith site watchId requestId revision)
 
 observedProgress :: ProgressState progress -> Maybe (ProgressState progress)
 observedProgress (ProgressRejected ReplyStale) = Nothing

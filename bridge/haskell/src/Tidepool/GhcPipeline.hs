@@ -3243,10 +3243,12 @@ revalidateAcceptedCandidates candidates = and <$> forM candidates (\admission ->
     interface <- BS.readFile (candidateInterface candidate)
     productBytes <- BS.readFile (candidateProductPath candidate)
     certificate <- bounded (canonicalCertificatePath proof) (4 * 1024 * 1024)
-    coreValid <- case canonicalCoreArtifact proof of
-      Nothing -> pure False
-      Just core -> (== canonicalCoreSha256 core) . hexBytes . SHA256.hash
-        <$> bounded (canonicalCorePath core) (32 * 1024 * 1024)
+    coreValid <- case admittedCandidateLoading admission of
+      CandidateInterfaceOnly -> pure True
+      CandidateLoadForExecution -> case canonicalCoreArtifact proof of
+        Nothing -> pure False
+        Just core -> (== canonicalCoreSha256 core) . hexBytes . SHA256.hash
+          <$> bounded (canonicalCorePath core) (32 * 1024 * 1024)
     packageImports <- readPackageImports (candidatePackageImports candidate)
       (candidatePackageImportsSha256 candidate)
       (ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
