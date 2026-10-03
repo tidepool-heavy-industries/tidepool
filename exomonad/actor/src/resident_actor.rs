@@ -1433,18 +1433,21 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    let submission = stage_actor_display(
-        environment,
-        context,
-        page,
-        callback,
-        update,
-        allowance,
-        operation,
-    )?;
-    if let Some(receipt) = &mut receipt {
-        receipt.prepare(&submission.request)?;
-    }
+    let stage = || {
+        stage_actor_display(
+            environment,
+            context,
+            page,
+            callback,
+            update,
+            allowance,
+            operation,
+        )
+    };
+    let submission = match &mut receipt {
+        Some(receipt) => receipt.stage_and_prepare(stage)?,
+        None => stage()?,
+    };
     complete_display_publication(&environment, submission).await
 }
 
@@ -9271,6 +9274,7 @@ where
                                 effect_ordinal: ordinal,
                             }),
                             Some(DisplayReceiptSubmission {
+                                owner: execution_state.display_receipt_owner.clone(),
                                 settlement: display_settlement,
                                 fragment: &mut *next_fragment,
                                 remaining: &mut *unit.display_remaining,

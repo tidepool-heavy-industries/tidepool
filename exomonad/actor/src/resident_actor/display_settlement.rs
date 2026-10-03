@@ -6,14 +6,20 @@ use tidepool_runtime::session::{WorkbenchDisplayPublication, WorkbenchDisplayPub
 /// cursor, native effect owner, or retained Haskell root.
 pub(super) struct DisplayExecutionSettlement {
     execution: WorkbenchExecutionId,
-    operations: Mutex<Vec<Arc<DisplayOperationSettlement>>>,
+    state: Mutex<DisplayExecutionState>,
+}
+
+#[derive(Default)]
+struct DisplayExecutionState {
+    frozen: bool,
+    operations: Vec<Arc<DisplayOperationSettlement>>,
 }
 
 impl DisplayExecutionSettlement {
     pub(super) fn new(execution: WorkbenchExecutionId) -> Self {
         Self {
             execution,
-            operations: Mutex::new(Vec::new()),
+            state: Mutex::new(DisplayExecutionState::default()),
         }
     }
 
@@ -21,9 +27,11 @@ impl DisplayExecutionSettlement {
         &self,
         settlement: Arc<DisplayOperationSettlement>,
     ) -> Result<(), ResidentActorWorkbenchError> {
-        let mut operations = self.operations.lock();
-        if settlement.id.execution != self.execution
-            || operations
+        let mut state = self.state.lock();
+        if state.frozen
+            || settlement.id.execution != self.execution
+            || state
+                .operations
                 .iter()
                 .any(|existing| existing.id == settlement.id)
         {
@@ -32,8 +40,23 @@ impl DisplayExecutionSettlement {
                     .into(),
             ));
         }
-        operations.push(settlement);
+        state.operations.push(settlement);
         Ok(())
+    }
+
+    /// Issuance, attachment and byte reservation share the terminal cutoff.
+    /// The supplied native admission is synchronous and never runs guest code.
+    fn admit_publication<T>(
+        &self,
+        admit: impl FnOnce() -> Result<T, ResidentActorWorkbenchError>,
+    ) -> Result<T, ResidentActorWorkbenchError> {
+        let state = self.state.lock();
+        if state.frozen {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "display execution has already frozen its terminal receipt".into(),
+            ));
+        }
+        admit()
     }
 
     pub(super) fn freeze_step(
@@ -51,7 +74,9 @@ impl DisplayExecutionSettlement {
     }
 
     fn freeze_receipts(&self, mut receipts: Option<&mut Vec<WorkbenchItemReceipt>>) {
-        let operations = self.operations.lock();
+        let mut state = self.state.lock();
+        state.frozen = true;
+        let operations = &state.operations;
         let mut packets = operations
             .iter()
             .filter_map(|settlement| settlement.packet())
@@ -64,7 +89,7 @@ impl DisplayExecutionSettlement {
             .iter()
             .map(|packet| packet.publication.lock())
             .collect::<Vec<_>>();
-        for settlement in &*operations {
+        for settlement in operations {
             let Some(packet) = settlement.packet() else {
                 continue;
             };
@@ -84,8 +109,9 @@ impl DisplayExecutionSettlement {
     }
 
     pub(super) fn observations(&self) -> Vec<(WorkbenchOperationId, WorkbenchDisplayPublication)> {
-        self.operations
+        self.state
             .lock()
+            .operations
             .iter()
             .filter_map(|operation| {
                 operation
@@ -309,13 +335,41 @@ impl DisplayOperationSettlement {
 /// The original exclusive fragment charges its prepared page before enqueue.
 /// Acknowledgment only updates the shared settlement, never this cursor.
 pub(super) struct DisplayReceiptSubmission<'a> {
+    pub(super) owner: Option<Arc<DisplayExecutionSettlement>>,
     pub(super) settlement: Option<Arc<DisplayOperationSettlement>>,
     pub(super) fragment: &'a mut ResidentWorkbenchFragment,
     pub(super) remaining: &'a mut usize,
 }
 
 impl DisplayReceiptSubmission<'_> {
+    pub(super) fn stage_and_prepare(
+        &mut self,
+        stage: impl FnOnce() -> Result<DisplayPublicationSubmission, ResidentActorWorkbenchError>,
+    ) -> Result<DisplayPublicationSubmission, ResidentActorWorkbenchError> {
+        let owner = self.owner.clone();
+        let admit = || {
+            let submission = stage()?;
+            self.prepare_unfenced(&submission.request)?;
+            Ok(submission)
+        };
+        match owner {
+            Some(owner) => owner.admit_publication(admit),
+            None => admit(),
+        }
+    }
+
     pub(super) fn prepare(
+        &mut self,
+        request: &DisplayPublication,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        let owner = self.owner.clone();
+        match owner {
+            Some(owner) => owner.admit_publication(|| self.prepare_unfenced(request)),
+            None => self.prepare_unfenced(request),
+        }
+    }
+
+    fn prepare_unfenced(
         &mut self,
         request: &DisplayPublication,
     ) -> Result<(), ResidentActorWorkbenchError> {
@@ -606,7 +660,7 @@ mod tests {
             // forest/journal custody and the discarded execution are gone.
             drop(journal);
             drop(owner);
-            let delivered = control.settle(Err(fail()));
+            let delivered = control.settle_reply(Err(fail()));
             assert_eq!(control.terminal_reply(), Some(delivered.clone()));
             let receipt = &delivered.as_ref().unwrap_err().receipts()[0];
             if terminal_first {
@@ -633,7 +687,7 @@ mod tests {
             }
             assert_eq!(displays.lock().pending_count(), 0);
             assert_eq!(
-                control.settle(Err(fail())),
+                control.settle_reply(Err(fail())),
                 delivered,
                 "late commit never rewrites the first delivered scheduler outcome"
             );
@@ -642,6 +696,174 @@ mod tests {
                 Some(WorkbenchDisplayPublication::Published { .. })
             ));
         }
+    }
+
+    #[test]
+    fn native_stage_and_terminal_freeze_share_one_publication_cutoff() {
+        let actor = ActorRef::first(crate::ActorId(37));
+        let execution = WorkbenchExecutionId::from_digest([23; 16]);
+        let operation = WorkbenchOperationId {
+            execution: execution.clone(),
+            input_unit_index: 0,
+            effect_ordinal: 0,
+        };
+        let owner = Arc::new(DisplayExecutionSettlement::new(execution));
+        let settlement = Arc::new(DisplayOperationSettlement::new(
+            operation.clone(),
+            "Console.DisplayWith".into(),
+            WorkbenchOperationDisposition::Committed,
+        ));
+        owner.retain(settlement.clone()).unwrap();
+        let control = crate::WorkbenchExecutionControl::untracked();
+        control.bind_receipt_owner(owner.clone());
+        let displays = Arc::new(Mutex::new(ActorDisplays::default()));
+        let (issued, issued_request) = std::sync::mpsc::channel();
+        let (release_stage, stage_release) = std::sync::mpsc::channel();
+        let stage = std::thread::spawn({
+            let owner = owner.clone();
+            let settlement = settlement.clone();
+            let displays = displays.clone();
+            move || {
+                owner.admit_publication(|| {
+                    let (request, answer) = displays.lock().stage(
+                        actor,
+                        WorkbenchDisplayPage {
+                            identity: (0, 0, 0),
+                            text: "visible".into(),
+                            expansions: Vec::new(),
+                            unavailable: false,
+                        },
+                        None,
+                        false,
+                        8192,
+                        Some(operation),
+                    )?;
+                    let submission =
+                        DisplayPublicationSubmission::new(displays, request.clone(), answer);
+                    issued.send(request.clone()).unwrap();
+                    // Freeze attempts its cutoff after native slot issuance and
+                    // before packet attachment, with no host submission yet.
+                    stage_release.recv().unwrap();
+                    settlement.admit(&request);
+                    Ok(submission)
+                })
+            }
+        });
+        let request = issued_request.recv().unwrap();
+        let (started, freeze_started) = std::sync::mpsc::channel();
+        let (frozen, freeze_done) = std::sync::mpsc::channel();
+        let freeze = std::thread::spawn({
+            let control = control.clone();
+            move || {
+                started.send(()).unwrap();
+                let reply = control.settle_reply(Err(KernelInvocationFailure::Failed {
+                    actor,
+                    detail: "scheduler stopped execution".into(),
+                    receipts: Vec::new(),
+                }));
+                frozen.send(reply).unwrap();
+            }
+        });
+        freeze_started.recv().unwrap();
+        assert!(matches!(
+            freeze_done.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        release_stage.send(()).unwrap();
+        let submission = stage.join().unwrap().unwrap();
+        let delivered = freeze_done.recv().unwrap();
+        freeze.join().unwrap();
+        let operation = &delivered.as_ref().unwrap_err().receipts()[0].operations[0];
+        assert!(
+            matches!(operation.display_publication, Some(WorkbenchDisplayPublication::Pending { publication }) if publication.display == request.page.identity && publication.page_ordinal == 1)
+        );
+        assert!(operation.display.is_none());
+        drop(submission);
+        request.answer(DisplayPublicationOutcome::Published(
+            tidepool_runtime::session::ActorOutputReference {
+                run: "run-1".into(),
+                sequence: 7,
+            },
+        ));
+        displays.lock().reconcile(request.page.identity.2).unwrap();
+        assert_eq!(control.terminal_reply(), Some(delivered));
+        assert!(matches!(
+            settlement.observation(),
+            Some(WorkbenchDisplayPublication::Published { .. })
+        ));
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let rejected: Result<(), ResidentActorWorkbenchError> = owner.admit_publication(|| {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        });
+        assert!(rejected.is_err());
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a frozen execution cannot issue a later publication"
+        );
+        assert!(owner
+            .retain(Arc::new(DisplayOperationSettlement::new(
+                WorkbenchOperationId {
+                    execution: owner.execution.clone(),
+                    input_unit_index: 0,
+                    effect_ordinal: 1
+                },
+                "Console.DisplayWith".into(),
+                WorkbenchOperationDisposition::Committed
+            )))
+            .is_err());
+    }
+
+    #[test]
+    fn terminal_freeze_before_issuance_rejects_uncaptured_packet() {
+        let actor = ActorRef::first(crate::ActorId(37));
+        let execution = WorkbenchExecutionId::from_digest([24; 16]);
+        let operation = WorkbenchOperationId {
+            execution: execution.clone(),
+            input_unit_index: 0,
+            effect_ordinal: 0,
+        };
+        let owner = Arc::new(DisplayExecutionSettlement::new(execution));
+        let settlement = Arc::new(DisplayOperationSettlement::new(
+            operation.clone(),
+            "Console.DisplayWith".into(),
+            WorkbenchOperationDisposition::Committed,
+        ));
+        owner.retain(settlement).unwrap();
+        let control = crate::WorkbenchExecutionControl::untracked();
+        control.bind_receipt_owner(owner.clone());
+        let delivered = control.settle_reply(Err(KernelInvocationFailure::Failed {
+            actor,
+            detail: "scheduler stopped before issuance".into(),
+            receipts: Vec::new(),
+        }));
+        assert!(delivered.as_ref().unwrap_err().receipts().is_empty());
+        let displays = Arc::new(Mutex::new(ActorDisplays::default()));
+        let stage = owner.admit_publication(|| {
+            let (request, answer) = displays.lock().stage(
+                actor,
+                WorkbenchDisplayPage {
+                    identity: (0, 0, 0),
+                    text: "visible".into(),
+                    expansions: Vec::new(),
+                    unavailable: false,
+                },
+                None,
+                false,
+                8192,
+                Some(operation),
+            )?;
+            Ok(DisplayPublicationSubmission::new(
+                displays.clone(),
+                request,
+                answer,
+            ))
+        });
+        assert!(stage.is_err());
+        assert!(displays.lock().slots.is_empty());
+        assert_eq!(displays.lock().next_slot, 0);
+        assert_eq!(control.terminal_reply(), Some(delivered));
     }
 
     #[test]
@@ -685,7 +907,7 @@ mod tests {
         assert!(request.answer(DisplayPublicationOutcome::Refused(
             "authority rejected before commit".into()
         )));
-        let delivered = control.settle(Err(KernelInvocationFailure::Rejected {
+        let delivered = control.settle_reply(Err(KernelInvocationFailure::Rejected {
             actor,
             detail: "display refused".into(),
             receipts: Vec::new(),

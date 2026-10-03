@@ -293,7 +293,11 @@ impl WorkbenchExecutionControl {
 
     /// The actor publishes the first terminal reply; transport failure may
     /// fill the slot only when no actor-owned reply arrived.
-    pub(crate) fn settle(
+    pub(crate) fn settle(&self, reply: crate::KernelWorkbenchReply) {
+        let _ = self.settle_reply(reply);
+    }
+
+    pub(crate) fn settle_reply(
         &self,
         mut reply: crate::KernelWorkbenchReply,
     ) -> crate::KernelWorkbenchReply {

@@ -1484,6 +1484,7 @@ where
                             let cursor = &mut owned.state.cursor;
                             let current = cursor.running.as_mut().expect("same display fragment");
                             let receipt = DisplayReceiptSubmission {
+                                owner: owned.state.effects.display_receipt_owner.clone(),
                                 settlement: current
                                     .inflight_effect
                                     .as_ref()
