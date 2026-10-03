@@ -13,4 +13,6 @@ rendering; use `display value` for bounded structured output. Whole-cell typeche
 execution; runtime failure retains the completed prefix, and the receipt names
 what each unit did. Inspect it before retrying. A cell splits into units at
 column-1 boundaries: keep `respond value` on one line with nothing after it.
-Use `lookup` for missing signatures and `doc workbench` for recovery.
+For signatures or `doc workbench`, use hosted `lookup` when declared; otherwise
+use `LookupApi.lookupRaw` with `LookupApi.lookupRequest` when the admitted notebook
+lists `Lookup`. `Prelude.lookup` is list lookup; `doc` queries are not Haskell.

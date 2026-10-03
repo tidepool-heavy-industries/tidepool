@@ -702,6 +702,7 @@ pub(super) async fn run_interactive_applications(
                             let instructions = orient_launch_instructions(
                                 &instructions,
                                 &installation.runtime_observation.snapshot(),
+                                installation.policy.tools(),
                             );
                             installation.runtime_observation.publish_launch_pending(
                                 "attaching the embedded conversation",

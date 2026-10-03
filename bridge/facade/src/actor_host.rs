@@ -5434,11 +5434,48 @@ fn supply_resident_command_backend(
 fn orient_launch_instructions(
     message: &str,
     observation: &exomonad_actor::ActorRuntimeObservation,
+    tools: &[exomonad_tool::HostedTool],
 ) -> String {
-    match observation.launch_orientation() {
+    let mut instructions = match observation.launch_orientation() {
         Some(orientation) => format!("{message}\n\n{orientation}"),
         None => message.to_owned(),
+    };
+    let names = tools.iter().map(|tool| tool.name()).collect::<Vec<_>>();
+    instructions.push_str(&format!(
+        "\n\nDeclared tools: {}.",
+        if names.is_empty() {
+            "(none)".to_owned()
+        } else {
+            names.join(", ")
+        },
+    ));
+    for tool in tools {
+        if tool.implementation() != exomonad_tool::ToolImplementation::HaskellCell {
+            continue;
+        }
+        let effects = tool
+            .effect_keys()
+            .iter()
+            .map(|effect| effect.haskell_name())
+            .collect::<Vec<_>>();
+        instructions.push_str(&format!(
+            "\nNotebook {} effects: {}.",
+            tool.name(),
+            effects.join(", "),
+        ));
+        if tool
+            .effect_keys()
+            .contains(&exomonad_tool::ToolEffectKey::Actor(
+                exomonad_tool::ActorEffectKey::Lookup,
+            ))
+        {
+            instructions.push_str(&format!(
+                "\nDiscovery in {}: LookupApi.lookupRaw (LookupApi.lookupRequest [\"doc topics\"]).",
+                tool.name(),
+            ));
+        }
     }
+    instructions
 }
 
 fn open_embedded_actor_binding(

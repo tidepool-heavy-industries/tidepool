@@ -103,7 +103,7 @@ their creating cell. See `doc workbench` and the compiled
 The activation supplies typed `sessionInput`, its reply declaration, and the
 roster of siblings admitted with you; use `display sessionInput` to inspect it.
 `respond`, `sessionReply` and `sessionInput` exist only while
-a request is pending; `lookup` shows them then. A root has none of them: use
+a request is pending; discovery shows them then. A root has none of them: use
 the project's task and review constructors instead of recipes written for a
 child. `request @Report (responseActor worker) (assignment [label|revision|] input)`
 assigns invocation-owned follow-up work. Await it before returning or explicitly
@@ -155,6 +155,15 @@ judgments over supplied evidence; load `exomonad-jev` for composition. `me` is
 lexically captured. `parentAgent` is your supervisor, receiving `sendMessage`
 and settling requests, or `Nothing` for a root.
 
+Run a shell string with `Cmd.run (Cmd.bashCommand "git status --short")`;
+`[bash|...|]` is a literal Bash quotation that constructs the same `Command`.
+Use `Cmd.withArguments` to pass dynamic values as positional arguments.
+
+```haskell
+result <- Cmd.run (Cmd.bashCommand "git status --short")
+display (Cmd.stdout result)
+```
+
 `Cmd.run command = Cmd.start command >>= Cmd.await` preserves the continuation until terminal
 completion, including nonzero exits. `Cmd.observe` returns bounded status normally;
 observation never detaches. Default starts are invocation-owned. Use
@@ -178,25 +187,26 @@ Handle refusal and retain cleanup; see `exomonad-define-actors`.
 
 ## Discover missing information
 
-Start with this guide and assignment. `lookup` accepts names, modules and
-Hoogle-like types (`:: Cmd.Command -> _`). It may add up to four Jev-selected
-related declarations or alternatives; original failures remain. `polymorphic`
-needs call-site constraints; `unknown` needs type information. `doc topics`
-locates guides and modules. `status` offers `summary`, `detailed`, `watches`,
-`recovery`, `lineage`, `trace` and `bindings` without compiling a cell.
+Start with this guide and assignment. `doc <topic>` is lookup query text,
+never Haskell syntax. Use hosted `lookup` only if your active `AgentSpec`
+supplies it. When the admitted notebook lists `Lookup`, use
+`LookupApi.lookupRaw` with `LookupApi.lookupRequest`.
+`Prelude.lookup` performs ordinary list lookup. `doc topics` lists guides and
+skills; load an installed skill from `.agents/skills/<name>/SKILL.md` first.
 
-Lookup examples name tested fixtures and prerequisites, not proof of the current
-workspace's compilation. Ambiguous, unavailable and live bindings have no example.
-Follow the exact locator for an omitted example; never execute truncated code.
+```haskell
+topics <- LookupApi.lookupRaw (LookupApi.lookupRequest ["doc topics"])
+display (show topics)
+```
 
-Before hand-building a review, merge, or triage loop, `lookup`/`doc` installed
-modules and skills: an existing actor is often four calls away, reimplementing
-it by hand many more.
+Hosted lookup may add up to four Jev-selected related declarations or
+alternatives; original failures remain. `polymorphic` needs call-site
+constraints; `unknown` needs type information. `status` offers `summary`,
+`detailed`, `watches`, `recovery`, `lineage`, `trace` and `bindings` without
+compiling a cell.
 
-Load the relevant skill at an unfamiliar boundary: `exomonad-command` for retained
-output/stdin/completion; `exomonad-workbench` for parser/type/display recovery;
-`exomonad-jev` for typed judgment composition; `exomonad-unfold` for delegation/source;
-`exomonad-coordinate`, `exomonad-fork`, and `exomonad-review` for project
-coordination; `exomonad-define-actors` for custom event handlers; `exomonad-cleanup` for
-retirement; `exomonad-agent-spec` for typed tools and spec reload; `doc` is the
-fallback.
+Examples cite tested fixtures, not current-workspace proof. Follow an exact
+locator for omitted code; never execute truncated examples.
+
+For unfamiliar boundaries, load the relevant installed skill. Documentation
+topics are the fallback.

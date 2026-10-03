@@ -303,6 +303,7 @@ impl ActorWorkbenchSource {
                 "qualified Data.Set as Set",
                 "Tidepool.Inspection (display, expand, expansions)",
                 "qualified Tidepool.Effects.Core",
+                "qualified Tidepool.Lookup as LookupApi",
             ]),
             spec: None,
             workspace_modules: Arc::from([]),

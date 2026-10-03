@@ -958,7 +958,21 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     .await;
     displayed(&mut campaign, root.as_ref(), guide_examples.next().unwrap()).await;
     displayed(&mut campaign, root.as_ref(), guide_examples.next().unwrap()).await;
+    let command_example = guide_examples.next().unwrap();
+    let lookup_example = guide_examples.next().unwrap();
     assert!(guide_examples.next().is_none(), "untested guide example");
+    displayed(&mut campaign, root.as_ref(), lookup_example).await;
+    let topics_found = displayed(
+        &mut campaign,
+        root.as_ref(),
+        include_str!("lookup_topics_found.hs"),
+    )
+    .await;
+    assert_eq!(
+        explicit_display_output(&topics_found)["text"],
+        "True",
+        "{topics_found}"
+    );
     displayed(
         &mut campaign,
         root.as_ref(),
@@ -971,6 +985,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     // The host requests a backend for each command in a cell.
     let command_examples = [
         "inspectRecentChanges \"inspect changed documentation\" >>= display",
+        command_example,
         examples(include_str!(
             "../../../../.exomonad/workspace/skills/exomonad-workbench/SKILL.md"
         ))

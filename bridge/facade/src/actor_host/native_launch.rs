@@ -276,8 +276,11 @@ pub(super) async fn launch_prepared_interactive_application(
         developer_instructions.push('\n');
         developer_instructions.push_str(notice);
     }
-    let developer_instructions =
-        orient_launch_instructions(&developer_instructions, &runtime_observation.snapshot());
+    let developer_instructions = orient_launch_instructions(
+        &developer_instructions,
+        &runtime_observation.snapshot(),
+        installation.policy.tools(),
+    );
     runtime_observation.publish_prompt_profile(
         installation.effective_role.prompt_profile(),
         PromptId::CATALOG_VERSION,

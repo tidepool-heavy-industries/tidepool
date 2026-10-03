@@ -5469,10 +5469,7 @@ async fn native_push_acknowledges_only_after_acceptance_and_retries_the_same_row
     let actor = ActorRef::first(exomonad_actor::ActorId(7));
     let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
     let (producer, reconciliations) = test_delivery_dependencies(root.path(), actor);
-    assert_eq!(
-        orient_launch_instructions("event", &observation.snapshot()),
-        "event"
-    );
+    assert!(orient_launch_instructions("event", &observation.snapshot(), &[]).starts_with("event"));
     observation.publish_launch_role(exomonad_actor::EffectiveRole::research(), 0);
     observation.publish_workspace(exomonad_actor::ActorWorkspaceObservation {
         workspace_path: "/tmp/visible".into(),
@@ -5488,9 +5485,9 @@ async fn native_push_acknowledges_only_after_acceptance_and_retries_the_same_row
     assert!(orientation.contains("workspace_path=\"/tmp/visible\" (native tools)"));
     assert!(orientation.contains("expected_branch=\"research\""));
     assert!(!orientation.contains("sessionReply"));
-    assert_eq!(
-        orient_launch_instructions("launch instructions", &observation.snapshot()),
-        format!("launch instructions\n\n{orientation}")
+    assert!(
+        orient_launch_instructions("launch instructions", &observation.snapshot(), &[])
+            .starts_with(&format!("launch instructions\n\n{orientation}"))
     );
 
     assert!(deliver_pending(
@@ -7188,4 +7185,48 @@ async fn withdrawal_without_native_evidence_is_not_retried_and_reports_no_host_r
         "{status:?}"
     );
     assert_eq!(status.next, exomonad_actor::InboundNext::NoHostRecovery);
+}
+
+#[test]
+fn launch_capabilities_follow_each_admitted_notebook_profile() {
+    use exomonad_tool::{
+        ActorEffectKey, CustomToolDeclaration, HostedTool, ToolEffectKey, ToolImplementation,
+        ToolScheduling,
+    };
+    let notebook = |name: &str, effects: Vec<ToolEffectKey>| {
+        HostedTool::Custom(CustomToolDeclaration {
+            name: name.into(),
+            description: "test notebook".into(),
+            schedule: ToolScheduling::Async,
+            implementation: ToolImplementation::HaskellCell,
+            effect_keys: effects,
+        })
+    };
+    let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
+    let sparse = notebook("sparse_cell", vec![ActorEffectKey::Commands.into()]);
+    let lookup = notebook("lookup_cell", vec![ActorEffectKey::Lookup.into()]);
+    let shared = PromptId::ExomonadBase.body();
+    let sparse_only =
+        orient_launch_instructions(shared, &observation.snapshot(), &[sparse.clone()]);
+    assert!(sparse_only.starts_with(shared));
+    assert!(sparse_only[shared.len()..].contains("sparse_cell"));
+    assert!(sparse_only[shared.len()..].contains("Commands"));
+    assert!(!sparse_only[shared.len()..].contains("Lookup"));
+    assert!(!sparse_only[shared.len()..].contains("LookupApi.lookupRaw"));
+    let mixed = orient_launch_instructions(shared, &observation.snapshot(), &[sparse, lookup]);
+    let suffix = &mixed[shared.len()..];
+    assert!(mixed.starts_with(shared));
+    assert!(suffix.contains("sparse_cell"));
+    assert!(suffix.contains("lookup_cell"));
+    assert_eq!(suffix.matches("LookupApi.lookupRaw").count(), 1);
+    assert!(!suffix.contains("haskell"));
+    let handler = HostedTool::Custom(CustomToolDeclaration {
+        name: "lookup".into(),
+        description: "authored handler".into(),
+        schedule: ToolScheduling::Async,
+        implementation: ToolImplementation::ResidentHandler,
+        effect_keys: vec![ActorEffectKey::Lookup.into()],
+    });
+    let hosted = orient_launch_instructions(shared, &observation.snapshot(), &[handler]);
+    assert!(!hosted[shared.len()..].contains("LookupApi.lookupRaw"));
 }
