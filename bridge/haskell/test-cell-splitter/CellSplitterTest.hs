@@ -1266,8 +1266,7 @@ checkedLoadBoundaryCompilation = bracket temporary removeDirectoryRecursive $ \r
       createDirectory path
       pure path
 
--- Metadata compilation must not enter the target's executable pipeline.
--- A changed dependency must still be checked on the following request.
+-- Only type-of queries consume numbered probes; other results retain query order.
 mixedInspectionCompilation :: IO ()
 mixedInspectionCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
   let target = root </> "MixedInspection.hs"
@@ -1297,6 +1296,8 @@ mixedInspectionCompilation = bracket temporary removeDirectoryRecursive $ \root 
       createDirectory path
       pure path
 
+-- Metadata compilation must not enter the target's executable pipeline.
+-- A changed dependency must still be checked on the following request.
 metadataCompilation :: IO ()
 metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
   let dependency = root </> "MetadataDependency.hs"
