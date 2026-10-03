@@ -386,6 +386,11 @@ async fn resident_command_retain_binding_returns_reference_without_command_prese
 }
 
 #[tokio::test]
+async fn resident_command_binding_survives_presenter_observation_failure() {
+    resident_await_watch_case(WatchCase::StructuredCommandPresenterFailure).await;
+}
+
+#[tokio::test]
 async fn resident_primary_await_watch_cancels_an_unpublished_cell() {
     resident_await_watch_case(WatchCase::PrimaryCancellation).await;
 }
@@ -916,6 +921,7 @@ enum WatchCase {
     PrimaryInterleavedPublication,
     StructuredRoundTrip,
     StructuredCommandPresentation,
+    StructuredCommandPresenterFailure,
     PrimaryCommandRetainBinding,
     PrimaryCancellation,
     PrimarySleepCancellation,
@@ -927,10 +933,14 @@ enum WatchCase {
 async fn resident_await_watch_case(case: WatchCase) {
     let interleaved = matches!(case, WatchCase::PrimaryInterleavedPublication);
     let structured_command = matches!(case, WatchCase::StructuredCommandPresentation);
+    let structured_observation_failure =
+        matches!(case, WatchCase::StructuredCommandPresenterFailure);
     let retain_command_binding = matches!(case, WatchCase::PrimaryCommandRetainBinding);
     let primary = !matches!(
         case,
-        WatchCase::StructuredRoundTrip | WatchCase::StructuredCommandPresentation
+        WatchCase::StructuredRoundTrip
+            | WatchCase::StructuredCommandPresentation
+            | WatchCase::StructuredCommandPresenterFailure
     );
     let command_observation = match case {
         WatchCase::PrimaryCommandAwaitCancellation => {
@@ -959,6 +969,8 @@ async fn resident_await_watch_case(case: WatchCase) {
 
     let session = support::process_unique_session(if retain_command_binding {
         185
+    } else if structured_observation_failure {
+        186
     } else if command_observation.is_some() {
         184
     } else if cancel_sleep {
@@ -1016,6 +1028,8 @@ async fn resident_await_watch_case(case: WatchCase) {
             session_id: None,
             turn_text: if structured_command {
                 include_str!("resident_local_actor/await_command_policy.hs")
+            } else if structured_observation_failure {
+                include_str!("resident_local_actor/await_command_presenter_failure_policy.hs")
             } else {
                 include_str!("resident_local_actor/await_watch_policy.hs")
             },
@@ -1193,8 +1207,72 @@ async fn resident_await_watch_case(case: WatchCase) {
         )
         .await
         .expect("watch settles")
-        .expect("watch call task")
-        .expect("watch tool call");
+        .expect("watch call task");
+        if structured_observation_failure {
+            let Err(error) = settled else {
+                panic!("the deliberately failing presenter must fail observation: {settled:?}");
+            };
+            let exomonad_actor::ResidentToolError::Invocation(
+                exomonad_actor::KernelInvocationFailure::Workbench(failure),
+            ) = error
+            else {
+                panic!("presenter failure should retain a workbench receipt: {error:?}");
+            };
+            assert!(
+                failure.detail.contains("exceeded the observation budget"),
+                "{failure:?}"
+            );
+            let receipt = failure
+                .receipts
+                .last()
+                .expect("failed unit receipt is retained");
+            assert_eq!(
+                receipt.failure_layer,
+                Some(tidepool_runtime::session::WorkbenchFailureLayer::Observation)
+            );
+            assert_eq!(receipt.installed_bindings.len(), 1, "{receipt:?}");
+            let binding = &receipt.installed_bindings[0];
+            assert!(!binding.contains("session_id:"), "{receipt:?}");
+            assert!(
+                receipt.output.contains(binding),
+                "the recovery receipt names the retained binding: {receipt:?}"
+            );
+            assert_eq!(
+                receipt.operations.len(),
+                3,
+                "start, retain binding, and await committed before presentation failed: {receipt:?}"
+            );
+            assert_eq!(receipt.operations[0].effect, "commandStartWith");
+            assert_eq!(receipt.operations[1].effect, "commandRetainJobWith");
+            assert_eq!(receipt.operations[2].effect, "commandWaitWith");
+            for (ordinal, operation) in receipt.operations.iter().enumerate() {
+                assert_eq!(operation.id.effect_ordinal, ordinal);
+                assert_eq!(
+                    operation.disposition,
+                    tidepool_runtime::session::WorkbenchOperationDisposition::Committed
+                );
+            }
+            assert!(
+                receipt
+                    .operations
+                    .iter()
+                    .all(|operation| !operation.effect.contains("Present")),
+                "retaining a binding does not implicitly present command output: {receipt:?}"
+            );
+            assert!(
+                receipt
+                    .operations
+                    .iter()
+                    .all(|operation| operation.display.is_none()),
+                "retaining the command job produces no display output: {receipt:?}"
+            );
+            forest.shutdown().await;
+            task.expect("structured actor task")
+                .await
+                .expect("actor task");
+            return;
+        }
+        let settled = settled.expect("watch tool call");
         if primary {
             assert_eq!(settled["status"], "committed", "{settled:?}");
             if interleaved {
