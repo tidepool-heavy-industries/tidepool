@@ -415,6 +415,19 @@ impl ActorDisplays {
         callback: RootCustody,
         update: bool,
     ) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError> {
+        // Keys are an output description, not another unbounded output channel.
+        let key_bytes = output
+            .expansions
+            .iter()
+            .try_fold(0usize, |bytes, (_, label)| {
+                bytes.checked_add(label.len())?.checked_add(32)
+            });
+        if !key_bytes.is_some_and(|bytes| bytes <= 8192) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "display expansion description exceeds its output budget".into(),
+            ));
+        }
+        output.text = crate::workbench_display::bounded_output(&output.text, 32768);
         let mut seen = std::collections::HashSet::new();
         if output
             .expansions
@@ -8074,20 +8087,26 @@ where
                         &CurrentEffectOwner::Workbench(execution_state),
                         boundary,
                     );
-                    let (boundary, display) =
+                    let (boundary, mut display) =
                         self.prepare_display_boundary(context, boundary).await?;
                     current
                         .inflight_effect
                         .as_mut()
                         .expect("captured display retains its effect stamp")
                         .display = display.clone();
-                    if let Some(display) = &display {
+                    if let Some(display) = &mut display {
                         let rendered = crate::workbench_display::bounded_output(
                             &display.text,
                             (*unit.display_remaining).min(32768),
                         );
                         let rendered =
                             next_fragment.present_output(&rendered, unit.display_remaining);
+                        display.text.clone_from(&rendered);
+                        current
+                            .inflight_effect
+                            .as_mut()
+                            .expect("display retains its effect stamp")
+                            .display = Some(display.clone());
                         if !rendered.is_empty() {
                             unit.command_output.push(rendered);
                         }
