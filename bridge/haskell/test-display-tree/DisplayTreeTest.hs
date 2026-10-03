@@ -41,6 +41,7 @@ main = do
   shortGroupBudgetDoesNotForceFields
   exactBudgetRetainsUnknownSuffixes
   tinyGrantsRetainConstructorNames
+  tinyConstructorFieldsAdvanceTheirActualSuffix
   oversizedConstructorNamesMakeProgressWithoutHidingFields
   oversizedFieldNamesRetainTheirSuffixAndValue
   unavailableDetailDoesNotReplaceSupportedText
@@ -317,6 +318,34 @@ tinyGrantsRetainConstructorNames = do
       assertEqual "compound constructor fields remain independently available" (Just " {value = 7}")
         (fmap displayStateText (expandDisplayState 64 fieldsKey record))
     _ -> fail "compound constructor envelope was lost"
+
+tinyConstructorFieldsAdvanceTheirActualSuffix :: IO ()
+tinyConstructorFieldsAdvanceTheirActualSuffix = do
+  let state = newDisplayState 1 (Constructor "C" [("x", TextLeaf "1")])
+      lazyState = newDisplayState 1 (Constructor "C" [("x", undefined)])
+  case displayStateKeys state of
+    [(fieldsKey, _)] -> do
+      fields <- requireExpansion fieldsKey state
+      suffix <- collect 12 fields
+      assertEqual "tiny constructor fields advance instead of retaining themselves" "C {x = 1}" (displayStateText state <> suffix)
+    _ -> fail "tiny constructor fields were not retained"
+  case displayStateKeys lazyState of
+    [(fieldsKey, _)] -> do
+      fields <- requireExpansion fieldsKey lazyState
+      assertEqual "a tiny fields opening does not force its value" " " (displayStateText fields)
+    _ -> fail "lazy constructor fields were not retained"
+  where
+    collect remaining state
+      | remaining <= (0 :: Int) = fail "constructor fields did not make progress"
+      | otherwise = case displayStateKeys state of
+          [] -> pure (displayStateText state)
+          [(key, _)] -> do
+            detail <- requireExpansion key state
+            suffix <- collect (remaining - 1) detail
+            pure (displayStateText state <> suffix)
+          _ -> fail "tiny constructor cursor acquired unrelated keys"
+    requireExpansion key state = maybe (fail "constructor fields cursor was lost") pure
+      (expandDisplayState 1 key state)
 
 oversizedConstructorNamesMakeProgressWithoutHidingFields :: IO ()
 oversizedConstructorNamesMakeProgressWithoutHidingFields = do

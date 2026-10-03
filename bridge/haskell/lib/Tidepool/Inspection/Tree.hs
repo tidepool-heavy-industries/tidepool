@@ -221,6 +221,7 @@ preview budget depth next label tree
   | otherwise = case tree of
       Constructor name [] -> ordinary (TextLeaf name)
       Constructor name fields
+        | T.null name && budget <= 5 -> ordinary tree
         | budget <= 5 || T.length (T.take (budget - 5) name) >= budget - 5 ->
             constructorPrefix name fields
         | otherwise -> children (name <> " {") "}" fields
