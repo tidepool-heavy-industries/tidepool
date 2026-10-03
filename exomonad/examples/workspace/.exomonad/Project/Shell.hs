@@ -123,7 +123,7 @@ presentSelected ::
   (Member Commands effects, Member Jev effects, Member Reflect effects) =>
   Command.ObservationPresenter effects
 presentSelected _command _purpose focus observation retained = do
-  (_, prepared) <- Cmd.observeWith observation retained (prepare focus)
+  (_, prepared) <- Cmd.observeWith observation retained (prepare focus retained)
   pure prepared
 
 -- | Without a focus, output that fits 'Cmd.presentedByteBudget' is shown
@@ -135,38 +135,161 @@ presentSelected _command _purpose focus observation retained = do
 prepare ::
   (Member Commands effects, Member Jev effects, Member Reflect effects) =>
   Maybe Text ->
+  Cmd.Job ->
   Cmd.PresentedObservation ->
-  Eff effects Text
-prepare focus observed = case Cmd.presentedOutput observed of
-  Left issue -> pure (statusHeading observed <> "\nOutput unavailable: " <> Cmd.renderCommandError issue <> recovery observed)
+  Eff effects Command.CommandToolResult
+prepare focus job observed = case Cmd.presentedOutput observed of
+  Left issue -> pure (reply 0 False (statusHeading observed <> "\nOutput unavailable: " <> Cmd.renderCommandError issue <> recovery observed))
   Right output -> do
     let frozen =
           OutputSnapshot
             (Cmd.presentedJob observed)
             (Cmd.outputAvailableEnd (Cmd.commandStdout output))
             (Cmd.outputAvailableEnd (Cmd.commandStderr output))
-    loaded <- loadStreams frozen (Just output)
-    case loaded of
-      Left issue -> pure (statusHeading observed <> "\n" <> renderIssue issue <> recoveryFor frozen)
-      Right (stdoutText, stderrText) -> do
-        let heading = statusHeading observed
-            budget = Cmd.presentedByteBudget observed
-            bodyBudget = max 0 (budget - utf8Bytes (heading <> "\n"))
-            plain = stdoutText <> stderrText
-        case focus of
-          Nothing ->
-            pure $
-              heading <> "\n"
-                <> if utf8Bytes plain <= bodyBudget
-                     then plain
-                     else plainOverBudget frozen bodyBudget stdoutText stderrText
-          Just focusText -> do
-            let labeled = labelStream Cmd.Stdout stdoutText <> labelStream Cmd.Stderr stderrText
+    case focus of
+      Nothing -> do
+        (text, payloadLines, isComplete) <- prepareUnfocused observed frozen output
+        pure (reply payloadLines isComplete text)
+      Just focusText -> do
+        loaded <- loadStreams frozen (Just output)
+        case loaded of
+          Left issue -> pure (reply 0 False (statusHeading observed <> "\n" <> renderIssue issue <> recoveryFor frozen))
+          Right (stdoutText, stderrText) -> do
+            let heading = statusHeading observed
+                budget = Cmd.presentedByteBudget observed
+                bodyBudget = max 0 (budget - utf8Bytes (heading <> "\n"))
+                plain = stdoutText <> stderrText
+                labeled = labelStream Cmd.Stdout stdoutText <> labelStream Cmd.Stderr stderrText
             if utf8Bytes labeled <= bodyBudget
-              then pure (heading <> "\n" <> plain)
+              then pure (reply (lineCount stdoutText + lineCount stderrText) True (heading <> "\n" <> labeled))
               else do
-                selected <- Sift.sift focusText bodyBudget labeled
-                pure (heading <> "\n" <> selected <> recoveryFor frozen)
+                let recoveryText = "\n" <> recoveryFor frozen
+                    selectedBudget = max 0 (bodyBudget - utf8Bytes recoveryText)
+                selected <- Sift.siftWithFacts payloadLineCount focusText selectedBudget labeled
+                pure (reply (Sift.siftedPayloadLines selected) (Sift.siftedComplete selected) (heading <> "\n" <> Sift.siftedText selected <> recoveryText))
+  where
+    reply linesShown complete text =
+      Cmd.observedResult job (Cmd.presentedStatus observed) (stdoutEndpoint <$> snapshotFromObservation observed) (stderrEndpoint <$> snapshotFromObservation observed) linesShown complete text
+
+-- The ordinary unfocused view only reads both complete streams when their
+-- frozen endpoints fit. Otherwise it requests bounded head and tail slices.
+prepareUnfocused :: Member Commands effects => Cmd.PresentedObservation -> OutputSnapshot -> CommandOutput -> Eff effects (Text, Int, Bool)
+prepareUnfocused observed frozen output =
+  case initialIssue of
+    Just issue -> pure (prefix <> renderIssue issue <> recovery, 0, False)
+    Nothing
+      | totalBytes <= fullBudget -> do
+          loaded <- loadStreams frozen (Just output)
+          pure $ case loaded of
+            Left issue -> (prefix <> renderIssue issue <> recovery, 0, False)
+            Right (stdoutText, stderrText) -> (prefix <> labelStream Cmd.Stdout stdoutText <> labelStream Cmd.Stderr stderrText, lineCount stdoutText + lineCount stderrText, True)
+      | otherwise -> do
+          let markerReserve = sum (map (reservedMarker . fst) nonemptyStreams)
+              labelReserve = sum (map (labelBytes . fst) nonemptyStreams)
+              selectedBudget = max 0 (truncatedBudget - markerReserve - labelReserve)
+              share bytes = proportional selectedBudget bytes totalBytes
+          stdout <- readStreamWindow frozen Cmd.Stdout (stdoutEndpoint frozen) (share (stdoutEndpoint frozen))
+          stderr <- readStreamWindow frozen Cmd.Stderr (stderrEndpoint frozen) (share (stderrEndpoint frozen))
+          pure $ case (stdout, stderr) of
+            (Left issue, _) -> (prefix <> renderIssue issue <> recovery, 0, False)
+            (_, Left issue) -> (prefix <> renderIssue issue <> recovery, 0, False)
+            (Right stdoutText, Right stderrText) ->
+              ( prefix <> renderWindow Cmd.Stdout stdoutText <> renderWindow Cmd.Stderr stderrText <> recovery,
+                windowPayloadLines stdoutText + windowPayloadLines stderrText,
+                False
+              )
+  where
+    prefix = statusHeading observed <> "\n"
+    budget = max 0 (Cmd.presentedByteBudget observed)
+    recovery = "\n" <> recoveryFor frozen
+    totalBytes = stdoutEndpoint frozen + stderrEndpoint frozen
+    fullBudget = max 0 (budget - utf8Bytes prefix - sum (map (labelBytes . fst) nonemptyStreams))
+    truncatedBudget = max 0 (budget - utf8Bytes prefix - utf8Bytes recovery)
+    nonemptyStreams = [(Cmd.Stdout, stdoutEndpoint frozen) | stdoutEndpoint frozen > 0] <> [(Cmd.Stderr, stderrEndpoint frozen) | stderrEndpoint frozen > 0]
+    initialIssue = firstIssue (pageIssue Cmd.Stdout (Cmd.commandStdout output), pageIssue Cmd.Stderr (Cmd.commandStderr output))
+    firstIssue (Just issue, _) = Just issue
+    firstIssue (Nothing, issue) = issue
+    pageIssue stream page
+      | Cmd.outputLossy page = Just (SnapshotDecodingLoss stream (Cmd.outputStart page))
+      | Cmd.outputStart page /= 0 || Cmd.outputLostBytes page /= 0 = Just (SnapshotExpired stream 0)
+      | otherwise = Nothing
+    labelBytes stream = utf8Bytes (streamName stream <> ":\n") + 1
+    reservedMarker stream = utf8Bytes ("\n<omitted " <> streamName stream <> " bytes " <> number (endpoint stream) <> ".." <> number (endpoint stream) <> " of " <> number (endpoint stream) <> ">\n")
+    endpoint Cmd.Stdout = stdoutEndpoint frozen
+    endpoint Cmd.Stderr = stderrEndpoint frozen
+
+windowPayloadLines :: StreamWindow -> Int
+windowPayloadLines window = lineCount (windowHead window) + lineCount (windowTail window)
+
+payloadLineCount :: Text -> Int
+payloadLineCount text
+  | "stdout:\n" `T.isPrefixOf` text || "stderr:\n" `T.isPrefixOf` text = lineCount (T.drop 1 (T.dropWhile (/= '\n') text))
+  | otherwise = lineCount text
+
+lineCount :: Text -> Int
+lineCount text
+  | T.null text = 0
+  | otherwise = length (T.lines text)
+
+proportional :: Int -> Int -> Int -> Int
+proportional budget bytes total
+  | total <= 0 = 0
+  | otherwise = fromInteger (toInteger budget * toInteger bytes `div` toInteger total)
+
+data StreamWindow = StreamWindow
+  { windowHead :: Text,
+    windowHeadEnd :: Int,
+    windowTail :: Text,
+    windowTailStart :: Int,
+    windowTotal :: Int
+  }
+
+readStreamWindow :: Member Commands effects => OutputSnapshot -> Cmd.CommandStream -> Int -> Int -> Eff effects (Either OutputSnapshotIssue StreamWindow)
+readStreamWindow frozen stream endpoint budget
+  | endpoint <= budget = do
+      whole <- readSelectedRange frozen stream 0 endpoint
+      pure $ fmap (\(text, _, end) -> StreamWindow text end "" endpoint endpoint) whole
+  | otherwise = do
+      let headBudget = budget * 3 `div` 4
+          tailBudget = budget - headBudget
+          tailOffset = endpoint - tailBudget
+      headPage <- readSelectedRange frozen stream 0 headBudget
+      tailPage <- readSelectedRange frozen stream tailOffset endpoint
+      pure $ do
+        (headText, _, headEnd) <- headPage
+        (tailText, tailStart, _) <- tailPage
+        pure (StreamWindow headText headEnd tailText tailStart endpoint)
+
+readSelectedRange :: Member Commands effects => OutputSnapshot -> Cmd.CommandStream -> Int -> Int -> Eff effects (Either OutputSnapshotIssue (Text, Int, Int))
+readSelectedRange frozen stream start end
+  | end <= start = pure (Right ("", start, end))
+  | otherwise = do
+      result <- Cmd.tryPage (snapshotJob frozen) stream (Cmd.OutputSlice start (end - start))
+      pure $ case result of
+        Left issue -> Left (SnapshotUnavailable stream issue)
+        Right page ->
+          let details = Cmd.pageDetails page
+              actualStart = Cmd.outputStart details
+              actualEnd = Cmd.outputEnd details
+           in if Cmd.outputLossy details
+                then Left (SnapshotDecodingLoss stream start)
+                else if Cmd.outputLostBytes details /= 0 || actualStart < start || actualStart > end
+                  then Left (SnapshotExpired stream start)
+                  else if actualEnd < actualStart || actualEnd > end
+                    then Left (SnapshotExpired stream actualEnd)
+                    else if actualStart > start && not (Cmd.outputLeadingFragment details)
+                      then Left (SnapshotExpired stream start)
+                      else if actualEnd < end && not (Cmd.outputTrailingFragment details)
+                        then Left (SnapshotExpired stream actualEnd)
+                        else Right (Cmd.outputText details, actualStart, actualEnd)
+
+renderWindow :: Cmd.CommandStream -> StreamWindow -> Text
+renderWindow _ window | windowTotal window == 0 = ""
+renderWindow stream window = streamName stream <> ":\n" <> windowHead window
+  <> (if windowHeadEnd window < windowTailStart window
+        then "\n<omitted " <> streamName stream <> " bytes " <> number (windowHeadEnd window) <> ".." <> number (windowTailStart window) <> " of " <> number (windowTotal window) <> ">\n"
+        else "")
+  <> windowTail window <> "\n"
 
 -- | Two independent streams: no section splitting, no scoring -- the
 -- head/tail truncation that runs whenever there is no focus to ask Jev
@@ -180,36 +303,6 @@ loadStreams frozen initial = do
 labelStream :: Cmd.CommandStream -> Text -> Text
 labelStream _ text | T.null text = ""
 labelStream stream text = streamName stream <> ":\n" <> text <> "\n"
-
--- | A head of about three quarters of the given stream's budget share and a
--- tail of the rest, with a marker naming the omitted byte range -- only for
--- a stream that was actually cut. Budget is split between stdout and
--- stderr proportionally to their sizes.
-plainOverBudget :: OutputSnapshot -> Int -> Text -> Text -> Text
-plainOverBudget frozen budget stdoutText stderrText =
-  let stdoutBytes = utf8Bytes stdoutText
-      stderrBytes = utf8Bytes stderrText
-      total = max 1 (stdoutBytes + stderrBytes)
-      share bytes = (budget * bytes) `div` total
-      (stdoutShown, stdoutMarker) = truncateStream "stdout" stdoutText (share stdoutBytes)
-      (stderrShown, stderrMarker) = truncateStream "stderr" stderrText (share stderrBytes)
-      markers = T.concat [marker <> "\n" | Just marker <- [stdoutMarker, stderrMarker]]
-   in stdoutShown <> stderrShown <> markers <> recoveryFor frozen
-
-truncateStream :: Text -> Text -> Int -> (Text, Maybe Text)
-truncateStream label text budget
-  | bytes <= max 0 budget = (text, Nothing)
-  | otherwise =
-      let headBudget = (max 0 budget * 3) `div` 4
-          tailBudget = max 0 (budget - headBudget)
-          headText = takeUtf8 headBudget text
-          tailText = takeUtf8End tailBudget text
-          omittedStart = utf8Bytes headText
-          omittedEnd = max omittedStart (bytes - utf8Bytes tailText)
-          marker = "omitted " <> label <> " bytes " <> number omittedStart <> ".." <> number omittedEnd <> " of " <> number bytes
-       in (headText <> tailText, Just marker)
-  where
-    bytes = utf8Bytes text
 
 statusHeading :: Cmd.PresentedObservation -> Text
 statusHeading observed =
@@ -324,23 +417,11 @@ readFrozen frozen stream endpoint initial = case initial of
 recovery :: Cmd.PresentedObservation -> Text
 recovery observed = maybe "" recoveryFor (snapshotFromObservation observed)
 
--- | Substituted with the actual retained-binding name (e.g. @job1@) by the
--- host once it mints that binding — the same fact it already names in the
--- "retained as ... :: Cmd.Job" line above this tool's output. The tool body
--- runs, and this text is built, before the host assigns a binding, so it
--- cannot be named here directly.
-jobBindingPlaceholder :: Text
-jobBindingPlaceholder = "{{job_binding}}"
-
 recoveryFor :: OutputSnapshot -> Text
 recoveryFor frozen =
-  "Recover without rerunning: let snap = Project.Shell.outputSnapshot "
-    <> jobBindingPlaceholder
-    <> " "
-    <> number (stdoutEndpoint frozen)
-    <> " "
-    <> number (stderrEndpoint frozen)
-    <> "."
+  "Recover retained output with read_output(session_id=\""
+    <> jobText (snapshotJob frozen)
+    <> "\", stream=\"Stdout\" or \"Stderr\", offset=<next_offset>). Do not rerun the command."
 
 sectionKey :: SectionId -> Text
 sectionKey (SectionId value) = "s" <> number value

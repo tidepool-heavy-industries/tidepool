@@ -44,6 +44,7 @@ module Tidepool.Command
     quiet,
     job,
     status,
+    retainJobBinding,
     stdout,
     stderr,
     failure,
@@ -293,22 +294,17 @@ presentStatus key bytes completionNotice current = do
   send (CommandPresentWith key (CommandVisible ("session_id: " <> key <> "\n" <> heading <> next) bytes))
   pure current
 
--- | Observe once, then let ordinary Haskell prepare what the tool returns
--- before command output is presented.  The callback receives stream endpoints
--- frozen immediately after the wait.  The small presentation emitted here
--- carries no text of its own: its only job is to cross the same host-side
--- boundary that mints and announces the retained @Cmd.Job@ binding ("retained
--- as ... :: Cmd.Job"), so that fact is said once, by the host, instead of
--- being duplicated here.  The callback's result — which already opens with
--- @session_id: ...@ — is the only command text the tool body returns.
--- Explicit page reads remain independent.
+-- | Observe once, then let ordinary Haskell prepare the tool's returned value.
+-- The callback receives stream endpoints frozen immediately after the wait.
+-- This helper has no implicit presentation side effect; a named tool's
+-- returned presenter owns the model-visible text and retention binding.
 observeWith ::
   (Member Commands effects) =>
   Observation ->
   Job ->
-  (PresentedObservation -> Eff effects Text) ->
-  Eff effects (CommandStatus, Text)
-observeWith options@Observation {waitMilliseconds = milliseconds} retained@(Job key) prepare = do
+  (PresentedObservation -> Eff effects a) ->
+  Eff effects (CommandStatus, a)
+observeWith options@Observation {waitMilliseconds = milliseconds} retained prepare = do
   current <- send (CommandAwaitWith key milliseconds) >>= checked
   presentObserved options retained prepare current
 
@@ -316,16 +312,15 @@ presentObserved ::
   (Member Commands effects) =>
   Observation ->
   Job ->
-  (PresentedObservation -> Eff effects Text) ->
+  (PresentedObservation -> Eff effects a) ->
   CommandStatus ->
-  Eff effects (CommandStatus, Text)
-presentObserved options retained@(Job key) prepare current = do
+  Eff effects (CommandStatus, a)
+presentObserved options retained prepare current = do
   -- Bound the first materialized pages by the caller's display budget.  Each
   -- page still carries the frozen stream endpoints, so a presenter can make
   -- an explicit, independently bounded page request when it needs more.
   output <- send (CommandOutputWith key (max 0 (min (16 * 1024) (outputBytes options))))
   prepared <- prepare (PresentedObservation retained current output (outputBytes options))
-  send (CommandPresentWith key (CommandVisible "" 512))
   pure (current, prepared)
 
 -- | Suppress routine command output within this computation, without changing
@@ -460,6 +455,11 @@ asJSON = eitherDecode
 
 status :: (Member Commands effects) => Job -> Eff effects CommandStatus
 status (Job key) = send (CommandStatusWith key) >>= checked
+
+-- | Name an existing command job in this actor's resident Haskell context.
+-- The host resolves ownership and returns the binding's source-level name.
+retainJobBinding :: (Member Commands effects) => Job -> Eff effects Text
+retainJobBinding (Job key) = send (CommandRetainJobWith key) >>= checked
 
 -- | Navigate retained stdout from its beginning; reading never executes again.
 output :: (Member Commands effects) => Job -> Eff effects OutputPage

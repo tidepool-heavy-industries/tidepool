@@ -11,6 +11,8 @@
 -- call it directly.
 module Project.Sift
   ( sift,
+    siftWithFacts,
+    Sifted (..),
   )
 where
 
@@ -46,19 +48,44 @@ data Section = Section
 
 data Ranked = Ranked Section Double
 
+data Sifted = Sifted
+  { siftedText :: Text,
+    siftedPayloadLines :: Int,
+    siftedComplete :: Bool
+  }
+
 -- | Select the sections of @text@ most relevant to @focus@, bounded by
 -- @budget@ bytes. Text that already fits the budget is returned whole,
 -- without asking Jev.
 sift :: (Member Jev effects, Member Reflect effects) => Text -> Int -> Text -> Eff effects Text
-sift focus budget text
-  | utf8Bytes text <= budget = pure text
+sift focus budget text = siftedText <$> siftWithFacts lineCount focus budget text
+
+siftWithFacts :: (Member Jev effects, Member Reflect effects) => (Text -> Int) -> Text -> Int -> Text -> Eff effects Sifted
+siftWithFacts countPayloadLines focus budget text
+  | utf8Bytes text <= budget = pure (Sifted text (countPayloadLines text) True)
   | otherwise = do
       recent <- recentConversationContext
       let sections = applyScoringCeiling (maximumScoredTokens * 4) (numberSections (splitSections sectionTokens text))
       scored <- scoreSections focus recent sections
       pure $ case scored of
-        Left failure -> renderFallback budget failure sections
-        Right ranked -> renderSelected budget ranked
+        Left failure ->
+          let selected = fallbackSelection budget failure sections
+           in Sifted (renderFallbackSelection failure sections selected) (selectedLineCount countPayloadLines selected) (length selected == length sections)
+        Right ranked ->
+          let selected = selectedRanked budget ranked
+              allSections = map rankedSection ranked
+           in Sifted (renderSelectedSections ranked selected) (selectedLineCount countPayloadLines selected) (length selected == length allSections)
+
+lineCount :: Text -> Int
+lineCount text
+  | T.null text = 0
+  | otherwise = length (T.lines text)
+
+selectedLineCount :: (Text -> Int) -> [Section] -> Int
+selectedLineCount countPayloadLines = sum . map (countPayloadLines . sectionText)
+
+rankedSection :: Ranked -> Section
+rankedSection (Ranked section' _) = section'
 
 numberSections :: [Text] -> [Section]
 numberSections = zipWith (\ident piece -> Section (SectionId ident) piece True) [1 ..]
@@ -155,15 +182,19 @@ scoreBatch focus recent rows = do
           | (row, judged) <- response.sections
         ]
 
-renderFallback :: Int -> Text -> [Section] -> Text
-renderFallback budget failure sections =
-  let prefix = "Jev unavailable; bounded raw output follows (" <> takeUtf8 256 failure <> ").\n"
-      render chosen = prefix <> renderMarked chosen <> omittedNote sections chosen
-      chosen = takeWithin budget render sections
-   in render chosen
+fallbackSelection :: Int -> Text -> [Section] -> [Section]
+fallbackSelection budget failure sections = takeWithin budget render sections
+  where
+    prefix = "Jev unavailable; bounded raw output follows (" <> takeUtf8 256 failure <> ").\n"
+    render chosen = prefix <> renderMarked chosen <> omittedNote sections chosen
 
-renderSelected :: Int -> [Ranked] -> Text
-renderSelected budget ranked =
+renderFallbackSelection :: Text -> [Section] -> [Section] -> Text
+renderFallbackSelection failure sections chosen =
+  let prefix = "Jev unavailable; bounded raw output follows (" <> takeUtf8 256 failure <> ").\n"
+   in prefix <> renderMarked chosen <> omittedNote sections chosen
+
+selectedRanked :: Int -> [Ranked] -> [Section]
+selectedRanked budget ranked =
   let allSections = map rankedSection ranked
       orderedByRank = sortBy (flip (comparing rankKey)) ranked
       render chosen =
@@ -171,12 +202,16 @@ renderSelected budget ranked =
           <> unscoredNotice ranked
           <> omittedNote allSections chosen
       selected = takeRanked budget render (filter (sectionScored . rankedSection) orderedByRank)
-      original = sortBy (comparing sectionId) selected
-   in render original
+   in sortBy (comparing sectionId) selected
   where
     rankKey (Ranked section' score) = (score, negateId (sectionId section'))
     negateId (SectionId value) = negate value
-    rankedSection (Ranked section' _) = section'
+
+renderSelectedSections :: [Ranked] -> [Section] -> Text
+renderSelectedSections ranked selected =
+  renderMarked selected
+    <> unscoredNotice ranked
+    <> omittedNote (map rankedSection ranked) selected
 
 -- | Best-effort packing, highest-ranked first: a candidate that would blow
 -- the budget is skipped rather than stopping the whole selection, since a

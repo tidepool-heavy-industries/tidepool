@@ -786,25 +786,35 @@ async fn template_bash_over_budget_without_focus_shows_head_tail_and_marker() {
         .await
     });
     let command_output = (1..=5000)
-        .map(|line| format!("{line}\n"))
+        .map(|line| format!("λ-{line}\n"))
         .collect::<String>();
-    let commands = TestCommands::completed_streams(&command_output, "");
+    let command_stderr = (1..=1000)
+        .map(|line| format!("err-{line}\n"))
+        .collect::<String>();
+    let commands = TestCommands::completed_streams(&command_output, &command_stderr);
     let request = tokio::select! {
         request = backend_request(&mut campaign) => request,
         result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
     };
-    request.supply(Ok(commands));
+    request.supply(Ok(commands.clone()));
     let response = invoked.await.unwrap();
     assert_eq!(response["status"], "committed", "{response}");
     let output = response["items"][0]["output"].as_str().unwrap();
+    assert!(
+        output.as_bytes().len() <= 2048,
+        "the complete UTF-8 result, including state and recovery text, fits max_output_bytes: {} bytes",
+        output.as_bytes().len()
+    );
     assert!(output.contains('1'), "head missing: {output}");
     assert!(output.contains("5000"), "tail missing: {output}");
+    assert!(output.contains("err-1"), "stderr head missing: {output}");
+    assert!(output.contains("err-1000"), "stderr tail missing: {output}");
     assert!(
-        output.contains("omitted stdout bytes "),
-        "omitted-byte-range marker missing: {output}"
+        output.contains("omitted stdout bytes ") && output.contains("omitted stderr bytes "),
+        "stream-specific omitted-byte-range markers missing: {output}"
     );
     assert!(
-        output.contains("Recover without rerunning: let snap = Project.Shell.outputSnapshot"),
+        output.contains("Recover retained output with read_output(session_id=\""),
         "recovery pointer missing: {output}"
     );
     assert!(
@@ -812,14 +822,54 @@ async fn template_bash_over_budget_without_focus_shows_head_tail_and_marker() {
         "the no-focus path must not section or mark up output: {output}"
     );
     assert!(
-        output.len() <= 2048 + 512,
-        "truncated output should stay close to its byte budget: {output}"
-    );
-    assert!(
         !any_section_scoring_request(&backend),
         "the no-focus path must never invoke Jev to score sections: {:?}",
         backend.requests.lock()
     );
+    let slices = commands.slice_requests.lock();
+    assert_eq!(
+        slices.len(),
+        4,
+        "only selected head/tail pages should be read: {slices:?}"
+    );
+    for (stream, stream_len) in [
+        (
+            tidepool_bridge_effects::CommandStream::Stdout,
+            command_output.len() as i64,
+        ),
+        (
+            tidepool_bridge_effects::CommandStream::Stderr,
+            command_stderr.len() as i64,
+        ),
+    ] {
+        let pages = slices
+            .iter()
+            .filter(|(selected, _, _)| *selected == stream)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pages.len(),
+            2,
+            "expected head and tail for {stream:?}: {pages:?}"
+        );
+        assert_eq!(
+            pages[0].1, 0,
+            "the first page must be the stream head: {pages:?}"
+        );
+        assert!(
+            pages[0].2 > pages[1].2,
+            "the first page should receive the larger head share: {pages:?}"
+        );
+        assert_eq!(
+            pages[1].1 + pages[1].2,
+            stream_len,
+            "the second page must end at the frozen endpoint: {pages:?}"
+        );
+    }
+    assert!(
+        slices.iter().map(|(_, _, bytes)| *bytes).sum::<i64>() <= 2048,
+        "the requested text pages must fit within the tool output budget: {slices:?}"
+    );
+    drop(slices);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -1516,6 +1566,7 @@ import Tidepool.Aeson.FromJSON (FromJSON)
 import Tidepool.Agent.Contract
 import qualified Tidepool.Command as Cmd
 import qualified Tidepool.Command.Tools as Shell
+import qualified Tidepool.Command as Cmd
 
 newtype Probe = Probe { topic :: Text }
   deriving (Generic, FromJSON, JsonSchema)
@@ -1958,9 +2009,9 @@ async fn watchdog_judges_the_tool_before_message_text_and_skips_host_refusals() 
         policy.as_ref(),
         r#"import qualified Project.Watchdog as Watchdog
 import Tidepool.Agent.Contract (ToolCall (..), ToolResult (..), annotationToJson)
-import Tidepool.Aeson.Value (Value (String), encodeValue)
+import Tidepool.Aeson.Value (Value (String, Null), encodeValue)
 let sent = ToolCall "haskell" (String "Right receipt <- sendMessage p \"reset: git reset --hard master && rm -rf target\"")
-annotation <- Watchdog.watchWith Watchdog.coreHeuristics sent (ToolResult "haskell" "toolResult1" 1 "Right (NotificationReceipt ((2,1),((1,1),(\"run:1:1\",7))))")
+annotation <- Watchdog.watchWith Watchdog.coreHeuristics sent (ToolResult "haskell" "toolResult1" 1 Null "Right (NotificationReceipt ((2,1),((1,1),(\"run:1:1\",7))))")
 (encodeValue (annotationToJson annotation), Watchdog.messageSend (ToolCall "haskell" (String "_ <- command \"rm -rf x\"\nsendMessage p \"done\"")), Watchdog.messageSend (ToolCall "bash" (String "sendMessage p \"x\"")), Watchdog.hostSettlementRefusal "reply not settled: your parent sent an update to request 2 that has not been confirmed as shown to you yet. Nothing was sent.", Watchdog.hostSettlementRefusal "error: build failed")"#,
     )
     .await
@@ -1968,6 +2019,27 @@ annotation <- Watchdog.watchWith Watchdog.coreHeuristics sent (ToolResult "haske
     assert!(judged.contains("abstained"), "{judged}");
     assert!(judged.contains("message send: sendMessage"), "{judged}");
     assert!(judged.contains("Nothing,Nothing,True,False)"), "{judged}");
+
+    let gate = dispatch_haskell_script(
+        policy.as_ref(),
+        r#"import qualified Project.Watchdog as Watchdog
+import qualified Tidepool.Command.Tools as Shell
+import Tidepool.Agent.Contract (ToolCall (..), ToolResult (..))
+import Tidepool.Aeson.Value (ToJSON (toJSON), object, (.=))
+import Tidepool.Aeson.FromJSON (Result (..), fromJSON)
+import Tidepool.Aeson.Schema (JsonSchema (..))
+import Data.Proxy (Proxy (..))
+import Data.Text (Text)
+let call = ToolCall "bash" (object ["cmd" .= ("printf ok" :: Text)])
+let failed = Shell.ObservedCommand "job1" Shell.Finished (Just False) (Just (Shell.OutcomeExited 7)) (Just Shell.CleanupClean) (Just 100) (Just 0) 1 True Nothing
+let clean = Shell.ObservedCommand "job2" Shell.Finished (Just True) (Just (Shell.OutcomeExited 0)) (Just Shell.CleanupClean) (Just 100) (Just 0) 1 True Nothing
+(Watchdog.trivialCall call (ToolResult "bash" "toolResult2" 2 (toJSON failed) "terminal: yes · CommandExited 0\nlooks successful"), Watchdog.trivialCall call (ToolResult "bash" "toolResult3" 3 (toJSON clean) "terminal: no · running\nshort"), fromJSON (toJSON clean) :: Result Shell.CommandToolFacts, toJSON (Shell.CommandToolResult clean "private stdout") == toJSON clean, jsonSchema (Proxy :: Proxy Shell.CommandToolResult) == jsonSchema (Proxy :: Proxy Shell.CommandToolFacts))"#,
+    )
+    .await
+    .to_string();
+    assert!(gate.contains("Nothing,Just \"trivial call:"), "marker text cannot override semantic exit status: {gate}");
+    assert!(gate.contains("Success"), "semantic facts round-trip through their decoder: {gate}");
+    assert!(gate.ends_with("True,True)"), "presentation is omitted and schema matches semantic JSON: {gate}");
 
     // An escalation carries the tool output whole within its budget, with no
     // excerpt notice; only a larger output is cut, and the cut names the budget.
@@ -1979,8 +2051,8 @@ annotation <- Watchdog.watchWith Watchdog.coreHeuristics sent (ToolResult "haske
                 &format!(
                     r#"import qualified Project.Watchdog as Watchdog
 import Tidepool.Agent.Contract (ToolCall (..), ToolResult (..))
-import Tidepool.Aeson.Value (Value (String))
-Watchdog.escalationEvidence (ToolCall "haskell" (String "build")) (ToolResult "haskell" "toolResult4" 4 {output})"#
+import Tidepool.Aeson.Value (Value (String, Null))
+Watchdog.escalationEvidence (ToolCall "haskell" (String "build")) (ToolResult "haskell" "toolResult4" 4 Null {output})"#
                 ),
             )
             .await

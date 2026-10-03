@@ -31,6 +31,7 @@ pub(super) struct TestCommands {
     hold_output: watch::Sender<bool>,
     pub(super) output_budgets: Mutex<Vec<usize>>,
     pub(super) slice_reads: std::sync::atomic::AtomicUsize,
+    pub(super) slice_requests: Mutex<Vec<(CommandStream, i64, i64)>>,
     short_slice_read: std::sync::atomic::AtomicUsize,
     pub(super) hang_cancel: std::sync::atomic::AtomicBool,
 }
@@ -116,6 +117,7 @@ impl TestCommands {
             hold_output: watch::channel(false).0,
             output_budgets: Mutex::new(Vec::new()),
             slice_reads: 0.into(),
+            slice_requests: Mutex::new(Vec::new()),
             short_slice_read: 0.into(),
             hang_cancel: false.into(),
         })
@@ -241,6 +243,7 @@ impl CommandBackend for TestCommands {
             };
             let (offset, limit) = match position {
                 CommandPosition::OutputSlice(offset, bytes) => {
+                    self.slice_requests.lock().push((stream, offset, bytes));
                     let read = self
                         .slice_reads
                         .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
