@@ -1,5 +1,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
@@ -125,7 +126,7 @@ import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import Control.Applicative ((<|>))
 import Control.Concurrent (myThreadId)
 import Control.Exception
-  ( Exception, finally, bracket, mask, onException, try, catch, throwIO, IOException )
+  ( Exception, SomeException, SomeAsyncException, fromException, finally, bracket, mask, try, catch, throwIO, IOException )
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes)
 import Data.List (find, isPrefixOf, isInfixOf, nub, nubBy, sort, sortOn, intercalate)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
@@ -775,7 +776,7 @@ exactCompileCycle selection variant =
 
 -- The worker owns one interpreter. An interrupted retirement leaves it
 -- unusable; a later request must not borrow its partially unloaded symbols.
-data ResidentAvailability = ResidentAvailable | ResidentBusy | ResidentPoisoned
+data ResidentAvailability = ResidentAvailable | ResidentBusy | ResidentPoisoned | ResidentClosed
   deriving (Eq)
 
 data CompilerTransactionFailure
@@ -3255,8 +3256,8 @@ withResidentPipelineSelected
   -> (ResidentCompiler -> IO a)
   -> IO a
 withResidentPipelineSelected baseIncludes useCompiler =
-  withResidentPipelineSelectedRequests baseIncludes (const (pure ())) $ \runRequest ->
-    runRequest useCompiler
+  withResidentPipelineSelectedRequests baseIncludes $ \runRequest ->
+    runRequest (pure ()) useCompiler
 
 -- | Keep transaction-scoped compiler state across every compile needed to
 -- prepare one cell, then remove it before admitting the next transaction.
@@ -3266,10 +3267,9 @@ withResidentPipelineSelected baseIncludes useCompiler =
 -- cannot admit another request without first sanitizing this one's state.
 withResidentPipelineSelectedRequests
   :: [FilePath]
-  -> (ModuleName -> IO ())
   -> (RequestRunner -> IO a)
   -> IO a
-withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
+withResidentPipelineSelectedRequests baseIncludes useRequests = do
   timing <- readTimingEnabled
   (libdir, startupMs) <- timeSection getLibdir
   emitPhase timing "startup" startupMs
@@ -3287,13 +3287,12 @@ withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
       let resetSession = reflectGhc
             (getSession >>= liftIO . freshExactState >>= setSession) session
           runRequest :: RequestRunner
-          runRequest action = bracket acquire release $ \() -> do
+          runRequest clearRecovery action = bracket acquire release $ \() -> do
             -- These caches contain GHC values tied to this environment, not
             -- portable products. No cache entry survives its owning bracket.
-            cache <- newIfaceCache
+            cacheRef <- newIfaceCache >>= newIORef
             memoRef <- newIORef Map.empty
             stateOriginRef <- newIORef OrdinarySourceState
-            requestTargetsRef <- newIORef Set.empty
             phase <- newIORef CompilerReady
             requestIdentity <- newTimingRequestIdentity
             let compile :: ResidentCompiler
@@ -3309,7 +3308,7 @@ withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
                     CompilerClosed -> throwIO CompilerTransactionReleased
                   result <- restore (do
                     targetModName' <- targetModuleNameFor path
-                    modifyIORef' requestTargetsRef (Set.insert targetModName')
+                    cache <- readIORef cacheRef
                     -- Target source can be transformed differently by each
                     -- purpose, even when its bytes have not changed.
                     evictTargetMemo targetModName' memoRef
@@ -3319,14 +3318,26 @@ withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
                           timing requestIdentity purpose mscope path extraIncludes buildProductsDir)
                         session)
                       `finally` writeIORef retainedRef emptyRetainedContext)
-                    `onException` writeIORef phase CompilerFailed
+                    `catch` \(failure :: SomeException) -> do
+                      writeIORef phase CompilerFailed
+                      case fromException failure :: Maybe SomeAsyncException of
+                        Just _ -> throwIO failure
+                        Nothing -> do
+                          -- A caller may retry a rejected generated instance.
+                          -- No partial compiler or recovery graph is reusable.
+                          clearRecovery
+                          writeIORef memoRef Map.empty
+                          newIfaceCache >>= writeIORef cacheRef
+                          resetSession
+                          writeIORef stateOriginRef OrdinarySourceState
+                          writeIORef phase CompilerReady
+                          throwIO failure
                   writeIORef phase CompilerReady
                   pure result
                 finish = do
                   writeIORef phase CompilerClosed
                   writeIORef memoRef Map.empty
-                  targets <- atomicModifyIORef' requestTargetsRef (\pending -> (Set.empty, pending))
-                  forM_ (Set.toList targets) evictRecovery
+                  clearRecovery
             action compile `finally` finish
           acquire = do
             caller <- myThreadId
@@ -3337,12 +3348,13 @@ withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
               ResidentAvailable -> pure ()
               ResidentBusy -> throwIO CompilerTransactionBusy
               ResidentPoisoned -> throwIO CompilerTransactionPoisoned
+              ResidentClosed -> throwIO CompilerTransactionReleased
           release () = do
             writeIORef availability ResidentPoisoned
             writeIORef retainedRef emptyRetainedContext
             resetSession
             writeIORef availability ResidentAvailable
-      in useRequests runRequest
+      in useRequests runRequest `finally` writeIORef availability ResidentClosed
 
 type ResidentCompiler = forall result.
   PipelineSelection result
@@ -3354,8 +3366,10 @@ type ResidentCompiler = forall result.
   -> Maybe FilePath
   -> IO result
 
+-- The caller's recovery graphs share the compiler transaction's lifetime.
+-- Invalidation also runs before any synchronous failed-attempt retry.
 type RequestRunner = forall requestResult.
-  (ResidentCompiler -> IO requestResult) -> IO requestResult
+  IO () -> (ResidentCompiler -> IO requestResult) -> IO requestResult
 
 -- | One resident-session compile cycle, against the ALREADY-OPEN session
 -- 'withResidentPipelineSelected' booted. Patches @importPaths@ for THIS cycle only

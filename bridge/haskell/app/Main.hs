@@ -73,7 +73,7 @@ import qualified Tidepool.ExecutionSchema as Execution
 import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
   ( PreparedModule(..), PreparedBodyCache, newPreparedBodyCache
-  )
+  , evictPreparedBodyMatching )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots
   , preparedRecoveryClosure, growPreparedRecovery )
@@ -118,10 +118,10 @@ import Tidepool.PlannedDeclaration
 import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
   , preparedApplyEntryTargetName, preparedApplyValueTargetName
-  , parseSessionModule, sessionHiPath )
+  , sessionHiPath )
 import Tidepool.FatIface
-  ( FatIfaceCache, newFatIfaceCache
-  , OwnerInterfaceCache, newOwnerInterfaceCache )
+  ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching
+  , OwnerInterfaceCache, newOwnerInterfaceCache, evictOwnerInterfaceMatching )
 import Tidepool.SessionArtifacts
   ( mkBoundBinders, parseValModule )
 import Tidepool.Metadata
@@ -170,6 +170,12 @@ freshRecoveryCaches :: IO RecoveryCaches
 freshRecoveryCaches = RecoveryCaches
   <$> newFatIfaceCache <*> newOwnerInterfaceCache <*> newPreparedBodyCache
 
+clearRecoveryCaches :: RecoveryCaches -> IO ()
+clearRecoveryCaches caches = do
+  evictFatIfaceMatching (rcFatIface caches) (const True)
+  evictOwnerInterfaceMatching (rcOwnerIface caches) (const True)
+  evictPreparedBodyMatching (rcPreparedBodies caches) (const True)
+
 data LocatedCellRejection = LocatedCellRejection CellSourceSpan String
   deriving Show
 instance Exception LocatedCellRejection
@@ -201,10 +207,10 @@ main = do
     then do
       hSetBinaryMode stdin True
       hSetBinaryMode stdout True
-      withResidentPipelineSelectedRequests [] (const (pure ())) $ \runRequest ->
-        WorkerServer.runWorkerLoop $ \serveTransaction ->
-          runRequest $ \compiler -> do
-            caches <- freshRecoveryCaches
+      withResidentPipelineSelectedRequests [] $ \runRequest ->
+        WorkerServer.runWorkerLoop $ \serveTransaction -> do
+          caches <- freshRecoveryCaches
+          runRequest (clearRecoveryCaches caches) $ \compiler ->
             serveTransaction (\cwd argv ->
               setCurrentDirectory cwd >> runWorkerInvocation compiler caches argv)
     else do
