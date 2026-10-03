@@ -7,6 +7,7 @@ module Tidepool.ExecutionProjection
   , ProjectedGroup(..), ProjectedGroupBody(..)
   , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
   , PreparedModuleProducts, projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes
+  , PreparedGroupRefusal(..), preparedModuleGroupRefusals
   , PreparedProjection
   , prepareProjection
   , prepareProjectionWithReachability
@@ -34,6 +35,7 @@ import Control.Monad.State.Strict
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.IntMap.Strict qualified as IntMap
+import Data.List (foldl')
 import Data.Foldable (toList)
 import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
@@ -232,12 +234,21 @@ projectPreparedModuleGroups context prepared =
 -- One compilation owns these outcomes for package closure and original-product
 -- publication. Keeping rejected outcomes also prevents the writer from projecting
 -- a module again under a different context or assigning different ordinals.
-newtype PreparedModuleProducts = PreparedModuleProducts
+data PreparedModuleProducts = PreparedModuleProducts
   [(Module, Either ProjectionError [ProjectedGroup])]
+  [(Module, PreparedGroupRefusal)]
+
+-- A refused original group has no native product. Its defining ordinal and
+-- complete recursive binder set remain available to diagnostics and closure.
+data PreparedGroupRefusal = PreparedGroupRefusal
+  { refusedOriginalOrdinal :: Word32
+  , refusedBinders :: [SymbolIdentity]
+  , refusedProjection :: ProjectionError
+  } deriving stock (Eq, Show)
 
 projectPreparedModuleProducts :: ProjectionContext -> [PreparedModule] -> PreparedModuleProducts
 projectPreparedModuleProducts context modules = PreparedModuleProducts
-  [(pmModule prepared, projectPreparedModuleGroups context prepared) | prepared <- modules]
+  [(pmModule prepared, projectPreparedModuleGroups context prepared) | prepared <- modules] []
 
 -- The compiler's actual home unit, complete source coverage and current module
 -- own original issuance. Package globals are sealed later against their exact
@@ -254,13 +265,71 @@ projectOriginalHomeModuleProducts env interfaces context modules =
         , mi_module interface == pmModule prepared =
             OriginalHomeProduct isHome
         | otherwise = ExecutableTarget
-  in PreparedModuleProducts
-      [(pmModule prepared, projectPreparedModuleGroupsFor (purpose prepared) context prepared Nothing)
-      | prepared <- modules]
+      originalOwners = Set.fromList
+        [pmModule prepared | prepared <- modules
+        , OriginalHomeProduct _ <- [purpose prepared]]
+      projected =
+        [(pmModule prepared, purpose prepared,
+          projectPreparedModuleGroupOutcomes (purpose prepared) context prepared Nothing)
+        | prepared <- modules]
+      outcomes =
+        [(owner, case selectedPurpose of
+            OriginalHomeProduct _ -> Right [group | (_, _, Right group) <- groups]
+            ExecutableTarget -> traverse (\(_, _, outcome) -> outcome) groups)
+        | (owner, selectedPurpose, groups) <- projected]
+      refusals =
+        [(owner, PreparedGroupRefusal ordinal binders reason)
+        | (owner, OriginalHomeProduct _, groups) <- projected
+        , (ordinal, binders, Left reason) <- groups]
+  in closeOriginalProducts originalOwners outcomes refusals
+
+-- Refusing one group also refuses every original group which requires its
+-- body. Interface authority is unaffected; the remaining native subset cannot
+-- acquire execution through an omitted helper, even after cold recovery.
+closeOriginalProducts :: Set Module
+  -> [(Module, Either ProjectionError [ProjectedGroup])]
+  -> [(Module, PreparedGroupRefusal)] -> PreparedModuleProducts
+closeOriginalProducts originalOwners outcomes refusals =
+  let groups = Map.fromList
+        [((owner, projectedOriginalOrdinal group), group)
+        | (owner, Right values) <- outcomes, owner `Set.member` originalOwners
+        , group <- values]
+      dependents = Map.fromListWith (++)
+        [(globalIdentity global, [key])
+        | (key, group) <- Map.toList groups
+        , global <- projectedGlobals (projectedBody group)]
+      pending = Seq.fromList
+        [binder | (_, refusal) <- refusals, binder <- refusedBinders refusal]
+      drain queue droppedKeys rejectedGroups = case Seq.viewl queue of
+        Seq.EmptyL -> (droppedKeys, reverse rejectedGroups)
+        missing Seq.:< rest ->
+          let reject state@(nextQueue, missingGroups, groupRefusals) key@(owner, ordinal)
+                | key `Set.member` missingGroups = state
+                | otherwise =
+                    let group = groups Map.! key
+                        refusal = PreparedGroupRefusal ordinal (projectedBinders group)
+                          (MissingPreparedTop missing)
+                    in (nextQueue <> Seq.fromList (projectedBinders group),
+                        Set.insert key missingGroups, (owner, refusal) : groupRefusals)
+              (updatedQueue, updatedDrops, updatedRefusals) = foldl' reject
+                (rest, droppedKeys, rejectedGroups) (Map.findWithDefault [] missing dependents)
+          in drain updatedQueue updatedDrops updatedRefusals
+      (omitted, dependentRefusals) = drain pending Set.empty []
+      remaining =
+        [(owner, case outcome of
+            Right values | owner `Set.member` originalOwners -> Right
+              [group | group <- values
+              , (owner, projectedOriginalOrdinal group) `Set.notMember` omitted]
+            _ -> outcome)
+        | (owner, outcome) <- outcomes]
+  in PreparedModuleProducts remaining (refusals ++ dependentRefusals)
 
 preparedModuleProductOutcomes :: PreparedModuleProducts
   -> [(Module, Either ProjectionError [ProjectedGroup])]
-preparedModuleProductOutcomes (PreparedModuleProducts outcomes) = outcomes
+preparedModuleProductOutcomes (PreparedModuleProducts outcomes _) = outcomes
+
+preparedModuleGroupRefusals :: PreparedModuleProducts -> [(Module, PreparedGroupRefusal)]
+preparedModuleGroupRefusals (PreparedModuleProducts _ refusals) = refusals
 
 projectPreparedModuleGroupsSelected :: ProjectionContext -> PreparedModule
   -> Maybe (Set Word32) -> Either ProjectionError [ProjectedGroup]
@@ -268,7 +337,16 @@ projectPreparedModuleGroupsSelected = projectPreparedModuleGroupsFor ExecutableT
 
 projectPreparedModuleGroupsFor :: ProjectionPurpose -> ProjectionContext -> PreparedModule
   -> Maybe (Set Word32) -> Either ProjectionError [ProjectedGroup]
-projectPreparedModuleGroupsFor purpose context prepared selection = traverse projectOne surviving
+projectPreparedModuleGroupsFor purpose context prepared selection =
+  traverse (\(_, _, outcome) -> outcome)
+    (projectPreparedModuleGroupOutcomes purpose context prepared selection)
+
+projectPreparedModuleGroupOutcomes :: ProjectionPurpose -> ProjectionContext -> PreparedModule
+  -> Maybe (Set Word32) -> [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroup)]
+projectPreparedModuleGroupOutcomes purpose context prepared selection =
+  [ (ordinal, [symbol | binder <- topBinders binding
+              , Just symbol <- [lookupVarEnv identities binder]], projectOne item)
+  | (ordinal, item@(binding, _)) <- surviving ]
   where
     identities = buildTopIdentityMap [prepared]
     originals = pmBindings prepared
@@ -278,7 +356,7 @@ projectPreparedModuleGroupsFor purpose context prepared selection = traverse pro
       | (ordinal, (binding, _)) <- zip [0 :: Int ..] originals
       , first : _ <- [topBinders binding] ]
     surviving =
-      [ item
+      [ (ordinal, item)
       | item@(binding, _) <- pmBindings (dropRetainedTops context prepared)
       , first : _ <- [topBinders binding]
       , Just ordinal <- [Map.lookup (getKey (varUnique first)) ordinalByFirst]

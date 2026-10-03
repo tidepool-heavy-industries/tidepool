@@ -63,7 +63,7 @@ import Tidepool.GhcPipeline
 import Tidepool.ExecutionEncode
   ( encodeWireProgram, ModuleProductEncoding, prepareModuleProductEncoding
   , moduleProductInput, moduleProductBytes, encodeModuleProductInventory )
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelected, PreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedRootIdentity, resolveTextPackageUnit)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelected, PreparedModuleProducts, PreparedGroupRefusal(..), projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedModuleGroupRefusals, preparedRootIdentity, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
@@ -615,6 +615,12 @@ writeModuleProducts :: OriginalInterfaceArtifacts -> FilePath -> Maybe PreparedM
          [ModuleProductEncoding])
 writeModuleProducts _ _ Nothing _ _ = pure (Map.empty, [])
 writeModuleProducts originalInterfaces outDir (Just inventory) interfaces packageRoots = do
+  forM_ (preparedModuleGroupRefusals inventory) $ \(owner, refusal) ->
+    hPutStrLn stderr ("module product group unavailable: "
+      ++ unitString (moduleUnit owner) ++ ":" ++ moduleNameString (moduleName owner)
+      ++ " ordinal " ++ show (refusedOriginalOrdinal refusal)
+      ++ " binders " ++ show (refusedBinders refusal)
+      ++ ": " ++ show (refusedProjection refusal))
   timing <- readTimingEnabled
   outcomes <- forM (preparedModuleProductOutcomes inventory) $ \(owner, outcome) -> do
     let name = moduleName owner

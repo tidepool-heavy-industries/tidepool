@@ -99,3 +99,15 @@ copiedIntPublisher sink = reportRequestProgressSited (1 {- copied-site -}) sink 
 {-# OPAQUE copiedRawPublisher #-}
 copiedRawPublisher :: Replies (Either ReplyError ())
 copiedRawPublisher = PublishProgressWith (1 {- copied-site -}) (41 :: Int) 1
+
+{-# OPAQUE safeSibling #-}
+safeSibling :: Int
+safeSibling = 42
+
+{-# OPAQUE rawAlias #-}
+rawAlias :: Replies (Either ReplyError ())
+rawAlias = rawPublish
+
+{-# OPAQUE rawAliasChain #-}
+rawAliasChain :: Replies (Either ReplyError ())
+rawAliasChain = rawAlias

@@ -4,6 +4,8 @@ import Control.Exception (bracket)
 import Control.Monad (forM_, unless)
 import Data.List (isInfixOf)
 import Data.Maybe (isJust)
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text qualified as T
 import GHC.Types.Name (getOccString)
 import GHC.Unit.Module (moduleName, moduleNameString)
@@ -11,7 +13,9 @@ import System.Directory (copyFile, createDirectory, getTemporaryDirectory, remov
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import Tidepool.EffectSchema (YieldSite(..), SiteType(..))
-import Tidepool.GhcPipeline (PipelineSelection(..), PreparedPipelineResult(..), runPipelineSelected)
+import Tidepool.GhcPipeline (PipelineResult(..), PipelineSelection(..), PreparedPipelineResult(..), runPipelineSelected)
+import Tidepool.ExecutionProjection
+import Tidepool.ExecutionSchema (SymbolIdentity(..), TargetDescriptor(..), Architecture(..), Endianness(..), globalIdentity)
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedStg (PreparedModule(..))
 
@@ -46,6 +50,44 @@ progressBoundaryChecks effects = bracket scratch removeDirectoryRecursive $ \wor
     fail "supported direct/watch/source progress helper lost canonical input authority"
   unless (length [() | site <- sites, input <- ysInputs site, "ProgressNote" `T.isInfixOf` stType input] == 5) $
     fail "progress helper metadata erased nominal newtype identity"
+  let context = ProjectionContext "test" "matched"
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+        (SymbolIdentity "main" "ProgressBoundary" "value" "safeSibling" Nothing)
+        [] Nothing Nothing Nothing Nothing
+      products = projectOriginalHomeModuleProducts
+        (prHscEnv (pprPipelineResult result)) (pprProductInterfaces result)
+        context (pprModules result)
+      originalRefusals =
+        [refusal | (owner, refusal) <- preparedModuleGroupRefusals products
+        , owner == pmModule prepared]
+      omitted = Set.fromList (concatMap refusedBinders originalRefusals)
+  groups <- case [outcome | (owner, outcome) <- preparedModuleProductOutcomes products
+                , owner == pmModule prepared] of
+    [Right values] -> pure values
+    _ -> fail "unrelated raw group discarded the safe original product"
+  safeOrdinal <- case
+    [fromIntegral ordinal | (ordinal, (binding, _)) <- zip [0 :: Int ..] (pmBindings prepared)
+    , any ((== "safeSibling") . getOccString) (topBinders binding)] of
+    [ordinal] -> pure ordinal
+    _ -> fail "safe original sibling lost its defining group"
+  unless (any (\group -> projectedOriginalOrdinal group == safeOrdinal
+      && any ((== "safeSibling") . symbolOccurrence) (projectedBinders group)) groups) $
+    fail "safe original sibling changed its ordinal or lost native custody"
+  unless (any (any ((== "publish") . symbolOccurrence) . projectedBinders) groups) $
+    fail "compiler-issued concrete progress publisher lost its original native group"
+  forM_ ["rawAlias", "rawAliasChain"] $ \occurrence -> unless
+    (any (\refusal -> any ((== T.pack occurrence) . symbolOccurrence) (refusedBinders refusal)
+      && case refusedProjection refusal of MissingPreparedTop _ -> True; _ -> False) originalRefusals) $
+    fail ("original product retained a dependent of an omitted raw group: " ++ occurrence)
+  unless (all (\group -> all ((`Set.notMember` omitted) . globalIdentity)
+      (projectedGlobals (projectedBody group))) groups) $
+    fail "original product's safe subset requires an omitted native group"
+  forM_ (protected ++ ["rawAlias", "rawAliasChain", "openObserver"]) $ \occurrence ->
+    case prepareProjection (context { projectionEntry = SymbolIdentity
+        "main" "ProgressBoundary" "value" (T.pack occurrence) Nothing }) (pprModules result) of
+      Left RejectedTypedSite{} -> pure ()
+      Left other -> fail ("authored raw projection changed refusal: " ++ show other)
+      Right _ -> fail ("authored raw projection acquired execution: " ++ occurrence)
   -- Approved library implementations forward the hidden site; they must not be
   -- rejected merely because their private bodies construct the raw effect.
   forM_ (pprModules result) $ \owner ->
