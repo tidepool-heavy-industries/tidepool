@@ -360,6 +360,7 @@ impl std::ops::Deref for Record {
     }
 }
 
+#[cfg(test)]
 impl std::ops::DerefMut for Record {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.data
@@ -1038,7 +1039,7 @@ fn eligible_records_with_report(
         };
         let mut record = record;
         let owner = computed_owner(&record);
-        record.original_owner = OriginalOwner::from_owner(&owner);
+        record.data.original_owner = OriginalOwner::from_owner(&owner);
         if let Some(original) = certified.iter().find(|original| {
             original.owner().unit == record.unit && original.owner().module == record.module
         }) {
@@ -1055,9 +1056,9 @@ fn eligible_records_with_report(
                 continue;
             }
             record.module_interface_proof = original.module_interface().cloned();
-            record.original_certification = original.certification_bytes().to_vec();
+            record.data.original_certification = original.certification_bytes().to_vec();
             record.execution_source = original.execution_source().cloned();
-            record.execution_source_sha256 =
+            record.data.execution_source_sha256 =
                 record.execution_source.as_ref().map(|graph| graph.digest());
         }
         report(product, original_bytes, PublicationDisposition::Eligible);
