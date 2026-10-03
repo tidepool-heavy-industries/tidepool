@@ -92,10 +92,65 @@ pub enum ArtifactInventoryFailure {
     },
 }
 
-#[derive(Debug)]
 pub struct ArtifactInventoryError {
     pub failure: ArtifactInventoryFailure,
     pub diagnostic_artifacts: Option<std::path::PathBuf>,
+    pub(crate) owner_conflict: Option<ArtifactOwnerConflictEvidence>,
+}
+
+pub(crate) struct ArtifactOwnerConflictEvidence {
+    existing: Arc<ArtifactEntry>,
+    incoming: Arc<ArtifactEntry>,
+    existing_in_parent: bool,
+}
+
+impl std::fmt::Debug for ArtifactInventoryError {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output
+            .debug_struct("ArtifactInventoryError")
+            .field("failure", &self.failure)
+            .field("diagnostic_artifacts", &self.diagnostic_artifacts)
+            .finish()
+    }
+}
+
+impl ArtifactInventoryError {
+    /// Only immutable evidence from the refused admission is retained. Reading
+    /// these diagnostics cannot admit either artifact or change its scope.
+    pub(crate) fn retain_owner_conflict(&self, root: &std::path::Path) -> std::io::Result<()> {
+        let Some(evidence) = &self.owner_conflict else {
+            return Ok(());
+        };
+        let root = root.join("owner-conflict");
+        std::fs::create_dir(&root)?;
+        let metadata = serde_json::json!({
+            "existing": evidence.existing.descriptor,
+            "incoming": evidence.incoming.descriptor,
+            "existing_in_parent": evidence.existing_in_parent,
+        });
+        std::fs::write(
+            root.join("index.json"),
+            serde_json::to_vec_pretty(&metadata).map_err(std::io::Error::other)?,
+        )?;
+        for (label, entry) in [
+            ("existing", &evidence.existing),
+            ("incoming", &evidence.incoming),
+        ] {
+            if let ArtifactPayload::Canonical(interface) = &entry.payload {
+                for (extension, bytes) in [
+                    ("finalized.cbor", interface.certificate_bytes()),
+                    ("hi", interface.interface_bytes()),
+                    ("packages", interface.package_imports_bytes()),
+                ] {
+                    std::fs::write(root.join(format!("{label}.{extension}")), bytes)?;
+                }
+                if let Some(core) = interface.core_bytes() {
+                    std::fs::write(root.join(format!("{label}.core")), core)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Display for ArtifactInventoryError {
@@ -118,6 +173,7 @@ fn admission_failure(failure: ArtifactInventoryFailure) -> CompileError {
     ArtifactInventoryError {
         failure,
         diagnostic_artifacts: None,
+        owner_conflict: None,
     }
     .into()
 }
@@ -719,9 +775,19 @@ impl ArtifactInventory {
                     incoming = ?entry.descriptor,
                     "refusing different artifacts for one exact original owner",
                 );
-                return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
-                    owner: entry.descriptor.owner.clone(),
-                }));
+                return Err(ArtifactInventoryError {
+                    failure: ArtifactInventoryFailure::OwnerConflict {
+                        owner: entry.descriptor.owner.clone(),
+                    },
+                    diagnostic_artifacts: None,
+                    owner_conflict: Some(ArtifactOwnerConflictEvidence {
+                        existing: Arc::clone(&state.payloads[existing_id]),
+                        incoming: Arc::clone(entry),
+                        existing_in_parent: closure(&state, parent.roots().into_iter())
+                            .contains(existing_id),
+                    }),
+                }
+                .into());
             }
             for (owner, seal) in &entry.interface_seals {
                 state
@@ -1568,6 +1634,53 @@ mod tests {
         ));
         assert!(inventory.admit(&empty, vec![private, dependent]).is_err());
         assert_eq!(inventory.node_count(), 0);
+    }
+
+    #[test]
+    fn owner_conflict_retains_exact_pair_after_unrelated_view_is_reclaimed() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let existing =
+            ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+                [1; 32],
+                "unit",
+                "PrivateOwner",
+                BTreeMap::new(),
+            ));
+        let incoming =
+            ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+                [2; 32],
+                "unit",
+                "PrivateOwner",
+                BTreeMap::new(),
+            ));
+        let retained = inventory.admit(&empty, vec![existing.clone()]).unwrap();
+        let CompileError::ArtifactInventory(error) =
+            inventory.admit(&empty, vec![incoming.clone()]).unwrap_err()
+        else {
+            panic!("expected exact owner conflict")
+        };
+        drop(retained);
+        assert_eq!(inventory.node_count(), 0);
+        let destination = tempfile::tempdir().unwrap();
+        error.retain_owner_conflict(destination.path()).unwrap();
+        let root = destination.path().join("owner-conflict");
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("index.json")).unwrap()).unwrap();
+        assert_eq!(index["existing_in_parent"], false);
+        for (label, entry) in [("existing", existing), ("incoming", incoming)] {
+            let ArtifactPayload::Canonical(interface) = entry.payload else {
+                unreachable!()
+            };
+            assert_eq!(
+                std::fs::read(root.join(format!("{label}.finalized.cbor"))).unwrap(),
+                interface.certificate_bytes()
+            );
+            assert_eq!(
+                index[label],
+                serde_json::to_value(entry.descriptor).unwrap()
+            );
+        }
     }
 
     #[test]

@@ -427,6 +427,7 @@ mod tests {
         let error = CompileError::ArtifactInventory(ArtifactInventoryError {
             failure: failure.clone(),
             diagnostic_artifacts: Some(PathBuf::from("retained-evidence")),
+            owner_conflict: None,
         });
         let diagnostic = classify_compile(&error);
         assert_eq!(diagnostic.class, FailureClass::VersionSkew);

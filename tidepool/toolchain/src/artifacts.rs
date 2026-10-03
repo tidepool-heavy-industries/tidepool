@@ -3232,6 +3232,9 @@ fn retain_compiler_failure_inner(
             tracing::warn!(path = %retained.display(), "retained failed compiler artifacts");
             match error {
                 CompileError::ArtifactInventory(mut error) => {
+                    if let Err(failure) = error.retain_owner_conflict(&retained) {
+                        tracing::warn!(%failure, "could not retain exact owner conflict evidence");
+                    }
                     error.diagnostic_artifacts = Some(retained);
                     CompileError::ArtifactInventory(error)
                 }
