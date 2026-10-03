@@ -19,6 +19,26 @@ use tidepool_testing::eval_harness;
 
 use super::support;
 
+trait ResidentToolEndpointTestProjection {
+    fn dispatch_json_boxed(&self, invocation: ToolInvocation)
+        -> exomonad_actor::ResidentToolFuture;
+}
+
+impl<T: exomonad_actor::ResidentToolEndpoint + ?Sized> ResidentToolEndpointTestProjection for T {
+    fn dispatch_json_boxed(
+        &self,
+        invocation: ToolInvocation,
+    ) -> exomonad_actor::ResidentToolFuture {
+        let response = exomonad_actor::ResidentToolEndpoint::dispatch_boxed(self, invocation);
+        Box::pin(async move {
+            response
+                .await?
+                .into_json()
+                .map_err(exomonad_actor::ResidentToolError::Encoding)
+        })
+    }
+}
+
 #[path = "resident_local_actor/completion_progress.rs"]
 mod completion_progress;
 #[path = "resident_local_actor/reload_progress.rs"]
@@ -547,7 +567,7 @@ impl ConcurrentResident {
         let context = Self::cell_context(key);
         tokio::spawn(async move {
             policy
-                .dispatch_boxed(ToolInvocation {
+                .dispatch_json_boxed(ToolInvocation {
                     context: Some(context),
                     name: exomonad_actor::HASKELL_TOOL.into(),
                     arguments: ToolArguments::Raw(source),
@@ -1244,7 +1264,7 @@ async fn resident_await_watch_case(case: WatchCase) {
         let context = cancelled_context.clone();
         tokio::spawn(async move {
             policy
-                .dispatch_boxed(ToolInvocation {
+                .dispatch_json_boxed(ToolInvocation {
                     context: Some(context),
                     name: exomonad_actor::HASKELL_TOOL.into(),
                     arguments: ToolArguments::Raw(if cancel_sleep {
@@ -1554,7 +1574,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
 
     let changed = sibling_installation
         .policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "set_value".into(),
             arguments: ToolArguments::Structured(serde_json::json!({"next": 73})),
@@ -1571,7 +1591,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         ("finish_value", serde_json::json!({"confirm": "bad"})),
     ] {
         let error = policy
-            .dispatch_boxed(ToolInvocation {
+            .dispatch_json_boxed(ToolInvocation {
                 context: None,
                 name: name.into(),
                 arguments: ToolArguments::Structured(arguments),
@@ -1589,7 +1609,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         );
     }
     let unchanged = policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "current_value".into(),
             arguments: ToolArguments::Structured(serde_json::json!({})),
@@ -1599,7 +1619,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
     assert_eq!(unchanged, serde_json::json!({"current": 0}));
 
     let doubled = policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "double_value".into(),
             arguments: ToolArguments::Structured(serde_json::json!({"value": 6})),
@@ -1609,7 +1629,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
     assert_eq!(doubled, serde_json::json!({"doubled": 12}));
 
     let spawned = policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "spawn_child".into(),
             arguments: ToolArguments::Structured(serde_json::json!({"seed": 19})),
@@ -1630,7 +1650,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
             if terminal.kind == exomonad_actor::ActorExitKind::Completed
     ));
     let finished = policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "finish_value".into(),
             arguments: ToolArguments::Structured(serde_json::json!({"confirm": true})),
@@ -1676,7 +1696,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
     // The first tree's retirement must preserve the sibling's live closures.
     let retained = sibling_installation
         .policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "current_value".into(),
             arguments: ToolArguments::Structured(serde_json::json!({})),
@@ -1686,7 +1706,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
     assert_eq!(retained, serde_json::json!({"current": 73}));
     sibling_installation
         .policy
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "finish_value".into(),
             arguments: ToolArguments::Structured(serde_json::json!({"confirm": true})),
