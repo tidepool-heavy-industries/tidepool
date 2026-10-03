@@ -664,6 +664,56 @@ fn run_inspections_with_policy(
             request.queries.len()
         )));
     }
+    #[cfg(test)]
+    if std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1") {
+        if let Some(root) = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
+            let retain = || -> std::io::Result<PathBuf> {
+                let root = PathBuf::from(root).join("inspection-receipts");
+                std::fs::create_dir_all(&root)?;
+                let retained = TempDir::new_in(root)?;
+                let directories = sources
+                    .keys()
+                    .filter_map(|path| path.parent())
+                    .collect::<BTreeSet<_>>();
+                for (index, directory) in directories.into_iter().enumerate() {
+                    let originals = directory.join(".exact-compilations");
+                    if !originals.try_exists()? {
+                        continue;
+                    }
+                    let destination = retained.path().join(index.to_string());
+                    std::fs::create_dir(&destination)?;
+                    std::fs::write(
+                        destination.join("original-directory.txt"),
+                        originals.as_os_str().as_encoded_bytes(),
+                    )?;
+                    for entry in std::fs::read_dir(originals)? {
+                        let entry = entry?;
+                        if !entry.file_type()?.is_dir() {
+                            continue;
+                        }
+                        let snapshot = destination.join(entry.file_name());
+                        std::fs::create_dir(&snapshot)?;
+                        for name in ["source.hs", "receipt.cbor"] {
+                            std::fs::copy(entry.path().join(name), snapshot.join(name))?;
+                        }
+                        let bytes = std::fs::read(snapshot.join("receipt.cbor"))?;
+                        if let Ok(CborValue::Array(header)) =
+                            ciborium::de::from_reader(bytes.as_slice())
+                        {
+                            if let Some(CborValue::Text(evidence)) = header.get(7) {
+                                std::fs::write(snapshot.join("dependencies.json"), evidence)?;
+                            }
+                        }
+                    }
+                }
+                Ok(retained.keep())
+            };
+            match retain() {
+                Ok(path) => eprintln!("owned inspection receipts retained at {}", path.display()),
+                Err(error) => eprintln!("could not retain owned inspection receipts: {error}"),
+            }
+        }
+    }
     if offer.exact_scope_path().is_some()
         && results
             .iter()
