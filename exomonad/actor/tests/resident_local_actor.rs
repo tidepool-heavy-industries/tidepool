@@ -361,6 +361,11 @@ async fn resident_structured_tool_command_presentation_retains_job_and_resumes()
 }
 
 #[tokio::test]
+async fn resident_command_retain_binding_returns_reference_without_command_presentation() {
+    resident_await_watch_case(WatchCase::PrimaryCommandRetainBinding).await;
+}
+
+#[tokio::test]
 async fn resident_primary_await_watch_cancels_an_unpublished_cell() {
     resident_await_watch_case(WatchCase::PrimaryCancellation).await;
 }
@@ -891,6 +896,7 @@ enum WatchCase {
     PrimaryInterleavedPublication,
     StructuredRoundTrip,
     StructuredCommandPresentation,
+    PrimaryCommandRetainBinding,
     PrimaryCancellation,
     PrimarySleepCancellation,
     PrimaryCommandAwaitCancellation,
@@ -901,6 +907,7 @@ enum WatchCase {
 async fn resident_await_watch_case(case: WatchCase) {
     let interleaved = matches!(case, WatchCase::PrimaryInterleavedPublication);
     let structured_command = matches!(case, WatchCase::StructuredCommandPresentation);
+    let retain_command_binding = matches!(case, WatchCase::PrimaryCommandRetainBinding);
     let primary = !matches!(
         case,
         WatchCase::StructuredRoundTrip | WatchCase::StructuredCommandPresentation
@@ -930,7 +937,9 @@ async fn resident_await_watch_case(case: WatchCase) {
     }
     eval_harness::require_extract();
 
-    let session = support::process_unique_session(if command_observation.is_some() {
+    let session = support::process_unique_session(if retain_command_binding {
+        185
+    } else if command_observation.is_some() {
         184
     } else if cancel_sleep {
         183
@@ -1090,7 +1099,10 @@ async fn resident_await_watch_case(case: WatchCase) {
                         }
                         .into(),
                         arguments: if primary {
-                            ToolArguments::Raw(if interleaved {
+                            ToolArguments::Raw(if retain_command_binding {
+                                include_str!("resident_local_actor/command_retain_binding_cell.hs")
+                                    .into()
+                            } else if interleaved {
                                 include_str!("resident_local_actor/interleaved_bind_cell.hs").into()
                             } else {
                                 include_str!("resident_local_actor/await_watch_cell.hs")
@@ -1183,6 +1195,19 @@ async fn resident_await_watch_case(case: WatchCase) {
                     .expect("read joined values");
                 assert_eq!(joined["status"], "committed", "{joined:?}");
                 assert_eq!(joined["items"][0]["output"], "42", "{joined:?}");
+                forest.shutdown().await;
+                return;
+            }
+            if retain_command_binding {
+                let binding = settled["items"][0]["output"]
+                    .as_str()
+                    .expect("the authored result is the retained binding reference");
+                assert!(!binding.contains("session_id:"), "{settled:?}");
+                assert_eq!(
+                    settled["items"][0]["installed_bindings"],
+                    serde_json::json!([binding]),
+                    "the host tracks the binding on the item that requested it: {settled:?}"
+                );
                 forest.shutdown().await;
                 return;
             }

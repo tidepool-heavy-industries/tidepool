@@ -324,6 +324,12 @@ pub fn commands() -> Effect {
                 HsType::Unit,
             ),
             verb(
+                "CommandRetainJobWith",
+                "command_retain_job_with",
+                vec![("job", HsType::Text, "String")],
+                HsType::either(named("CommandError"), HsType::Text),
+            ),
+            verb(
                 "CommandOutputWith",
                 "command_output_with",
                 vec![

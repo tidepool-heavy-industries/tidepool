@@ -2940,6 +2940,16 @@ enum OwnedWorkbenchWait {
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         >,
     ),
+    RetainCommandBinding {
+        continuation: ResidentHole,
+        operation: futures_util::future::BoxFuture<
+            'static,
+            (
+                Result<String, tidepool_bridge_effects::CommandError>,
+                Option<String>,
+            ),
+        >,
+    },
     Watch(crate::request_effect::WatchPoll),
     Drain {
         continuation: ResidentHole,

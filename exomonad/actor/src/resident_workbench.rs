@@ -2943,6 +2943,17 @@ impl<H, O> ResidentActorRunner<H, O> {
 }
 
 impl<H, O> ResidentActorWorkbench<H, O> {
+    pub(crate) fn shared_for_command_binding(&self) -> Self {
+        Self {
+            access: self.access.sharing(),
+            response: self.response.clone(),
+            request: self.request.clone(),
+            json_input: self.json_input.clone(),
+            compilation_authority: self.compilation_authority.clone(),
+            private_execution: self.private_execution.clone(),
+        }
+    }
+
     #[must_use]
     pub fn new(
         machines: Arc<ActorMachineRegistry<H, O>>,

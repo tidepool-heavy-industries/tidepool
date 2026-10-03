@@ -164,3 +164,61 @@ where
         displayed_pages: pages.filter(|_| !shortened).and_then(Result::ok),
     })
 }
+
+pub(super) async fn retain_job_binding<H, O>(
+    jobs: &crate::command_jobs::CommandJobs,
+    context: &ActorSessionContext,
+    workbench: &crate::ResidentActorWorkbench<H, O>,
+    job: String,
+    permitted: bool,
+) -> (Result<String, CommandError>, Option<String>)
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let result = if !permitted {
+        Err(CommandError::CommandUnauthorized)
+    } else {
+        match jobs.owner(&job) {
+            Err(error) => Err(error),
+            Ok(owner) => authorize_job_binding(context.actor, owner),
+        }
+    };
+    let result = match result {
+        Err(error) => Err(error),
+        Ok(()) => workbench
+            .bind_command_job(context.clone(), job)
+            .await
+            .map_err(|error| CommandError::CommandUnavailable(error.to_string())),
+    };
+    let binding = result.as_ref().ok().cloned();
+    (result, binding)
+}
+
+fn authorize_job_binding(caller: ActorRef, owner: ActorRef) -> Result<(), CommandError> {
+    if caller == owner {
+        Ok(())
+    } else {
+        Err(CommandError::CommandUnauthorized)
+    }
+}
+
+#[cfg(test)]
+mod binding_authority_tests {
+    use super::*;
+
+    #[test]
+    fn foreign_job_owner_cannot_retain_the_binding() {
+        let caller = ActorRef::first(crate::ActorId(1));
+        let owner = ActorRef::first(crate::ActorId(2));
+        assert_eq!(
+            authorize_job_binding(caller, owner),
+            Err(CommandError::CommandUnauthorized)
+        );
+        assert_eq!(
+            authorize_job_binding(owner, owner),
+            Ok(()),
+            "the owning actor may retain its command job"
+        );
+    }
+}
