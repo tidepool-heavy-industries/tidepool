@@ -142,7 +142,9 @@ import Tidepool.Metadata
   , wiredInDataCons )
 import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut)
 import Tidepool.Timing (readTimingEnabled, timePhase, timeDetailPhase)
-import Tidepool.TurnSource (extractModuleName, spliceTemplate, renderImportBinder)
+import Tidepool.TurnSource
+  ( extractModuleName, spliceTemplate, renderImportBinder
+  , generatedScaffoldModuleName, renameScaffoldModuleHeader )
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencySource(..), DependencyImport(..), ProductAvailability(..)
   , renderDependencyEvidence, revalidateDependencyEvidence, selectedHomeRequirements )
@@ -897,25 +899,26 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
         spliceInto tmplFile = do
           originalTemplate <- readFile tmplFile
           verifyProtectedTemplate tmplFile originalTemplate
-          tmplSrc <- case prologue of
-            Nothing -> pure originalTemplate
-            Just authored -> do
-              withImports <- replaceRecipeMarker "default (Int, Double, Text)\n"
-                (concatMap ((++ "\n") . locatedImportSource) (prologueImports authored)
-                  ++ "default (Int, Double, Text)\n") originalTemplate
-              pure (concatMap ((++ "\n") . locatedPragmaSource) (prologuePragmas authored) ++ withImports)
           let original = case (display, admitted) of
                 (Just authority, Nothing) -> displayPlannedDeclaration authority
                 (Nothing, Just authority) -> itemPlannedDeclaration authority
                 _ -> Nothing
-          withOriginal <- case original of
-            Nothing -> pure tmplSrc
-            Just ((_, owner), _) -> replaceRecipeMarker "default (Int, Double, Text)\n"
-              ("import " ++ owner ++ "\ndefault (Int, Double, Text)\n") tmplSrc
-          withProgram <- if null programImports then pure withOriginal else
-            replaceRecipeMarker "default (Int, Double, Text)\n"
-              (concatMap (\owner -> "import " ++ owner ++ "\n") programImports ++ "default (Int, Double, Text)\n") withOriginal
-          let renderRecipe preview = do
+          let prepareTemplate template = do
+                tmplSrc <- case prologue of
+                  Nothing -> pure template
+                  Just authored -> do
+                    withImports <- replaceRecipeMarker "default (Int, Double, Text)\n"
+                      (concatMap ((++ "\n") . locatedImportSource) (prologueImports authored)
+                        ++ "default (Int, Double, Text)\n") template
+                    pure (concatMap ((++ "\n") . locatedPragmaSource) (prologuePragmas authored) ++ withImports)
+                withOriginal <- case original of
+                  Nothing -> pure tmplSrc
+                  Just ((_, owner), _) -> replaceRecipeMarker "default (Int, Double, Text)\n"
+                    ("import " ++ owner ++ "\ndefault (Int, Double, Text)\n") tmplSrc
+                if null programImports then pure withOriginal else
+                  replaceRecipeMarker "default (Int, Double, Text)\n"
+                    (concatMap (\owner -> "import " ++ owner ++ "\n") programImports ++ "default (Int, Double, Text)\n") withOriginal
+              renderRecipe withProgram preview = do
                 -- Replace only the protected scaffold marker, before inserting
                 -- the admitted statement or checked signature declarations.
                 withPreview <- maybe (pure withProgram)
@@ -932,28 +935,69 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
                         (concatMap (\(moduleName',names) -> "import " ++ moduleName' ++ " (" ++ intercalate ", " (map renderImportBinder names) ++ ")\n")
                           (itemValueImports admission) ++ "default (Int, Double, Text)\n") withPreview
                     checkedRecipeSource admission withPrefix turnSrc
+              scopeFields = do
+                case requestSessionArtifacts args of
+                  Just manifest -> do
+                    exact <- readExactScope manifest >>= either fail pure
+                    pure ["exact-scope-semantic", scopeSemanticSha256 exact]
+                  Nothing -> do
+                    let scope = scopeFromWorkerRequest args
+                    pure ["session-scope", ssRoot scope, show (ssValIfaces scope), show (ssIncarnation scope)]
+              authorityFields = case (display, admitted) of
+                (Just authority, Nothing) ->
+                  ["display", displayAdmissionDigest authority, displayCellReceiptDigest authority]
+                (Nothing, Just authority) ->
+                  ["item", itemAdmissionDigest authority, itemCellReceiptDigest authority]
+                _ -> ["unadmitted"]
+              retainedFields = concat
+                [ ["retained", T.unpack (symbolUnit identity), T.unpack (symbolModule identity)
+                  , T.unpack (symbolNamespace identity), T.unpack (symbolOccurrence identity)]
+                  ++ maybe ["no-record-parent"] (\parent -> ["record-parent", T.unpack parent])
+                    (symbolRecordParent identity)
+                  ++ [show generation]
+                | (identity, generation) <- Map.toAscList (requestRetainedGenerations args) ]
+              renderNamedRecipe preview = do
+                withProgram <- prepareTemplate originalTemplate
+                baseSource <- renderRecipe withProgram preview
+                if sbKind sb == KDecl
+                  then pure (originalTemplate, baseSource)
+                  else do
+                    semanticScope <- scopeFields
+                    let owner = generatedScaffoldModuleName
+                          (["turn-scaffold-owner-v1", "scope"] ++ semanticScope
+                            ++ ["template", originalTemplate, "rendered", baseSource
+                              , "includes", show (requestIncludes args)]
+                            ++ authorityFields ++ retainedFields)
+                    renamed <- either fail pure (renameScaffoldModuleHeader owner originalTemplate)
+                    renamedTemplate <- prepareTemplate renamed
+                    finalSource <- renderRecipe renamedTemplate preview
+                    pure (renamed, finalSource)
           rendered <- if requestActivationPreview args
             then do
               let opaque = "(TidepoolScaffoldText.pack \"<opaque value>\\nUse the input type to select fields or apply sessionInput.\", False)"
-              checkSource <- renderRecipe (Just opaque)
+              (checkProtected, checkSource) <- renderNamedRecipe (Just opaque)
               (_, checkModule, checkPath) <- writeSplicedModule outDir lastAttempt checkSource
               checkPurpose <- case protectedTemplates of
                 Nothing -> pure basePurpose
                 Just _ -> do
-                  recipe <- generatedScaffoldRecipe originalTemplate checkSource checkPath checkModule >>= either fail pure
+                  recipe <- generatedScaffoldRecipe checkProtected checkSource checkPath checkModule >>= either fail pure
                   pure (GeneratedScaffoldCompile recipe basePurpose)
               checked <- compiler CheckedEnvironment Set.empty checkPurpose
                 (Just (scopeFromWorkerRequest args)) checkPath (requestIncludes args) (requestBuildProductsDir args)
               inputType <- maybe (fail "activation is missing its checked input type") (pure . stripMonadHead) (crResultType checked)
               rendered <- satisfiesCapturedConstraint (crHscEnv checked) (crTargetTcGblEnv checked)
                 "__tidepoolActivationConstraint" inputType
-              finalSource <- renderRecipe (Just (if rendered
+              (finalProtected, finalSource) <- renderNamedRecipe (Just (if rendered
                 then "TidepoolInspection.workbenchActivationDisplay __activationBudget __activationInput"
                 else opaque))
-              writeSplicedModule outDir lastAttempt finalSource
-            else renderRecipe Nothing >>= writeSplicedModule outDir lastAttempt
-          let (source,moduleName',modulePath) = rendered
-          pure (originalTemplate,source,moduleName',modulePath)
+              finalOutput <- writeSplicedModule outDir lastAttempt finalSource
+              pure (finalProtected, finalSource, finalOutput)
+            else do
+              (finalProtected, finalSource) <- renderNamedRecipe Nothing
+              finalOutput <- writeSplicedModule outDir lastAttempt finalSource
+              pure (finalProtected, finalSource, finalOutput)
+          let (protected, source, ( _,moduleName',modulePath)) = rendered
+          pure (protected,source,moduleName',modulePath)
     -- Four-shape selection (protocol note, "the verdict space has four
     -- shapes, not three"): a bind that binds no name selects its own
     -- template kind and skips the session-bind artifacts entirely —

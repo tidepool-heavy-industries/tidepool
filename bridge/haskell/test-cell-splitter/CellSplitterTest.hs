@@ -162,6 +162,10 @@ generatedScaffoldIdentityChecks = do
     owner (generatedScaffoldModuleName fields)
   unless (owner /= generatedScaffoldModuleName (fields ++ ["different generation"]))
     (fail "generated owner ignored a retained generation change")
+  unless (owner /= generatedScaffoldModuleName (fields ++ ["different admission digest"]))
+    (fail "generated owner ignored an admission digest change")
+  unless (owner /= generatedScaffoldModuleName (fields ++ ["different rendered source"]))
+    (fail "generated owner ignored a rendered source change")
   renamed <- either fail pure (renameScaffoldModuleHeader owner template)
   assertEqual "generated owner rename changes only the protected header"
     ("{-# LANGUAGE OverloadedStrings #-}\nmodule " ++ owner ++ " where\n__result = {{TURN}}\n") renamed
