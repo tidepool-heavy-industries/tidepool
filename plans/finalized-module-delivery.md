@@ -34,7 +34,9 @@ The coordinator owns GHC frontend/finalization and the integration checkout.
 Independent owners handle the Rust inventory/certificate boundary, native
 request routing, explicit display qualification, and progress type safety.
 Retirement of obsolete fold/pin/type-import paths is joined before qualification.
-One expensive build/test lane is admitted at a time; source work is parallel.
+One profiling/compiler-backed lane is admitted at a time. A second focused
+compile lane may run with observed memory headroom; source work is parallel.
+Do not multiply large resident compiler heaps to fill worker slots.
 
 ## Required acceptance
 

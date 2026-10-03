@@ -80,6 +80,7 @@ import Tidepool.PreparedRecovery
 import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
 import Tidepool.CompileInput (writeCompileInputProof)
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal, homeInterfaceUsageOwners)
+import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts)
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), OriginalInterfaceArtifacts
   , newOriginalInterfaceArtifacts, originalInterfaceBytes)
@@ -460,7 +461,9 @@ writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productC
       evidenceBytes <- BS.readFile (outDir </> "dependencies.json")
       pure (productBytes, evidenceBytes)
     timeDetailPhase timing "module_products" "certify" $ do
-      certified <- encodeCertifiedProducts hscEnv (pprProductInterfaces prepared) (pprAcceptedCandidates prepared)
+      finalized <- captureFinalizedModuleArtifacts originalInterfaces hscEnv
+        (pprFinalizedModules prepared) (pprPackageImports prepared) finalDependencies outDir
+      certified <- encodeCertifiedProducts hscEnv (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
         (compilationScope <$> pprExactCompilation prepared)
         (map moduleProductInput freshProducts) [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
         finalDependencies productBytes evidenceBytes
@@ -1783,7 +1786,7 @@ programInterfaceRequirements prepared unit owner = do
     Just value | unitString (moduleUnit (mi_module value)) == unit -> pure value
     _ -> fmap fst <$> readExactInterface (prHscEnv (pprPipelineResult prepared))
       (mkModule (stringToUnit unit) (mkModuleName owner)) >>= either (fail . show) pure
-  pure (nub (source ++ homeInterfaceUsageOwners iface))
+  pure (nub (source ++ homeInterfaceUsageOwners (prHscEnv (pprPipelineResult prepared)) iface))
 
 programSourceRequirements :: PreparedPipelineResult -> String -> String -> IO [(String, String)]
 programSourceRequirements prepared unit owner = do
