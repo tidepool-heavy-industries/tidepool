@@ -53,7 +53,7 @@ instructionsAndResults turns =
   ]
 
 background <- instructionsAndResults <$> recentContext 5
-background
+display background
 ```
 
 `background` is now the context argument for whatever decides next, and the

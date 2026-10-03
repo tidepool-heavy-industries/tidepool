@@ -740,7 +740,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     let root = campaign.root_installation.policy.clone();
     let guide = include_str!("../../../../exomonad/prompts/api-guide.md");
     let mut guide_examples = examples(guide);
-    committed(root.as_ref(), guide_examples.next().unwrap()).await;
+    displayed(&mut campaign, root.as_ref(), guide_examples.next().unwrap()).await;
     let child = campaign
         .next_deployment(
             "guide example child policy installation",
@@ -765,8 +765,13 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
             },
         )
         .await;
-    let pending = committed(root.as_ref(), "state <- pollWatch ready\ninspectFull state").await;
-    let rendered = pending["items"][1]["output"].as_str().unwrap();
+    let pending = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "state <- pollWatch ready\ndisplay (inspectFull state)",
+    )
+    .await;
+    let rendered = explicit_display_output(&pending)["text"].as_str().unwrap();
     // A pending watch observation is itself the registered wake: its
     // `PendingProgress` carries the dependency's lifecycle/provider evidence
     // and `pendingWatched = True`, so `inspectFull` shows there is nothing a
@@ -779,15 +784,17 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
     campaign.await_watch_ready().await;
-    let success = committed(
+    let success = displayed(
+        &mut campaign,
         root.as_ref(),
-        "state <- pollWatch ready\ninspectFull (fmap settledValue state)",
+        "state <- pollWatch ready\ndisplay (inspectFull (fmap settledValue state))",
     )
     .await;
-    committed(root.as_ref(), guide_examples.next().unwrap()).await;
-    committed(root.as_ref(), guide_examples.next().unwrap()).await;
+    displayed(&mut campaign, root.as_ref(), guide_examples.next().unwrap()).await;
+    displayed(&mut campaign, root.as_ref(), guide_examples.next().unwrap()).await;
     assert!(guide_examples.next().is_none(), "untested guide example");
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         example(include_str!(
             "../../../../.exomonad/workspace/skills/exomonad-jev/references/recent-changes.md"
@@ -797,7 +804,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     // Exercise the canonical command/Jev composition and workbench examples.
     // The host requests a backend for each command in a cell.
     let command_examples = [
-        "inspectRecentChanges \"inspect changed documentation\"",
+        "inspectRecentChanges \"inspect changed documentation\" >>= display",
         examples(include_str!(
             "../../../../.exomonad/workspace/skills/exomonad-workbench/SKILL.md"
         ))
@@ -812,6 +819,8 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
             "../../../../.exomonad/workspace/skills/exomonad-jev/SKILL.md"
         )),
     ];
+    let output_store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let output_run = super::runtime_namespace(campaign.session_root.path());
     for (index, source) in command_examples.into_iter().enumerate() {
         let mut running = tokio::spawn({
             let root = root.clone();
@@ -827,10 +836,18 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
                     "guide example command backend",
                     Duration::from_secs(180),
                     |event| match event {
-                        LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                        LocalResidentDeployment::CommandBackend(_) | LocalResidentDeployment::DisplayPublished(_) => Ok(event),
                         other => Err(other),
                     },
                 ) => {
+                    let request = match request {
+                        LocalResidentDeployment::CommandBackend(request) => request,
+                        LocalResidentDeployment::DisplayPublished(request) => {
+                            super::display_output::publish(&campaign.forest, &output_store, &output_run, None, None, &request);
+                            continue;
+                        }
+                        _ => unreachable!(),
+                    };
                     if request.purpose
                         == exomonad_actor::command_jobs::CommandBackendPurpose::SourceProbe
                     {
@@ -848,46 +865,53 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
             assert!(result.to_string().contains("Jev unavailable:"), "{result}");
         }
     }
-    let layout = committed(root.as_ref(), include_str!("notebook_let_layout.hs")).await;
+    let layout = displayed(
+        &mut campaign,
+        root.as_ref(),
+        include_str!("notebook_let_layout.hs"),
+    )
+    .await;
+    assert_eq!(explicit_display_output(&layout)["text"], "42", "{layout}");
     assert_eq!(
-        layout["items"].as_array().unwrap().last().unwrap()["output"],
-        "42",
-        "{layout}"
-    );
-    assert_eq!(
-        success["items"][1]["output"],
+        explicit_display_output(&success)["text"],
         "WatchReady (Right \"Remove the stale path and report the focused check.\")"
     );
 
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         include_str!("shared_api_guide_unavailable.hs"),
     )
     .await;
     campaign.await_watch_ready().await;
-    let unavailable = committed(
-        root.as_ref(),
-        "state <- pollWatch retainedFailureReady\ninspectFull (fmap (either (const True) (const False) . settledValue) state)",
+    let unavailable = displayed(
+        &mut campaign, root.as_ref(),
+        "state <- pollWatch retainedFailureReady\ndisplay (inspectFull (fmap (either (const True) (const False) . settledValue) state))",
     )
     .await;
-    assert_eq!(unavailable["items"][1]["output"], "WatchReady True");
-    let outer_unavailable = committed(
+    assert_eq!(
+        explicit_display_output(&unavailable)["text"],
+        "WatchReady True"
+    );
+    let outer_unavailable = displayed(
+        &mut campaign,
         root.as_ref(),
-        "state <- pollWatch outerFailureReady\ninspectFull (guideIsUnavailable state)",
+        "state <- pollWatch outerFailureReady\ndisplay (inspectFull (guideIsUnavailable state))",
     )
     .await;
-    assert_eq!(outer_unavailable["items"][1]["output"], "True");
+    assert_eq!(explicit_display_output(&outer_unavailable)["text"], "True");
 
     // The guide's companion `doc reflect` example, on this same campaign so it
     // needs no compile of its own. This root has no conversation reader, which
     // is the unbound case the example is written to survive: it continues with
     // no history rather than being handed somebody else's.
-    let reflect = committed(
+    let reflect = displayed(
+        &mut campaign,
         root.as_ref(),
         example(include_str!("../../../../exomonad/prompts/docs/reflect.md")),
     )
     .await;
-    assert_eq!(reflect["items"][2]["output"], "[]", "{reflect}");
+    assert_eq!(explicit_display_output(&reflect)["text"], "[]", "{reflect}");
     assert_eq!(
         reflect["items"][1]["operations"][0]["effect"], "reflect",
         "{reflect}"
