@@ -131,7 +131,7 @@ import Tidepool.PlannedDeclaration
 import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
   , preparedApplyEntryTargetName, preparedApplyValueTargetName
-  , sessionHiPath )
+  , sessionHiPath, sessionModuleString )
 import Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching, readExactInterface
   , OwnerInterfaceCache, newOwnerInterfaceCache, evictOwnerInterfaceMatching )
@@ -874,6 +874,15 @@ compileClassifiedTurnKeeping
   -> String -> StmtBinders -> String -> Maybe CheckedItemAdmission -> Maybe CheckedDisplayAdmission
   -> IORef (Maybe (FilePath, String)) -> [String] -> Maybe SourcePrologue -> IO CompiledTurnOutput
 compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb bindersStr admitted display lastAttempt programImports prologue = do
+    semanticScopeFields <- case requestSessionArtifacts args of
+      Just manifest -> do
+        exact <- readExactScope manifest >>= either fail pure
+        pure ["exact-scope-semantic", scopeSemanticSha256 exact]
+      Nothing -> do
+        let scope = scopeFromWorkerRequest args
+        pure (["session-scope-root", ssRoot scope]
+          ++ maybe ["session-incarnation-absent"] (\value -> ["session-incarnation", value]) (ssIncarnation scope)
+          ++ concatMap (\value -> ["session-value-interface", sessionModuleString value]) (ssValIfaces scope))
     let templates = requestTurnTemplates args
         protectedTemplates = case (display,admitted) of
           (Just authority,Nothing) -> Just (displayTurnTemplates authority)
@@ -935,20 +944,16 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
                         (concatMap (\(moduleName',names) -> "import " ++ moduleName' ++ " (" ++ intercalate ", " (map renderImportBinder names) ++ ")\n")
                           (itemValueImports admission) ++ "default (Int, Double, Text)\n") withPreview
                     checkedRecipeSource admission withPrefix turnSrc
-              scopeFields = do
-                case requestSessionArtifacts args of
-                  Just manifest -> do
-                    exact <- readExactScope manifest >>= either fail pure
-                    pure ["exact-scope-semantic", scopeSemanticSha256 exact]
-                  Nothing -> do
-                    let scope = scopeFromWorkerRequest args
-                    pure ["session-scope", ssRoot scope, show (ssValIfaces scope), show (ssIncarnation scope)]
               authorityFields = case (display, admitted) of
                 (Just authority, Nothing) ->
                   ["display", displayAdmissionDigest authority, displayCellReceiptDigest authority]
                 (Nothing, Just authority) ->
                   ["item", itemAdmissionDigest authority, itemCellReceiptDigest authority]
                 _ -> ["unadmitted"]
+              includeFields = case (display, admitted) of
+                (Nothing, Nothing) -> ["source-search-includes"]
+                  ++ concatMap (\include -> ["include-path", include]) (requestIncludes args)
+                _ -> ["checked-import-authority"]
               retainedFields = concat
                 [ ["retained", T.unpack (symbolUnit identity), T.unpack (symbolModule identity)
                   , T.unpack (symbolNamespace identity), T.unpack (symbolOccurrence identity)]
@@ -962,12 +967,10 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
                 if sbKind sb == KDecl
                   then pure (originalTemplate, baseSource)
                   else do
-                    semanticScope <- scopeFields
                     let owner = generatedScaffoldModuleName
-                          (["turn-scaffold-owner-v1", "scope"] ++ semanticScope
+                          (["turn-scaffold-owner-v1", "scope"] ++ semanticScopeFields
                             ++ ["template", originalTemplate, "rendered", baseSource
-                              , "includes", show (requestIncludes args)]
-                            ++ authorityFields ++ retainedFields)
+                              ] ++ includeFields ++ authorityFields ++ retainedFields)
                     renamed <- either fail pure (renameScaffoldModuleHeader owner originalTemplate)
                     renamedTemplate <- prepareTemplate renamed
                     finalSource <- renderRecipe renamedTemplate preview
