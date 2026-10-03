@@ -2156,6 +2156,13 @@ impl SessionLib {
             .into_iter()
             .map(recovery::RecoveryArtifactClosure::Home)
             .collect::<Vec<_>>();
+        artifacts.extend(
+            context
+                .materialize_module_interfaces(root)
+                .map_err(|error| invalid(&error.to_string()))?
+                .into_iter()
+                .map(recovery::RecoveryArtifactClosure::ModuleInterface),
+        );
         for interface in context.joined_interfaces() {
             artifacts.push(recovery::RecoveryArtifactClosure::Join(
                 interface

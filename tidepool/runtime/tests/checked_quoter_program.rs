@@ -169,6 +169,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
                 durable.path(),
                 &references,
                 &[],
+                &[],
                 Vec::new(),
             )
             .unwrap();

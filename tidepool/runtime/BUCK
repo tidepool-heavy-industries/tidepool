@@ -190,6 +190,7 @@ tidepool_rust_binary(
         "//third-party/rust:serde",
         "//third-party/rust:serde_json",
         "//third-party/rust:serial_test",
+        "//third-party/rust:sha2",
         "//third-party/rust:static_assertions",
         "//third-party/rust:tempfile",
         "//third-party/rust:thiserror",
