@@ -8,7 +8,7 @@ import qualified Data.Map.Strict as Map
 import Control.Exception (SomeException, bracket, finally, fromException, throwIO, try)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef)
-import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, tails)
+import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, sort, tails)
 import Data.Char (isDigit)
 import Data.Data (Data, Typeable, cast, gmapQ)
 import qualified Data.ByteString as BS
@@ -89,6 +89,7 @@ main = getArgs >>= \case
 compilerBoundaryChecks :: IO ()
 compilerBoundaryChecks = do
   requestValidationChecks
+  dependencyQualifierChecks
   cellProgramStateChecks
   checkedAdmissionChecks
   harnessSourceChecks
@@ -140,6 +141,39 @@ requestValidationChecks = do
   requestShapeValidation
   requestFieldOrdering
   putStrLn "request validation: 4 groups passed (certification, source-check round-trip, mode shapes, field ordering)"
+
+dependencyQualifierChecks :: IO ()
+dependencyQualifierChecks = do
+  let spellings =
+        [ (DependencyUnqualified, "none")
+        , (DependencyOtherUnit "package-owner", "other:package-owner")
+        , (DependencyThisUnit "main", "this:main")
+        , (DependencyThisUnit "other:main", "this:other:main")
+        ]
+  forM_ spellings $ \(qualifier, wire) -> do
+    assertEqual "dependency qualifier wire spelling" wire (renderDependencyQualifier qualifier)
+    assertEqual "dependency qualifier admission" (Just qualifier) (parseDependencyQualifier wire)
+  assertEqual "dependency qualifier order preserves canonical wire rows"
+    (sort (map snd spellings))
+    (map renderDependencyQualifier (sort (map fst spellings)))
+  forM_ ["", "none:", "this:", "other:", "main", "OTHER:main"] $ \wire ->
+    assertEqual "invalid dependency qualifier rejected" Nothing (parseDependencyQualifier wire)
+  let evidence = DependencyEvidence True True []
+        [DependencyResolution qualifier "Owner" False Nothing [] | (qualifier, _) <- spellings]
+        [] [DependencyModule "main" "Consumer" False "/Consumer.hs"
+          [DependencyImport qualifier "Owner" False Nothing | (qualifier, _) <- spellings]
+          ProductReady]
+      resolution wire = "{\"qualifier\":\"" ++ wire
+        ++ "\",\"module\":\"Owner\",\"boot\":false,\"selected\":null,\"candidates\":[]}"
+      imported wire = "{\"qualifier\":\"" ++ wire
+        ++ "\",\"module\":\"Owner\",\"boot\":false,\"selected\":null}"
+      expected = "{\"version\":4,\"cache_safe\":true,\"selection_complete\":true,\"sources\":[],\"resolutions\":["
+        ++ intercalate "," (map (resolution . snd) spellings)
+        ++ "],\"packages\":[],\"modules\":[{\"unit\":\"main\",\"module\":\"Consumer\""
+        ++ ",\"boot\":false,\"source\":\"/Consumer.hs\",\"imports\":["
+        ++ intercalate "," (map (imported . snd) spellings) ++ "],\"product\":\"ready\"}]}"
+  assertEqual "dependency evidence retains version 4 qualifier bytes" expected (renderDependencyEvidence evidence)
+  putStrLn "dependency qualifiers: admission and unchanged evidence encoding passed"
 
 requestOwnedParserDefaults :: IO ()
 requestOwnedParserDefaults = do
@@ -953,9 +987,10 @@ dependencyEvidenceCompilation = bracket temporary removeDirectoryRecursive $ \ro
   unless ("Data.Text" `elem` dependencyPackages evidence) $
     fail "package import was not recorded in dependency evidence"
   unless (case qualifiedWitnesses of
-      [resolution] -> "other:" `isPrefixOf` dependencyResolutionQualifier resolution
-        && dependencyResolutionSelected resolution == Nothing
-        && null (dependencyResolutionCandidates resolution)
+      [resolution] -> case dependencyResolutionQualifier resolution of
+        DependencyOtherUnit _ -> dependencyResolutionSelected resolution == Nothing
+          && null (dependencyResolutionCandidates resolution)
+        _ -> False
       _ -> False) $
     fail "qualified package import was not distinguished from home lookup"
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"

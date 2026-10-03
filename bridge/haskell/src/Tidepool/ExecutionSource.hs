@@ -147,14 +147,14 @@ issueExecutionSourceRecipe recipe
       <> encodeBool (dependencySelectionComplete evidence)
       <> list (\source -> encodeListLen 2 <> text' (dependencySourcePath source)
           <> text' (dependencySourceSha256 source)) (dependencySources evidence)
-      <> list (\row -> encodeListLen 5 <> text' (dependencyResolutionQualifier row)
+      <> list (\row -> encodeListLen 5 <> text' (renderDependencyQualifier (dependencyResolutionQualifier row))
           <> text' (dependencyResolutionModule row) <> encodeBool (dependencyResolutionBoot row)
           <> optional' text' (dependencyResolutionSelected row)
           <> list text' (dependencyResolutionCandidates row)) (dependencyResolutions evidence)
       <> list (\node -> encodeListLen 6 <> text' (dependencyModuleUnit node)
           <> text' (dependencyModuleName node) <> encodeBool (dependencyModuleBoot node)
           <> text' (dependencyModuleSource node)
-          <> list (\edge -> encodeListLen 4 <> text' (dependencyImportQualifier edge)
+          <> list (\edge -> encodeListLen 4 <> text' (renderDependencyQualifier (dependencyImportQualifier edge))
               <> text' (dependencyImportName edge) <> encodeBool (dependencyImportBoot edge)
               <> optional' text' (dependencyImportSelected edge)) (dependencyModuleImports node)
           <> text' (productKind (dependencyModuleProduct node))) (dependencyModules evidence)
@@ -189,7 +189,7 @@ data ExecutionSourceFailure
   | ExecutionSourceChanged (String, String)
   | ExecutionSourceResolutionChanged (String, String)
   | ExecutionSourceImportResolutionChanged (String, String)
-      [(String,String,Bool,Maybe FilePath)] [(String,String,Bool,Maybe FilePath)]
+      [(DependencyQualifier,String,Bool,Maybe FilePath)] [(DependencyQualifier,String,Bool,Maybe FilePath)]
   | ExecutionSourceSearchChanged (String, String) [FilePath]
   | ExecutionSourcePackageChanged (String, String)
   | ExecutionSourceLinkableMissing (String, String)
@@ -539,13 +539,10 @@ sourcePath = do
   unless (isAbsolute value || value == "@generated-source") (fail "relative original execution source")
   pure value
 
-qualifier :: Decoder s String
+qualifier :: Decoder s DependencyQualifier
 qualifier = do
   value <- nonempty
-  unless (value == "none" || any (\prefix -> take (length prefix) value == prefix
-      && length value > length prefix) ["this:","other:"])
-    (fail "invalid original execution import qualifier")
-  pure value
+  maybe (fail "invalid original execution import qualifier") pure (parseDependencyQualifier value)
 
 digestField :: Decoder s String
 digestField = do

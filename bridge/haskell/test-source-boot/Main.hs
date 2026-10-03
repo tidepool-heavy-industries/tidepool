@@ -94,6 +94,7 @@ import Tidepool.ExecutionSchema
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencyImport(..)
   , DependencyResolution(..), ProductAvailability(..), DependencySource(..), sourceEvidence
+  , DependencyQualifier(..), renderDependencyQualifier
   , selectedHomeRequirements, renderDependencyEvidence )
 import Tidepool.ExactHydration
   ( newOriginalInterfaceArtifacts, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
@@ -913,9 +914,9 @@ writeExecutionScope path work original lexicalNames = do
     pure (name,identity,owner,productRow)
   let list f values = TList (map f values)
       source row = TList [text (dependencySourcePath row),text (dependencySourceSha256 row)]
-      resolution row = TList [text (dependencyResolutionQualifier row),text (dependencyResolutionModule row),TBool (dependencyResolutionBoot row)
+      resolution row = TList [text (renderDependencyQualifier (dependencyResolutionQualifier row)),text (dependencyResolutionModule row),TBool (dependencyResolutionBoot row)
         ,optional (dependencyResolutionSelected row),list text (dependencyResolutionCandidates row)]
-      imported row = TList [text (dependencyImportQualifier row),text (dependencyImportName row),TBool (dependencyImportBoot row),optional (dependencyImportSelected row)]
+      imported row = TList [text (renderDependencyQualifier (dependencyImportQualifier row)),text (dependencyImportName row),TBool (dependencyImportBoot row),optional (dependencyImportSelected row)]
       node row = TList [text (dependencyModuleUnit row),text (dependencyModuleName row),TBool (dependencyModuleBoot row)
         ,text (dependencyModuleSource row),list imported (dependencyModuleImports row),text "ready"]
       proof = TList [TBool True,TBool True,list source (dependencySources evidence),list resolution (dependencyResolutions evidence)
@@ -2164,7 +2165,7 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
       dagIdentity name = (executionRefIdentity helperReference) {executionModule=name}
       dagPath name = work </> name ++ ".hs"
       dagModules = [DependencyModule "main" name False (dagPath name)
-          [DependencyImport "none" child False (Just (dagPath child))
+          [DependencyImport DependencyUnqualified child False (Just (dagPath child))
             | child <- take 2 (drop (index+1) dagNames)] ProductReady
         | (index,name) <- zip [0::Int ..] dagNames]
       dagGraph = originalGraph {executionGraphSha256=replicate 64 'c',
@@ -3397,7 +3398,7 @@ writeManifestFor names work cold = do
       <> foldMap text [replicate 64 '0', digest BS.empty, replicate 64 '0']
       <> encodeListLen (fromIntegral (length imports))
       <> foldMap (\imported -> encodeListLen 4
-        <> text (dependencyImportQualifier imported) <> text (dependencyImportName imported)
+        <> text (renderDependencyQualifier (dependencyImportQualifier imported)) <> text (dependencyImportName imported)
         <> encodeBool (dependencyImportBoot imported)
         <> text (maybe "" id (dependencyImportSelected imported))) imports
       <> encodeListLen 0 <> text packagePath <> text (digest packages) <> text productPath

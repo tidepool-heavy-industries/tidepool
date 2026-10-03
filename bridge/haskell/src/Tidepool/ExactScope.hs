@@ -49,7 +49,7 @@ import Tidepool.PackageWitness
 import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyModule(..), DependencyImport(..), DependencyResolution(..), renderDependencyEvidence
-  , revalidateDependencyEvidence )
+  , DependencyQualifier, renderDependencyQualifier, revalidateDependencyEvidence )
 
 data ExactScope = ExactScope
   { scopeManifestPath :: FilePath
@@ -311,7 +311,7 @@ data ExactCompilation = ExactCompilation
   { compilationScope :: ExactScope
   , compilationTransaction :: Word64
   , compilationSource :: FilePath
-  , compilationImports :: [((String, String, Bool), [(String, String, Bool, String)])]
+  , compilationImports :: [((String, String, Bool), [(DependencyQualifier, String, Bool, String)])]
   , compilationSourceSelection :: Maybe SourceSelectedOriginals
   } deriving (Eq, Show)
 
@@ -440,7 +440,7 @@ writeExactCompilation compilation evidence = do
       encodeArray values = E.encodeListLen (fromIntegral (length values)) <> mconcat values
       text = E.encodeString . T.pack
       importRow (qualifier, name, boot, unit) = encodeArray
-        [text qualifier, text name, E.encodeBool boot, text unit]
+        [text (renderDependencyQualifier qualifier), text name, E.encodeBool boot, text unit]
       moduleRow ((unit, name, boot), edges) = encodeArray
         [text unit, text name, E.encodeBool boot, encodeArray (map importRow edges)]
       receipt = encodeArray
