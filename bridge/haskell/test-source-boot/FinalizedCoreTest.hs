@@ -15,6 +15,10 @@ import GHC.Core.InstEnv (is_dfun)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCon (tyConName)
 import GHC.Core.Opt.Pipeline (core2core)
+import GHC.Cmm.CLabel (mkInitializerStubLabel)
+import GHC.Data.FastString (fsLit)
+import GHC.Types.ForeignStubs (ForeignStubs(..), CHeader(..), CStub(..))
+import GHC.Utils.Outputable qualified as Outputable
 import GHC.Driver.Main (hscTidy)
 import GHC.Driver.Backend (interpreterBackend)
 import GHC.ByteCode.Types (CompiledByteCode(..))
@@ -85,6 +89,21 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
         finalized = FinalizedModule home guts
     liftIO $ do
       bytes <- requireRight =<< captureFinalizedCore env finalized work
+      let emptyStubs = ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [] [])
+          initializer = mkInitializerStubLabel (cg_module guts) (fsLit "canonical_test_init")
+          nonemptyStubs =
+            [ForeignStubs (CHeader (Outputable.text "extern void canonical_test(void);")) (CStub Outputable.empty [] [])
+            ,ForeignStubs (CHeader Outputable.empty) (CStub (Outputable.text "void canonical_test(void) {}") [] [])
+            ,ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [initializer] [])
+            ,ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [] [initializer])]
+      emptyCapture <- requireRight =<< captureFinalizedCore env
+        finalized {finalizedTidyGuts = guts {cg_foreign = emptyStubs}} work
+      assert (emptyCapture == bytes) "semantically empty GHC foreign stubs changed canonical Core"
+      forM_ nonemptyStubs $ \stubs -> do
+        refusal <- captureFinalizedCore env
+          finalized {finalizedTidyGuts = guts {cg_foreign = stubs}} work
+        assert (case refusal of Left (FinalizedCoreUnsupported ForeignExportStubs) -> True; _ -> False)
+          "nonempty foreign header/body/initializer/finalizer was discarded"
       forM_ (take 1 (bindersOfBinds (cg_binds guts))) $ \binder -> do
         refusal <- captureFinalizedCore env
           finalized { finalizedTidyGuts = guts

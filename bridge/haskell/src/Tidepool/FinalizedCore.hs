@@ -29,7 +29,8 @@ import GHC.Iface.Syntax (IfaceBindingX, IfaceMaybeRhs, IfaceTopBndrInfo)
 import GHC.IfaceToCore (typecheckWholeCoreBindings)
 import GHC.Settings.Config (cProjectVersion)
 import GHC.Tc.Utils.Monad (initIfaceCheck)
-import GHC.Types.ForeignStubs (ForeignStubs(..))
+import GHC.Types.ForeignStubs (ForeignStubs(..), CHeader(..), CStub(..))
+import GHC.Driver.Ppr (showSDoc)
 import GHC.Types.Name (Name, isExternalName, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.TyThing (TyThing(..))
@@ -45,7 +46,7 @@ import GHC.Unit.Module.WholeCoreBindings (WholeCoreBindings(..), emptyIfaceForei
 import GHC.Unit.Types (Module, UnitId)
 import GHC.Utils.Binary
   ( Binary(..), openBinMem, unsafeUnpackBinBuffer, withBinBuffer )
-import GHC.Utils.Outputable (text)
+import GHC.Utils.Outputable (text, pprCode)
 import Tidepool.ExtractUtil (trySynchronous)
 import Tidepool.FinalizedModule (FinalizedModule(..))
 
@@ -123,7 +124,7 @@ finalizedCoreLimit = 32 * 1024 * 1024
 -- interface capture callers; this format writes no temporary source or files.
 captureFinalizedCore :: HscEnv -> FinalizedModule -> FilePath
   -> IO (Either FinalizedCoreFailure BS.ByteString)
-captureFinalizedCore _env finalized _directory = case validateFinalized finalized of
+captureFinalizedCore env finalized _directory = case validateFinalized env finalized of
   Left failure -> pure (Left failure)
   Right () -> do
     encoded <- trySynchronous $ do
@@ -150,10 +151,10 @@ captureFinalizedCore _env finalized _directory = case validateFinalized finalize
       , corePackages = Set.toAscList (cg_dep_pkgs guts)
       }
 
-validateFinalized :: FinalizedModule -> Either FinalizedCoreFailure ()
-validateFinalized finalized
+validateFinalized :: HscEnv -> FinalizedModule -> Either FinalizedCoreFailure ()
+validateFinalized env finalized
   | mi_module (hm_iface home) /= cg_module guts = Left FinalizedCoreOwnerMismatch
-  | ForeignStubs{} <- cg_foreign guts = unsupported ForeignExportStubs
+  | not (emptyForeignStubs (cg_foreign guts)) = unsupported ForeignExportStubs
   | not (null (cg_foreign_files guts)) = unsupported ForeignSourceFiles
   | not (null (cg_spt_entries guts)) = unsupported StaticPointerEntries
   | not (null (cg_ccs guts)) = unsupported CostCentres
@@ -164,6 +165,14 @@ validateFinalized finalized
     home = finalizedHomeModInfo finalized
     guts = finalizedTidyGuts finalized
     unsupported = Left . FinalizedCoreUnsupported
+    -- GHC's tidy result can retain the monoidal empty ForeignStubs value.
+    -- Use the same code rendering as its stub writer and preserve every
+    -- initializer/finalizer obligation even when both documents are empty.
+    emptyForeignStubs NoStubs = True
+    emptyForeignStubs (ForeignStubs (CHeader header) (CStub body initializers finalizers)) =
+      null (showSDoc (hsc_dflags env) (pprCode header))
+        && null (showSDoc (hsc_dflags env) (pprCode body))
+        && null initializers && null finalizers
     missingGlobals =
       [ name | binder <- bindersOfBinds (cg_binds guts)
       , let name = varName binder
