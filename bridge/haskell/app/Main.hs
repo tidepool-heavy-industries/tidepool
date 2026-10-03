@@ -896,14 +896,13 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           (Just authority, Nothing) -> CheckedItemCompile [] (displayPlannedDeclaration authority) (displayCompletedValues authority)
           (Nothing, Just authority) -> checkedItemCompilePurpose authority
           _ -> GeneralCompile
-        -- Splice @tmplFile@ against the turn text, write the spliced module
-        -- to a scratch file under 'outDir', and return it alongside the
-        -- module name derived from its own @module X where@ header. The
-        -- scratch file's basename must match that header — 'runPipelineSessionSelected'
-        -- looks up the compiled module by @capitalize (takeBaseName path)@
-        -- (GhcPipeline.hs) exactly as 'tidepool_runtime::extract_module_name'
-        -- does today for the existing two-spawn wrap_* templates
-        -- (session.rs), which this mode's templates carry over unchanged.
+        -- Splice @tmplFile@ against the turn text and write the generated
+        -- module under the name in its compiler-owned header. Non-declaration
+        -- turns derive a stable owner from their semantic compile inputs;
+        -- authored declaration templates retain their declared module name.
+        -- The scratch basename must match the header because
+        -- 'runPipelineSessionSelected' resolves the compiled module by
+        -- @capitalize (takeBaseName path)@ (GhcPipeline.hs).
         spliceInto :: FilePath -> IO (String, String, String, FilePath)
         spliceInto tmplFile = do
           originalTemplate <- readFile tmplFile
