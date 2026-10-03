@@ -56,7 +56,7 @@ import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..)
   , withResidentPipelineSelectedRequests, withExactInterfaceTransaction
-  , checkCellInstances
+  , checkCellInstances, cellGeneratedInstanceRecipe
   , cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, stripMonadHead, generatedScaffoldRecipe, activationPreviewInputType )
 import Tidepool.ExecutionEncode
@@ -1143,7 +1143,9 @@ runLegacyCellMode compiler caches args cellPath = do
       -- Preserve the latest plan for failure diagnostics without encoding and
       -- writing a provisional result before every successful check attempt.
       writeIORef provisionalOutput (Just (out, plan, rendered))
-      compiler checkedSelection Set.empty checkPurpose scope modulePath (requestIncludes args) (requestBuildProductsDir args))
+      compiler checkedSelection Set.empty
+        (GeneratedInstanceCheck (cellGeneratedInstanceRecipe effective) checkPurpose)
+        scope modulePath (requestIncludes args) (requestBuildProductsDir args))
         (maybe initialPlan (\(plan,_,_,_) -> plan) preparedDeclaration)
     checkedSource <- either fail pure (renderCellCheckSource checkingTemplate (checkPlan analyzed))
     let (finalPlan, finalSource, compiled) = (analyzed, checkedSource, provisional)
@@ -1276,7 +1278,8 @@ runCellProgramMode compiler caches args cellPath exact planned = do
                 let globalSource = globalProgramKeys offset (length (cellPlanItems plan)) rendered
                 writeFile checkPath globalSource
                 scoped (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates localArgs)) Set.empty
-                  (CheckedItemCompile [] (programOriginal state) prefix)
+                  (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
+                    (CheckedItemCompile [] (programOriginal state) prefix))
                   (Just (scopeFromWorkerRequest localArgs)) checkPath (requestIncludes args) (requestBuildProductsDir args)
           (checked,compiled) <- timePhase timing "cell_program_segment_check" (checkCellInstances check withPrefix)
           signatures <- cellCheckedBinderSignatures compiled
@@ -1381,6 +1384,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
 programPurpose :: ProgramCellState -> CompilePurpose -> CompilePurpose
 programPurpose state purpose = case purpose of
   GeneratedScaffoldCompile recipe inner -> GeneratedScaffoldCompile recipe (programPurpose state inner)
+  GeneratedInstanceCheck recipe inner -> GeneratedInstanceCheck recipe (programPurpose state inner)
   OriginalDeclarationCompile -> ProgramItemCompile True [] (programOriginals state) (selectedProgramValues (programValues state))
   CheckedItemCompile annotations _ values -> ProgramItemCompile False annotations (programOriginals state) values
   other -> other
@@ -1481,7 +1485,8 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
         pure original
       checkOriginal plan = do
         _ <- writeOriginal plan
-        compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)) Set.empty OriginalDeclarationCompile scope sourcePath
+        compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)) Set.empty
+          (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) OriginalDeclarationCompile) scope sourcePath
           (requestIncludes args) (requestBuildProductsDir args)
   createDirectoryIfMissing True directory
   (finalized, _) <- checkCellInstances checkOriginal initial

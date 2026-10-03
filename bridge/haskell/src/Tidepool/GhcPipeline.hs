@@ -13,6 +13,8 @@ module Tidepool.GhcPipeline
   , splitTupleType
   , cellExpressionPlans, cellExpressionEvidence, cellCheckedBinderSignatures, satisfiesCapturedConstraint
   , checkCellInstances, activationPreviewInputType
+  , GeneratedInstanceRecipe, generatedInstanceRecipe, cellGeneratedInstanceRecipe
+  , withGeneratedInstanceRecovery
     -- * Resident session
   , withResidentPipelineSelected
   , withResidentPipelineSelectedRequests
@@ -33,6 +35,8 @@ import GHC.Driver.Monad (reflectGhc, reifyGhc)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, addToHpt, lookupHpt)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Types.Avail (availNames)
+import GHC.Iface.Load (loadInterface, WhereFrom(..))
+import GHC.Rename.Names (renameRawPkgQual)
 import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
 import GHC.Iface.Make (mkIfaceTc)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
@@ -101,7 +105,7 @@ import GHC.Core.DataCon (dataConOrigArgTys)
 import GHC.Data.Bag (listToBag)
 import GHC.Tc.Solver (tcCheckGivens, tcCheckWanteds)
 import GHC.Tc.Solver.InertSet (emptyInert)
-import GHC.Tc.Utils.Monad (initTcWithGbl)
+import GHC.Tc.Utils.Monad (initTcWithGbl, initIfaceCheck)
 import GHC.Tc.Utils.TcMType (newEvVars)
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
@@ -113,7 +117,7 @@ import GHC.Types.Name.Set (extendNameSetList)
 import GHC.Types.Name.Reader (GlobalRdrEnv, rdrNameOcc)
 import GHC.Types.Name.Ppr (mkNamePprCtx)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, mkInternalName, nameModule_maybe)
-import GHC.Types.Name.Occurrence (OccName, mkOccName, mkTyVarOcc, occNameSpace, occNameString)
+import GHC.Types.Name.Occurrence (OccName, mkOccName, mkTyVarOcc, occNameSpace, occNameString, isTcOcc)
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Types.Var (mkTyVar, mkTyVarBinder, setVarName, tyVarKind, varName)
 import GHC.Types.Var.Set (isEmptyVarSet)
@@ -138,7 +142,7 @@ import Data.Data (Data, cast, gmapQ)
 import Data.Generics (everything, mkQ)
 import Data.Foldable (toList)
 import Data.Word (Word64)
-import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellGenericDeclaration(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations)
+import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
   , NativeParsedModule, unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModule)
 import Tidepool.FinalizedModule (FinalizedModule(..))
@@ -316,10 +320,16 @@ checkCellInstances compile plan = do
   attempted <- try (compile plan)
   case attempted of
     Right result -> pure (plan, result)
-    Left failure -> case rejectedCellInstances plan failure of
-      [] -> throwIO failure
-      rejected -> checkCellInstances compile
-        (omitCellGenericDeclarations rejected plan)
+    Left (GeneratedInstanceRejection failure rejected) -> do
+      let generic = [name | GenericDuplicate name <- rejected]
+            ++ [name | UnsupportedGeneric name <- rejected]
+          structural = [name | StructuralDisplayCompanionDuplicate name <- rejected]
+            ++ [name | UnsupportedGeneric name <- rejected]
+          remaining = omitCellStructuralDisplayDeclarations structural
+            (omitCellGenericDeclarations generic plan)
+      if remaining == plan
+        then throwIO failure
+        else checkCellInstances compile remaining
 
 -- | Capture native expression types and effect lifting without probing display
 -- instances. Output is an explicit authored effect.
@@ -483,31 +493,106 @@ stabilizeCellEvidenceType supply ty
     collect (CastTy inner _) = collect inner
     collect _ = []
 
--- GHC owns Generic identity, including qualified imports and reexports.
--- Recovery removes only generated candidates; authored errors still fail.
-rejectedCellInstances :: CellSourcePlan -> SourceError -> [String]
-rejectedCellInstances plan failure = nub
-  [ occurrence
+-- The retry recipe names generated candidates; GHC supplies their exact
+-- target and class identities before the target's typecheck can fail.
+data GeneratedInstanceRecipe = GeneratedInstanceRecipe
+  { generatedDisplayAlias :: String
+  , generatedGenericTargets :: [String]
+  , generatedStructuralTargets :: [String]
+  } deriving (Eq, Show)
+
+cellGeneratedInstanceRecipe :: CellSourcePlan -> GeneratedInstanceRecipe
+cellGeneratedInstanceRecipe plan = GeneratedInstanceRecipe
+  { generatedDisplayAlias = cellPlanStructuralDisplayAlias plan
+  , generatedGenericTargets = map genericDeclarationTarget (cellPlanGenericDeclarations plan)
+  , generatedStructuralTargets = map structuralDisplayTargetName (cellPlanStructuralDisplayTargets plan)
+  }
+
+data GeneratedInstanceFailure
+  = GenericDuplicate String
+  | UnsupportedGeneric String
+  | StructuralDisplayCompanionDuplicate String
+  deriving (Eq, Show)
+
+data GeneratedInstanceRejection = GeneratedInstanceRejection SourceError [GeneratedInstanceFailure]
+
+instance Show GeneratedInstanceRejection where
+  show (GeneratedInstanceRejection _ failures) = "generated instance rejection: " ++ show failures
+
+instance Exception GeneratedInstanceRejection
+
+data GeneratedInstanceAuthority = GeneratedInstanceAuthority
+  { generatedTargetModule :: Module
+  , generatedDisplayName :: Maybe Name
+  }
+
+-- Capture only from the actual generated import under this admitted compiler
+-- environment. Export Names preserve the defining unit through reexports.
+withGeneratedInstanceRecovery
+  :: GeneratedInstanceRecipe -> HscEnv -> ModSummary -> ParsedModule -> IO a -> IO a
+withGeneratedInstanceRecovery recipe environment summary parsed action = do
+  displayName <- if null (generatedStructuralTargets recipe)
+    then pure Nothing
+    else Just <$> captureDisplayName
+  let authority = GeneratedInstanceAuthority (ms_mod summary) displayName
+  action `catch` \failure -> case rejectedCellInstances recipe authority failure of
+    [] -> throwIO failure
+    rejected -> throwIO (GeneratedInstanceRejection failure rejected)
+  where
+    captureDisplayName = do
+      declaration <- case
+          [decl | L _ decl <- hsmodImports (unLoc (pm_parsed_source parsed))
+          , fmap unLoc (ideclAs decl) == Just (mkModuleName (generatedDisplayAlias recipe))] of
+        [found] -> pure found
+        _ -> fail "generated Display companion has no unique compiler import"
+      let importedName = unLoc (ideclName declaration)
+          qualifier = renameRawPkgQual (hsc_unit_env environment) importedName (ideclPkgQual declaration)
+      resolved <- findImportedModule environment importedName qualifier
+      owner <- case resolved of
+        Found _ found -> pure found
+        _ -> fail "generated Display companion import cannot be resolved"
+      loaded <- initIfaceCheck (ppr importedName) environment $
+        loadInterface (ppr importedName) owner (ImportByUser (ideclSource declaration))
+      iface <- case loaded of
+        Succeeded found | mi_module found == owner -> pure found
+        _ -> fail "generated Display companion import has no admitted interface"
+      exports <- either fail pure (selectedImportNames (mi_exports iface) (ideclImportList declaration))
+      case nub [name | name <- exports, isTcOcc (nameOccName name)
+                    , occNameString (nameOccName name) == "Display"] of
+        [name] -> pure name
+        _ -> fail "generated Display companion import has no unique Display export"
+
+rejectedCellInstances
+  :: GeneratedInstanceRecipe -> GeneratedInstanceAuthority -> SourceError -> [GeneratedInstanceFailure]
+rejectedCellInstances recipe authority failure = nub
+  [ rejection occurrence
   | envelope <- toList (getMessages (srcErrorMessages failure))
   , GhcTcRnMessage diagnostic <- [errMsgDiagnostic envelope]
-  , ty <- rejectedTypes diagnostic
+  , (rejection, candidates, ty) <- rejectedTypes diagnostic
   , Just (constructor, _) <- [splitTyConApp_maybe ty]
+  , nameModule_maybe (tyConName constructor) == Just (generatedTargetModule authority)
   , let occurrence = occNameString (nameOccName (tyConName constructor))
   , occurrence `elem` candidates
   ]
   where
-    candidates = map genericDeclarationTarget (cellPlanGenericDeclarations plan)
+    generic = generatedGenericTargets recipe
+    structural = generatedStructuralTargets recipe
     rejectedTypes (TcRnMessageWithInfo _ (TcRnMessageDetailed _ message)) = rejectedTypes message
     rejectedTypes (TcRnWithHsDocContext _ message) = rejectedTypes message
     rejectedTypes (TcRnCannotDeriveInstance cls types _ _ (DerivErrGenerics _))
-      | nameUnique (className cls) == genClassKey = types
+      | nameUnique (className cls) == genClassKey = [(UnsupportedGeneric, generic, ty) | ty <- types]
     rejectedTypes (TcRnDupInstanceDecls _ instances) =
-      [ ty | instance' <- toList instances
-      , nameUnique (className (is_cls instance')) == genClassKey
+      [ (rejection, candidates, ty)
+      | instance' <- toList instances
+      , (rejection, candidates) <-
+          if nameUnique (className (is_cls instance')) == genClassKey
+            then [(GenericDuplicate, generic)]
+            else [(StructuralDisplayCompanionDuplicate, structural)
+                 | Just (className (is_cls instance')) == generatedDisplayName authority]
       , ty <- is_tys instance' ]
     rejectedTypes (TcRnConflictingFamInstDecls instances) =
-      [ ty | instance' <- toList instances
-      , nameUnique (fi_fam instance') == repTyConKey, ty <- fi_tys instance' ]
+      [(GenericDuplicate, generic, ty) | instance' <- toList instances
+      , nameUnique (fi_fam instance') == repTyConKey, ty <- fi_tys instance']
     rejectedTypes _ = []
 
 -- | Resolve the target module's 'ModuleName' for one input file. Prefers the
@@ -591,6 +676,7 @@ data PipelineVariant = PipelineVariant
     -- source-less @Val.G\<g\>@ ifaces). Empty on the normal path.
   , pvPlan :: Bool -> ModuleGraph -> Maybe ExactScope -> Ghc CompilePlan
     -- ^ @pvPlan timingEnabled downsweepGraph selectedExactScope@.
+  , pvGeneratedInstanceCheck :: Maybe GeneratedInstanceRecipe
   , pvTransformParsed :: HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
   }
 
@@ -638,16 +724,29 @@ data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCo
   | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
   | CellProgramCompile CompilePurpose ExactScope
   | GeneratedScaffoldCompile GeneratedScaffoldRecipe CompilePurpose
+  | GeneratedInstanceCheck GeneratedInstanceRecipe CompilePurpose
   deriving (Eq, Show)
+
+generatedInstanceRecipe :: CompilePurpose -> Maybe GeneratedInstanceRecipe
+generatedInstanceRecipe (GeneratedInstanceCheck recipe _) = Just recipe
+generatedInstanceRecipe (GeneratedScaffoldCompile _ inner) = generatedInstanceRecipe inner
+generatedInstanceRecipe (CellProgramCompile inner _) = generatedInstanceRecipe inner
+generatedInstanceRecipe _ = Nothing
+
+withoutGeneratedInstanceCheck :: CompilePurpose -> CompilePurpose
+withoutGeneratedInstanceCheck (GeneratedInstanceCheck _ inner) = withoutGeneratedInstanceCheck inner
+withoutGeneratedInstanceCheck purpose = purpose
 
 generatedRecipe :: CompilePurpose -> Maybe GeneratedScaffoldRecipe
 generatedRecipe (GeneratedScaffoldCompile recipe _) = Just recipe
 generatedRecipe (CellProgramCompile inner _) = generatedRecipe inner
+generatedRecipe (GeneratedInstanceCheck _ inner) = generatedRecipe inner
 generatedRecipe _ = Nothing
 
 originalPurpose :: CompilePurpose -> CompilePurpose
 originalPurpose (GeneratedScaffoldCompile _ inner) = originalPurpose inner
 originalPurpose (CellProgramCompile inner _) = originalPurpose inner
+originalPurpose (GeneratedInstanceCheck _ inner) = originalPurpose inner
 originalPurpose purpose = purpose
 
 transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
@@ -686,12 +785,14 @@ transformFor (PlannedDeclarationCheck inventory _) target env summary
   | otherwise = pure . unannotatedModule
 transformFor (CellProgramCompile purpose _) target env summary = transformFor purpose target env summary
 transformFor (GeneratedScaffoldCompile _ purpose) target env summary = transformFor purpose target env summary
+transformFor (GeneratedInstanceCheck _ purpose) target env summary = transformFor purpose target env summary
 
 transformWithCompletedValues :: Maybe CompletedValueImports -> CompilePurpose -> ModuleName
   -> HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
 transformWithCompletedValues captured purpose target env summary = case purpose of
   CellProgramCompile inner _ -> transformWithCompletedValues captured inner target env summary
   GeneratedScaffoldCompile _ inner -> transformWithCompletedValues captured inner target env summary
+  GeneratedInstanceCheck _ inner -> transformWithCompletedValues captured inner target env summary
   HostActivationInputCompile annotations original requested
     | ms_mod_name summary == target -> \parsed -> do
         signature <- hostInputSignature annotations
@@ -3420,6 +3521,7 @@ normalVariant purpose path = do
    { pvLabel = "runPipeline"
    , pvExactScope = Nothing
    , pvGeneratedScaffold = generatedRecipe purpose
+   , pvGeneratedInstanceCheck = generatedInstanceRecipe purpose
    , pvDownsweepExcludes = []
    , pvTransformParsed = transformFor purpose targetModName'
    , pvPlan = \_timing modGraphRaw _selectedExact -> pure CompilePlan
@@ -3878,7 +3980,7 @@ sessionVariant purpose scope path = do
         _ -> []
   capturedExact <- traverse (\manifest -> readExactScope manifest >>= either (ioError . userError) pure)
     (ssExactScope scope)
-  let exact = case purpose of
+  let exact = case withoutGeneratedInstanceCheck purpose of
         PlannedDeclarationCheck _ admitted -> Just admitted
         CellProgramCompile _ admitted -> Just admitted
         _ -> capturedExact
@@ -3911,6 +4013,7 @@ sessionVariant purpose scope path = do
    { pvLabel = "runSessionPipeline"
    , pvExactScope = exact
    , pvGeneratedScaffold = generatedRecipe purpose
+   , pvGeneratedInstanceCheck = generatedInstanceRecipe purpose
    , pvDownsweepExcludes = excludedOwners
    , pvTransformParsed = \env summary parsed -> do
        captured <- readIORef completedValuesRef
