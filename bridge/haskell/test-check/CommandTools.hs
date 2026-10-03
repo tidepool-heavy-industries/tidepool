@@ -176,7 +176,7 @@ main = do
   check ("capped output from a larger finished stream remains incomplete with recovery: " <> T.unpack (Tools.presentation immediate)) largeResultIncomplete
   check "a fetched prefix that fits the display budget is still incomplete" uncroppedPrefixIncomplete
   check "yield route detaches a still-running job" (Detached "job-immediate" `elem` events)
-  putStrLn "passed: command tool receipt behavior (11 checks)"
+  putStrLn "passed: command tool receipt behavior (15 checks)"
   where
     isPresentation Presented = True
     isPresentation _ = False
