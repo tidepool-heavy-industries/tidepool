@@ -13909,8 +13909,35 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     #[tokio::test]
     async fn progress_nominal_type_mismatch_preserves_snapshot_wakes_and_roots() {
+        use crate::request::sources::{RequestSourceKind, SourceDelivery, SourceEvent};
         use crate::request::{RequestRegistry, WatchRequirement};
+        use ractor::{Actor, ActorProcessingErr};
         use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+
+        struct SourceCollector;
+        impl Actor for SourceCollector {
+            type Msg = crate::KernelMessage;
+            type State = tokio::sync::mpsc::UnboundedSender<SourceDelivery>;
+            type Arguments = Self::State;
+            async fn pre_start(
+                &self,
+                _: ractor::ActorRef<Self::Msg>,
+                sender: Self::Arguments,
+            ) -> Result<Self::State, ActorProcessingErr> {
+                Ok(sender)
+            }
+            async fn handle(
+                &self,
+                _: ractor::ActorRef<Self::Msg>,
+                message: Self::Msg,
+                sender: &mut Self::State,
+            ) -> Result<(), ActorProcessingErr> {
+                if let crate::KernelMessage::Source(delivery) = message {
+                    sender.send(delivery)?;
+                }
+                Ok(())
+            }
+        }
 
         tidepool_testing::eval_harness::require_extract();
         let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
@@ -13918,22 +13945,38 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let observer_id = tidepool_repr::SessionId(0xCA02);
         let (mut publisher, publisher_root) = bare_session_at(publisher_id);
         let (mut observer, observer_root) = bare_session_at(observer_id);
+        let images = Arc::new(tidepool_runtime::session::ImageRegistry::new());
+        publisher.set_image_registry(images.clone());
+        observer.set_image_registry(images);
         let fixture = include_str!("fixtures/ProgressRuntime.hs");
         std::fs::write(publisher_root.path().join("ProgressRuntime.hs"), fixture).unwrap();
-        let preamble = insert_preamble_imports(surface.preamble(), "qualified ProgressRuntime");
+        let preamble = insert_preamble_imports(
+            surface.preamble(),
+            "qualified ProgressRuntime\nimport qualified Tidepool.Effects.Core as ProgressCore",
+        );
         let templates = resident_workbench_templates(
             &preamble,
             "'[TidepoolReplies.Replies]",
             "qualified Tidepool.Agent.Reply.Internal as TidepoolReplies",
         );
+        let source_templates = resident_workbench_templates(
+            &preamble,
+            "'[ProgressCore.ActorKernel, TidepoolReplies.Replies]",
+            "qualified Tidepool.Agent.Reply.Internal as TidepoolReplies",
+        );
         let mut include = surface.include_path_refs();
         include.push(publisher_root.path());
-        let compile = |text: &str| {
+        let compile = |text: &str, source: bool| {
+            let templates = if source {
+                &source_templates
+            } else {
+                &templates
+            };
             let TurnResult::Bind { compiled, .. } = run_turn(TurnRequest {
                 exact_context: None,
                 session_id: None,
                 turn_text: text,
-                templates: &templates,
+                templates,
                 include: &include,
                 session_root: publisher_root.path(),
                 inject_modules: &[],
@@ -13948,10 +13991,26 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             compiled
         };
         // Compile each immutable program once; publication retries use fresh frames.
-        let note = compile("published <- ProgressRuntime.publishNote 1");
-        let wrong = compile("published <- ProgressRuntime.publishInt 1");
-        let wrong_observer = compile("observed <- ProgressRuntime.observeInt 1");
-        let correct_observer = compile("observed <- ProgressRuntime.observeNote 1");
+        let note = compile("published <- ProgressRuntime.publishNote 1", false);
+        let wrong = compile("published <- ProgressRuntime.publishInt 1", false);
+        let wrong_observer = compile("observed <- ProgressRuntime.observeInt 1", false);
+        let correct_observer = compile("observed <- ProgressRuntime.observeNote 1", false);
+        let wrong_source = compile("installed <- ProgressRuntime.installIntSource 1", true);
+        let correct_source = compile("installed <- ProgressRuntime.installNoteSource 1", true);
+        let verifier = compile("sourceVerifier <- pure ProgressRuntime.verifySource", false);
+        let verified = observer
+            .run_bind_with_sites(
+                "source-verifier",
+                verifier.code(),
+                "sourceVerifier",
+                tidepool_repr::Generation(1),
+            )
+            .unwrap();
+        assert!(matches!(verified, ResidentOutcome::Completed { .. }));
+        let source_verifier = observer
+            .retain_binding_custody("sourceVerifier")
+            .unwrap()
+            .unwrap();
         let expected = Arc::new(
             note.asks
                 .iter()
@@ -13973,7 +14032,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         };
         let owner = crate::ActorRef::first(crate::ActorId(0xCA01));
         let target = crate::ActorRef::first(crate::ActorId(0xCA02));
-        let registry = RequestRegistry::default();
+        let registry = Arc::new(RequestRegistry::default());
         let request = registry.reserve(owner, target);
         assert_eq!(
             request.0, 1,
@@ -13991,6 +14050,18 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             )
             .unwrap();
         assert!(initial.is_empty());
+        let (source_send, mut source_events) = tokio::sync::mpsc::unbounded_channel();
+        let (source_address, source_task) =
+            SourceCollector::spawn(None, SourceCollector, source_send)
+                .await
+                .unwrap();
+        let sources = registry
+            .attach_sources(
+                owner,
+                crate::LocalActorRef::new(source_address.clone(), crate::RetainedActorExit::new()),
+                &[(0, request, RequestSourceKind::Progress)],
+            )
+            .unwrap();
         let baseline = publisher.value_handle_count();
         let hole = suspend(
             publisher
@@ -14022,6 +14093,10 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             registry.observe_watch(owner, watch),
             Ok(crate::request::WatchObservation::Pending(_))
         ));
+        assert!(
+            source_events.try_recv().is_err(),
+            "refused publication cannot enqueue a source event"
+        );
         let hole = suspend(
             publisher
                 .run_with_sites("correct-progress", note.code())
@@ -14041,6 +14116,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             notifications.len(),
             1,
             "only accepted publication wakes the watch"
+        );
+        let first_source = tokio::time::timeout(Duration::from_secs(2), source_events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&first_source.event, SourceEvent::Progress(snapshot) if snapshot.revision == 1)
         );
         let snapshot = registry
             .observe_progress(owner, request)
@@ -14075,6 +14157,10 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             "refusal preserves the previous publication"
         );
         assert_eq!(publisher.value_handle_count(), baseline + 1);
+        assert!(
+            source_events.try_recv().is_err(),
+            "wrong retry cannot emit another source revision"
+        );
 
         let no_progress = RequestRegistry::default();
         let request_without_progress = no_progress.reserve(owner, target);
@@ -14106,6 +14192,17 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
         // The erased representations are equal, but the observer's nominal
         // witness differs. The common resume path must refuse BEFORE importing.
+        let warm = suspend(
+            observer
+                .run_with_sites("observer-publication-image", note.code())
+                .unwrap(),
+        );
+        observer
+            .abort(
+                warm.cont_id(),
+                "observer installed original publication image".into(),
+            )
+            .unwrap();
         let observer_handles = observer.value_handle_count();
         let observer_hole = suspend(
             observer
@@ -14127,7 +14224,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         )
         .session_context(owner);
         runner
-            .resume_progress_observation(context, observer_hole, Ok((Some(snapshot), false)))
+            .resume_progress_observation(
+                context.clone(),
+                observer_hole,
+                Ok((Some(snapshot), false)),
+            )
             .await
             .unwrap();
         let after = runner
@@ -14144,6 +14245,101 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             after, observer_handles,
             "wrong nominal observation never imports a payload root"
         );
+        let mut entries = Vec::new();
+        for (label, compiled) in [
+            ("wrong-source", wrong_source),
+            ("correct-source", correct_source),
+        ] {
+            let outcome = runner
+                .access
+                .with_host_machine(label, observer_id, None, move |session, _| {
+                    session
+                        .run_with_sites(label, compiled.code())
+                        .map_err(Into::into)
+                })
+                .await
+                .unwrap();
+            let ResidentActorStartupStep::InstallSource {
+                continuation,
+                source,
+            } = runner
+                .capture_startup_step(context.clone(), outcome, RealmId::ROOT)
+                .await
+                .unwrap()
+            else {
+                panic!("fixture must capture the real installed source mapper")
+            };
+            runner
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    session
+                        .abort(continuation.cont_id(), "source fixture captured".into())
+                        .map_err(Into::into)
+                })
+                .await
+                .unwrap();
+            entries.push(source.entry);
+        }
+        let [wrong_entry, correct_entry]: [_; 2] = entries.try_into().ok().unwrap();
+        let source_handles = runner
+            .access
+            .with_host_machine("source-handle-baseline", observer_id, None, |session, _| {
+                Ok(session.value_handle_count())
+            })
+            .await
+            .unwrap();
+        let wrong_message = runner
+            .map_source(
+                context.clone(),
+                wrong_entry.clone(),
+                registry.accept_source_delivery(first_source.clone()).event,
+            )
+            .await
+            .unwrap();
+        let verifier = Arc::new(source_verifier);
+        let verify_message = |message: crate::MailboxValue| {
+            let verifier = verifier.clone();
+            runner
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    session
+                        .run_rooted_application(
+                            "verify-progress-source",
+                            &verifier,
+                            &message.into_custody(),
+                            RealmId::ROOT,
+                            None,
+                        )
+                        .map_err(Into::into)
+                })
+        };
+        let wrong_result = verify_message(wrong_message).await.unwrap();
+        assert!(matches!(wrong_result, ResidentOutcome::Completed { .. }));
+        let after_wrong_source = runner
+            .access
+            .with_host_machine(
+                "source-refused-import-count",
+                observer_id,
+                None,
+                |session, _| Ok(session.value_handle_count()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            after_wrong_source, source_handles,
+            "wrong mapper neither imports nor retains progress; verifier input is consumed"
+        );
+        assert_eq!(
+            registry
+                .observe_progress(owner, request)
+                .unwrap()
+                .0
+                .unwrap()
+                .revision,
+            1
+        );
+        assert!(source_events.try_recv().is_err());
+
         let correct_hole = runner
             .access
             .with_host_machine(
@@ -14158,7 +14354,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             )
             .await
             .unwrap();
-        let context = crate::ActorDescriptor::new(
+        let publisher_context = crate::ActorDescriptor::new(
             "correct-progress-observer",
             crate::ActorPlacement {
                 session: publisher_id,
@@ -14168,9 +14364,117 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         )
         .session_context(owner);
         runner
-            .resume_progress_observation(context, suspend(correct_hole), Ok((Some(current), false)))
+            .resume_progress_observation(
+                publisher_context,
+                suspend(correct_hole),
+                Ok((Some(current), false)),
+            )
             .await
             .unwrap();
+        let correct_message = runner
+            .map_source(
+                context.clone(),
+                correct_entry.clone(),
+                registry.accept_source_delivery(first_source).event,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            verify_message(correct_message).await.unwrap(),
+            ResidentOutcome::Completed { .. }
+        ));
+        let (later_watch, initial) = registry
+            .register_watch_requirements(
+                owner,
+                "later-correct".into(),
+                vec![(request, WatchRequirement::ProgressAfter(1))],
+            )
+            .unwrap();
+        assert!(initial.is_empty());
+        let later = runner
+            .access
+            .with_host_machine(
+                "later-correct-source-publication",
+                publisher_id,
+                None,
+                move |session, _| {
+                    let ResidentOutcome::Suspended { hole, .. } =
+                        session.run_with_sites("later-note", note.code())?
+                    else {
+                        panic!("later publication must suspend")
+                    };
+                    let token = session.capture_progress_publication(&hole, RealmId::ROOT)?;
+                    session.abort(hole.cont_id(), "later publication captured".into())?;
+                    Ok(token)
+                },
+            )
+            .await
+            .unwrap();
+        let (revision, notifications) = registry
+            .publish_progress(target, request, later, publisher_id)
+            .unwrap();
+        assert_eq!(revision, 2);
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].watch, later_watch);
+        let later_source = tokio::time::timeout(Duration::from_secs(2), source_events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&later_source.event, SourceEvent::Progress(snapshot) if snapshot.revision == 2)
+        );
+        let later_message = runner
+            .map_source(
+                context.clone(),
+                correct_entry.clone(),
+                registry.accept_source_delivery(later_source).event,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            verify_message(later_message).await.unwrap(),
+            ResidentOutcome::Completed { .. }
+        ));
+        registry.begin_reply(target, request).unwrap();
+        registry.finish_reply(request, None);
+        let closed = tokio::time::timeout(Duration::from_secs(2), source_events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(&closed.event, SourceEvent::ProgressClosed));
+        let closed_message = runner
+            .map_source(
+                context.clone(),
+                correct_entry,
+                registry.accept_source_delivery(closed).event,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            verify_message(closed_message).await.unwrap(),
+            ResidentOutcome::Completed { .. }
+        ));
+        drop(sources);
+        assert!(registry.finish_reply(request, None).is_empty());
+        assert_eq!(
+            registry.forget_watch(owner, watch).unwrap(),
+            crate::request::ForgetWatchOutcome::Forgotten
+        );
+        assert_eq!(
+            registry.forget_watch(owner, later_watch).unwrap(),
+            crate::request::ForgetWatchOutcome::Forgotten
+        );
+        assert_eq!(
+            registry.forget_response(owner, request).unwrap().0,
+            crate::request::ForgetResponseOutcome::Forgotten
+        );
+        assert!(matches!(
+            registry.observe_progress(owner, request),
+            Err(crate::ReplyError::Stale)
+        ));
+        source_address.stop(None);
+        source_task.await.unwrap();
+        assert!(source_events.try_recv().is_err());
         drop(observer_root);
     }
 

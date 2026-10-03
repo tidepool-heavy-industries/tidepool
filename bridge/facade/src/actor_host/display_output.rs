@@ -47,6 +47,29 @@ pub(super) fn publish(
     control: Option<&harness::server::ServerControl>,
     request: &Arc<DisplayPublication>,
 ) {
+    publish_inner(forest, store, run, conversation, control, request, || {});
+}
+
+#[cfg(test)]
+pub(super) fn publish_before_ack(
+    forest: &ResidentForest<ExomonadHandlerStack, CapturedOutput>,
+    store: &Store,
+    run: &str,
+    request: &Arc<DisplayPublication>,
+    before_ack: impl FnOnce(),
+) {
+    publish_inner(forest, store, run, None, None, request, before_ack);
+}
+
+fn publish_inner(
+    forest: &ResidentForest<ExomonadHandlerStack, CapturedOutput>,
+    store: &Store,
+    run: &str,
+    conversation: Option<HostIdentity>,
+    control: Option<&harness::server::ServerControl>,
+    request: &Arc<DisplayPublication>,
+    before_ack: impl FnOnce(),
+) {
     let previous = request.outcome();
     if matches!(
         previous,
@@ -137,6 +160,7 @@ pub(super) fn publish(
                 // deduplicates this same canonical reference.
                 control.publish_actor_output(commit.output());
             }
+            before_ack();
             let reference = commit.output().reference();
             request.answer(DisplayPublicationOutcome::Published(
                 tidepool_runtime::session::ActorOutputReference {

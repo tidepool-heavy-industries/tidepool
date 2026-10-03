@@ -3,6 +3,8 @@ module ProgressRuntime where
 
 import Control.Monad.Freer (Eff)
 import Tidepool.Agent.Reply.Internal
+import Tidepool.Actor.Source (installSource, progressSource)
+import Tidepool.Effects.Core (ActorKernel)
 
 newtype ProgressNote = ProgressNote Int
 
@@ -25,3 +27,24 @@ observeInt request = do
   case state of
     ProgressRejected ReplyProgressTypeMismatch -> pure True
     _ -> error "wrong nominal progress observer received an admitted snapshot"
+
+data SourceCheck result = SourceCheck Bool
+
+installIntSource :: Int -> Eff '[ActorKernel, Replies] ()
+installIntSource request = installSource
+  (progressSource (Progress (RequestId request) :: Progress Int) project)
+  where
+    project (ProgressRejected ReplyProgressTypeMismatch) = SourceCheck True
+    project _ = SourceCheck False
+
+installNoteSource :: Int -> Eff '[ActorKernel, Replies] ()
+installNoteSource request = installSource
+  (progressSource (Progress (RequestId request) :: Progress ProgressNote) project)
+  where
+    project (ProgressUpdate (ProgressCursor revision) (ProgressNote 41)) = SourceCheck (revision > 0)
+    project ProgressClosed = SourceCheck True
+    project _ = SourceCheck False
+
+verifySource :: SourceCheck () -> Eff '[Replies] ()
+verifySource (SourceCheck True) = pure ()
+verifySource _ = error "source mapper received the wrong nominal progress state"

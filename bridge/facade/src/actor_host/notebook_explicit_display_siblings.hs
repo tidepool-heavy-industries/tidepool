@@ -4,3 +4,4 @@ pair <- do
   let value = either (const "") id (Cmd.stdout job)
   pure (DisplayPair value value)
 shown <- display pair
+expanded <- expand shown (fst (head (expansions shown)))

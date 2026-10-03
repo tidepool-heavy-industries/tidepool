@@ -3618,23 +3618,45 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
     let mut campaign = TestCampaign::start().await;
     let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     let policy = campaign.root_installation.policy.clone();
+    let invocation = ToolInvocationContext::external(
+        "display-qualification".into(),
+        "expansion-cancellation".into(),
+        "expansion-cancellation".into(),
+        Some("expansion-cancellation".into()),
+        None,
+    );
     let invoking_policy = policy.clone();
+    let dispatch_context = invocation.clone();
     let mut running = tokio::spawn(async move {
-        dispatch_haskell_script(
-            invoking_policy.as_ref(),
-            include_str!("notebook_explicit_display_siblings.hs"),
-        )
-        .await
+        invoking_policy
+            .dispatch_boxed(ToolInvocation {
+                context: Some(dispatch_context),
+                name: exomonad_actor::HASKELL_TOOL.into(),
+                arguments: ToolArguments::Raw(
+                    include_str!("notebook_explicit_display_siblings.hs").into(),
+                ),
+            })
+            .await
     });
     let backend = TestCommands::completed(&"x".repeat(4000));
     tokio::select! {
         request = backend_request(&mut campaign) => request.supply(Ok(backend.clone())),
         result = &mut running => panic!("display ended before its authored command: {result:?}"),
     }
-    let first = campaign.drive_actor_output(&store, running).await.unwrap();
-    assert_eq!(first["status"], "committed", "{first}");
-    let display = explicit_display_output(&first);
-    let identity = explicit_display_identity(display);
+    let initial = campaign
+        .next_deployment(
+            "initial display publication",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::DisplayPublished(request) => Ok(request),
+                other => Err(other),
+            },
+        )
+        .await;
+    let run = super::runtime_namespace(campaign.session_root.path());
+    super::display_output::publish(&campaign.forest, &store, &run, None, None, &initial);
+    let display = serde_json::to_value(&initial.page).unwrap();
+    let identity = explicit_display_identity(&display);
     let origin = harness::store::actor_output::ActorOutputOrigin {
         run: super::runtime_namespace(campaign.session_root.path()),
         native_actor: identity.0 as u64,
@@ -3644,24 +3666,185 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
     assert_eq!(initial_history.outputs.len(), 1);
     assert!(initial_history.outputs[0].emission().conversation.is_none());
     assert_eq!(
-        display["output"]["sequence"],
-        initial_history.outputs[0].reference().sequence
+        initial.outcome(),
+        Some(exomonad_actor::DisplayPublicationOutcome::Published(
+            tidepool_runtime::session::ActorOutputReference {
+                run: run.clone(),
+                sequence: initial_history.outputs[0].reference().sequence,
+            }
+        ))
     );
     let keys = display["expansions"].as_array().unwrap();
     assert_eq!(
         keys.len(),
         2,
-        "both fields are independently addressable: {first}"
+        "both fields are independently addressable: {display}"
     );
     let left = keys[0][0].as_i64().unwrap();
     let right = keys[1][0].as_i64().unwrap();
     assert!(display["text"].as_str().unwrap().contains("DisplayPair"));
 
-    tidepool_extract_cmd::reset_extract_spawn_count();
-    let expanded = campaign
-        .drive_actor_output(&store, policy.expand_display_boxed(identity, left))
+    let pending = campaign
+        .next_deployment(
+            "authored expansion publication before host acknowledgement",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::DisplayPublished(request) => Ok(request),
+                other => Err(other),
+            },
+        )
+        .await;
+    assert_eq!(pending.page.identity, identity);
+    assert_eq!(pending.page_ordinal, 2);
+    assert!(
+        pending.operation.is_some(),
+        "authored expansion has an execution owner"
+    );
+    let (committed, commit_observed) = tokio::sync::oneshot::channel();
+    let (release_ack, ack_released) = std::sync::mpsc::channel();
+    let held_host = tokio::task::spawn_blocking({
+        let forest = campaign.forest.clone();
+        let store = store.clone();
+        let run = run.clone();
+        let pending = pending.clone();
+        move || {
+            super::display_output::publish_before_ack(&forest, &store, &run, &pending, || {
+                committed.send(()).unwrap();
+                ack_released.recv_timeout(Duration::from_secs(60)).unwrap();
+            })
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), commit_observed)
         .await
+        .unwrap()
         .unwrap();
+    assert_eq!(
+        store
+            .actor_output_page(&origin, 0, 10)
+            .unwrap()
+            .outputs
+            .len(),
+        2
+    );
+    assert!(pending.outcome().is_none());
+    let frozen_context = pending.host_context().unwrap().clone();
+    let committed_page = store.actor_output_page(&origin, 0, 10).unwrap();
+    let committed_sequence = committed_page.outputs[1].reference().sequence;
+    let committed_emission = committed_page.outputs[1].emission().clone();
+
+    // Source admission is complete. Only native retry/expansion may run below.
+    tidepool_extract_cmd::reset_extract_spawn_count();
+    let cancelled = tokio::time::timeout(
+        Duration::from_secs(30),
+        policy.cancel_workbench_boxed(invocation.clone()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let exomonad_actor::WorkbenchCancellationOutcome::Cancelled {
+        reply: delivered, ..
+    } = cancelled
+    else {
+        panic!("expected the actual notebook cancellation owner: {cancelled:?}")
+    };
+    let receipts: &[tidepool_runtime::session::WorkbenchItemReceipt] = match &delivered {
+        Ok(response) => &response.items,
+        Err(failure) => failure.receipts(),
+    };
+    let uncertain = receipts
+        .iter()
+        .flat_map(|item| &item.operations)
+        .find(|operation| operation.id == *pending.operation.as_ref().unwrap())
+        .unwrap();
+    use tidepool_runtime::session::WorkbenchDisplayPublication;
+    let publication = match uncertain.display_publication.as_ref().unwrap() {
+        WorkbenchDisplayPublication::Pending { publication } => publication,
+        WorkbenchDisplayPublication::Unconfirmed {
+            publication,
+            detail,
+        } => {
+            assert!(detail.len() <= 2048);
+            publication
+        }
+        other => panic!("first delivered reply must preserve uncertainty: {other:?}"),
+    };
+    assert_eq!(publication.display, identity);
+    assert_eq!(publication.page_ordinal, 2);
+    assert!(uncertain.display.is_none());
+    let frozen_bytes = serde_json::to_vec(receipts).unwrap();
+    let original = tokio::time::timeout(Duration::from_secs(30), running)
+        .await
+        .unwrap()
+        .unwrap();
+    match original {
+        Err(exomonad_actor::ResidentToolError::Invocation(failure)) => {
+            assert_eq!(delivered, Err(failure))
+        }
+        Ok(output) => {
+            let response = delivered
+                .as_ref()
+                .expect("a successful tool reply must carry the cancelled native response");
+            assert_eq!(
+                response.status,
+                tidepool_runtime::session::WorkbenchRunStatus::RequestCancelled
+            );
+            assert_eq!(output, serde_json::to_value(response).unwrap());
+        }
+        other => {
+            panic!("original tool transport lost the canonical cancellation receipt: {other:?}")
+        }
+    }
+    assert!(pending.was_unconfirmed());
+
+    let retried_policy = policy.clone();
+    let retried =
+        tokio::spawn(async move { retried_policy.expand_display_boxed(identity, left).await });
+    let resubmitted = campaign
+        .next_deployment(
+            "native retry of committed output whose acknowledgement was lost",
+            Duration::from_secs(30),
+            |event| match event {
+                LocalResidentDeployment::DisplayPublished(request) => Ok(request),
+                other => Err(other),
+            },
+        )
+        .await;
+    assert!(Arc::ptr_eq(&resubmitted, &pending));
+    assert_eq!(resubmitted.page_ordinal, 2);
+    assert_eq!(resubmitted.host_context(), Some(&frozen_context));
+    super::display_output::publish(&campaign.forest, &store, &run, None, None, &resubmitted);
+    let expanded = tokio::time::timeout(Duration::from_secs(30), retried)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    release_ack.send(()).unwrap();
+    held_host.await.unwrap();
+    let replay = policy.cancel_workbench_boxed(invocation).await.unwrap();
+    let exomonad_actor::WorkbenchCancellationOutcome::Cancelled { reply: replay, .. } = replay
+    else {
+        panic!("cancellation replay lost its original outcome: {replay:?}")
+    };
+    assert_eq!(replay, delivered);
+    let replay_receipts: &[tidepool_runtime::session::WorkbenchItemReceipt] = match &replay {
+        Ok(response) => &response.items,
+        Err(failure) => failure.receipts(),
+    };
+    assert_eq!(serde_json::to_vec(replay_receipts).unwrap(), frozen_bytes);
+    assert_eq!(
+        store
+            .actor_output_page(&origin, 0, 10)
+            .unwrap()
+            .outputs
+            .len(),
+        2
+    );
+    let reconciled = store.actor_output_page(&origin, 0, 10).unwrap();
+    assert_eq!(
+        reconciled.outputs[1].reference().sequence,
+        committed_sequence
+    );
+    assert_eq!(reconciled.outputs[1].emission(), &committed_emission);
     assert_eq!(expanded["status"], "committed", "{expanded}");
     let next = explicit_display_output(&expanded);
     assert_eq!(explicit_display_identity(next), identity);
@@ -3713,10 +3896,7 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
         3
     );
     assert!(
-        explicit_display_output(&first)["text"]
-            .as_str()
-            .unwrap()
-            .contains("DisplayPair"),
+        display["text"].as_str().unwrap().contains("DisplayPair"),
         "historical output stays readable after retirement"
     );
 }
