@@ -19,6 +19,7 @@ EXTRACTOR_LIBRARY_PACKAGES = [
     "directory",
     "process",
     "template-haskell",
+    "time",
     "text",
     "cborg",
     "cryptohash-sha256",

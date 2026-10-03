@@ -103,6 +103,7 @@ library tidepool-extract-internal
     directory,
     process,
     template-haskell,
+    time,
     text,
     cborg,
     cryptohash-sha256,
