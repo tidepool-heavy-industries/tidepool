@@ -72,17 +72,19 @@ impl CheckedCellSpecification {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactSignatureName {
-    qualifier: String,
     unit: String,
     module: String,
     namespace: String,
     occurrence: String,
 }
 
+/// A compiler-issued native IfaceType and its original external Names.
+/// `source` is presentation text; compilation consumes the opaque payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactCheckedSignature {
     key: String,
     source: String,
+    iface: Arc<[u8]>,
     names: Vec<ExactSignatureName>,
 }
 
@@ -311,9 +313,6 @@ impl ExactCheckedSignature {
 }
 
 impl ExactSignatureName {
-    pub fn qualifier(&self) -> &str {
-        &self.qualifier
-    }
     pub fn unit(&self) -> &str {
         &self.unit
     }
@@ -2605,15 +2604,16 @@ fn read_table(root: &Path) -> Result<tidepool_repr::DataConTable, CompileError> 
 
 fn encode_signature(signature: &ExactCheckedSignature) -> Value {
     array([
+        text("TPCHECKEDSIGNATURE2"),
         text(&signature.key),
         text(&signature.source),
+        Value::Bytes(signature.iface.to_vec()),
         Value::Array(
             signature
                 .names
                 .iter()
                 .map(|name| {
                     array([
-                        text(&name.qualifier),
                         text(&name.unit),
                         text(&name.module),
                         text(&name.namespace),
@@ -2879,32 +2879,63 @@ pub(crate) fn admit_checked_cell(
 }
 
 fn decode_signature(value: &Value) -> Result<ExactCheckedSignature, CompileError> {
-    let fields = row(value, 3)?;
-    let mut qualifiers = BTreeSet::new();
-    let names = list(&fields[2], 65536)?
+    let fields = row(value, 5)?;
+    if string(&fields[0])? != "TPCHECKEDSIGNATURE2" {
+        return Err(failure("checked signature version"));
+    }
+    let key = string(&fields[1])?.to_owned();
+    let Value::Bytes(iface) = &fields[3] else {
+        return Err(failure("checked signature IfaceType payload"));
+    };
+    if iface.is_empty() || iface.len() > 4 * 1024 * 1024 {
+        return Err(failure("checked signature IfaceType byte bound"));
+    }
+    let names = list(&fields[4], 65536)?
         .iter()
         .map(|value| {
-            let fields = row(value, 5)?;
-            let qualifier = string(&fields[0])?.to_owned();
-            let namespace = string(&fields[3])?.to_owned();
-            if !qualifier.starts_with("TidepoolCheckedName")
-                || !qualifiers.insert(qualifier.clone())
-                || !matches!(namespace.as_str(), "type" | "data")
+            let fields = row(value, 4)?;
+            let unit = string(&fields[0])?.to_owned();
+            let module = string(&fields[1])?.to_owned();
+            let namespace = string(&fields[2])?.to_owned();
+            let occurrence = string(&fields[3])?.to_owned();
+            if unit.is_empty()
+                || module.is_empty()
+                || occurrence.is_empty()
+                || !matches!(namespace.as_str(), "type" | "data" | "var")
             {
-                return Err(failure("invalid signature Name qualifier or namespace"));
+                return Err(failure(
+                    "invalid signature Name owner, occurrence or namespace",
+                ));
             }
             Ok(ExactSignatureName {
-                qualifier,
-                unit: string(&fields[1])?.to_owned(),
-                module: string(&fields[2])?.to_owned(),
+                unit,
+                module,
                 namespace,
-                occurrence: string(&fields[4])?.to_owned(),
+                occurrence,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if names.windows(2).any(|pair| {
+        (
+            &pair[0].unit,
+            &pair[0].module,
+            &pair[0].namespace,
+            &pair[0].occurrence,
+        ) >= (
+            &pair[1].unit,
+            &pair[1].module,
+            &pair[1].namespace,
+            &pair[1].occurrence,
+        )
+    }) {
+        return Err(failure(
+            "checked signature Names are unsorted or duplicated",
+        ));
+    }
     Ok(ExactCheckedSignature {
-        key: string(&fields[0])?.to_owned(),
-        source: string(&fields[1])?.to_owned(),
+        key,
+        source: string(&fields[2])?.to_owned(),
+        iface: iface.clone().into(),
         names,
     })
 }
@@ -2997,6 +3028,105 @@ mod tests {
         Arc,
     };
 
+    fn signature_codec_fixture() -> ciborium::Value {
+        use super::*;
+        // Structural codec fixture only; this payload is never executed by GHC.
+        array([
+            text("TPCHECKEDSIGNATURE2"),
+            text("pin"),
+            text("UI presentation"),
+            Value::Bytes(vec![1, 2, 3]),
+            array([array([
+                text("main"),
+                text("Owner"),
+                text("type"),
+                text("Original"),
+            ])]),
+        ])
+    }
+
+    #[test]
+    fn checked_signature_native_codec_preserves_opaque_payload_and_original_names() {
+        use super::*;
+        let mut wire = signature_codec_fixture();
+        let Value::Array(fields) = &mut wire else {
+            unreachable!()
+        };
+        fields[4] = Value::Array(
+            ["data", "type", "var"]
+                .into_iter()
+                .map(|namespace| {
+                    array([
+                        text("main"),
+                        text("Owner"),
+                        text(namespace),
+                        text("Original"),
+                    ])
+                })
+                .collect(),
+        );
+        let signature = decode_signature(&wire).unwrap();
+        assert_eq!(signature.key(), "pin");
+        assert_eq!(signature.source(), "UI presentation");
+        assert_eq!(signature.iface.as_ref(), &[1, 2, 3]);
+        assert_eq!(signature.names()[1].unit(), "main");
+        assert_eq!(signature.names()[1].module(), "Owner");
+        assert_eq!(signature.names()[1].namespace(), "type");
+        assert_eq!(signature.names()[1].occurrence(), "Original");
+        assert_eq!(encode_signature(&signature), wire);
+    }
+
+    #[test]
+    fn checked_signature_native_codec_rejects_old_and_malformed_authority() {
+        use super::*;
+        assert!(decode_signature(&array([text("pin"), text("old"), array([])])).is_err());
+        for (index, invalid) in [
+            (0, text("TPCHECKEDSIGNATURE1")),
+            (1, Value::Integer(1.into())),
+            (2, Value::Bytes(vec![1])),
+            (3, text("IfaceType")),
+            (3, Value::Bytes(Vec::new())),
+            (3, Value::Bytes(vec![1; 4 * 1024 * 1024 + 1])),
+            (4, Value::Array(vec![array([]); 65537])),
+        ] {
+            let mut wire = signature_codec_fixture();
+            let Value::Array(fields) = &mut wire else {
+                unreachable!()
+            };
+            fields[index] = invalid;
+            assert!(decode_signature(&wire).is_err());
+        }
+        for (index, invalid) in [(0, ""), (1, ""), (2, "field"), (3, "")] {
+            let mut wire = signature_codec_fixture();
+            let Value::Array(fields) = &mut wire else {
+                unreachable!()
+            };
+            let Value::Array(names) = &mut fields[4] else {
+                unreachable!()
+            };
+            let Value::Array(name) = &mut names[0] else {
+                unreachable!()
+            };
+            name[index] = text(invalid);
+            assert!(decode_signature(&wire).is_err());
+        }
+        for occurrences in [["A", "A"], ["B", "A"]] {
+            let mut wire = signature_codec_fixture();
+            let Value::Array(fields) = &mut wire else {
+                unreachable!()
+            };
+            fields[4] = Value::Array(
+                occurrences
+                    .into_iter()
+                    .map(|occurrence| {
+                        array([text("main"), text("Owner"), text("type"), text(occurrence)])
+                    })
+                    .collect(),
+            );
+            assert!(decode_signature(&wire).is_err());
+        }
+    }
+
     fn witness_bytes(shape: ciborium::Value, seal: &str) -> Vec<u8> {
         use super::*;
         let mut structure = Vec::new();
@@ -3004,7 +3134,14 @@ mod tests {
         let wire = array([
             text("TPCANONICALINPUTTYPE1"),
             text("1"),
-            array([text("activation-input"), text("presentation"), array([])]),
+            // Structural codec fixture only; these bytes are not a GHC IfaceType.
+            array([
+                text("TPCHECKEDSIGNATURE2"),
+                text("activation-input"),
+                text("presentation"),
+                Value::Bytes(vec![1]),
+                array([]),
+            ]),
             Value::Bytes(structure),
             array([array([text("main"), text("Owner"), text(seal)])]),
         ]);
@@ -3245,7 +3382,8 @@ mod tests {
         let Value::Array(signature) = &mut fields[2] else {
             unreachable!()
         };
-        signature[1] = text("different parser presentation");
+        signature[2] = text("different parser presentation");
+        signature[3] = Value::Bytes(vec![2]);
         let mut presentation_bytes = Vec::new();
         ciborium::into_writer(&presentation_wire, &mut presentation_bytes).unwrap();
         let presentation = CanonicalInputTypeWitness::from_bytes(&presentation_bytes).unwrap();
@@ -3371,6 +3509,8 @@ mod tests {
                 signatures: vec![ExactCheckedSignature {
                     key: "__tidepool_cell_pin_0_sessionInput".into(),
                     source: "Int".into(),
+                    // Nonexecuting role-validation fixture, not a GHC payload.
+                    iface: vec![1].into(),
                     names: Vec::new(),
                 }],
             }],
