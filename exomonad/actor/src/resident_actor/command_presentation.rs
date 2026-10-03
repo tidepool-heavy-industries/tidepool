@@ -37,11 +37,12 @@ impl PreparedCommandPresentation {
         }
         if let Some(pages) = self.displayed_pages {
             jobs.mark_displayed(actor, &self.job, &pages)
-                .map_err(|error| {
-                    ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "command observation receipt: {error:?}"
-                    ))
-                })?;
+                .map_err(
+                    |error| ResidentActorWorkbenchError::CompletedResultObservation {
+                        detail: format!("command observation receipt: {error:?}"),
+                        recovered_bindings: recovered_bindings.clone(),
+                    },
+                )?;
         }
         Ok(())
     }
@@ -195,6 +196,48 @@ where
     };
     let binding = result.as_ref().ok().cloned();
     (result, binding)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn displayed_receipt_failure_is_post_execution_observation() {
+        let jobs = crate::command_jobs::CommandJobs::default();
+        let mut fragment = ResidentWorkbenchFragment::empty_for_test();
+        let prepared = PreparedCommandPresentation {
+            job: "fault-injected-missing-job".into(),
+            presentation: CommandPresentation::CommandVisible("already executed".into(), 1024),
+            binding: None,
+            displayed_pages: Some(Vec::new()),
+        };
+        let mut recovered_bindings = vec!["retained-by-prior-effect".into()];
+        let mut remaining = 1024;
+        let mut output = Vec::new();
+        let error = prepared
+            .apply(
+                &jobs,
+                ActorRef::first(crate::ActorId(1)),
+                &mut fragment,
+                &mut remaining,
+                &mut output,
+                &mut recovered_bindings,
+            )
+            .expect_err("unknown job makes the displayed receipt fail");
+
+        let ResidentActorWorkbenchError::CompletedResultObservation {
+            detail,
+            recovered_bindings: retained,
+        } = error
+        else {
+            panic!("display receipt failure must remain a post-execution observation")
+        };
+        assert!(detail.contains("command observation receipt"));
+        assert_eq!(output, ["already executed"]);
+        assert_eq!(retained, ["retained-by-prior-effect"]);
+        assert_eq!(recovered_bindings, ["retained-by-prior-effect"]);
+    }
 }
 
 fn authorize_job_binding(caller: ActorRef, owner: ActorRef) -> Result<(), CommandError> {

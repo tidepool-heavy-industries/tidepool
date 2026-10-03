@@ -1007,31 +1007,38 @@ async fn resident_await_watch_case(case: WatchCase) {
     } else {
         181
     });
-    let declarations = [
-        tidepool_mcp::agent_tools_decl(),
-        tidepool_mcp::actor_decl(),
-        tidepool_mcp::actor_kernel_decl(),
-        tidepool_mcp::actor_local_decl(),
-        tidepool_mcp::commands_decl(),
-        tidepool_mcp::fs_read_decl(),
-        tidepool_mcp::sleep_decl(),
-    ];
+    let declarations = if direct_binding_cell {
+        vec![tidepool_mcp::commands_decl()]
+    } else {
+        vec![
+            tidepool_mcp::agent_tools_decl(),
+            tidepool_mcp::actor_decl(),
+            tidepool_mcp::actor_kernel_decl(),
+            tidepool_mcp::actor_local_decl(),
+            tidepool_mcp::commands_decl(),
+            tidepool_mcp::fs_read_decl(),
+            tidepool_mcp::sleep_decl(),
+        ]
+    };
     let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
     let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
-    let preamble = insert_preamble_imports(
-        &tidepool_mcp::build_preamble(&declarations, false),
-        "Tidepool.Agent.Contract",
-    );
-    let preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Watch as Watch");
-    let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
-    let preamble = format!(
-        "{preamble}\
-         type ActorEffects = '[AgentTools, Actor, Commands, Watch.Watches, Sleep]\n\
-         data WaitInput = WaitInput {{ delay :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
-         data WaitOutput = WaitOutput {{ settled :: Bool }} deriving (Generic, ToJSON, JsonSchema)\n\
-         data ResidentTools mode = ResidentTools {{ waitForCommand :: mode :- Call WaitInput WaitOutput }} deriving (Generic)\n"
-    );
+    let preamble = tidepool_mcp::build_preamble(&declarations, false);
+    let preamble = if direct_binding_cell {
+        format!("{preamble}type ActorEffects = '[Commands]\n")
+    } else {
+        let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Contract");
+        let preamble =
+            insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Watch as Watch");
+        let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
+        format!(
+            "{preamble}\
+             type ActorEffects = '[AgentTools, Actor, Commands, Watch.Watches, Sleep]\n\
+             data WaitInput = WaitInput {{ delay :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
+             data WaitOutput = WaitOutput {{ settled :: Bool }} deriving (Generic, ToJSON, JsonSchema)\n\
+             data ResidentTools mode = ResidentTools {{ waitForCommand :: mode :- Call WaitInput WaitOutput }} deriving (Generic)\n"
+        )
+    };
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let session_root = tempfile::tempdir().expect("session root");
@@ -1103,11 +1110,15 @@ async fn resident_await_watch_case(case: WatchCase) {
         let actor = forest
             .new_workbench(
                 "resident-await-watch".into(),
-                exomonad_actor::EffectiveRole::root().with_effect_keys(vec![
-                    exomonad_actor::ActorEffectKey::Commands,
-                    exomonad_actor::ActorEffectKey::Watches,
-                    exomonad_actor::ActorEffectKey::Sleep,
-                ]),
+                exomonad_actor::EffectiveRole::root().with_effect_keys(if direct_binding_cell {
+                    vec![exomonad_actor::ActorEffectKey::Commands]
+                } else {
+                    vec![
+                        exomonad_actor::ActorEffectKey::Commands,
+                        exomonad_actor::ActorEffectKey::Watches,
+                        exomonad_actor::ActorEffectKey::Sleep,
+                    ]
+                }),
             )
             .await
             .expect("spawn primary workbench");
@@ -1231,7 +1242,7 @@ async fn resident_await_watch_case(case: WatchCase) {
             );
             command_backend.release.notify_one();
         }
-        if primary {
+        if primary && !direct_binding_cell {
             tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 while !actor.hosted_cell_computing() && !settled_call.is_finished() {
                     tokio::task::yield_now().await;
@@ -1342,18 +1353,28 @@ async fn resident_await_watch_case(case: WatchCase) {
                 return;
             }
             if retain_command_binding {
-                let binding = settled["items"][0]["installedBindings"][0]
-                    .as_str()
-                    .expect("the host returns the retained binding reference");
-                assert!(!binding.contains("session_id:"), "{settled:?}");
-                assert_eq!(
-                    settled["items"][0]["installedBindings"],
-                    serde_json::json!([binding]),
-                    "the host tracks the binding on the item that requested it: {settled:?}"
+                let installed_bindings = settled["items"][0]["installedBindings"]
+                    .as_array()
+                    .expect("host binding references");
+                let observation_binding = installed_bindings
+                    .first()
+                    .and_then(serde_json::Value::as_str)
+                    .expect("ordinary result observation is listed first");
+                assert!(
+                    observation_binding.starts_with("observation"),
+                    "the automatic result binder is distinct from the retained job: {settled:?}"
                 );
+                let binding = installed_bindings
+                    .last()
+                    .and_then(serde_json::Value::as_str)
+                    .expect("the command retain effect returns the retained binding reference");
+                assert!(!binding.contains("session_id:"), "{settled:?}");
+                assert_eq!(installed_bindings.len(), 2, "{settled:?}");
+                assert_ne!(binding, observation_binding, "{settled:?}");
                 assert_eq!(
-                    settled["items"][0]["output"], "",
-                    "binding the job does not implicitly display or return it"
+                    settled["items"][0]["output"],
+                    format!("[bound {observation_binding}]"),
+                    "only the cell's automatic observation is reported"
                 );
                 let operations = settled["items"][0]["operations"]
                     .as_array()

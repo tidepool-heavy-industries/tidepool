@@ -258,7 +258,7 @@ elaboratePreparedSites env authority siblings bindings = do
         , not (getKey (nameUnique (idName (fst origin))) `Set.member` trustedProgressOwners authority) -> do
             modify' (\current -> current
               { esRejections = SiteRejection (fst origin)
-                  "raw or site-aware progress operations require compiler-issued typed helper evidence"
+                  ("raw or site-aware progress operations require compiler-issued typed helper evidence: " ++ T.unpack (snd origin))
                   : esRejections current })
             pure expression
       Var{} -> pure expression

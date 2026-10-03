@@ -1,7 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module ModuleProductRoundtripTest (verifyModuleProductInterfaceRoundtrip) where
+module ModuleProductRoundtripTest
+  ( verifyModuleProductInterfaceRoundtrip, verifyOriginalProductCatalogue ) where
 
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
@@ -11,8 +12,10 @@ import Codec.CBOR.Write (toLazyByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Map.Strict qualified as Map
+import Data.Maybe (listToMaybe)
 import Data.Set qualified as Set
 import Data.Text qualified as T
+import Data.Word (Word32)
 import GHC
   ( backend, getSession, getSessionDynFlags, ms_mod, ms_textual_imps, unLoc
   , noBackend
@@ -24,19 +27,24 @@ import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
 import GHC.Iface.Recomp.Flags (fingerprintDynFlags, fingerprintOptFlags)
 import GHC.Iface.Recomp.Binary (putNameLiterally)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
+import GHC.Types.Id (idName)
+import GHC.Types.Name (nameOccName)
+import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
 import GHC.Unit.Module (mkModuleName, moduleNameString, moduleUnit)
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
 import GHC.Unit.Module.ModIface (mi_extra_decls, mi_final_exts, mi_flag_hash, mi_opt_hash)
 import GHC.Unit.Types (moduleName, unitString)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
-import System.Directory (copyFile, getFileSize, renameFile)
-import System.FilePath ((</>))
+import System.Directory (copyFile, createDirectoryIfMissing, getFileSize, renameFile)
+import System.FilePath ((</>), takeDirectory)
 import Numeric (showHex)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), ProjectedGroup(..), ProjectedGroupBody(..)
-  , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected, topBinders )
+  , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected, topBinders
+  , projectOriginalHomeModuleProducts, preparedModuleProductOutcomes
+  , prepareProjection, projectSelected )
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope
@@ -47,8 +55,10 @@ import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedStg (PreparedModule(..))
 import Tidepool.RetainedUnfoldings (scopeRetainedHscEnv)
 import Tidepool.DependencyEvidence (DependencySource(..), sourceEvidence)
-import Tidepool.ModuleCandidates (ModuleCandidate(..))
+import Tidepool.ModuleCandidates
+  ( CandidateGroup(..), CandidateGlobal(..), ModuleCandidate(..), readModuleCandidates )
 import Tidepool.PackageWitness (encodePackageImports)
+import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
 
 -- Exercise the skinny interface retained for a prepared defining module,
 -- then import it from a new GHC session with its source absent.
@@ -291,3 +301,162 @@ verifyModuleProductInterfaceRoundtrip work = do
     parsed <- parseModule summary
     _ <- typecheckModule parsed
     pure ()
+
+verifyOriginalProductCatalogue :: FilePath -> IO ()
+verifyOriginalProductCatalogue work = do
+  let directory = work </> "original-product-catalogue"
+      a = directory </> "ModuleProductCatalogA.hs"
+      b = directory </> "ModuleProductCatalogB.hs"
+      replyInternal = directory </> "Tidepool" </> "Agent" </> "Reply" </> "Internal.hs"
+      manifest = directory </> "candidate-template.cbor"
+      seal = T.replicate 64 "a"
+      candidateRow = encodeListLen 16
+        <> encodeString "main"
+        <> encodeString "ModuleProductCatalogA"
+        <> encodeString (T.pack a) <> encodeString seal
+        <> encodeString (T.pack (a ++ ".hi")) <> encodeString seal
+        <> encodeString seal <> encodeString seal <> encodeString seal
+        <> encodeListLen 0 <> encodeListLen 0
+        <> encodeString (T.pack (a ++ ".packages")) <> encodeString seal
+        <> encodeString (T.pack (a ++ ".tpmod"))
+        <> encodeListLen 0
+        <> encodeListLen 5 <> encodeString "module"
+        <> encodeString (T.pack (a ++ ".certificate")) <> encodeString seal
+        <> encodeString (T.pack (a ++ ".core")) <> encodeString seal
+      manifestBytes = toLazyByteString
+        (encodeListLen 7 <> encodeString "TPMCAN" <> encodeString "10"
+          <> encodeListLen 0 <> encodeListLen 0 <> encodeListLen 1 <> candidateRow
+          <> encodeListLen 2 <> encodeListLen 0 <> encodeListLen 0 <> encodeString seal)
+  createDirectoryIfMissing True directory
+  BS.writeFile manifest (BL.toStrict manifestBytes)
+  candidateResult <- readModuleCandidates manifest
+  baseCandidate <- case candidateResult of
+    Right [candidate] -> pure candidate
+    Left reason -> ioError (userError reason)
+    _ -> ioError (userError "candidate template did not decode to one module")
+  copyFile "test-prepared-stg/ModuleProductCatalogA.hs" a
+  copyFile "test-prepared-stg/ModuleProductCatalogB.hs" b
+  createDirectoryIfMissing True (takeDirectory replyInternal)
+  copyFile "test-prepared-stg/ReplyInternalFixture.hs" replyInternal
+  result <- runPipelineSelected (PreparedProducts Nothing) b [directory]
+  moduleA <- case [prepared | prepared <- pprModules result
+      , moduleNameString (moduleName (pmModule prepared)) == "ModuleProductCatalogA"] of
+    [prepared] -> pure prepared
+    _ -> ioError (userError "catalogue pipeline omitted its defining module")
+  moduleB <- case [prepared | prepared <- pprModules result
+      , moduleNameString (moduleName (pmModule prepared)) == "ModuleProductCatalogB"] of
+    [prepared] -> pure prepared
+    _ -> ioError (userError "catalogue pipeline omitted its target module")
+  let context = ProjectionContext
+        { projectionProfile = "ghc-9.12-prepared-stg"
+        , projectionToolchain = "ghc-9.12.2"
+        , projectionTarget = Schema.TargetDescriptor Schema.X86_64
+            Schema.LittleEndian 64 64 "sysv64" []
+        , projectionRetainedGenerations = mempty
+        , projectionEntry = Schema.SymbolIdentity "main" "ModuleProductCatalogB"
+            "value" "consumeSafe" Nothing
+        , projectionAuxiliaryRoots = []
+        , projectionFormattingAuthority = Nothing
+        , projectionTimeAuthority = Nothing
+        , projectionJsonAuthority = Nothing
+        , projectionTextUnit = Nothing
+        }
+      contextFor modul occurrence = context
+        { projectionEntry = Schema.SymbolIdentity
+            (T.pack (unitString (moduleUnit (pmModule moduleA))))
+            modul "value" occurrence Nothing
+        }
+      selectedProgram modules modul occurrence = do
+        (program, _) <- prepareProjection (contextFor modul occurrence) modules
+          >>= projectSelected
+        pure program
+      products = projectOriginalHomeModuleProducts (prHscEnv (pprPipelineResult result))
+        (pprProductInterfaces result) context (pprModules result)
+      fresh =
+        [ (unitString (moduleUnit owner), moduleNameString (moduleName owner),
+            either (Left . show) Right groups)
+        | (owner, groups) <- preparedModuleProductOutcomes products ]
+      productA = case [groups | (owner, Right groups) <- preparedModuleProductOutcomes products
+          , moduleNameString (moduleName owner) == "ModuleProductCatalogA"] of
+        [groups] -> groups
+        _ -> []
+      freshClosure program = requiredOriginalPackageGlobalsWithRetained
+        fresh [] [] Set.empty (Schema.programGlobals program)
+      candidateGroup group = CandidateGroup
+        (fromIntegral (projectedOriginalOrdinal group))
+        (projectedBinders group)
+        [ CandidateGlobal
+            { candidateGlobalIdentity = Schema.globalIdentity global
+            , candidateGlobalRep = Schema.globalRep global
+            , candidateGlobalSignature = Schema.globalEntrySignature global >>= \(Schema.SignatureId index) ->
+                listToMaybe (drop (fromIntegral index) (projectedSignatures body))
+            , candidateGlobalEvaluated = Schema.globalRequiredEvaluated global
+            , candidateGlobalGeneration = fromIntegral <$> Schema.globalRequiredGeneration global
+            }
+        | global <- projectedGlobals body ]
+        where body = projectedBody group
+      cachedProduct = baseCandidate
+        { candidateUnit = unitString (moduleUnit (pmModule moduleA))
+        , candidateModule = "ModuleProductCatalogA"
+        , candidateGroups = map candidateGroup productA
+        }
+      assertRejected label modul occurrence =
+        case selectedProgram (pprModules result) modul occurrence of
+          Left (RejectedTypedSite _) -> pure ()
+          other -> ioError (userError (label ++ " was not rejected: " ++ show other))
+  safe <- either (ioError . userError . ("safe target projection failed: " ++) . show)
+    pure (selectedProgram (pprModules result) "ModuleProductCatalogB" "consumeSafe")
+  case freshClosure safe of
+    Right _ -> pure ()
+    Left reason -> ioError (userError ("fresh safe original product closure failed: " ++ reason))
+  assertRejected "direct raw progress helper" "ModuleProductCatalogA" "rawProgress"
+  assertRejected "helper depending on raw progress" "ModuleProductCatalogA" "dependentProgress"
+  assertRejected "transitive target depending on raw progress"
+    "ModuleProductCatalogB" "consumeDependentProgress"
+  case productA of
+    groups@(_ : _) -> do
+      let groupNames = map (map Schema.symbolOccurrence . projectedBinders) groups
+          safePresent = any (elem "safeValue") groupNames
+          invalidPresent = any (any (`elem` ["rawProgress", "dependentProgress"])) groupNames
+          sourceGroups = Set.fromList
+            [ (fromIntegral index :: Word32,
+                Set.fromList (map (T.pack . occNameString . nameOccName . idName)
+                  (topBinders binding)))
+            | (index, (binding, _)) <- zip [0 :: Int ..] (pmBindings moduleA) ]
+          retainedGroups =
+            [ (projectedOriginalOrdinal group, Set.fromList (map Schema.symbolOccurrence
+                (projectedBinders group))) | group <- groups ]
+          -- GHC may replace the source names with worker names. Multiple
+          -- binders in one original group still prove the recursive pair.
+          hasRecursiveGroup = any ((> 1) . length . projectedBinders) groups
+      unless (safePresent && not invalidPresent && hasRecursiveGroup
+          && all (`Set.member` sourceGroups) retainedGroups) $
+        ioError (userError ("fresh catalogue has missing/invalid group evidence: "
+          ++ show (safePresent, invalidPresent, hasRecursiveGroup, retainedGroups)))
+      unless (length groups < length (pmBindings moduleA)) $
+        ioError (userError "fresh catalogue did not omit rejected and dependent groups")
+    _ -> ioError (userError "fresh catalogue omitted eligible defining module")
+  cachedSafe <- either
+    (ioError . userError . ("cached safe target projection failed: " ++) . show)
+    pure (selectedProgram [moduleB] "ModuleProductCatalogB" "consumeSafe")
+  case requiredOriginalPackageGlobalsWithRetained [] [cachedProduct] [] Set.empty
+      (Schema.programGlobals cachedSafe) of
+    Right _ -> pure ()
+    Left reason -> ioError (userError ("cached safe product closure failed: " ++ reason))
+  cachedDependent <- either
+    (ioError . userError . ("cached dependent target projection failed: " ++) . show)
+    pure (selectedProgram [moduleB] "ModuleProductCatalogB" "consumeDependentProgress")
+  case requiredOriginalPackageGlobalsWithRetained [] [cachedProduct] [] Set.empty
+      (Schema.programGlobals cachedDependent) of
+    Left _ -> pure ()
+    Right _ -> ioError (userError "cached original product authorized its omitted dependent helper")
+  let safeIdentity = Schema.SymbolIdentity
+        (T.pack (unitString (moduleUnit (pmModule moduleA))))
+        "ModuleProductCatalogA" "value" "safeValue" Nothing
+      cachedWithoutSafeValue = cachedProduct
+        { candidateGroups = filter (not . any ((== "safeValue") . Schema.symbolOccurrence)
+            . candidateGroupBinders) (candidateGroups cachedProduct) }
+  case requiredOriginalPackageGlobalsWithRetained [] [cachedWithoutSafeValue] []
+      (Set.singleton safeIdentity) (Schema.programGlobals cachedSafe) of
+    Right _ -> pure ()
+    Left reason -> ioError (userError ("retained generation did not close its imported original: " ++ reason))

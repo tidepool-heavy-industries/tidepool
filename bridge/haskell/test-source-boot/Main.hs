@@ -12,7 +12,7 @@ import Control.Exception (SomeException, AsyncException(ThreadKilled), bracket, 
 import Control.Concurrent (MVar, forkIO, killThread, newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (foldM, forM, forM_, unless, void, when)
 import GHC.Clock (getMonotonicTimeNSec)
-import Data.Word (Word64)
+import Data.Word (Word32, Word64)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
@@ -83,7 +83,7 @@ import Tidepool.ExecutionEncode (encodeModuleProducts)
 
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
-  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, topBinders
+  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, closeUnavailableOriginalGroups, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared )
 import Tidepool.ExecutionProjection (resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
@@ -1498,6 +1498,31 @@ structuralCandidate work = do
 
 originalProjectionProducts :: IO ()
 originalProjectionProducts = withScratch $ \work -> do
+  let identity :: String -> String -> String -> SymbolIdentity
+      identity unit moduleName' occurrence =
+        SymbolIdentity (T.pack unit) (T.pack moduleName') (T.pack "value") (T.pack occurrence) Nothing
+      owners :: Map.Map SymbolIdentity (String, Word32)
+      dependencies :: Map.Map (String, Word32) (Set.Set SymbolIdentity)
+      unavailable = identity "main" "A" "unavailable"
+      middle = identity "main" "B" "middle"
+      terminal = identity "main" "C" "terminal"
+      unrelated = identity "main" "D" "unrelated"
+      cycleA = identity "main" "E" "cycleA"
+      cycleB = identity "main" "F" "cycleB"
+      owners = Map.fromList
+        [(unavailable, ("A", 0)), (middle, ("B", 3)),
+         (terminal, ("C", 7)), (unrelated, ("D", 2)),
+         (cycleA, ("E", 1)), (cycleB, ("F", 4))]
+      dependencies = Map.fromList
+        [ (("B", 3), Set.singleton unavailable)
+        , (("C", 7), Set.singleton middle)
+        , (("E", 1), Set.singleton cycleB)
+        , (("F", 4), Set.singleton cycleA)
+        , (("D", 2), Set.empty) ]
+      blocked = closeUnavailableOriginalGroups dependencies owners
+        (Set.fromList [unavailable, cycleA])
+  unless (blocked == Set.fromList [("A", 0), ("B", 3), ("C", 7), ("E", 1), ("F", 4)]) $
+    fail "original product closure did not handle cross-module chains, cycles and unrelated groups"
   copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing (work </> "MetadataQuoteSupport.hs") [work] Nothing

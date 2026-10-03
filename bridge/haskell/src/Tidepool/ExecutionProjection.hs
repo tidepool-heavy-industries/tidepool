@@ -6,7 +6,10 @@ module Tidepool.ExecutionProjection
   , projectPreparedTargetWithConstructors
   , ProjectedGroup(..), ProjectedGroupBody(..)
   , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
-  , PreparedModuleProducts, projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes
+  , PreparedModuleProducts, OriginalGroupOmission(..), OriginalGroupOmissionReason(..)
+  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts
+  , preparedModuleProductOutcomes, preparedModuleProductOmissions
+  , closeUnavailableOriginalGroups
   , PreparedProjection
   , prepareProjection
   , prepareProjectionWithReachability
@@ -37,7 +40,7 @@ import Data.IntMap.Strict qualified as IntMap
 import Data.Foldable (toList)
 import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
-import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe, mapMaybe)
 import Tidepool.PreparedBuiltins
   ( DeferredFunction(..), deferredFunction, wiredInErrorKind )
 import Data.Map.Strict (Map)
@@ -230,14 +233,25 @@ projectPreparedModuleGroups context prepared =
   projectPreparedModuleGroupsSelected context prepared Nothing
 
 -- One compilation owns these outcomes for package closure and original-product
--- publication. Keeping rejected outcomes also prevents the writer from projecting
--- a module again under a different context or assigning different ordinals.
-newtype PreparedModuleProducts = PreparedModuleProducts
-  [(Module, Either ProjectionError [ProjectedGroup])]
+-- publication. Original groups retain their own projection result and ordinal;
+-- executable-target products preserve the all-or-nothing result.
+data OriginalGroupOmissionReason
+  = ProjectionFailed ProjectionError
+  | DependsOnUnavailable [SymbolIdentity]
+  deriving stock (Eq, Show)
+
+data OriginalGroupOmission = OriginalGroupOmission
+  { omittedOriginalOrdinal :: Word32
+  , omittedOriginalBinders :: [SymbolIdentity]
+  , omittedOriginalReason :: OriginalGroupOmissionReason
+  } deriving stock (Eq, Show)
+
+data PreparedModuleProducts = PreparedModuleProducts
+  [(Module, Either ProjectionError [ProjectedGroup], [OriginalGroupOmission])]
 
 projectPreparedModuleProducts :: ProjectionContext -> [PreparedModule] -> PreparedModuleProducts
 projectPreparedModuleProducts context modules = PreparedModuleProducts
-  [(pmModule prepared, projectPreparedModuleGroups context prepared) | prepared <- modules]
+  [(pmModule prepared, projectPreparedModuleGroups context prepared, []) | prepared <- modules]
 
 -- The compiler's actual home unit, complete source coverage and current module
 -- own original issuance. Package globals are sealed later against their exact
@@ -254,13 +268,98 @@ projectOriginalHomeModuleProducts env interfaces context modules =
         , mi_module interface == pmModule prepared =
             OriginalHomeProduct isHome
         | otherwise = ExecutableTarget
+      originalRows =
+        [ (prepared, projectPreparedModuleGroupOutcomesFor (purpose prepared)
+            context prepared Nothing)
+        | prepared <- modules, isOriginal prepared ]
+      rowsByOwner = Map.fromList
+        [(pmModule prepared, outcomes) | (prepared, outcomes) <- originalRows]
+      isOriginal prepared = case purpose prepared of
+        OriginalHomeProduct _ -> True
+        ExecutableTarget -> False
+      groupOwners = Map.fromList
+        [ (symbol, (pmModule prepared, ordinal))
+        | (prepared, outcomes) <- originalRows
+        , (ordinal, symbols, _) <- outcomes
+        , symbol <- symbols ]
+      failedBinders = Set.fromList
+        [ symbol
+        | (_, outcomes) <- originalRows
+        , (_, symbols, Left _) <- outcomes
+        , symbol <- symbols ]
+      dependencies = Map.fromList
+        [ ((pmModule prepared, projectedOriginalOrdinal projected),
+            Set.fromList
+              [ globalIdentity global
+              | global <- projectedGlobals (projectedBody projected)
+              , globalRequiredGeneration global == Nothing ])
+        | (prepared, outcomes) <- originalRows
+        , (_, _, Right projected) <- outcomes ]
+      blocked = closeUnavailableOriginalGroups dependencies groupOwners failedBinders
+      finish prepared = case purpose prepared of
+        ExecutableTarget -> (pmModule prepared,
+          projectPreparedModuleGroupsFor ExecutableTarget context prepared Nothing, [])
+        OriginalHomeProduct _ ->
+          let outcomes = Map.findWithDefault [] (pmModule prepared) rowsByOwner
+              failed =
+                [ OriginalGroupOmission ordinal symbols
+                    (ProjectionFailed reason)
+                | (ordinal, symbols, Left reason) <- outcomes ]
+              retained =
+                [ projected
+                | (ordinal, _, Right projected) <- outcomes
+                , (pmModule prepared, ordinal) `Set.notMember` blocked ]
+              unavailableDependencies projected = Set.fromList
+                [ globalIdentity global
+                | global <- projectedGlobals (projectedBody projected)
+                , globalRequiredGeneration global == Nothing
+                , (globalIdentity global `Map.lookup` groupOwners)
+                    `maybeOwnedBy` blocked ]
+              dependent =
+                [ OriginalGroupOmission ordinal (projectedBinders projected)
+                    (DependsOnUnavailable (Set.toList (unavailableDependencies projected)))
+                | (ordinal, _, Right projected) <- outcomes
+                , (pmModule prepared, ordinal) `Set.member` blocked ]
+          in (pmModule prepared, Right retained, failed ++ dependent)
   in PreparedModuleProducts
-      [(pmModule prepared, projectPreparedModuleGroupsFor (purpose prepared) context prepared Nothing)
-      | prepared <- modules]
+      [(owner, outcome, omissions) | prepared <- modules
+        , let (owner, outcome, omissions) = finish prepared]
+  where
+    maybeOwnedBy Nothing _ = False
+    maybeOwnedBy (Just owner) blocked' = owner `Set.member` blocked'
 
 preparedModuleProductOutcomes :: PreparedModuleProducts
   -> [(Module, Either ProjectionError [ProjectedGroup])]
-preparedModuleProductOutcomes (PreparedModuleProducts outcomes) = outcomes
+preparedModuleProductOutcomes (PreparedModuleProducts outcomes) =
+  [(owner, outcome) | (owner, outcome, _) <- outcomes]
+
+preparedModuleProductOmissions :: PreparedModuleProducts
+  -> [(Module, [OriginalGroupOmission])]
+preparedModuleProductOmissions (PreparedModuleProducts outcomes) =
+  [(owner, omissions) | (owner, _, omissions) <- outcomes]
+
+-- | Find every projected original group that transitively imports an
+-- unavailable original binder. Dependency edges are identities emitted by
+-- actual 'GlobalDecl's; retained-generation imports are removed by the caller.
+closeUnavailableOriginalGroups
+  :: Ord key => Map key (Set SymbolIdentity) -> Map SymbolIdentity key
+  -> Set SymbolIdentity -> Set key
+closeUnavailableOriginalGroups dependencies owners unavailable = go (Set.toList initial) initial
+  where
+    dependants = Map.fromListWith Set.union
+      [ (symbol, Set.singleton group)
+      | (group, symbols) <- Map.toList dependencies
+      , symbol <- Set.toList symbols ]
+    symbolsByGroup = Map.fromListWith Set.union
+      [(group, Set.singleton symbol) | (symbol, group) <- Map.toList owners]
+    initial = Set.fromList (mapMaybe (`Map.lookup` owners) (Set.toList unavailable))
+    go [] blocked = blocked
+    go (group : pending) blocked =
+      let referenced = Map.findWithDefault Set.empty group symbolsByGroup
+          next = Set.unions
+            [Map.findWithDefault Set.empty symbol dependants | symbol <- Set.toList referenced]
+          fresh = next `Set.difference` blocked
+      in go (Set.toList fresh ++ pending) (blocked `Set.union` fresh)
 
 projectPreparedModuleGroupsSelected :: ProjectionContext -> PreparedModule
   -> Maybe (Set Word32) -> Either ProjectionError [ProjectedGroup]
@@ -268,7 +367,14 @@ projectPreparedModuleGroupsSelected = projectPreparedModuleGroupsFor ExecutableT
 
 projectPreparedModuleGroupsFor :: ProjectionPurpose -> ProjectionContext -> PreparedModule
   -> Maybe (Set Word32) -> Either ProjectionError [ProjectedGroup]
-projectPreparedModuleGroupsFor purpose context prepared selection = traverse projectOne surviving
+projectPreparedModuleGroupsFor purpose context prepared selection =
+  traverse (\(_, _, result) -> result)
+    (projectPreparedModuleGroupOutcomesFor purpose context prepared selection)
+
+projectPreparedModuleGroupOutcomesFor :: ProjectionPurpose -> ProjectionContext -> PreparedModule
+  -> Maybe (Set Word32) -> [(Word32, [SymbolIdentity], Either ProjectionError ProjectedGroup)]
+projectPreparedModuleGroupOutcomesFor purpose context prepared selection =
+  [(ordinal, groupBinderSymbols item, projectOne ordinal item) | (ordinal, item) <- surviving]
   where
     identities = buildTopIdentityMap [prepared]
     originals = pmBindings prepared
@@ -278,7 +384,7 @@ projectPreparedModuleGroupsFor purpose context prepared selection = traverse pro
       | (ordinal, (binding, _)) <- zip [0 :: Int ..] originals
       , first : _ <- [topBinders binding] ]
     surviving =
-      [ item
+      [ (ordinal, item)
       | item@(binding, _) <- pmBindings (dropRetainedTops context prepared)
       , first : _ <- [topBinders binding]
       , Just ordinal <- [Map.lookup (getKey (varUnique first)) ordinalByFirst]
@@ -287,20 +393,17 @@ projectPreparedModuleGroupsFor purpose context prepared selection = traverse pro
       [ symbol
       | (binding, _) <- originals, binder <- topBinders binding
       , Just symbol <- [lookupVarEnv identities binder] ]
+    groupBinderSymbols (binding, _) =
+      mapMaybe (lookupVarEnv identities) (topBinders binding)
     owner = (Text.pack (unitString (moduleUnit (pmModule prepared))),
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
-    projectOne item@(binding, _) = do
+    projectOne ordinal item@(binding, _) = do
       case [ srMessage rejection
            | rejection <- selectOwnedEvidence (topBinders binding)
                (evidenceRejectionsByOwner evidenceIndex)
            , not (skippedFromRecovery context (srBinder rejection)) ] of
         message : _ -> Left (RejectedTypedSite (Text.pack message))
         [] -> pure ()
-      first <- case topBinders binding of
-        value : _ -> Right value
-        [] -> Left (UnsupportedPreparedShape "prepared group has no binder")
-      ordinal <- maybe (Left (UnsupportedPreparedShape "prepared group lost its ordinal"))
-        Right (Map.lookup (getKey (varUnique first)) ordinalByFirst)
       binders <- traverse (\binder -> maybe
         (Left (UnsupportedPreparedShape "prepared top has no identity")) Right
         (lookupVarEnv identities binder)) (topBinders binding)

@@ -362,9 +362,9 @@ executeWith presenter
                 pure (boundedResult (Cmd.outputBytes options) (result factsWithBinding ("session_id: " <> key <> "\nretained as " <> binding <> " :: Cmd.Job\nStarted in background; its completion notice will wake you. Keep working; do not poll. Use read_output to inspect output or cancel_command to stop it.")))
             | otherwise -> case wait of
                 Nothing -> do
-                  _ <- Cmd.await retained
                   binding <- Cmd.retainJobBinding retained
-                  boundedResult (Cmd.outputBytes options) . attachBinding key binding <$> presenter (Just script) purpose focus (budgetForBinding options binding) retained
+                  let blockingOptions = options {Cmd.waitMilliseconds = -1}
+                  boundedResult (Cmd.outputBytes options) . attachBinding key binding <$> presenter (Just script) purpose focus (budgetForBinding blockingOptions binding) retained
                 Just _ -> do
                   binding <- Cmd.retainJobBinding retained
                   shown <- boundedResult (Cmd.outputBytes options) . attachBinding key binding <$> presenter (Just script) purpose focus (budgetForBinding options binding) retained
@@ -456,7 +456,13 @@ readRetained ReadOutput {session_id = key, stream = selected, offset = position,
         _ -> pure first
       case pageResult of
         Left Cmd.CommandOutputPending -> pure $ boundedResult budget (result (OutputPage key (outputStreamFact selectedStream) offset offset offset offset False 0 False 0 False) "No output yet; streams are starting.")
-        Left issue -> pure $ boundedResult budget (result (Rejected OpReadOutput (Just key) (T.pack (show issue)) NoSideEffect) ("Output unavailable: " <> T.pack (show issue) <> "\nDo not rerun the command to recover this retained page."))
+        Left issue ->
+          let detail = T.pack (show issue)
+              recovery = readRecovery key selectedStream offset
+              prefix = "Output unavailable: "
+              detailBudget = max 0 (budget - utf8Bytes (prefix <> recovery))
+              shownDetail = boundedErrorDetail detailBudget detail
+           in pure $ boundedResult budget (result (Rejected OpReadOutput (Just key) detail NoSideEffect) (prefix <> shownDetail <> recovery))
         Right details -> do
           let eof = Cmd.outputFinished details && Cmd.outputEnd details == Cmd.outputAvailableEnd details
               stream = outputStreamFact selectedStream
@@ -484,7 +490,11 @@ defaultPresenter command _ _ options retained = do
   pure shown
   where
     render observed = case Cmd.presentedOutput observed of
-      Left issue -> pure (observedResult retained (Cmd.presentedStatus observed) Nothing Nothing 0 False (heading observed <> "\nOutput unavailable: " <> Cmd.renderCommandError issue))
+      Left issue ->
+        pure
+          ( observedResult retained (Cmd.presentedStatus observed) Nothing Nothing 0 False
+              (boundedErrorPresentation (Cmd.presentedByteBudget observed) (heading observed <> "\nOutput unavailable: ") (Cmd.renderCommandError issue) (readRecovery (jobKey retained) Cmd.Stdout 0))
+          )
       Right output -> do
         let out = Cmd.commandStdout output
             err = Cmd.commandStderr output
@@ -549,6 +559,26 @@ defaultPresenter command _ _ options retained = do
           share = if total <= 0 then 0 else fromInteger (toInteger budget * toInteger pageBytes `div` toInteger total)
           shown = utf8Prefix share (Cmd.outputText page)
        in shown : allocate (max 0 (budget - utf8Bytes shown)) (max 0 (total - pageBytes)) rest
+
+readRecovery :: Text -> Cmd.CommandStream -> Int -> Text
+readRecovery key selectedStream offset =
+  "\nRecover retained output with read_output(session_id=\"" <> key <> "\", stream=\"" <> argument <> "\", offset=" <> number offset <> "). Do not rerun the command."
+  where
+    argument = case selectedStream of
+      Cmd.Stdout -> "Stdout"
+      Cmd.Stderr -> "Stderr"
+
+boundedErrorPresentation :: Int -> Text -> Text -> Text -> Text
+boundedErrorPresentation budget prefix detail recovery =
+  let detailBudget = max 0 (budget - utf8Bytes (prefix <> recovery))
+   in prefix <> boundedErrorDetail detailBudget detail <> recovery
+
+boundedErrorDetail :: Int -> Text -> Text
+boundedErrorDetail budget detail
+  | utf8Bytes detail <= budget = detail
+  | otherwise =
+      let marker = "\n[error detail shortened]"
+       in utf8Prefix (max 0 (budget - utf8Bytes marker)) detail <> marker
 
 observedResult :: Cmd.Job -> Cmd.CommandStatus -> Maybe Int -> Maybe Int -> Int -> Bool -> Text -> CommandToolResult
 observedResult job status outEnd errEnd linesShown isComplete text =
