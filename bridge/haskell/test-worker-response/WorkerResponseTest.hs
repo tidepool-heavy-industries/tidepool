@@ -14,7 +14,7 @@ import System.Environment (getArgs, getExecutablePath, setEnv)
 import System.Exit (ExitCode(..))
 import System.IO (Handle, hClose, hFlush, openTempFile, stdin, stdout, stderr)
 import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, terminateProcess, waitForProcess)
-import System.IO.Error (isResourceExhaustedError)
+import System.IO.Error (IOErrorType(ResourceExhausted), ioeGetErrorType)
 import System.Timeout (timeout)
 import System.Posix.Resource
   ( Resource(..), ResourceLimit(..), getResourceLimit, setResourceLimit )
@@ -168,7 +168,7 @@ catchThreadKilled failure = throwIO failure
 
 catchResourceExhaustion :: IOException -> IO ()
 catchResourceExhaustion failure
-  | isResourceExhaustedError failure = pure ()
+  | ioeGetErrorType failure == ResourceExhausted = pure ()
   | otherwise = throwIO failure
 
 -- The worker child leaves exactly one descriptor slot available, so capture
@@ -188,7 +188,7 @@ withOneFreeFd action = do
       case result of
         Right handle -> fillUntilExhausted (handle : held)
         Left failure
-          | isResourceExhaustedError failure -> case held of
+          | ioeGetErrorType failure == ResourceExhausted -> case held of
               one : rest -> hClose one >> pure rest
               [] -> throwIO failure
           | otherwise -> throwIO failure
