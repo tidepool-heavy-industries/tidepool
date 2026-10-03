@@ -1527,7 +1527,7 @@ data WatchdogTools mode = WatchdogTools
   deriving (Generic)
 
 tools :: Member Cmd.Commands effects => WatchdogTools (AsServerT (Eff effects))
-tools = WatchdogTools { shell = Shell.tools, probe = tool "Answer one fixed question about a topic." probeBody }
+tools = WatchdogTools { shell = Shell.tools, probe = presentWith id $ tool "Answer one fixed question about a topic." probeBody }
 
 probeBody :: Probe -> Eff effects Text
 probeBody request = pure ("probed " <> topic request)
