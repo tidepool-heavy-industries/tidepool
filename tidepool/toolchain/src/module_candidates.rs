@@ -382,6 +382,41 @@ impl std::ops::Deref for ValidatedRecord {
     }
 }
 
+impl ValidatedRecord {
+    fn admit(
+        record: Record,
+        canonical: crate::certified_products::CertifiedModuleInterface,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Option<Self> {
+        let reference = record.module_interface.as_ref()?;
+        let interface = &reference.interface;
+        let core_matches = match (&reference.core, canonical.core_bytes()) {
+            (Some(reference), Some(bytes)) => {
+                reference.bytes == bytes.len() as u64
+                    && reference.sha256 == validation.digest(bytes)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if interface.toolchain_identity_sha256 != canonical.producer_sha256()
+            || interface.unit != canonical.unit()
+            || interface.module != canonical.module()
+            || interface.skinny_iface_sha256 != canonical.interface_sha256()
+            || interface.package_imports_sha256 != canonical.package_imports_sha256()
+            || reference.certificate_sha256 != validation.digest(canonical.certificate_bytes())
+            || !core_matches
+        {
+            return None;
+        }
+        Some(Self {
+            data: record.data,
+            evidence: record.evidence,
+            canonical,
+            execution_source: record.execution_source,
+        })
+    }
+}
+
 /// Opaque compiler buffers are byte strings, never element-wise integer arrays.
 /// Record readers bound the entire encoded payload before invoking serde;
 /// ciborium grows buffers from consumed chunks, not an untrusted length hint.
@@ -1685,12 +1720,7 @@ fn select_records_inner(
             &canonical,
         )
         .ok()?;
-        let record = ValidatedRecord {
-            data: record.data,
-            evidence: record.evidence,
-            canonical,
-            execution_source: record.execution_source,
-        };
+        let record = ValidatedRecord::admit(record, canonical, &mut package_validation)?;
         let product = matching.into_iter().next()?;
         if generation_dependent(&product) {
             continue;
@@ -2879,6 +2909,100 @@ mod tests {
             &mut |_, _, disposition| dispositions.push(disposition),
         );
         (records, dispositions)
+    }
+
+    #[test]
+    fn candidate_admission_requires_exact_durable_and_in_memory_canonical_identity() {
+        use crate::recovery_artifacts::{
+            RecoveryCoreRef, RecoveryJoinRef, RecoveryModuleInterfaceRef,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let record = candidate_fixture(root.path(), "Library");
+        let canonical = record.module_interface_proof.as_ref().unwrap().clone();
+        let reference = record.module_interface.as_ref().unwrap();
+        let core = reference.core.as_ref().unwrap();
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        assert!(
+            ValidatedRecord::admit(record.clone(), canonical.clone(), &mut validation).is_some()
+        );
+        let mismatches = [
+            RecoveryModuleInterfaceRef {
+                interface: RecoveryJoinRef {
+                    toolchain_identity_sha256: [91; 32],
+                    ..reference.interface.clone()
+                },
+                ..reference.clone()
+            },
+            RecoveryModuleInterfaceRef {
+                interface: RecoveryJoinRef {
+                    unit: "other".into(),
+                    ..reference.interface.clone()
+                },
+                ..reference.clone()
+            },
+            RecoveryModuleInterfaceRef {
+                interface: RecoveryJoinRef {
+                    module: "Other".into(),
+                    ..reference.interface.clone()
+                },
+                ..reference.clone()
+            },
+            RecoveryModuleInterfaceRef {
+                interface: RecoveryJoinRef {
+                    skinny_iface_sha256: [91; 32],
+                    ..reference.interface.clone()
+                },
+                ..reference.clone()
+            },
+            RecoveryModuleInterfaceRef {
+                interface: RecoveryJoinRef {
+                    package_imports_sha256: [91; 32],
+                    ..reference.interface.clone()
+                },
+                ..reference.clone()
+            },
+            RecoveryModuleInterfaceRef {
+                certificate_sha256: [91; 32],
+                ..reference.clone()
+            },
+            RecoveryModuleInterfaceRef {
+                core: None,
+                ..reference.clone()
+            },
+            RecoveryModuleInterfaceRef {
+                core: Some(RecoveryCoreRef {
+                    sha256: [91; 32],
+                    ..core.clone()
+                }),
+                ..reference.clone()
+            },
+            RecoveryModuleInterfaceRef {
+                core: Some(RecoveryCoreRef {
+                    bytes: core.bytes + 1,
+                    ..core.clone()
+                }),
+                ..reference.clone()
+            },
+        ];
+        for reference in mismatches {
+            let inconsistent = Record {
+                data: RecordData {
+                    module_interface: Some(reference),
+                    ..record.data.clone()
+                },
+                ..record.clone()
+            };
+            assert!(
+                ValidatedRecord::admit(inconsistent, canonical.clone(), &mut validation).is_none()
+            );
+        }
+        let other = candidate_fixture(root.path(), "Other");
+        assert!(ValidatedRecord::admit(
+            record,
+            other.module_interface_proof.unwrap(),
+            &mut validation,
+        )
+        .is_none());
     }
 
     #[test]
