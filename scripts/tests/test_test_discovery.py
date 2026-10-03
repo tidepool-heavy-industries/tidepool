@@ -28,8 +28,8 @@ class DiscoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "scripts").mkdir()
-            shutil.copy(SCRIPTS / "test-suite-check.sh", root / "scripts")
-            shutil.copy(SCRIPTS / "test_source_ownership.py", root / "scripts")
+            for name in ("test-suite-check.sh", "test-suite-check.py", "test_source_ownership.py"):
+                shutil.copy(SCRIPTS / name, root / "scripts")
             tests = root / "nested" / "different-directory-name" / "tests"
             (tests / "suites").mkdir(parents=True)
             suite = tests / "suites" / "integration.rs"

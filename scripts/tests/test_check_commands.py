@@ -48,9 +48,12 @@ if sys.argv[1] == "metadata":
     if os.environ.get("FAIL_METADATA"):
         sys.exit(7)
     targets = [] if os.environ.get("NO_TARGETS") else [
-        {"kind": ["test"], "name": name} for name in ("alpha", "beta")]
+        {"kind": ["test"], "name": name,
+         "src_path": str(Path.cwd() / "tests" / "suites" / (name + ".rs"))}
+        for name in ("alpha", "beta")]
     print(json.dumps({"workspace_members": ["example"], "packages": [
-        {"id": "example", "name": "example", "targets": targets}]}))
+        {"id": "example", "name": "example", "manifest_path": str(Path.cwd() / "Cargo.toml"),
+         "targets": targets}]}))
     sys.exit(0)
 assert os.environ.get("TIDEPOOL_EXTRACT_DAEMON_SOCKET"), "missing resident compiler"
 if os.environ.get("WAIT_FOR_SIGNAL"):
@@ -114,6 +117,46 @@ sys.exit(int(os.environ.get("TEST_STATUS", "0")))
         calls = [json.loads(line) for line in (self.root / "cargo.jsonl").read_text().splitlines()]
         self.assertEqual(calls[-1][-2:], ["-p", "example"])
         self.assertNotIn("--test", calls[-1])
+
+    def use_real_suite_checker(self):
+        for name in ("test-suite-check.sh", "test-suite-check.py", "test_source_ownership.py"):
+            shutil.copyfile(SCRIPTS / name, self.root / "scripts" / name)
+        (self.root / "scripts" / "test-suite-check.sh").chmod(0o755)
+
+    def test_suite_list_validates_and_plans_from_one_metadata_document(self):
+        self.use_real_suite_checker()
+        result = subprocess.run(["bash", "scripts/test-suite.sh", "example", "--list"],
+                                cwd=self.root, env=self.env, capture_output=True,
+                                text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("1/2: alpha", result.stdout)
+        self.assertIn("2/2: beta", result.stdout)
+        calls = [json.loads(line) for line in (self.root / "cargo.jsonl").read_text().splitlines()]
+        self.assertEqual(calls, [["metadata", "--no-deps", "--format-version", "1"]])
+
+    def test_suite_list_reports_registration_failure_from_shared_metadata(self):
+        self.use_real_suite_checker()
+        suites = self.root / "tests" / "suites"
+        suites.mkdir(parents=True)
+        (suites / "alpha.rs").write_text("#[test]\nfn registered() {}\n")
+        (suites / "forgotten.rs").write_text("#[test]\nfn forgotten() {}\n")
+        result = subprocess.run(["bash", "scripts/test-suite.sh", "example", "--list"],
+                                cwd=self.root, env=self.env, capture_output=True,
+                                text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forgotten.rs", result.stdout)
+        calls = [json.loads(line) for line in (self.root / "cargo.jsonl").read_text().splitlines()]
+        self.assertEqual(calls, [["metadata", "--no-deps", "--format-version", "1"]])
+
+    def test_standalone_suite_check_queries_and_validates_metadata(self):
+        self.use_real_suite_checker()
+        result = subprocess.run(["bash", "scripts/test-suite-check.sh"],
+                                cwd=self.root, env=self.env, capture_output=True,
+                                text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("register every test-bearing integration source", result.stdout)
+        calls = [json.loads(line) for line in (self.root / "cargo.jsonl").read_text().splitlines()]
+        self.assertEqual(calls, [["metadata", "--no-deps", "--format-version", "1"]])
 
     def test_lint_failure_still_runs_tests_and_retires_compiler(self):
         result = self.run_check(LINT_STATUS="7")

@@ -88,7 +88,7 @@ fn emit_dev_source_identity(identity: Option<&str>) {
     );
     let dest =
         Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("dev_source_identity.rs");
-    write_if_changed(&dest, output).expect("write dev Haskell source identity");
+    write_if_changed(&dest, &output).expect("write dev Haskell source identity");
 }
 
 /// Dev-build stand-in for [`emit_bundle`]: same generated symbol and type, no
