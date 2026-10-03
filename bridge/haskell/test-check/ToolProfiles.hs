@@ -80,6 +80,7 @@ actorRuntime AgentToolsInputWith = do
     input : remaining -> modify (\current -> current {actorInputs = remaining}) >> pure input
     [] -> error "actor requested an unexpected tool input"
 actorRuntime (AgentToolsReplyWith value) = modify (\harness -> harness {actorReplies = actorReplies harness <> [value]})
+actorRuntime _ = error "unexpected actor tool operation"
 
 main :: IO ()
 main = do
