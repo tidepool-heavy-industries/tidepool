@@ -73,12 +73,12 @@ installation (AgentToolsInstallWith value _) = modify (const value)
 installation _ = error "installation executed the retained handler"
 
 actorRuntime :: AgentTools a -> Eff '[State ActorHarness] a
-actorRuntime (AgentToolsAwaitWith _ _ _) = pure ("await", Null)
-actorRuntime AgentToolsInputWith = do
+actorRuntime (AgentToolsAwaitWith _ _ _) = do
   harness <- get
   case actorInputs harness of
     input : remaining -> modify (\current -> current {actorInputs = remaining}) >> pure input
     [] -> error "actor requested an unexpected tool input"
+actorRuntime AgentToolsInputWith = error "actor requested an ordinary hosted tool input"
 actorRuntime (AgentToolsReplyWith value) = modify (\harness -> harness {actorReplies = actorReplies harness <> [value]})
 actorRuntime _ = error "unexpected actor tool operation"
 
