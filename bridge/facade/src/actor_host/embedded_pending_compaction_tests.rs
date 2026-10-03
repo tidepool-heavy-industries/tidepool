@@ -88,7 +88,7 @@ impl ResidentToolEndpoint for GatedEndpoint {
         None
     }
 
-    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture {
         let Some(context) = invocation.context else {
             return Box::pin(async {
                 Err(ResidentToolError::Unavailable(
@@ -121,7 +121,7 @@ impl ResidentToolEndpoint for GatedEndpoint {
             settled
                 .send(call_id)
                 .map_err(|_| ResidentToolError::Unavailable("test observer closed".into()))?;
-            Ok(result)
+            Ok(exomonad_actor::ResidentToolResponse::Value(result))
         })
     }
 }

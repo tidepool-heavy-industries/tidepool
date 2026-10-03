@@ -2369,11 +2369,10 @@ fn failure_layer_output_hint(layer: Option<WorkbenchFailureLayer>) -> String {
 /// to the machine before this failed), so it defaults to `Effect` rather
 /// than staying unclassified.
 /// A reload receipt leads with where it ended and how long it took. The
-/// lines beneath say how far it got; a reader deciding what to do next should
-/// not have to read them to learn the outcome.
+/// lines beneath retain the selected source and publication details.
 fn reload_receipt(outcome: &str, started: std::time::Instant, lines: Vec<String>) -> String {
     format!(
-        "outcome: {outcome} ({:.1}s)\n{}",
+        "{outcome} ({:.1}s)\n{}",
         started.elapsed().as_secs_f64(),
         lines.join("\n")
     )

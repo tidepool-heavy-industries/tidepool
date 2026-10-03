@@ -1,5 +1,5 @@
 use super::*;
-use exomonad_actor::ResidentToolFuture;
+use exomonad_actor::{ResidentToolDispatchFuture, ResidentToolFuture};
 use exomonad_tool::CustomToolDeclaration;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -22,13 +22,15 @@ impl ResidentToolEndpoint for GatedEndpoint {
     fn instructions(&self) -> Option<&str> {
         None
     }
-    fn dispatch_boxed(&self, _: ToolInvocation) -> ResidentToolFuture {
+    fn dispatch_boxed(&self, _: ToolInvocation) -> ResidentToolDispatchFuture {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.entered.add_permits(1);
         let release = self.release.clone();
         Box::pin(async move {
             release.acquire().await.unwrap().forget();
-            Ok(serde_json::json!({"done":true}))
+            Ok(exomonad_actor::ResidentToolResponse::Value(
+                serde_json::json!({"done":true}),
+            ))
         })
     }
     fn complete_boxed(
@@ -249,7 +251,7 @@ impl ResidentToolEndpoint for FailingSealEndpoint {
     fn instructions(&self) -> Option<&str> {
         None
     }
-    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture {
         self.inner.dispatch_boxed(invocation)
     }
     fn complete_boxed(
@@ -505,7 +507,7 @@ mod actual_seal {
         fn instructions(&self) -> Option<&str> {
             self.real.instructions()
         }
-        fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+        fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture {
             let real = self.real.clone();
             let gate = self.release_dispatch.clone();
             let delayed = self.delay_dispatch.load(Ordering::SeqCst);
