@@ -6,7 +6,54 @@ use crate::artifacts::SealedTurnProducts;
 use crate::declaration_context::ExactSourceAdmission;
 use std::collections::BTreeMap;
 
+// Includes materialization, closure certification and descriptor assembly.
+// Caller inventory and final context admission remain outside this stage.
 pub(super) fn admit_authored_artifact_closure(
+    products: &[CertifiedRecoveryProduct],
+    selected_owner: &ExactModuleIdentity,
+    toolchain_identity_sha256: [u8; 32],
+    evidence: &[crate::cache::ModuleEvidence],
+    source_admission: Option<&ExactSourceAdmission>,
+    context: Option<&Arc<ExactDeclarationContext>>,
+    includes: &[PathBuf],
+) -> Result<
+    (
+        tempfile::TempDir,
+        Vec<DeclarationArtifact>,
+        Vec<ExactInterfaceOwner>,
+        Vec<ExactLexicalNode>,
+        Vec<crate::recovery_artifacts::CertifiedJoinedInterface>,
+    ),
+    CompileError,
+> {
+    let started = std::time::Instant::now();
+    let result = admit_authored_artifact_closure_inner(
+        products,
+        selected_owner,
+        toolchain_identity_sha256,
+        evidence,
+        source_admission,
+        context,
+        includes,
+    )?;
+    let elapsed = started.elapsed();
+    let bytes = products
+        .iter()
+        .flat_map(|product| product.original_byte_anchors())
+        .map(|bytes| bytes.len() as u64)
+        .sum();
+    crate::timing::record_stage_with_owners(
+        crate::timing::NO_NODE,
+        crate::timing::NO_ROUND,
+        "products.authored_closure_admission",
+        elapsed,
+        bytes,
+        products.len(),
+    );
+    Ok(result)
+}
+
+fn admit_authored_artifact_closure_inner(
     products: &[CertifiedRecoveryProduct],
     selected_owner: &ExactModuleIdentity,
     toolchain_identity_sha256: [u8; 32],
