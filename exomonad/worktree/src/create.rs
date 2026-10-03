@@ -145,6 +145,19 @@ mod restoration_walk_tests {
     }
 
     #[test]
+    fn restoration_walk_does_not_follow_a_symlink_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = directory.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("file"), b"outside").unwrap();
+        let layer = directory.path().join("layer");
+        std::os::unix::fs::symlink(&outside, &layer).unwrap();
+
+        assert_eq!(restoration_budget(&[layer.clone()]).unwrap(), 4096);
+        sync_restored_tree(&layer).unwrap();
+    }
+
+    #[test]
     fn restoration_sync_propagates_a_walk_error() {
         let directory = tempfile::tempdir().unwrap();
         assert!(sync_restored_tree(&directory.path().join("missing")).is_err());
