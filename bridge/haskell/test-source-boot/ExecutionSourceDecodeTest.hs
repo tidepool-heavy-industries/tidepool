@@ -1,4 +1,4 @@
-module ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots) where
+module ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots, executionSourceResolutionBudgetChecks) where
 
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Decoding (Decoder)
@@ -117,6 +117,55 @@ executionSourceDecodeChecks = do
   expectParcelRejection "duplicate original execution graphs" decodeExecutionSourceDescriptors parcel
   expectParcelRejection "duplicate original execution references" decodeExecutionSourceReferences (encode (TList [reference, reference]))
   putStrLn "execution source decoder: 21 admission cases passed"
+
+-- Candidate-path fanout is independent of the number of resolution rows.
+-- These compact packets stay below the graph byte bound throughout.
+executionSourceResolutionBudgetChecks :: IO ()
+executionSourceResolutionBudgetChecks = do
+  bytes <- fixtureBytes
+  graph <- either fail pure (decode bytes)
+  term <- case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
+    Right (remaining,value) | BL.null remaining -> pure value
+    _ -> fail "issued resolution fixture has malformed CBOR"
+  let path = TString "/decoder-fixture/Absent.hs"
+      resolution index candidates = TList
+        [TString (T.pack (renderDependencyQualifier DependencyUnqualified)),
+         TString (T.pack ("Missing" ++ show index)),TBool False,TNull,TList candidates]
+      rows counts = TList [resolution index (replicate count path)
+        | (index,count) <- zip [0 :: Int ..] counts]
+      packet inventory = encode (at 7 (at 3 (const inventory)) term)
+      accepted label inventory = either (fail . ((label ++ ": ") ++))
+        (\decoded -> evaluate (forceGraph decoded) >> pure ()) (decode (packet inventory))
+      refused label inventory = case decode (packet inventory) of
+        Left reason | "original execution inventory exceeds bound" `isInfixOf` reason -> pure ()
+        _ -> fail ("resolution candidate path budget admitted " ++ label)
+      atLimit = rows (replicate 16 4096)
+      overLimit = rows (replicate 16 4096 ++ [1])
+      malformedAfterLimit = case atLimit of
+        TList firstRows -> TList (firstRows ++ [resolution 16 [TBool False]])
+        _ -> error "resolution fixture inventory is not a list"
+      recipe evidence = ExecutionSourceRecipe (executionGraphProducer graph)
+        (executionGraphSemantic graph) (executionGraphIncludes graph)
+        (executionGeneratedOrigin graph) evidence (executionGraphOwners graph)
+        (executionGraphExactImports graph) (executionGraphPackages graph)
+  accepted "65536 aggregate candidate paths" atLimit
+  refused "65537 individually valid aggregate candidate paths" overLimit
+  refused "candidate budget before candidate element decoding" malformedAfterLimit
+  refused "4097 candidates in one row" (rows [4097])
+  accepted "65536 empty resolution rows" (rows (replicate 65536 0))
+  refused "65537 resolution rows" (rows (replicate 65537 0))
+  boundedGraph <- either fail pure (decode (packet atLimit))
+  case issueExecutionSourceRecipe (recipe (executionGraphEvidence boundedGraph)) of
+    Right (Just _) -> pure ()
+    _ -> fail "local recipe withheld the aggregate candidate path boundary"
+  -- Build the final row directly: it is refused before encoding the graph.
+  let excessive = (executionGraphEvidence boundedGraph) {dependencyResolutions=
+        dependencyResolutions (executionGraphEvidence boundedGraph) ++
+        [DependencyResolution DependencyUnqualified "Missing16" False Nothing ["/decoder-fixture/Absent.hs"]]}
+  case issueExecutionSourceRecipe (recipe excessive) of
+    Right Nothing -> pure ()
+    _ -> fail "local recipe encoded excessive aggregate candidate paths"
+  putStrLn "execution source resolution budget: eight aggregate, row, preallocation and issuer cases passed"
 
 chars :: String -> Int
 chars = foldl' (\total character -> total + ord character) 0

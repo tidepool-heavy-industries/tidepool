@@ -81,7 +81,9 @@ unchanged `TPEXECUTIONSOURCE` bytes remain independent of the metadata envelope.
 Metadata is limited to four MiB. Execution graphs retain their 64 MiB aggregate
 and 4096-graph bounds. Authored source is bounded separately at 32 MiB of UTF-8;
 other text and metadata keep their existing bounds. Advertised invalid or
-oversized parcels are rejected.
+oversized parcels are rejected. Resolution evidence retains at most 65,536 rows,
+4,096 candidate paths per row and 65,536 candidate paths across all rows; import
+and exact-import edges retain their independent budgets.
 
 This is a strict matched worker/frontend migration. Earlier exact-scope versions
 2, 4, 6 and 7 are rejected. Deploy both producers and consumers together and

@@ -130,6 +130,8 @@ issueExecutionSourceRecipe recipe
       , length (recipeExactImports recipe)]
       && length (dependencyResolutions evidence) <= 65536
       && all ((<= 4096) . length . dependencyResolutionCandidates) (dependencyResolutions evidence)
+      && sum (map (toInteger . length . dependencyResolutionCandidates)
+        (dependencyResolutions evidence)) <= 65536
       && all ((<= 4096) . length . dependencyModuleImports) (dependencyModules evidence)
       && sum (map (length . dependencyModuleImports) (dependencyModules evidence)) <= 65536
       && all ((<= 4096) . length . snd) (recipeExactImports recipe)
@@ -486,10 +488,14 @@ decodeGraph sha bytes = do
   complete <- decodeBool
   unless (safe && complete) (fail "incomplete original execution evidence")
   sources <- bounded 4096 (array 2 >> DependencySource <$> sourcePath <*> digestField)
-  resolutions <- bounded 65536 $ do
+  resolutions <- withEdgeBudget 65536 65536 $ \remaining -> do
     array 5
-    DependencyResolution <$> qualifier <*> nonempty <*> decodeBool <*> optional sourcePath
-      <*> bounded 4096 sourcePath
+    q <- qualifier
+    name <- nonempty
+    boot <- decodeBool
+    selected <- optional sourcePath
+    candidates <- bounded (min 4096 remaining) sourcePath
+    pure (DependencyResolution q name boot selected candidates, length candidates)
   modules <- withEdgeBudget 4096 65536 $ \remaining -> do
     array 6
     unit <- nonempty

@@ -62,6 +62,18 @@ pub(crate) struct SourceSelectionContext<'a> {
     pub(crate) independent: &'a BTreeSet<ExactModuleIdentity>,
 }
 
+// Resolution candidate paths have their own aggregate edge budget, independent
+// of resolution rows, module imports and exact import edges.
+fn resolution_candidates_fit(resolutions: &[ResolutionEvidence]) -> bool {
+    resolutions.len() <= EDGE_LIMIT
+        && resolutions
+            .iter()
+            .all(|resolution| resolution.candidates.len() <= OWNER_LIMIT)
+        && resolutions.iter().fold(0usize, |total, resolution| {
+            total.saturating_add(resolution.candidates.len())
+        }) <= EDGE_LIMIT
+}
+
 /// Validate current selection separately from the fresh-source cache evidence.
 /// The ordered search roots come from the request, never from its receipt.
 pub(crate) fn validate_source_selected_originals(
@@ -77,7 +89,7 @@ pub(crate) fn validate_source_selected_originals(
         || !evidence.selection_complete
         || evidence.sources.len() != claims.len()
         || evidence.modules.len() != claims.len()
-        || evidence.resolutions.len() > EDGE_LIMIT
+        || !resolution_candidates_fit(&evidence.resolutions)
         || evidence.packages.len() > OWNER_LIMIT
         || evidence
             .modules
@@ -89,10 +101,6 @@ pub(crate) fn validate_source_selected_originals(
             .map(|module| module.imports.len())
             .sum::<usize>()
             > EDGE_LIMIT
-        || evidence
-            .resolutions
-            .iter()
-            .any(|row| row.candidates.len() > OWNER_LIMIT)
         || context.include.len() > OWNER_LIMIT
         || context.include.iter().any(|root| !root.is_absolute())
     {
@@ -1169,6 +1177,94 @@ mod tests {
     }
 
     #[test]
+    fn resolution_candidate_paths_share_an_aggregate_admission_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let (graph, owners) = test_graph(root.path());
+        let mut wire = GraphWire::decode(graph.bytes()).unwrap();
+        let missing = root.path().join("missing-candidate.hs");
+        wire.evidence.resolutions = (0..16)
+            .map(|index| ResolutionEvidence {
+                qualifier: ImportQualifier::Unqualified,
+                module: format!("Missing{index}"),
+                boot: false,
+                selected: None,
+                candidates: vec![missing.clone(); OWNER_LIMIT],
+            })
+            .collect();
+        assert!(resolution_candidates_fit(&wire.evidence.resolutions));
+        wire.validate().unwrap();
+        let boundary_bytes = wire.encode().unwrap();
+        CertifiedExecutionSourceGraph::recover(boundary_bytes.clone()).unwrap();
+
+        wire.evidence.resolutions.push(ResolutionEvidence {
+            qualifier: ImportQualifier::Unqualified,
+            module: "Missing16".into(),
+            boot: false,
+            selected: None,
+            candidates: vec![missing.clone()],
+        });
+        assert!(wire.evidence.resolutions.len() < EDGE_LIMIT);
+        assert!(wire
+            .evidence
+            .resolutions
+            .iter()
+            .all(|row| row.candidates.len() <= OWNER_LIMIT));
+        assert!(!resolution_candidates_fit(&wire.evidence.resolutions));
+        assert!(wire.validate().is_err());
+        assert!(
+            wire.encode().is_err(),
+            "bound before serialization allocation"
+        );
+        let fresh = owners
+            .iter()
+            .map(|owner| ExactModuleIdentity {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+            })
+            .collect();
+        assert!(matches!(
+            CertifiedExecutionSourceGraph::admit(ExecutionSourceGraphInput {
+                producer: crate::artifact_inventory::CanonicalProducerIdentity::from_test_sha256(
+                    wire.producer_sha256,
+                ),
+                semantic_sha256: wire.semantic_sha256,
+                include: &wire.include,
+                source_path: &wire.source_path,
+                source: &wire.source,
+                evidence: &wire.evidence,
+                exact_imports: &BTreeMap::new(),
+                owners: &owners,
+                fresh_owners: &fresh,
+                retained_sources: &BTreeMap::new(),
+                packages: &BTreeMap::new(),
+            })
+            .unwrap(),
+            ExecutionSourceAdmission::Unavailable(ExecutionSourceUnavailable::LimitExceeded)
+        ));
+
+        // Retained bytes still need independent recovery admission. Mutate only
+        // the candidate inventory using the existing generic CBOR encoder.
+        use ciborium::value::Value;
+        let mut packet: Value = ciborium::de::from_reader(boundary_bytes.as_slice()).unwrap();
+        let fields = packet.as_array_mut().unwrap();
+        let evidence = fields[7].as_array_mut().unwrap();
+        evidence[3].as_array_mut().unwrap().push(Value::Array(vec![
+            Value::Text(String::from(ImportQualifier::Unqualified)),
+            Value::Text("Missing16".into()),
+            Value::Bool(false),
+            Value::Null,
+            Value::Array(vec![Value::Text(missing.to_str().unwrap().into())]),
+        ]));
+        let mut excessive_bytes = Vec::new();
+        ciborium::ser::into_writer(&packet, &mut excessive_bytes).unwrap();
+        assert!(excessive_bytes.len() < GRAPH_BYTES_LIMIT);
+        let decoded = GraphWire::decode(&excessive_bytes).unwrap();
+        assert!(!resolution_candidates_fit(&decoded.evidence.resolutions));
+        assert!(decoded.validate().is_err());
+        assert!(CertifiedExecutionSourceGraph::recover(excessive_bytes).is_err());
+    }
+
+    #[test]
     fn graph_descriptor_capture_preserves_immutable_bytes_and_refuses_substitution() {
         let root = tempfile::tempdir().unwrap();
         let capture = tempfile::tempdir().unwrap();
@@ -1670,6 +1766,9 @@ fn validate_cbor_budget(bytes: &[u8]) -> Result<(), CborBudgetError> {
 impl GraphWire {
     fn encode(&self) -> Result<Vec<u8>, CompileError> {
         let evidence = &self.evidence;
+        if !resolution_candidates_fit(&evidence.resolutions) {
+            return Err(failure("resolution candidates exceed their edge bound"));
+        }
         let encoding: GraphEncoding = (
             "TPEXECUTIONSOURCE".into(),
             self.version,
@@ -1914,7 +2013,7 @@ impl CertifiedExecutionSourceGraph {
             || input.owners.len() > OWNER_LIMIT
             || input.evidence.sources.len() > OWNER_LIMIT
             || input.evidence.modules.len() > OWNER_LIMIT
-            || input.evidence.resolutions.len() > EDGE_LIMIT
+            || !resolution_candidates_fit(&input.evidence.resolutions)
             || input.evidence.packages.len() > OWNER_LIMIT
             || input.exact_imports.len() > OWNER_LIMIT
             || input.packages.len() > OWNER_LIMIT
@@ -1923,11 +2022,6 @@ impl CertifiedExecutionSourceGraph {
                 .modules
                 .iter()
                 .any(|module| module.imports.len() > OWNER_LIMIT)
-            || input
-                .evidence
-                .resolutions
-                .iter()
-                .any(|resolution| resolution.candidates.len() > OWNER_LIMIT)
             || input
                 .exact_imports
                 .values()
@@ -2339,7 +2433,7 @@ impl GraphWire {
             || self.evidence.sources.len() > OWNER_LIMIT
             || self.evidence.modules.is_empty()
             || self.evidence.modules.len() > OWNER_LIMIT
-            || self.evidence.resolutions.len() > EDGE_LIMIT
+            || !resolution_candidates_fit(&self.evidence.resolutions)
             || self.exact_imports.len() > OWNER_LIMIT
             || self.packages.len() > OWNER_LIMIT
         {

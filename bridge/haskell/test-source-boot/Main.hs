@@ -1,6 +1,6 @@
 module Main (main) where
 
-import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots)
+import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots, executionSourceResolutionBudgetChecks)
 import ExactScopeV8Test (exactScopeV8Checks, candidateCanonicalChecks)
 import CandidateGraphDescriptorTest (candidateGraphDescriptorChecks)
 import GenuineCandidateFixture
@@ -197,6 +197,7 @@ main = getArgs >>= \case
   ["--canonical-candidates", scope, candidates] -> candidateCanonicalChecks scope candidates
   ["--finalized-frontend-once"] -> finalizedFrontendOnce
   ["--execution-source-decode"] -> executionSourceDecodeChecks
+  ["--execution-source-resolution-budget"] -> executionSourceResolutionBudgetChecks
   "--execution-source-decode-benchmark" : iterations : files -> executionSourceDecodeBenchmark iterations files
   "--execution-source-decode-snapshots" : output : files -> executionSourceDecodeSnapshots output files
   ["--exact-scope-binders"] -> exactScopeBinders
