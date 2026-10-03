@@ -487,6 +487,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
         root: campaign.actor.clone(),
         config: campaign.config.clone(),
         run_root: campaign.config.run_root.clone(),
+        output_store: service.runtime.store(),
         #[cfg(feature = "codex-compat")]
         tmux: TmuxSession::new(&campaign.config.tmux_session).unwrap(),
         #[cfg(feature = "codex-compat")]

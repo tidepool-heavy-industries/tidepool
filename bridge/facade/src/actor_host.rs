@@ -28,6 +28,7 @@ mod context_transaction_acceptance_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod custody_tests;
 mod delivery;
+mod display_output;
 #[cfg(all(test, feature = "codex-compat"))]
 mod documentation_tests;
 #[cfg(test)]
@@ -2647,6 +2648,7 @@ struct InteractiveFleet {
     root: LocalActorRef,
     config: ActorHostConfig,
     run_root: PathBuf,
+    output_store: Arc<harness::store::Store>,
     #[cfg(feature = "codex-compat")]
     tmux: TmuxSession,
     #[cfg(feature = "codex-compat")]
@@ -2899,6 +2901,10 @@ async fn run_owned(
         )
     } else {
         None
+    };
+    let output_store = match embedded_service.as_ref() {
+        Some(service) => service.runtime.store(),
+        None => display_output::open_run_store(&run_root).map_err(runtime_error)?,
     };
     #[cfg(test)]
     let mut embedded_service = embedded_service;
@@ -3502,6 +3508,7 @@ async fn run_owned(
             root: root_actor.clone(),
             config: config.clone(),
             run_root: run_root.clone(),
+            output_store,
             #[cfg(feature = "codex-compat")]
             tmux: tmux.clone(),
             #[cfg(feature = "codex-compat")]

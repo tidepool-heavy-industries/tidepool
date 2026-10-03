@@ -3347,6 +3347,7 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
     use super::command_test_support::TestCommands;
 
     let mut campaign = TestCampaign::start().await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     let policy = campaign.root_installation.policy.clone();
     let invoking_policy = policy.clone();
     let mut running = tokio::spawn(async move {
@@ -3361,7 +3362,7 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
         request = backend_request(&mut campaign) => request.supply(Ok(backend.clone())),
         result = &mut running => panic!("display ended before its authored command: {result:?}"),
     }
-    let first = running.await.unwrap();
+    let first = campaign.drive_actor_output(&store, running).await.unwrap();
     assert_eq!(first["status"], "committed", "{first}");
     let display = explicit_display_output(&first);
     let identity = explicit_display_identity(display);
@@ -3376,7 +3377,10 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
     assert!(display["text"].as_str().unwrap().contains("DisplayPair"));
 
     tidepool_extract_cmd::reset_extract_spawn_count();
-    let expanded = policy.expand_display_boxed(identity, left).await.unwrap();
+    let expanded = campaign
+        .drive_actor_output(&store, policy.expand_display_boxed(identity, left))
+        .await
+        .unwrap();
     assert_eq!(expanded["status"], "committed", "{expanded}");
     let next = explicit_display_output(&expanded);
     assert_eq!(explicit_display_identity(next), identity);
@@ -3387,7 +3391,10 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
         .expand_display_boxed((identity.0, identity.1 + 1, identity.2), right)
         .await
         .is_err());
-    let final_page = policy.expand_display_boxed(identity, right).await.unwrap();
+    let final_page = campaign
+        .drive_actor_output(&store, policy.expand_display_boxed(identity, right))
+        .await
+        .unwrap();
     assert!(explicit_display_output(&final_page)["expansions"]
         .as_array()
         .unwrap()
@@ -3413,13 +3420,18 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
 
 #[tokio::test]
 async fn explicit_display_rejects_callback_effect_before_authority_input() {
-    let campaign = TestCampaign::start().await;
-    let policy = campaign.root_installation.policy.as_ref();
-    let published = committed(
-        policy,
-        include_str!("notebook_explicit_display_untrusted_callback.hs"),
-    )
-    .await;
+    let mut campaign = TestCampaign::start().await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let policy = campaign.root_installation.policy.clone();
+    let published = campaign
+        .drive_actor_output(
+            &store,
+            committed(
+                policy.as_ref(),
+                include_str!("notebook_explicit_display_untrusted_callback.hs"),
+            ),
+        )
+        .await;
     let identity = explicit_display_identity(explicit_display_output(&published));
     tidepool_extract_cmd::reset_extract_spawn_count();
     assert!(policy.expand_display_boxed(identity, 1).await.is_err());
@@ -3434,13 +3446,18 @@ async fn explicit_display_rejects_callback_effect_before_authority_input() {
 
 #[tokio::test]
 async fn explicit_display_respects_shared_budget_and_handles_survive_cell_failure() {
-    let campaign = TestCampaign::start().await;
-    let policy = campaign.root_installation.policy.as_ref();
-    let failed = dispatch_haskell_script(
-        policy,
-        include_str!("notebook_explicit_display_budget_failure.hs"),
-    )
-    .await;
+    let mut campaign = TestCampaign::start().await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let policy = campaign.root_installation.policy.clone();
+    let failed = campaign
+        .drive_actor_output(
+            &store,
+            dispatch_haskell_script(
+                policy.as_ref(),
+                include_str!("notebook_explicit_display_budget_failure.hs"),
+            ),
+        )
+        .await;
     assert_eq!(failed["status"], "rejected", "{failed}");
     let displays: Vec<_> = failed["items"]
         .as_array()
@@ -3466,7 +3483,10 @@ async fn explicit_display_respects_shared_budget_and_handles_survive_cell_failur
     assert_eq!(keys.len(), 1, "the unrendered prefix remains addressable");
     let key = keys[0][0].as_i64().unwrap();
     tidepool_extract_cmd::reset_extract_spawn_count();
-    let expanded = policy.expand_display_boxed(identity, key).await.unwrap();
+    let expanded = campaign
+        .drive_actor_output(&store, policy.expand_display_boxed(identity, key))
+        .await
+        .unwrap();
     let suffix = explicit_display_output(&expanded)["text"].as_str().unwrap();
     assert_eq!(format!("{prefix}{suffix}"), "v".repeat(5000));
     assert_eq!(tidepool_extract_cmd::extract_spawn_count(), 0);
