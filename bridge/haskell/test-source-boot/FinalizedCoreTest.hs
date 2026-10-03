@@ -1,3 +1,5 @@
+{-# LANGUAGE GADTs #-}
+
 module FinalizedCoreTest (finalizedCoreChecks) where
 
 import Control.Exception (bracket, try)
@@ -5,6 +7,8 @@ import Control.Monad (forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as BS
+import Data.Dynamic (fromDynamic)
+import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Codec.CBOR.Encoding
@@ -20,29 +24,33 @@ import GHC.Data.FastString (fsLit)
 import GHC.Types.ForeignStubs (ForeignStubs(..), CHeader(..), CStub(..))
 import GHC.Utils.Outputable qualified as Outputable
 import GHC.Driver.Main (hscTidy)
-import GHC.Driver.Backend (interpreterBackend)
+import GHC.Driver.Make (load')
+import GHC.Driver.Pipeline.Execute (runPhase)
+import GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..))
+import GHC.Driver.Hooks (runPhaseHook)
 import GHC.ByteCode.Types (CompiledByteCode(..))
 import GHC.Data.FlatBag (elemsFlatBag)
-import GHC.Linker.Types (linkableBCOs, linkableModule)
+import GHC.Linker.Types (linkableBCOs, linkableModule, linkableParts, linkablePartAllBCOs)
 import GHC.Driver.Session (targetProfile, updOptLevel)
 import GHC.Fingerprint.Type (Fingerprint(..))
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
 import GHC.Iface.Make (mkIfaceTc)
-import GHC.Types.Id (idType)
-import GHC.Types.Name (getOccString, isExternalName)
+import GHC.Types.Name (getOccString)
 import GHC.Types.SptEntry (SptEntry(..))
-import GHC.Types.TyThing (TyThing(..))
 import GHC.Types.TypeEnv (lookupTypeEnv)
 import GHC.Types.Var (varName)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, lookupHpt)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModGuts (CgGuts(..))
 import GHC.Unit.Module.ModIface
-  ( ModIfaceBackend(..), mi_final_exts, mi_iface_hash, set_mi_extra_decls
-  , mi_usages, set_mi_usages, set_mi_final_exts, set_mi_module )
+  ( ModIfaceBackend(..), mi_iface_hash, set_mi_extra_decls
+  , set_mi_usages, set_mi_final_exts, set_mi_module )
 import GHC.Unit.Module.Deps (Usage(..))
-import GHC.Unit.Types (moduleUnit, unitString, unitIdString, toUnitId)
-import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_dflags, hsc_all_home_unit_ids)
+import GHC.Unit.Module.Graph (ModuleGraphNode(..))
+import GHC.Unit.Types (unitString, unitIdString, toUnitId, GenWithIsBoot(..))
+import GHC.Unit.Finder (addHomeModuleToFinder)
+import GHC.Driver.Env (HscEnv(..), hsc_HPT, hsc_dflags, hsc_all_home_unit_ids, hsc_home_unit)
+import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.ForeignSrcLang (ForeignSrcLang(..))
 import Numeric (showHex)
 import System.Directory
@@ -59,7 +67,8 @@ import Tidepool.ExactScope (CanonicalInterfaceProof, validateCandidateCanonicalI
 import Tidepool.ModuleCandidates (readModuleCandidates)
 import Tidepool.PackageWitness (emptyPackageImports, encodePackageImports)
 import Tidepool.HomeProducts
-  ( CandidateCoreFailure(..), hydrateCandidateExecutable, validateCandidateInterfaceRequirements )
+  ( CandidateCoreFailure(..), hydrateCandidateExecutable, materializeCandidateCompilerView
+  , validateCandidateInterfaceRequirements )
 import Tidepool.PreparedStg (PreparedModule(..), prepareModule, unelaboratedModule)
 
 -- | A new GHC session hydrates captured interface bytes after the only source
@@ -202,7 +211,8 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       malformed <- decodeFinalizedCore env home (ms_location summary) (BS.take 1 bytes)
       assert (case malformed of Left FinalizedCoreDecodeFailure{} -> True; _ -> False)
         "truncated canonical companion did not fail closed"
-  putStrLn "finalized Core: cold source-free STG and GHC bytecode, native owner/types/requirements, Rec groups and local instances; Core seal, owner/version/truncation and unsupported metadata checked"
+  makeViewChecks libdir work artifact bytes summary proof
+  putStrLn "finalized Core: executed one case; source-free STG, direct bytecode and GHC make execution with zero module frontends; staged type-only/Core views, durable interface, native requirements, Core seal and unsupported metadata checked"
   where
     configure work = do
       flags <- getSessionDynFlags
@@ -218,8 +228,97 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       createDirectory path
       pure path
 
--- The test uses the matched candidate decoder and certificate validator rather
--- than manufacturing the private canonical proof consumed by recovery.
+-- This qualifies GHC's make handoff using a genuine finalized pair and the
+-- fixture's structural certificate, independently of Rust certificate issuance.
+makeViewChecks :: FilePath -> FilePath -> ExactIfaceArtifact -> BS.ByteString
+  -> ModSummary -> CanonicalInterfaceProof -> IO ()
+makeViewChecks libdir work artifact bytes summary proof = runGhc (Just libdir) $ do
+  flags <- getSessionDynFlags
+  _ <- setSessionDynFlags (ms_hspp_opts summary)
+    { importPaths = [work], hiDir = Just work, objectDir = Just work
+    , verbosity = verbosity flags }
+  fresh <- getSession
+  interfaces <- liftIO (requireRight =<< readExactIfaceArtifacts fresh [artifact])
+  admitted <- liftIO (hydrateExactScope fresh interfaces)
+  let typeDirectory = work </> "type-make-view"
+      executableDirectory = work </> "executable-make-view"
+      corePath = work </> "captured.core"
+      executableSummary = summary {ms_hspp_opts =
+        (ms_hspp_opts summary) {backend = interpreterBackend}}
+  liftIO $ do
+    createDirectory typeDirectory
+    createDirectory executableDirectory
+    removeFile corePath
+  typeView <- liftIO (materializeCandidateCompilerView typeDirectory 0 False admitted proof summary)
+  liftIO $ do
+    typeBytes <- BS.readFile (ml_hi_file (ms_location typeView))
+    typeInterfaces <- requireRight =<< readExactIfaceArtifacts admitted
+      [artifact {exactPath = ml_hi_file (ms_location typeView)
+        , exactSha256 = hexBytes (SHA256.hash typeBytes)}]
+    assert (case typeInterfaces of
+        [(_,iface)] -> case mi_extra_decls iface of Nothing -> True; _ -> False
+        _ -> False) "type-only make view loaded defining Core"
+    BS.writeFile corePath (BS.take 1 bytes)
+    refused <- try (materializeCandidateCompilerView executableDirectory 0 True
+      admitted proof executableSummary) :: IO (Either CandidateCoreFailure ModSummary)
+    assert (case refused of Left CandidateCoreBytesMismatch -> True; _ -> False)
+      "make executable view accepted changed Core bytes"
+    BS.writeFile corePath bytes
+  (typeHome, _) <- loadView admitted typeView
+  liftIO $ assert (case homeMod_bytecode (hm_linkable typeHome) of Nothing -> True; _ -> False)
+    "type-only make handoff unnecessarily generated bytecode"
+  executableView <- liftIO (materializeCandidateCompilerView executableDirectory 1 True
+    admitted proof executableSummary)
+  (executableHome, frontends) <- loadView admitted executableView
+  liftIO $ assert (case homeMod_bytecode (hm_linkable executableHome) of
+      Just linkable -> linkableModule linkable == ms_mod summary
+      Nothing -> False) "source-free make handoff did not retain its executable input"
+  loadedEnvironment <- getSession
+  _ <- liftIO $ addHomeModuleToFinder (hsc_FC loadedEnvironment)
+    (hsc_home_unit loadedEnvironment) (GWIB (ms_mod_name summary) NotBoot)
+    (ms_location executableView)
+  imported <- parseImportDecl "import qualified FinalizedCoreFixture"
+  setContext [IIDecl imported]
+  answer <- dynCompileExpr
+    "case FinalizedCoreFixture.evenBox 1 of FinalizedCoreFixture.Box value -> value"
+  liftIO $ do
+    assert ((fromDynamic answer :: Maybe Int) == Just 1)
+      "source-free make bytecode did not execute its original recursive/private bindings"
+    assert (case homeMod_bytecode (hm_linkable executableHome) of
+        Just linkable -> any (not . null . elemsFlatBag . bc_bcos)
+          (foldMap linkablePartAllBCOs (linkableParts linkable))
+        Nothing -> False) "source-free make demand did not generate real GHC bytecode"
+    observed <- readIORef frontends
+    assert (observed == 0) "source-free make handoff ran a module frontend"
+    durable <- BS.readFile (exactPath artifact)
+    assert (hexBytes (SHA256.hash durable) == exactSha256 artifact)
+      "make cleanup changed or removed the durable original interface"
+    present <- doesFileExist (work </> "FinalizedCoreFixture.hs")
+    assert (not present) "make execution restored the original source"
+  where
+    loadView admitted view = do
+      frontends <- liftIO (newIORef (0 :: Int))
+      let hook :: TPhase result -> IO result
+          hook phase@T_Hsc{} = do
+            modifyIORef' frontends (+1)
+            runPhase phase
+          hook phase = runPhase phase
+      setSession admitted {hsc_hooks = (hsc_hooks admitted)
+        {runPhaseHook = Just (PhaseHook hook)}}
+      loaded <- load' Nothing LoadAllTargets mkUnknownDiagnostic Nothing
+        (mkModuleGraph [ModuleNode [] view])
+      liftIO $ assert (case loaded of Succeeded -> True; Failed -> False)
+        "source-free staged interface failed GHC make loading"
+      env <- getSession
+      home <- maybe (fail "source-free make result has no original HMI") pure
+        (lookupHpt (hsc_HPT env) (ms_mod_name view))
+      count <- liftIO (readIORef frontends)
+      liftIO $ assert (count == 0) "staged make view invoked a module frontend"
+      setSession env {hsc_hooks = hsc_hooks admitted}
+      pure (home,frontends)
+
+-- The structural certificate exercises the matched decoder/validator with
+-- compiler-produced interface/Core bytes; it does not prove Rust issuance.
 captureProof :: HscEnv -> ExactIfaceArtifact -> FilePath -> BS.ByteString -> FilePath
   -> IO CanonicalInterfaceProof
 captureProof env artifact source core work = do
