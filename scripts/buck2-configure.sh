@@ -153,6 +153,7 @@ tls = false
 instance_name = swarm
 EOF
 fi
+chmod 0644 "$tmp_config"
 mv -f -- "$tmp_config" .buckconfig.local
 trap - EXIT
 printf 'Wrote %s/.buckconfig.local\n' "$PWD"

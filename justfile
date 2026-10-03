@@ -127,7 +127,7 @@ doctor:
 
 # Reuse local Cabal/Cargo outputs to build Exomonad and its matched compiler tools.
 exomonad-build:
-    {{ exomonad_nix }} bash exomonad/scripts/exomonad-build.sh
+    {{ nix }} bash exomonad/scripts/exomonad-build.sh
 
 # Pass Exomonad init flags after `--`, for example:
 #   just exomonad-init -- --session exomonad-tidepool-fresh --no-attach
