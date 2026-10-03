@@ -24,7 +24,7 @@ import GHC
 import GHC.Driver.Env
   ( HscEnv(..), hsc_HPT, hscUpdateHPT )
 import GHC.Driver.Backend (backendGeneratesCode)
-import GHC.Core.Type (eqType)
+import GHC.Core.TyCo.Compare (eqType)
 import GHC.Driver.Config.Diagnostic (initDiagOpts, initPrintConfig)
 import GHC.Driver.Errors (printOrThrowDiagnostics)
 import GHC.Driver.Errors.Types (GhcMessage(GhcTcRnMessage))
