@@ -38,6 +38,7 @@ import Tidepool.SessionArtifacts (mkBoundBinders)
 import Tidepool.DiagJson (Diag (..), DiagSeverity(..), DependencyLoadFailure(..), diagsFromSourceError)
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
+import Tidepool.ExactScope (readExactScope)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transformProgramDeclarationImports)
 import Tidepool.GhcPipeline
@@ -91,7 +92,7 @@ main = getArgs >>= \case
   ["--metadata-inspection"] -> mixedInspectionCompilation >> putStrLn "metadata inspection: mixed query order and probe ordinals passed"
   ["--checked-load-boundary"] -> checkedLoadBoundaryCompilation >> putStrLn "checked load boundary: 4 passed"
   ["--structural-display", effectsRoot] -> structuralDisplayCompilation OrdinaryDisplayTest effectsRoot >> putStrLn "structural display: 1 passed"
-  ["--structural-display-exact", effectsRoot] -> structuralDisplayCompilation ExactDisplayTest effectsRoot >> putStrLn "exact structural display: 1 passed"
+  ["--structural-display-exact", effectsRoot] -> structuralDisplayCompilation LegacyDisplayScopeTest effectsRoot >> putStrLn "legacy structural display scope refusal: 1 passed"
   _ -> runAllTests
 
 compilerBoundaryChecks :: IO ()
@@ -1439,21 +1440,25 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
       createDirectory path
       pure path
 
-data DisplayTestScope = OrdinaryDisplayTest | ExactDisplayTest
+data DisplayTestScope = OrdinaryDisplayTest | LegacyDisplayScopeTest
 
 structuralDisplayCompilation :: DisplayTestScope -> FilePath -> IO ()
-structuralDisplayCompilation selectedScope effectsRoot = bracket temporary removeDirectoryRecursive $ \root -> do
-  source <- readFile "test-cell-splitter/DisplayFields.cell.hs"
-  plan <- analyzeCell template source >>= either (fail . renderCellSplitError) pure
-  scope <- case selectedScope of
-    OrdinaryDisplayTest -> pure Nothing
-    ExactDisplayTest -> do
-      let path = root </> "exact-scope.cbor"
-      BS.writeFile path (toStrictByteString (encodeListLen 7
+structuralDisplayCompilation LegacyDisplayScopeTest _ = bracket structuralDisplayDirectory removeDirectoryRecursive $ \root -> do
+  let path = root </> "exact-scope.cbor"
+      bytes = toStrictByteString (encodeListLen 7
         <> encodeString "TPEXACTSCOPE" <> encodeString "2"
         <> foldMap encodeString (replicate 2 (Text.replicate 64 "0"))
-        <> encodeListLen 0 <> encodeListLen 0 <> encodeListLen 0))
-      pure (Just (SessionScope root [] (Just path) Nothing))
+        <> encodeListLen 0 <> encodeListLen 0 <> encodeListLen 0)
+  BS.writeFile path bytes
+  result <- readExactScope path
+  case result of
+    Left _ -> pure ()
+    Right _ -> fail "legacy scope authorized structural companion compilation"
+  unchanged <- BS.readFile path
+  unless (unchanged == bytes) (fail "legacy scope refusal changed its producer bytes")
+structuralDisplayCompilation OrdinaryDisplayTest effectsRoot = bracket structuralDisplayDirectory removeDirectoryRecursive $ \root -> do
+  source <- readFile "test-cell-splitter/DisplayFields.cell.hs"
+  plan <- analyzeCell template source >>= either (fail . renderCellSplitError) pure
   let includes = ["lib", "test-cell-splitter", effectsRoot]
   withResidentPipelineSelectedRequests includes $ \runRequest -> runRequest (pure ()) $ \compiler -> do
     let compile current = do
@@ -1462,7 +1467,7 @@ structuralDisplayCompilation selectedScope effectsRoot = bracket temporary remov
           writeFile path rendered
           compiler CheckedEnvironment mempty
             (GeneratedInstanceCheck (cellGeneratedInstanceRecipe current) GeneralCompile)
-            scope path includes Nothing
+            Nothing path includes Nothing
     (accepted, _) <- checkCellInstances compile plan
     assertEqual "resolved authored Display instances retained" False
       (any (`elem` map structuralDisplayTargetName (cellPlanStructuralDisplayTargets accepted)) ["Custom", "Reexported"])
@@ -1501,13 +1506,6 @@ structuralDisplayCompilation selectedScope effectsRoot = bracket temporary remov
       Left _ -> pure ()
       Right _ -> fail "explicit invalid Generic instance must remain a user error"
   where
-    temporary = do
-      parent <- getTemporaryDirectory
-      (path, handle) <- openTempFile parent "tidepool-cell-display"
-      hClose handle
-      removeFile path
-      createDirectory path
-      pure path
     template = unlines
       [ "{-# LANGUAGE OverloadedStrings, DeriveGeneric, StandaloneDeriving, FlexibleInstances, FlexibleContexts, UndecidableInstances #-}"
       , "{{CELL_PRAGMAS}}"
@@ -1516,6 +1514,15 @@ structuralDisplayCompilation selectedScope effectsRoot = bracket temporary remov
       , "{{CELL_DECLS}}"
       , "__tidepool_cell_check = do { {{CELL_BODY}} } :: Maybe ()"
       ]
+
+structuralDisplayDirectory :: IO FilePath
+structuralDisplayDirectory = do
+  parent <- getTemporaryDirectory
+  (path, handle) <- openTempFile parent "tidepool-cell-display"
+  hClose handle
+  removeFile path
+  createDirectory path
+  pure path
 
 -- Escaping callbacks have no authority after their owning transaction closes.
 -- Rejection leaves the active or next transaction able to compile real source.
