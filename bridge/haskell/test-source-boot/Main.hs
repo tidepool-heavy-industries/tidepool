@@ -3020,6 +3020,8 @@ verifyRetainedPackageWitness producer evidence = do
           pure certified
     (first, firstLog) <- certify
     (second, secondLog) <- certify
+    retainDiagnosticOracle "repeated-package-first" firstLog
+    retainDiagnosticOracle "repeated-package-second" secondLog
     unless (first == second) $ fail "repeated package certification changed its wire evidence"
     retainByteOracle "repeated-package" first
     repeatedTerm <- either (fail . show) (pure . snd)
@@ -3119,6 +3121,8 @@ verifyRetainedPackageWitness producer evidence = do
       (encode (map (`global` 0) ordered) >>= either fail pure)
     (backward, backwardLog) <- captureDiagnostics
       (encode (map (`global` 0) (reverse ordered)) >>= either fail pure)
+    retainDiagnosticOracle "implicit-forward" forwardLog
+    retainDiagnosticOracle "implicit-backward" backwardLog
     forwardTerm <- decode forward
     backwardTerm <- decode backward
     restored <- case backwardTerm of
@@ -3136,6 +3140,7 @@ verifyRetainedPackageWitness producer evidence = do
   withTiming $ do
     (_, diagnostics) <- captureDiagnostics
       (encode (map (`global` 0) identities) >>= either fail pure)
+    retainDiagnosticOracle "five-package-identities" diagnostics
     unless (count "certified_package_global_requests" diagnostics == 5
         && count "certified_package_owner_loads" diagnostics == 3
         && count "certified_package_catalog_builds" diagnostics == 3
@@ -3174,6 +3179,9 @@ verifyRetainedPackageWitness producer evidence = do
     retainByteOracle label bytes =
       lookupEnv "TIDEPOOL_CERTIFICATE_BYTE_ORACLE" >>= mapM_ (\prefix ->
         BS.writeFile (prefix ++ "-" ++ label ++ ".cbor") bytes)
+    retainDiagnosticOracle label diagnostics =
+      lookupEnv "TIDEPOOL_CERTIFICATE_BYTE_ORACLE" >>= mapM_ (\prefix ->
+        writeFile (prefix ++ "-" ++ label ++ ".log") diagnostics)
     sameRepeatedReferences references globals = case (references, globals) of
       (TInt firstIndex : rest, [firstWitness, secondWitness]) ->
         all (== TInt firstIndex) (take 999 rest)
