@@ -36,7 +36,8 @@ import GHC.Unit.Module.Location (ModLocation, ml_hi_file)
 import Control.Concurrent.MVar
   (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
 import Control.Exception
-  ( SomeAsyncException, SomeException, displayException, fromException, throwIO, try )
+  ( displayException )
+import Tidepool.ExtractUtil (trySynchronous)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
@@ -147,17 +148,6 @@ loadModuleExtraDecls hscEnv modl = do
           "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": exception: " ++ show e
         Nothing -> pure ()
       return (FatIfaceLoadFailureOutcome (show e))
-
--- | Catch ordinary interface failures while allowing asynchronous exceptions
--- (notably cancellation) to escape the cache loader.
-trySynchronous :: IO a -> IO (Either SomeException a)
-trySynchronous action = do
-  result <- try action
-  case result of
-    Left e -> case (fromException e :: Maybe SomeAsyncException) of
-      Just async -> throwIO async
-      Nothing -> pure (Left e)
-    Right value -> pure (Right value)
 
 -- | Read an already-resolved defining identity, including hidden package
 -- modules. Import visibility is not a condition for preparing a recovered

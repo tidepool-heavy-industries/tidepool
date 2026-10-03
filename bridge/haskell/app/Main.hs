@@ -14,8 +14,8 @@ import Codec.CBOR.Write (toStrictByteString)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Exception
-  ( evaluate, try, throwIO, SomeAsyncException, SomeException, Exception
-  , fromException, toException, IOException )
+  ( evaluate, try, throwIO, SomeException
+  , toException, IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (intercalate, nub, isPrefixOf)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
@@ -26,7 +26,6 @@ import System.Exit (ExitCode(..), exitWith)
 import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
 import qualified System.Info as SystemInfo
 
-import GHC.Types.SourceError (SourceError)
 import GHC (Module, ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName)
 import GHC.Driver.Env (HscEnv)
 import GHC.Unit.Module.ModIface (ModIface, mi_module)
@@ -43,7 +42,7 @@ import qualified Data.Text.Encoding as TE
 import Tidepool.Binders
   ( extractBindersNamed
   , classifyWithFlags, classifyBlock, exportItemName, defaultParserDynFlags
-  , analyzeCell, analyzeOrderedCell, cellInferenceSegments, renderCellCheckSource, CellSplitError(..), CellSourceSpan(..)
+  , analyzeCell, analyzeOrderedCell, cellInferenceSegments, renderCellCheckSource, CellSourceSpan(..)
   , CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), BoundBinder(..),
     SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ExpressionLiftPlan(..), ExpressionPresentation(..), installCellDisplayDeclarations
   , declarationSourceWithTemplateFlags, renderDeclarationForTemplate
@@ -95,15 +94,17 @@ import Tidepool.DeclarationJoin
   , renderDeclarationInventoryOutcome )
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
-  ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..), InputRejection(..), DependencyLoadFailure(..)
-  , diagsFromSourceError, diagFromException, renderDiagsJson )
+  ( Diag(..), SourceRejection(..), InputRejection(..) )
 import Tidepool.CheckedAdmission
   ( validateCheckedCellAdmission, validateCheckedItemAdmission
   , checkedDisplayBinders, validateCheckedDisplayAdmission )
 import Tidepool.CheckedRecipe
   ( checkedDisplayRecipe, checkedProgramDisplayRecipe, writeCheckedDisplayReceipt
   , checkedItemCompilePurpose, checkedRecipeSource, replaceRecipeMarker, writeCheckedItemReceipt )
-import Tidepool.ExtractUtil (capitalize, shaHex)
+import Tidepool.ExtractUtil (capitalize, shaHex, trySynchronous)
+import Tidepool.WorkerDiagnostics
+  ( throwCellSplitError, sourceFailureDiagnostics, renderInspectionDiagnostics
+  , reportDiags, reportDiagsWithWarnings )
 import Tidepool.ExtractRequest (RequestShapeError(..), validateRequestShape, InspectionRequest(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.ExactScope
@@ -189,26 +190,6 @@ evictRecoveryCaches caches targetModName' = do
   evictFatIfaceMatching (rcFatIface caches) (staleRecoveryModule targetModName')
   evictOwnerInterfaceMatching (rcOwnerIface caches) (staleRecoveryModule targetModName')
   evictPreparedBodyMatching (rcPreparedBodies caches) (staleRecoveryModule targetModName')
-
-data LocatedCellRejection = LocatedCellRejection CellSourceSpan String
-  deriving Show
-instance Exception LocatedCellRejection
-
-throwCellSplitError :: CellSplitError -> IO a
-throwCellSplitError errorValue = case errorValue of
-  CellPrologueFailure sourceSpan message ->
-    throwIO (LocatedCellRejection sourceSpan message)
-  CellLexFailure ->
-    throwIO (LocatedCellRejection (CellSourceSpan 1 1 1 1)
-      "GHC could not lex the notebook cell")
-  CellDanglingOperatorFailure sourceSpan operatorText ->
-    throwIO (LocatedCellRejection sourceSpan
-      ("cell ends with a dangling operator `" ++ operatorText
-        ++ "`: remove it or supply its right operand"))
-  CellUnsupportedLocalFixity sourceSpan ->
-    throwIO (LocatedCellRejection sourceSpan
-      "local fixity cannot cross prepared item boundaries; put the operator and its fixity in an authored declaration group")
-  CellHeaderFailure message -> fail ("cell check template header: " ++ message)
 
 -- | Serve one typed request. Stdout contains exactly one diagnostics document;
 -- stderr is the human-readable channel.
@@ -413,25 +394,6 @@ isInspectionTypeQuery query = case query of
   InspectTypeOf _ -> True
   _ -> False
 
--- Both direct checking and GHC dependency loading retain real source
--- diagnostics. Only this structural distinction permits a source alternative;
--- input, protocol and worker failures never choose another template.
-sourceFailureDiagnostics :: SomeException -> Maybe [Diag]
-sourceFailureDiagnostics exception = case fromException exception of
-  Just (sourceError :: SourceError) -> Just (diagsFromSourceError sourceError)
-  Nothing -> case fromException exception of
-    Just (DependencySourceFailure diagnostics) -> Just diagnostics
-    _ -> Nothing
-
-renderInspectionDiagnostics :: [Diag] -> String
-renderInspectionDiagnostics = intercalate "\n" . map render
-  where
-    render diagnostic = location diagnostic ++ dMessage diagnostic
-    location diagnostic = case dFile diagnostic of
-      Just (file, line, column, _, _) -> file ++ ":" ++ show line ++ ":" ++ show column ++ ": "
-      Nothing -> ""
-
-
 -- | Prepend the harness language profile to scratch input copies. Inspection
 -- requests profile every singleton fallback and their optional batch source;
 -- other modes compile only the first input. Putting the profile in source
@@ -473,42 +435,6 @@ spliceHarnessProfilePragma args = case requestFiles args of
 harnessProfilePragmaLine :: String
 harnessProfilePragmaLine =
   "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}"
-
--- | The shared epilogue every dispatch arm ends on: render the fixed-shape
--- JSON diagnostics report to stdout from a captured extraction result, with a
--- human-readable debug copy on stderr, exiting non-zero on failure. Also used
--- in parse-only modes (e.g. 'runClassifyMode') where no live GHC session
--- exists to ever throw a 'SourceError' — 'fromException' can only take the
--- 'Nothing' branch there.
-reportDiags :: Either SomeException () -> IO ExitCode
-reportDiags = reportDiagsWithWarnings . fmap (const [])
-
-reportDiagsWithWarnings :: Either SomeException [Diag] -> IO ExitCode
-reportDiagsWithWarnings (Left e) = do
-  let (outcome, diags) = case fromException e of
-        Just (rejection :: InputRejection) -> (ReportInputRejected, [Diag Nothing DiagError (show rejection)])
-        Nothing -> case fromException e of
-          Just (se :: SourceError) -> (ReportSourceFailure, diagsFromSourceError se)
-          Nothing -> case fromException e of
-            Just (DependencySourceFailure diagnostics) -> (ReportSourceFailure, diagnostics)
-            Just DependencyWorkerFailure -> (ReportWorkerFailure, [diagFromException e])
-            Nothing -> case fromException e of
-              Just (SourceRejection message) ->
-                (ReportSourceFailure, [Diag Nothing DiagError message])
-              Nothing -> case fromException e of
-                Just (LocatedCellRejection (CellSourceSpan sl sc el ec) message) ->
-                  (ReportSourceFailure,
-                    [Diag (Just ("<cell>", sl, sc, el, ec)) DiagError message])
-                Nothing -> (ReportWorkerFailure, [diagFromException e])
-  putStrLn (renderDiagsJson outcome diags)
-  -- Debug copy for humans only; stdout (above) is the authoritative machine
-  -- contract.
-  case fromException e of
-    Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
-    Nothing -> hPutStrLn stderr $ "Error: " ++ show e
-  pure (ExitFailure 1)
-reportDiagsWithWarnings (Right warnings) =
-  putStrLn (renderDiagsJson ReportSuccess warnings) >> pure ExitSuccess
 
 -- | Whether a generic extraction needs stable session values in scope.
 hasSessionScope :: WorkerRequest -> Bool
@@ -628,15 +554,6 @@ writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productC
           hPutStrLn stderr ("product certification unavailable: " ++ reason)
           BS.writeFile (outDir </> "certified-products.cbor") BS.empty
     pure (CertifiedOriginalProducts freshDependencies freshProducts)
-
-trySynchronous :: IO a -> IO (Either SomeException a)
-trySynchronous action = do
-  result <- try action
-  case result of
-    Left exception -> case fromException exception :: Maybe SomeAsyncException of
-      Just async -> throwIO async
-      Nothing -> pure (Left exception)
-    Right value -> pure (Right value)
 
 data PreparedArtifact = PreparedArtifact
   { paTarget :: String

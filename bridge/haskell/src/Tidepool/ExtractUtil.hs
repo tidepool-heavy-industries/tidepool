@@ -6,8 +6,10 @@ module Tidepool.ExtractUtil
   ( getLibdir
   , shaHex
   , capitalize
+  , trySynchronous
   ) where
 
+import Control.Exception (SomeAsyncException, SomeException, fromException, throwIO, try)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import Numeric (showHex)
@@ -34,3 +36,14 @@ capitalize (c:cs) = toUpper c : cs
 shaHex :: BS.ByteString -> String
 shaHex = concatMap (\byte -> let text = showHex byte "" in
   replicate (2 - length text) '0' ++ text) . BS.unpack . SHA256.hash
+
+-- | Catch ordinary failures while allowing cancellation and other asynchronous
+-- exceptions to escape their caller's failure policy.
+trySynchronous :: IO a -> IO (Either SomeException a)
+trySynchronous action = do
+  result <- try action
+  case result of
+    Left exception -> case fromException exception :: Maybe SomeAsyncException of
+      Just async -> throwIO async
+      Nothing -> pure (Left exception)
+    Right value -> pure (Right value)
