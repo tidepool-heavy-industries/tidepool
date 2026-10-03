@@ -1110,7 +1110,7 @@ async fn assert_captured_reader(child: &LocalResidentInstallation) {
     .expect("captured reader reply bounded")
     .expect("real captured native tool reply");
     assert!(
-        matches!(reply, crate::ResidentToolResponse::Value(value) if value == serde_json::json!(42)),
+        matches!(&reply, crate::ResidentToolResponse::Value(value) if *value == serde_json::json!(42)),
         "{reply:?}"
     );
 }

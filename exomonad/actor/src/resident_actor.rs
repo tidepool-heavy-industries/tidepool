@@ -2408,7 +2408,10 @@ fn merge_retained_bindings(receipt: &mut WorkbenchItemReceipt, bindings: &[Strin
     if bindings.is_empty() || receipt.output.contains("retained bindings:") {
         return;
     }
-    let retained = format!("retained bindings: {}", receipt.installed_bindings.join(", "));
+    let retained = format!(
+        "retained bindings: {}",
+        receipt.installed_bindings.join(", ")
+    );
     if receipt.output.is_empty() {
         receipt.output = retained;
     } else {
@@ -2437,15 +2440,6 @@ fn failure_layer_output_hint(layer: Option<WorkbenchFailureLayer>) -> String {
     }
 }
 
-/// Which failure layer produced `error`, for a receipt built from it.
-/// `Compile`/`CellCheck`/`CompileInfrastructure` never ran an effect at all;
-/// `Resident`/`Delivered` wrap a [`tidepool_runtime::session::ResidentError`],
-/// which already distinguishes an effect failure from an observation one —
-/// see [`tidepool_runtime::session::ResidentError::failure_layer`]. A
-/// `Delivered` error whose inner error that classification does not cover is
-/// still known to be post-commit (its doc: the response was already handed
-/// to the machine before this failed), so it defaults to `Effect` rather
-/// than staying unclassified.
 /// A reload receipt leads with where it ended and how long it took. The
 /// lines beneath retain the selected source and publication details.
 fn reload_receipt(outcome: &str, started: std::time::Instant, lines: Vec<String>) -> String {
@@ -2456,6 +2450,15 @@ fn reload_receipt(outcome: &str, started: std::time::Instant, lines: Vec<String>
     )
 }
 
+/// Which failure layer produced `error`, for a receipt built from it.
+/// `Compile`/`CellCheck`/`CompileInfrastructure` never ran an effect at all;
+/// `Resident`/`Delivered` wrap a [`tidepool_runtime::session::ResidentError`],
+/// which already distinguishes an effect failure from an observation one —
+/// see [`tidepool_runtime::session::ResidentError::failure_layer`]. A
+/// `Delivered` error whose inner error that classification does not cover is
+/// still known to be post-commit (its doc: the response was already handed
+/// to the machine before this failed), so it defaults to `Effect` rather
+/// than staying unclassified.
 fn resident_actor_failure_layer(
     error: &ResidentActorWorkbenchError,
 ) -> Option<WorkbenchFailureLayer> {
@@ -10356,8 +10359,7 @@ where
                             "{}\nunfold admission ended without committing every fork group",
                             failure_receipt.output
                         );
-                        failure_receipt.operations =
-                            std::mem::take(&mut cursor.unit.operations);
+                        failure_receipt.operations = std::mem::take(&mut cursor.unit.operations);
                         failure_receipt.failure_layer = Some(WorkbenchFailureLayer::Effect);
                         merge_retained_bindings(
                             &mut failure_receipt,
@@ -10668,10 +10670,6 @@ where
                             .map(|checked| committed_declaration_warnings(checked, cursor.index))
                             .unwrap_or_default();
                         warnings.extend(checked_warnings);
-                        let output = crate::workbench_display::resolve_job_binding_placeholder(
-                            output,
-                            &installed_bindings,
-                        );
                         let output = if request.tool_call().is_some() {
                             crate::bound_workbench_display(&output, cursor.unit.display_remaining)
                         } else {
@@ -10893,10 +10891,7 @@ where
                             terminal_transfer: Some(WorkbenchTerminalTransfer::ReplyAccepted),
                             failure_layer: None,
                         };
-                        merge_retained_bindings(
-                            &mut receipt,
-                            &cursor.unit.recovered_bindings,
-                        );
+                        merge_retained_bindings(&mut receipt, &cursor.unit.recovered_bindings);
                         cursor.receipts.push(receipt);
                         return Ok(WorkbenchRunAdvance::Complete(KernelStep::ContinueLater(
                             workbench_response(
@@ -11105,10 +11100,7 @@ where
                             ),
                             failure_layer: None,
                         };
-                        merge_retained_bindings(
-                            &mut receipt,
-                            &cursor.unit.recovered_bindings,
-                        );
+                        merge_retained_bindings(&mut receipt, &cursor.unit.recovered_bindings);
                         cursor.receipts.push(receipt);
                         return Ok(WorkbenchRunAdvance::Complete(KernelStep::ContinueLater(
                             workbench_response(
@@ -16866,15 +16858,17 @@ mod tests {
             effect: "retain command job binding".into(),
             disposition: WorkbenchOperationDisposition::Committed,
         };
-        let failure =
-            workbench_failure_after_unit(&[], 0, 1, source, vec![operation], &recovered);
+        let failure = workbench_failure_after_unit(&[], 0, 1, source, vec![operation], &recovered);
 
         let receipt = failure
             .receipts
             .last()
             .expect("completed observation failure has a receipt");
         assert_eq!(receipt.status, WorkbenchItemStatus::Diagnostic);
-        assert_eq!(receipt.failure_layer, Some(WorkbenchFailureLayer::Observation));
+        assert_eq!(
+            receipt.failure_layer,
+            Some(WorkbenchFailureLayer::Observation)
+        );
         assert_eq!(receipt.installed_bindings, recovered);
         assert!(receipt.output.contains("effects committed"));
         assert!(receipt.output.contains("retained bindings: commandJob"));
