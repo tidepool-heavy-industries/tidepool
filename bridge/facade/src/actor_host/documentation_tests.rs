@@ -1171,7 +1171,13 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
         .await;
     let output = explicit_display_output(&shown)["text"].as_str().unwrap();
     assert!(output.starts_with("WatchReady"), "{shown}");
-    assert!(!output.contains("candidate-9828"), "{shown}");
+    assert!(
+        !explicit_display_output(&shown)["expansions"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{shown}"
+    );
     let expanded = campaign
         .drive_actor_output(
             &store,
@@ -1181,11 +1187,14 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
             ),
         )
         .await;
-    assert!(
-        explicit_display_output(&expanded)["text"]
-            .as_str()
-            .unwrap()
-            .contains("candidate-9828"),
+    assert_eq!(
+        explicit_display_output(&expanded)["text"],
+        output,
+        "{expanded}"
+    );
+    assert_eq!(
+        explicit_display_output(&expanded)["expansions"],
+        explicit_display_output(&shown)["expansions"],
         "{expanded}"
     );
     committed(root.as_ref(), &format!("let retained = {saved} ()")).await;
@@ -1215,7 +1224,7 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
         let exact = campaign
             .drive_actor_output(&store, committed(root.as_ref(), &source))
             .await;
-        assert_eq!(exact["items"][0]["output"], "True", "{exact}");
+        assert_eq!(explicit_display_output(&exact)["text"], "True", "{exact}");
     }
     let before = campaign
         .forest
@@ -1237,7 +1246,10 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
     let two = campaign
         .drive_actor_output(&store, committed(root.as_ref(), &inspect))
         .await;
-    assert_eq!(one["items"][0]["output"], two["items"][0]["output"]);
+    assert_eq!(
+        explicit_display_output(&one)["text"],
+        explicit_display_output(&two)["text"]
+    );
     assert_eq!(
         campaign
             .forest

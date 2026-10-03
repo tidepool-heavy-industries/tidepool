@@ -137,8 +137,8 @@ instance Display WatchFailure where
 
 data FullInspection = FullInspection ([Text] -> Int -> (Text, Bool)) DisplayTree
 
--- | Retain the value and render only the display allowance when observed.
--- Explicit inspection uses a larger preview, not an unbounded serialization.
+-- | Retain the value's structural renderer. Explicit display keeps its ordinary
+-- allowance and expansion keys; inspection never serializes an unbounded value.
 class FullDisplay a where
   inspectFull :: a -> FullInspection
 
@@ -153,6 +153,9 @@ instance FullDisplay Text where
 
 instance FullDisplay [Char] where
   inspectFull value = FullInspection (\_ budget -> rawString budget value) (StringLeaf value)
+
+instance Display FullInspection where
+  displayTree (FullInspection _ tree) = tree
 
 instance WorkbenchDisplay FullInspection where
   workbenchDisplay (FullInspection render _) = render [] 65536
