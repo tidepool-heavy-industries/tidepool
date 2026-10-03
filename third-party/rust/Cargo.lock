@@ -3421,6 +3421,7 @@ dependencies = [
  "ureq",
  "url",
  "uuid",
+ "walkdir",
  "which",
 ]
 

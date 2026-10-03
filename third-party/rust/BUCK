@@ -14674,6 +14674,12 @@ cargo.rust_library(
     deps = [":libc-0.2"],
 )
 
+alias(
+    name = "walkdir",
+    actual = ":walkdir-2",
+    visibility = ["PUBLIC"],
+)
+
 http_archive(
     name = "walkdir-2.5.0.crate",
     sha256 = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b",

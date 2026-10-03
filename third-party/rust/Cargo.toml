@@ -63,4 +63,5 @@ path = "empty.rs"
 "ureq" = { package = "ureq", version = "=2.12.1", default-features = true, features = ["json"] }
 "url" = { package = "url", version = "=2.5.8", default-features = true, features = [] }
 "uuid" = { package = "uuid", version = "=1.24.1", default-features = true, features = ["v4"] }
+"walkdir" = { package = "walkdir", version = "=2.5.0", default-features = true, features = [] }
 "which" = { package = "which", version = "=8.0.5", default-features = true, features = [] }
