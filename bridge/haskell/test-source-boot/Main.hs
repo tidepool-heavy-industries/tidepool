@@ -1,7 +1,7 @@
 module Main (main) where
 
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots)
-import ExactScopeV8Test (exactScopeV8Checks)
+import ExactScopeV8Test (exactScopeV8Checks, candidateCanonicalChecks)
 
 import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
@@ -186,6 +186,7 @@ main :: IO ()
 main = getArgs >>= \case
   ["--finalized-core"] -> finalizedCoreChecks
   ["--exact-scope-v8", manifest] -> exactScopeV8Checks manifest
+  ["--canonical-candidates", scope, candidates] -> candidateCanonicalChecks scope candidates
   ["--finalized-frontend-once"] -> finalizedFrontendOnce
   ["--execution-source-decode"] -> executionSourceDecodeChecks
   "--execution-source-decode-benchmark" : iterations : files -> executionSourceDecodeBenchmark iterations files
@@ -478,7 +479,8 @@ executionSourceClosureWire path = do
     fail "large closure accepted a missing native owner"
   let candidates = takeDirectory path </> "empty-candidates.cbor"
   BS.writeFile candidates (toStrictByteString (encodeTerm (TList
-    [TString "TPMCAN", TString "8", TList [], TList [], TList [], TList [TList [],TList []]])))
+    [TString "TPMCAN", TString "10", TList [], TList [], TList [], TList [TList [],TList []]
+      ,TString (T.pack (scopeProducerSha256 scope))])))
   decoded <- readModuleCandidatesWithGraphs graphs candidates >>= either fail pure
   unless (null decoded) $ fail "empty candidate manifest invented source candidates"
   bytes <- BS.readFile path
@@ -1438,7 +1440,8 @@ verifyCertifiedGroupingOrder work original = do
   writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression path iface
   interfaceBytes <- BS.readFile path
   sourceBytes <- BS.readFile source
-  let candidate = ModuleCandidate
+  base <- structuralCandidate work
+  let candidate = base
         { candidateUnit = unitString (moduleUnit (mi_module iface))
         , candidateModule = name
         , candidateSource = source
@@ -1473,6 +1476,23 @@ verifyCertifiedGroupingOrder work original = do
   where
     ordinal (TList [TInt value,TList []]) = value
     ordinal _ = -1
+
+-- Synthetic descriptors exercise producer group framing only. This decoder
+-- does not grant them a durable certificate or compiler admission.
+structuralCandidate :: FilePath -> IO ModuleCandidate
+structuralCandidate work = do
+  let path = work </> "structural-candidate.cbor"
+      seal = TString (T.replicate 64 "a")
+      row = TList [TString "main",TString "Fixture",TString "/fixture/Source.hs",seal
+        ,TString "/fixture/Source.hi",seal,seal,seal,seal,TList [],TList []
+        ,TString "/fixture/packages",seal,TString "/fixture/products.tpmod",TList []
+        ,TList [TString "module",TString "/fixture/module.cbor",seal,TString "/fixture/Core",seal]]
+      packet = TList [TString "TPMCAN",TString "10",TList [],TList [],TList [row]
+        ,TList [TList [],TList []],seal]
+  BS.writeFile path (toStrictByteString (encodeTerm packet))
+  readModuleCandidates path >>= \case
+    Right [candidate] -> pure candidate
+    _ -> fail "structural producer-group candidate did not decode"
 
 originalProjectionProducts :: IO ()
 originalProjectionProducts = withScratch $ \work -> do
@@ -1617,12 +1637,12 @@ compactInventoryRows rows = do
   pure (TList (reverse (fixtureSymbolRows inventory)),TList (reverse (fixtureGlobalRows inventory)),compact)
   where
     empty = FixtureInventory Map.empty [] Map.empty []
-    compactRow inventory (TList fields) | length fields == 14 = case drop 10 fields of
+    compactRow inventory (TList fields) | length fields == 16 = case drop 10 fields of
       TList groups:_ -> do
         (next,compact) <- mapFixtureInventory compactGroup inventory groups
         pure (next,TList (take 10 fields ++ [TList compact] ++ drop 11 fields))
       _ -> Left "fixture candidate lacks groups"
-    compactRow _ _ = Left "fixture candidate must have fourteen fields"
+    compactRow _ _ = Left "fixture candidate must have sixteen fields"
     compactGroup inventory (TList [ordinal,TList binders,TList globals]) = do
       (withBinders,binderRefs) <- mapFixtureInventory internFixtureSymbol inventory binders
       (withGlobals,globalRefs) <- mapFixtureInventory internFixtureGlobal withBinders globals
@@ -1682,7 +1702,8 @@ candidateCompactInventory = withScratch $ \work -> do
         ,fixtureCandidate "Other" (map groupTerm (reverse groups))]
       emptyParcel = TList [TList [],TList []]
       envelope symbols globalTable rows = TList
-        [TString "TPMCAN",TString "8",symbols,globalTable,TList rows,emptyParcel]
+        [TString "TPMCAN",TString "10",symbols,globalTable,TList rows,emptyParcel
+        ,TString (T.replicate 64 "a")]
       readFixture name value = do
         let path = work </> (name ++ ".cbor")
             bytes = toStrictByteString (encodeTerm value)
@@ -1729,8 +1750,12 @@ candidateCompactInventory = withScratch $ \work -> do
   where
     fixtureCandidate name groups = TList
       ([TString "main",TString name,TString "/fixture/source.hs",sha,TString "/fixture/interface.hi",sha,sha,sha,sha]
-        ++ [TList [],TList groups,TString "/fixture/packages",sha,TString "/fixture/products.tpmod"])
-      where sha = TString (T.replicate 64 "0")
+        ++ [TList [],TList groups,TString "/fixture/packages",sha,TString "/fixture/products.tpmod"
+          ,TList [],TList [TString "module",TString "/fixture/module.cbor",proofSeal
+            ,TString "/fixture/Core",proofSeal]])
+      where
+        sha = TString (T.replicate 64 "0")
+        proofSeal = TString (T.replicate 64 "a")
     groupTerm group = TList [TInt (fromIntegral (candidateGroupOrdinal group))
       ,TList (map symbolTerm (candidateGroupBinders group)),TList (map globalTerm (candidateGroupGlobals group))]
     globalTerm global = TList [symbolTerm (candidateGlobalIdentity global),repTerm (candidateGlobalRep global)

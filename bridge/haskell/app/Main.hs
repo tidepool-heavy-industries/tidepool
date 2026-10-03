@@ -117,7 +117,7 @@ import Tidepool.ExactScope
   ( ExactCompilation(..), ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
   , originalGroupFromProjected, originalGroupFromCandidate
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
-  , ExactInterfaceEvidence(..)
+  , ExactInterfaceEvidence(..), validateCandidateCanonicalInterfaceProof, canonicalCertificateSha256
   , readExactScope, revalidateExactScope, writeExactCompilation, extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CellProgramState
@@ -429,7 +429,8 @@ retainedOriginalInterfaces prepared =
   [artifact | scope <- maybe [] pure (compilationScope <$> pprExactCompilation prepared)
     , (artifact, _, _) <- scopeInterfaces scope]
   ++ [ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
-        (candidateInterface candidate) (candidateInterfaceSha256 candidate) []
+        (candidateInterface candidate) (candidateInterfaceSha256 candidate)
+        (candidateInterfaceRequirements candidate)
      | candidate <- pprAcceptedCandidates prepared]
 
 writeCertifiedProductsKeeping
@@ -1616,7 +1617,11 @@ retainProgramProducts includes directory prepared certified target initial = do
           && shaHex packageBytes == candidatePackageImportsSha256 candidate
           && shaHex productBytes == candidateProductSha256 candidate) $
         fail "accepted cached supporting original changed before retention"
-      requirements <- programInterfaceRequirements prepared unit owner
+      selectedInterfaces <- foldM selectCandidateInterface (scopeInterfaces scope)
+        (pprAcceptedCandidates prepared)
+      proof <- validateCandidateCanonicalInterfaceProof (scopeProducerSha256 scope)
+        selectedInterfaces candidate >>= either fail pure
+      let requirements = candidateInterfaceRequirements candidate
       lexicalRequirements <- programSourceRequirements prepared unit owner >>= programLexicalRequirements scope supportOwners
       let groups = map originalGroupFromCandidate (candidateGroups candidate)
           existingInterfaces = [(artifact,packages,sha)
@@ -1641,6 +1646,8 @@ retainProgramProducts includes directory prepared certified target initial = do
           BS.writeFile productPath productBytes
           pure scope { scopeProducts = scopeProducts scope ++ [original]
             , scopeInterfaces = scopeInterfaces scope ++ [(interface,packagesPath,candidatePackageImportsSha256 candidate)]
+            , scopeInterfaceEvidence = Map.insert key (ModuleInterfaceEvidence proof)
+                (scopeInterfaceEvidence scope)
             , scopeLexical = scopeLexical scope ++ [(key,lexicalRequirements)] }
         ([(interface,packagesPath,packagesSha)],[original])
           | lookup key (scopeLexical scope) == Just lexicalRequirements
@@ -1657,8 +1664,25 @@ retainProgramProducts includes directory prepared certified target initial = do
               unless (currentInterface == interfaceBytes && currentPackages == packageBytes
                   && currentProduct == productBytes) $
                 fail "retained cached supporting original changed between cell slots"
-              pure scope
+              case Map.lookup key (scopeInterfaceEvidence scope) of
+                Just (ModuleInterfaceEvidence retained)
+                  | canonicalCertificateSha256 retained == canonicalCertificateSha256 proof -> pure scope
+                _ -> fail "cached source product conflicts with retained canonical evidence"
         _ -> fail "cached source product conflicts with an admitted original owner"
+    selectCandidateInterface interfaces candidate = do
+      let key = (candidateUnit candidate,candidateModule candidate)
+          row = (ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
+            (candidateInterface candidate) (candidateInterfaceSha256 candidate)
+            (candidateInterfaceRequirements candidate),candidatePackageImports candidate,
+            candidatePackageImportsSha256 candidate)
+      case [existing | existing@(interface,_,_) <- interfaces
+          , (exactUnit interface,exactModule interface) == key] of
+        [] -> pure (interfaces ++ [row])
+        [(interface,_,packageSha)]
+          | exactSha256 interface == candidateInterfaceSha256 candidate
+          , exactRequirements interface == candidateInterfaceRequirements candidate
+          , packageSha == candidatePackageImportsSha256 candidate -> pure interfaces
+        _ -> fail "accepted candidate conflicts with the selected canonical interface closure"
     retain scope (index, originalProduct) = do
       let (unitText,ownerText,interfaceBytes,groups) = moduleProductInput originalProduct
           unit = T.unpack unitText

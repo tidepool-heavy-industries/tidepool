@@ -1,6 +1,8 @@
 module Main where
 
 import qualified Data.Set as Set
+import Codec.CBOR.Term (Term(..), encodeTerm)
+import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (forM_, unless, void)
 import Control.Monad.IO.Class (liftIO)
@@ -404,6 +406,23 @@ originalProductRootsProof = originalProductRootsProofWith projectedOriginalGloba
 
 originalProductRootsProofWith :: (Execution.GlobalDecl -> (Execution.SymbolIdentity, Bool)) -> IO ()
 originalProductRootsProofWith projectedDemand = do
+  -- The package-root walker consumes groups only. Decode an unvalidated wire
+  -- descriptor rather than constructing or authenticating a module proof.
+  parent <- getTemporaryDirectory
+  base <- bracket (openTempFile parent "original-group-descriptor.cbor")
+    (\(path,_) -> removeFile path) $ \(path,handle) -> do
+      hClose handle
+      let seal = TString (fromString (replicate 64 'a'))
+          row = TList [TString "main",TString "Fixture",TString "/fixture/Source.hs",seal
+            ,TString "/fixture/Source.hi",seal,seal,seal,seal,TList [],TList []
+            ,TString "/fixture/Source.packages",seal,TString "/fixture/Source.tpmod",TList []
+            ,TList [TString "module",TString "/fixture/module.cbor",seal,TString "/fixture/Core",seal]]
+          packet = TList [TString "TPMCAN",TString "10",TList [],TList [],TList [row]
+            ,TList [TList [],TList []],seal]
+      BS.writeFile path (toStrictByteString (encodeTerm packet))
+      readModuleCandidates path >>= \case
+        Right [candidate] -> pure candidate
+        _ -> fail "structural original-group candidate did not decode"
   let identity unit name occurrence = Execution.SymbolIdentity
         (fromString unit) (fromString name) (fromString "value") (fromString occurrence) Nothing
       source = identity "main" "Tidepool.Aeson.FromJSON" "$fFromJSONInt_$cparseJSON"
@@ -412,10 +431,7 @@ originalProductRootsProofWith projectedDemand = do
       package = identity "ghc-internal" "GHC.Internal.Real" "$fIntegralInt"
       unused = identity "ghc-internal" "GHC.Internal.Real" "$fIntegralWord"
       global value = Execution.GlobalDecl value Execution.LiftedRefRep Nothing False Nothing
-      candidate name groups = ModuleCandidate "main" name "/fixture/Source.hs"
-        (replicate 64 '0') "/fixture/Source.hi" (replicate 64 '0')
-        (replicate 64 '1') (replicate 64 '2') (replicate 64 '3') [] groups
-        "/fixture/Source.hi.packages" (replicate 64 '4') "/fixture/Source.tpmod" Nothing
+      candidate name groups = base {candidateModule=name,candidateGroups=groups}
       imported value generation = CandidateGlobal value Execution.LiftedRefRep Nothing False generation
       parserCandidate = candidate "Tidepool.Aeson.FromJSON"
         [CandidateGroup 137 [source, sibling] [imported sibling Nothing, imported package Nothing]]
