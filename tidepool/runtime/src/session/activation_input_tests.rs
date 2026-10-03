@@ -54,6 +54,24 @@ struct InputFixture {
 
 impl InputFixture {
     fn compile(source: &str, opaque: bool, session: SessionId) -> Self {
+        let (root, recipe) = Self::source_recipe(opaque);
+        let library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
+            .unwrap()
+            .with_validation_include(recipe.include.clone());
+        let view = PersistentSession::new(Some(library), crate::DEFAULT_NURSERY_SIZE)
+            .compile_view_in(ScopeId::ROOT)
+            .unwrap();
+        let producer = compiled(compile_turn(&view, &recipe, source, &[]));
+        assert_startup_origin("producer", &producer, true);
+        Self {
+            root,
+            session,
+            recipe,
+            producer,
+        }
+    }
+
+    fn source_recipe(opaque: bool) -> (tempfile::TempDir, Arc<InputRecipe>) {
         tidepool_testing::eval_harness::require_extract();
         let effects = TestEffectSurface::minimal(&[
             tidepool_mcp::agent_tools_decl(),
@@ -108,30 +126,17 @@ impl InputFixture {
             row: "'[Replies]".into(),
             include,
         });
-        let library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
-            .unwrap()
-            .with_validation_include(recipe.include.clone());
-        let view = PersistentSession::new(Some(library), crate::DEFAULT_NURSERY_SIZE)
-            .compile_view_in(ScopeId::ROOT)
-            .unwrap();
-        let producer = compiled(compile_turn(&view, &recipe, source, &[]));
-        assert_startup_origin("producer", &producer, true);
-        Self {
-            root,
-            session,
-            recipe,
-            producer,
-        }
+        (root, recipe)
     }
 
     fn fresh(&self) -> TestSession {
-        let library = SessionLib::open(
-            self.session,
-            self.root.path(),
-            ModuleEnv::standalone_default(),
-        )
-        .unwrap()
-        .with_validation_include(self.recipe.include.clone());
+        Self::fresh_in(self.session, &self.root, &self.recipe)
+    }
+
+    fn fresh_in(session: SessionId, root: &tempfile::TempDir, recipe: &InputRecipe) -> TestSession {
+        let library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
+            .unwrap()
+            .with_validation_include(recipe.include.clone());
         let mut resident = TestSession::unbootstrapped(
             frunk::HNil,
             EmptyOutput,
@@ -155,7 +160,7 @@ impl InputFixture {
             .unwrap();
         let (bound, receiver, reservation) = compile_checked_binding(
             &mut resident,
-            &self.recipe,
+            recipe,
             include_str!("fixtures/activation-input-receiver.hs"),
             execution.clone(),
         );
@@ -192,33 +197,7 @@ impl InputFixture {
             matches!(outcome, ResidentOutcome::BindingsCommitted { .. }),
             "projected native binding completion: {outcome:?}"
         );
-        let intent = resident
-            .freeze_private_execution(
-                &execution,
-                crate::session::ExecutionPublicationIntent::CompletedCell,
-            )
-            .expect("freeze the checked receiver binding pair");
-        assert_eq!(intent.native_write_ids().len(), 2);
-        let publication = resident
-            .restage_ephemeral_execution_publication(intent)
-            .expect("stage receiver publication into ROOT");
-        let ticket = match publication {
-            crate::session::ExecutionPublication::Bindings(base) => base.stage().unwrap(),
-            crate::session::ExecutionPublication::Declarations(base) => {
-                let crate::session::CertifiedDeclarationPublication::Accepted(accepted) =
-                    base.certify().expect("certify receiver Value publication")
-                else {
-                    panic!("receiver Value publication must be accepted");
-                };
-                accepted.stage().unwrap()
-            }
-        };
-        assert_eq!(
-            resident
-                .publish_staged_public_manifest(ticket, &crate::session::PublicationDecision::new())
-                .expect("commit the checked receiver binding pair to ROOT"),
-            crate::session::PublicManifestCommit::Ephemeral,
-        );
+        publish_checked_fixture(&mut resident, &execution, 2);
         resident.set_run_context(previous_context).unwrap();
         resident.retire_scope(execution.private_scope());
         let retained = resident
@@ -323,6 +302,41 @@ impl InputFixture {
         );
         (submission, activation)
     }
+}
+
+fn publish_checked_fixture(
+    resident: &mut TestSession,
+    execution: &crate::session::PrivateExecutionAdmission,
+    native_writes: usize,
+) {
+    let intent = resident
+        .freeze_private_execution(
+            execution,
+            crate::session::ExecutionPublicationIntent::CompletedCell,
+        )
+        .expect("freeze the checked fixture publication");
+    assert_eq!(intent.native_write_ids().len(), native_writes);
+    let publication = resident
+        .restage_ephemeral_execution_publication(intent)
+        .expect("stage the checked fixture into ROOT");
+    let ticket = match publication {
+        crate::session::ExecutionPublication::Bindings(base) => base.stage().unwrap(),
+        crate::session::ExecutionPublication::Declarations(base) => {
+            let crate::session::CertifiedDeclarationPublication::Accepted(accepted) = base
+                .certify()
+                .expect("certify the checked declaration/value publication")
+            else {
+                panic!("checked fixture publication must be accepted");
+            };
+            accepted.stage().unwrap()
+        }
+    };
+    assert_eq!(
+        resident
+            .publish_staged_public_manifest(ticket, &crate::session::PublicationDecision::new())
+            .expect("commit the checked fixture to ROOT"),
+        crate::session::PublicManifestCommit::Ephemeral,
+    );
 }
 
 fn assert_startup_origin(label: &str, compiled: &CompiledTurn, requires_input: bool) {
@@ -558,16 +572,20 @@ fn preview_original(
     assert_eq!(tuple[1], false);
 }
 
-fn compile_checked_binding(
+struct CheckedFixtureCell {
+    checked: turn::CellCheck,
+    prefix: Arc<crate::session::RuntimeCheckedPrefix>,
+    templates: Vec<turn::TurnTemplate>,
+    include: Vec<PathBuf>,
+}
+
+fn check_fixture_cell(
     resident: &mut TestSession,
     recipe: &InputRecipe,
     source: &str,
     execution: Arc<crate::session::PrivateExecutionAdmission>,
-) -> (
-    Vec<BoundBinder>,
-    CompiledTurn,
-    Arc<crate::session::RuntimeCheckedItemAdmission>,
-) {
+    declaration_count: usize,
+) -> CheckedFixtureCell {
     use crate::session::{CellCheckRequest, TemplateSelector};
     use tidepool_toolchain::checked_cell::CheckedCellSpecification;
 
@@ -577,7 +595,18 @@ fn compile_checked_binding(
         .unwrap()
         .with_scoped_injection();
     let imports = view.turn_imports(&SourceImports::new());
-    let template = resident_cell_check_template(&recipe.preamble, &recipe.row, &imports);
+    let preamble = if declaration_count == 0 {
+        recipe.preamble.clone()
+    } else {
+        recipe.preamble.replace(
+            "module Expr where",
+            &format!(
+                "module {} where",
+                resident.next_declaration_module().unwrap().module_name()
+            ),
+        )
+    };
+    let template = resident_cell_check_template(&preamble, &recipe.row, &imports);
     let templates = resident_workbench_templates(&recipe.preamble, &recipe.row, &imports);
     let specification = Arc::new(CheckedCellSpecification {
         admission_digest: [0; 32],
@@ -601,7 +630,7 @@ fn compile_checked_binding(
     let admission = resident
         .admit_cell_for_execution(
             execution,
-            0,
+            declaration_count,
             specification.clone(),
             specification.specification_digest(),
             recipe.digest(),
@@ -628,37 +657,155 @@ fn compile_checked_binding(
         &templates,
     )
     .expect("check fixture bindings through runtime admission");
-    let item = checked.checked_item(0).unwrap();
-    let prefix = resident
-        .begin_checked_prefix(admission, item.clone())
+    let first = checked.checked_item(0).unwrap();
+    let prefix = resident.begin_checked_prefix(admission, first).unwrap();
+    CheckedFixtureCell {
+        checked,
+        prefix,
+        templates,
+        include: includes,
+    }
+}
+
+impl CheckedFixtureCell {
+    fn compile_binding(
+        &self,
+        resident: &mut TestSession,
+        index: usize,
+    ) -> (
+        Vec<BoundBinder>,
+        CompiledTurn,
+        Arc<crate::session::RuntimeCheckedItemAdmission>,
+    ) {
+        let item = self.checked.checked_item(index).unwrap();
+        let source = item.source();
+        let include = self
+            .include
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let reservation = resident
+            .admit_checked_item(self.prefix.clone(), item.clone())
+            .unwrap();
+        let snapshot = reservation.snapshot();
+        let view = snapshot.view();
+        let injected = snapshot.compiler_prefix().injected_modules();
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = turn::run_checked_item(
+            TurnRequest {
+                exact_context: view.exact_compile_context(),
+                session_id: Some(view.session()),
+                turn_text: source,
+                templates: &self.templates,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                gen: reservation.generation().0,
+                verdict: Some(self.checked.items[index].verdict.clone()),
+                target: None,
+                retained_imports: snapshot.admitted_retained_imports(),
+            },
+            reservation.clone(),
+        )
+        .expect("compile admitted fixture bindings")
+        else {
+            panic!("fixture setup or value probe must be a checked bind");
+        };
+        (bound, compiled, reservation)
+    }
+
+    fn adopt_declaration(&self, resident: &mut TestSession) -> String {
+        let item = self.checked.checked_item(0).unwrap();
+        let owner = item
+            .planned_declaration()
+            .unwrap()
+            .product()
+            .owner()
+            .module
+            .clone();
+        let reservation = resident
+            .admit_checked_item(self.prefix.clone(), item)
+            .unwrap();
+        resident.adopt_checked_declaration(reservation).unwrap();
+        owner
+    }
+}
+
+fn compile_checked_binding(
+    resident: &mut TestSession,
+    recipe: &InputRecipe,
+    source: &str,
+    execution: Arc<crate::session::PrivateExecutionAdmission>,
+) -> (
+    Vec<BoundBinder>,
+    CompiledTurn,
+    Arc<crate::session::RuntimeCheckedItemAdmission>,
+) {
+    check_fixture_cell(resident, recipe, source, execution, 0).compile_binding(resident, 0)
+}
+
+fn publish_fixture_declaration(
+    resident: &mut TestSession,
+    recipe: &InputRecipe,
+    source: &str,
+    native_writes: usize,
+) -> String {
+    let previous_context = resident.run_context();
+    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..previous_context
+        })
         .unwrap();
-    let reservation = resident.admit_checked_item(prefix, item).unwrap();
-    let snapshot = reservation.snapshot();
-    let view = snapshot.view();
-    let injected = snapshot.compiler_prefix().injected_modules();
-    let TurnResult::Bind {
-        bound, compiled, ..
-    } = turn::run_checked_item(
-        TurnRequest {
-            exact_context: view.exact_compile_context(),
-            session_id: Some(view.session()),
-            turn_text: source,
-            templates: &templates,
-            include: &include,
-            session_root: view.session_root(),
-            inject_modules: &injected,
-            gen: reservation.generation().0,
-            verdict: Some(checked.items[0].verdict.clone()),
-            target: None,
-            retained_imports: snapshot.admitted_retained_imports(),
-        },
-        reservation.clone(),
-    )
-    .expect("compile admitted fixture bindings")
-    else {
-        panic!("fixture setup or value probe must be a checked bind");
-    };
-    (bound, compiled, reservation)
+    let checked = check_fixture_cell(resident, recipe, source, execution.clone(), 1);
+    let owner = checked.adopt_declaration(resident);
+    assert_eq!(checked.checked.items.len(), native_writes + 1);
+    let mut retained = Vec::new();
+    for index in 1..checked.checked.items.len() {
+        let (bound, compiled, reservation) = checked.compile_binding(resident, index);
+        assert_eq!(bound.len(), 1);
+        let certificate = compiled
+            .certification
+            .as_ref()
+            .unwrap()
+            .checked_execution()
+            .unwrap()
+            .value_interface_certificate()
+            .unwrap();
+        let outcome = resident
+            .run_bind_with_sites(
+                &bound[0].name,
+                compiled.code(),
+                &bound[0],
+                reservation.generation(),
+            )
+            .unwrap();
+        assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+        retained.push((bound[0].clone(), certificate));
+    }
+    publish_checked_fixture(resident, &execution, native_writes);
+    resident.set_run_context(previous_context).unwrap();
+    resident.retire_scope(execution.private_scope());
+    let published = resident
+        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .unwrap();
+    for (binder, certificate) in retained {
+        assert!(published
+            .bindings
+            .iter()
+            .any(|(name, id)| name == &binder.name
+                && *id == SessionVarId::from_extract(binder.var_id)));
+        assert!(Arc::ptr_eq(
+            resident
+                .state
+                .retained_checked_value_artifact(certificate.owner())
+                .unwrap(),
+            &certificate
+        ));
+    }
+    owner
 }
 
 fn original_value_probe(
@@ -1029,85 +1176,132 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
     refuse_changed_checked_sites(&mut checked, &fixture);
 }
 
+/// Resident declarations and captured checked values retain nominal owners across
+/// lawful source shadowing. External-module type custody has a separate test.
 #[test]
 fn activation_opaque_input_native_owner_survives_same_spelling_source_shadow() {
-    let fixture = InputFixture::compile(
-        include_str!("fixtures/activation-input-opaque.hs"),
-        true,
-        SessionId(1711),
+    let (root, recipe) = InputFixture::source_recipe(false);
+    let session = SessionId(1711);
+    let mut resident = InputFixture::fresh_in(session, &root, &recipe);
+    let original = publish_fixture_declaration(
+        &mut resident,
+        &recipe,
+        include_str!("fixtures/activation-input-resident-original.hs"),
+        2,
     );
-    let replacement = fixture
-        .recipe
-        .preamble
-        .replace(
-            "import ActivationInputOriginal (Input)",
-            "import ActivationInputReplacement (Input)",
-        )
-        .replace(
-            "import qualified ActivationInputOriginal as Original",
-            "import qualified ActivationInputReplacement as Original",
-        )
-        .replace(
-            "import qualified ActivationInputOriginal\n",
-            "import qualified ActivationInputReplacement as ActivationInputOriginal\n",
-        );
-    let shadow = Arc::new(InputRecipe {
-        preamble: replacement,
-        row: fixture.recipe.row.clone(),
-        include: fixture.recipe.include.clone(),
-    });
-    let mut refused = fixture.fresh();
-    let reservation = fixture.start(&mut refused);
-    let (submission, hole) = fixture.deliver(&mut refused, reservation, 1);
-    let site = parked_site(&mut refused, &hole);
-    let before = refused
+    let original_head = resident
+        .current_decl_heads_in(ScopeId::ROOT)
+        .into_iter()
+        .find(|(name, _)| name == "Input")
+        .unwrap();
+    let original_projection = resident
+        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .unwrap()
+        .bindings
+        .into_iter()
+        .find(|(name, _)| name == "originalProject")
+        .unwrap()
+        .1;
+    let original_input = resident
+        .public_visibility_snapshot_in(ScopeId::ROOT)
+        .unwrap()
+        .bindings
+        .into_iter()
+        .find(|(name, _)| name == "originalInput")
+        .unwrap()
+        .1;
+    let previous_context = resident.run_context();
+    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..previous_context
+        })
+        .unwrap();
+    let (bound, producer, _) = compile_checked_binding(
+        &mut resident,
+        &recipe,
+        include_str!("fixtures/activation-input-resident-request.hs"),
+        execution.clone(),
+    );
+    assert!(
+        bound.is_empty(),
+        "request setup has no public output bindings"
+    );
+    assert!(producer
+        .certification
+        .as_ref()
+        .unwrap()
+        .checked_execution()
+        .unwrap()
+        .matches_target(&producer.prepared));
+    let fixture = InputFixture {
+        root,
+        session,
+        recipe,
+        producer,
+    };
+    let reservation = fixture.start(&mut resident);
+    resident.set_run_context(previous_context).unwrap();
+    let (submission, hole) = fixture.deliver(&mut resident, reservation, 1);
+    let site = parked_site(&mut resident, &hole);
+    let realm = resident.parked_realm(&hole).unwrap();
+    let input = resident
+        .capture_activation_input(&hole, realm, site)
+        .unwrap();
+    let shadow = publish_fixture_declaration(
+        &mut resident,
+        &fixture.recipe,
+        include_str!("fixtures/activation-input-resident-shadow.hs"),
+        0,
+    );
+    assert_ne!(
+        original, shadow,
+        "same spelling has a distinct nominal declaration owner"
+    );
+    let selected = resident
         .public_visibility_snapshot_in(ScopeId::ROOT)
         .unwrap();
-    let (owner, compiled) = checked_input(&mut refused, &hole, site, shadow);
-    preview_original(&mut refused, owner, compiled);
+    for (name, id) in [
+        ("originalProject", original_projection),
+        ("originalInput", original_input),
+    ] {
+        assert!(
+            selected
+                .bindings
+                .iter()
+                .any(|(selected, actual)| selected == name && *actual == id),
+            "shadowing preserves the actual original checked value ID"
+        );
+    }
+    let shadow_head = resident
+        .current_decl_heads_in(ScopeId::ROOT)
+        .into_iter()
+        .find(|(name, _)| name == "Input")
+        .unwrap();
     assert_ne!(
-        refused
-            .public_visibility_snapshot_in(ScopeId::ROOT)
-            .unwrap(),
-        before
+        original_head, shadow_head,
+        "ROOT publication advanced after lawful declaration shadow"
     );
-    assert!(refused
-        .binding_names_in(ScopeId::ROOT)
-        .iter()
-        .any(|name| name == "sessionInput"));
-    assert_eq!(refused.outstanding_custody(), 0);
-    assert!(matches!(
-        fixture.resume_activation(&mut refused, hole),
-        ResidentOutcome::Completed { .. }
-    ));
-    assert!(matches!(
-        refused.resume(submission, ()).unwrap(),
-        ResidentOutcome::Completed { .. }
-    ));
-    drop(refused);
-
-    // Reuse the immutable original fixture, with fresh mutable native state.
-    let mut accepted = fixture.fresh();
-    let reservation = fixture.start(&mut accepted);
-    let (submission, hole) = fixture.deliver(&mut accepted, reservation, 1);
-    let site = parked_site(&mut accepted, &hole);
-    let (owner, compiled) = checked_input(&mut accepted, &hole, site, fixture.recipe.clone());
-    preview_original(&mut accepted, owner, compiled);
+    let (owner, compiled) = checked_captured_input(&mut resident, input, fixture.recipe.clone());
+    preview_original(&mut resident, owner, compiled);
     original_value_probe(
-        &mut accepted,
+        &mut resident,
         &fixture.recipe,
-        "Original.project sessionInput",
+        "originalProject sessionInput",
         42,
     );
+    assert_eq!(resident.outstanding_custody(), 0);
     assert!(matches!(
-        fixture.resume_activation(&mut accepted, hole),
+        fixture.resume_activation(&mut resident, hole),
         ResidentOutcome::Completed { .. }
     ));
     assert!(matches!(
-        accepted.resume(submission, ()).unwrap(),
+        resident.resume(submission, ()).unwrap(),
         ResidentOutcome::Completed { .. }
     ));
-    assert!(accepted.parked_holes().is_empty());
+    resident.retire_scope(execution.private_scope());
+    assert!(resident.parked_holes().is_empty());
 }
 
 #[test]
