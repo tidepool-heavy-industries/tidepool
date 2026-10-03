@@ -1499,8 +1499,8 @@ runCellProgramMode compiler caches args cellPath exact planned = do
             KBind -> ["__tidepool_cell_pin_" ++ show index ++ "_" ++ binder | binder <- sbBinders verdict]
             KExpr -> ["__tidepool_cell_expr_" ++ show index]
             KDecl -> []
-          signatures = [signature | key <- keys, signature <- programCheckedSignatures state, signatureKey signature == key]
-          expression = case [value | value <- programExpressions state, expressionPlanKey value `elem` keys] of
+          signatures = signaturesFor keys state
+          expression = case expressionsFor keys state of
             [value] -> Just value
             _ -> Nothing
           itemAdmission = CheckedItemAdmission AuthoredCheckedItem (checkedAdmissionDigest admission) (checkedAdmissionDigest admission)

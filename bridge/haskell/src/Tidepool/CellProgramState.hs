@@ -3,7 +3,7 @@ module Tidepool.CellProgramState
   , initialProgramCellState, programItemOffset
   , recordDeclarationSegment, recordCheckedSegment
   , programPlans, programPins, programExpressions, programCheckedSignatures
-  , programSources, programDeclarations
+  , programSources, programDeclarations, signaturesFor, expressionsFor
   ) where
 
 import Data.Foldable (toList)
@@ -11,8 +11,8 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Data.Word (Word64)
 import Tidepool.Binders
-  ( SourcePrologue, CellSourcePlan(..), CheckedBinderPin, CellExpressionPlan )
-import Tidepool.CheckedCell (CheckedSignature)
+  ( SourcePrologue, CellSourcePlan(..), CheckedBinderPin, CellExpressionPlan(expressionPlanKey) )
+import Tidepool.CheckedCell (CheckedSignature(signatureKey))
 import Tidepool.CheckedPrefixImports (CompletedValueImport)
 import Tidepool.ExactScope (ExactScope)
 import Tidepool.ExecutionSchema (SymbolIdentity)
@@ -76,3 +76,18 @@ programSources = toList . sourceHistory
 
 programDeclarations :: ProgramCellState -> [(Int,String)]
 programDeclarations = toList . declarationHistory
+
+-- Signature requests follow binder-key order, including repeated requested keys.
+-- Expression evidence instead follows checked chronology, even for ambiguous keys.
+signaturesFor :: [String] -> ProgramCellState -> [CheckedSignature]
+signaturesFor keys state = concatMap
+  (\key -> matchingChunks ((== key) . signatureKey) (signatureChunks state)) keys
+
+expressionsFor :: [String] -> ProgramCellState -> [CellExpressionPlan]
+expressionsFor keys state = matchingChunks
+  ((`elem` keys) . expressionPlanKey) (expressionChunks state)
+
+-- Traverse the chunk owner directly, allocating only the matching result spine.
+matchingChunks :: (a -> Bool) -> Seq.Seq [a] -> [a]
+matchingChunks predicate = foldr
+  (\chunk rest -> foldr (\value values -> if predicate value then value : values else values) rest chunk) []

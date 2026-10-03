@@ -53,4 +53,16 @@ cellProgramStateChecks = do
     (programExact final == exact && programPrologue final == prologue
       && null (programValues final) && null (programOriginals final)
       && programOriginal final == Nothing && Map.null (programRetained final))
-  putStrLn "cell accumulation: 6 checks passed"
+  assert "signature queries retain requested key order, duplicate evidence, and repeated keys"
+    (signaturesFor ["expr-4","missing","pin-0","pin-0"] final
+      == [signature "expr-4" "Char",signature "pin-0" "Int",signature "pin-0" "Duplicate"
+         ,signature "pin-0" "Int",signature "pin-0" "Duplicate"]
+      && null (signaturesFor [] final) && null (signaturesFor ["missing"] final))
+  let duplicateExpression = (expression "expr-1") { expressionPlanType = "Bool" }
+      ambiguous = recordCheckedSegment (plan []) [] [duplicateExpression] [] "" final
+  assert "expression queries retain chronology and ambiguity regardless of requested key order"
+    (expressionsFor ["expr-4","missing","expr-1","expr-1"] ambiguous
+      == expressions1 ++ expressions2 ++ [duplicateExpression]
+      && expressionsFor ["expr-1"] ambiguous == expressions1 ++ [duplicateExpression]
+      && null (expressionsFor [] ambiguous) && null (expressionsFor ["missing"] ambiguous))
+  putStrLn "cell accumulation: 8 checks passed"
