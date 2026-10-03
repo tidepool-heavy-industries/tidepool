@@ -1696,8 +1696,13 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
         assert_eq!(child.supervisor_parent, Some(campaign.actor.identity()));
         if child.label.ends_with("/exact") {
             assert_eq!(child.context_parent, Some(campaign.actor.identity()));
-            let inherited = committed(child.policy.as_ref(), "inspectFull parentOnly").await;
-            assert_eq!(inherited["items"][0]["output"], "41");
+            let inherited = displayed(
+                &mut campaign,
+                child.policy.as_ref(),
+                "display (inspectFull parentOnly)",
+            )
+            .await;
+            assert_eq!(explicit_display_output(&inherited)["text"], "41");
         } else {
             assert_eq!(child.context_parent, None);
             assert_eq!(child.fork_effort, Some(exomonad_actor::ForkEffort::Medium));
@@ -1876,7 +1881,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
 
 #[tokio::test]
 async fn configured_modules_are_available_to_resident_declarations_from_frozen_sources() {
-    let campaign = TestCampaign::start_with_config(
+    let mut campaign = TestCampaign::start_with_config(
         exomonad_actor::ResearchPolicy::default(), |admission| admission, |config| {
             let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(authored.join("Project")).unwrap();
@@ -1887,11 +1892,16 @@ async fn configured_modules_are_available_to_resident_declarations_from_frozen_s
             std::fs::write(authored.join("Project/Work.hs"), "invalid edited source").unwrap();
         },
     ).await;
-    let policy = campaign.root_installation.policy.as_ref();
-    let result = committed(policy, "saved <- pure candidate\ninspectFull saved").await;
-    assert_eq!(result["items"][1]["output"], "Preparation 7");
-    let declaration = committed(policy, "readDelivery :: Delivery -> Int\nreadDelivery (Preparation n) = n\nreadDelivery (Complete n) = n\ninspectFull (readDelivery candidate)").await;
-    assert_eq!(declaration["items"][1]["output"], "7");
+    let policy = campaign.root_installation.policy.clone();
+    let result = displayed(
+        &mut campaign,
+        policy.as_ref(),
+        "saved <- pure candidate\ndisplay (show saved)",
+    )
+    .await;
+    assert_eq!(explicit_display_output(&result)["text"], "Preparation 7");
+    let declaration = displayed(&mut campaign, policy.as_ref(), "readDelivery :: Delivery -> Int\nreadDelivery (Preparation n) = n\nreadDelivery (Complete n) = n\ndisplay (readDelivery candidate)").await;
+    assert_eq!(explicit_display_output(&declaration)["text"], "7");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -2888,7 +2898,7 @@ async fn route_reply_case(cancel: bool) {
 
 #[tokio::test]
 async fn frozen_prompt_bytes_round_trip_through_haskell() {
-    let campaign = workspace_campaign_with(|authored| {
+    let mut campaign = workspace_campaign_with(|authored| {
         let config = authored.join("config.toml");
         let mut text = std::fs::read_to_string(&config).unwrap();
         text.push_str("literal = \"prompts/literal.md\"\n");
@@ -2900,16 +2910,15 @@ async fn frozen_prompt_bytes_round_trip_through_haskell() {
         .unwrap();
     })
     .await;
-    let result = committed(
-        campaign.root_installation.policy.as_ref(),
-        "inspectFull (fmap (map fromEnum . T.unpack) (workspacePrompt \"literal\"))",
+    let policy = campaign.root_installation.policy.clone();
+    let result = displayed(
+        &mut campaign,
+        policy.as_ref(),
+        "display (show (fmap (map fromEnum . T.unpack) (workspacePrompt \"literal\")))",
     )
     .await;
-    // The list layout breaks a line after every comma (`treeParts`, for
-    // line-based paging); this assertion cares about the exact byte values
-    // round-tripping, not the display's line breaks, so it strips them
-    // before comparing.
-    let output = result["items"][0]["output"]
+    // Explicit Show preserves the exact code points, including control bytes.
+    let output = explicit_display_output(&result)["text"]
         .as_str()
         .unwrap_or_else(|| panic!("{result}"));
     assert_eq!(

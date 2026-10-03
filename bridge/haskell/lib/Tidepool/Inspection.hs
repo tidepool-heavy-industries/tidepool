@@ -51,7 +51,7 @@ import Tidepool.Agent.Watch.Internal
 import Tidepool.Inspection.Display
 import Tidepool.Inspection.Tree
 import Tidepool.Effects.Core
-  ( Console (Print, DisplayWith, DisplayExpandWith, DisplayAllowanceWith, DisplayExpansionInputWith), DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
+  ( Console (DisplayWith, DisplayExpandWith, DisplayAllowanceWith, DisplayExpansionInputWith), DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
 import Tidepool.Worktree (HeadState (..), renderGitOid, renderWorktreeError)
 import Prelude
 
@@ -239,7 +239,7 @@ instance WorkbenchDisplay (ProgressState a) where
      in ("ProgressRejected · " <> text, omitted)
 
 
--- | The previous display and an ordinary action that continues its retained
+-- | A retained display page and an ordinary action that continues its
 -- rendering. An exhausted page has an empty, exhausted successor.
 -- The representation is a closure so the resident binding owner retains it
 -- without deep-forcing the tree or the recursively available future pages.
