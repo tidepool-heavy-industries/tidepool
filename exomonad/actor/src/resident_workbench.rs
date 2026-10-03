@@ -15539,7 +15539,8 @@ mod request_tests {
     #[tokio::test]
     async fn lookup_inspects_checked_bound_value_on_repeated_requests() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        let workbench =
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
         let mut sibling_context = context.clone();
         sibling_context.placement.lexical_scope = workbench
             .access
@@ -15548,21 +15549,59 @@ mod request_tests {
             })
             .await
             .expect("private sibling scope");
-        for (binding_context, cell) in [
+        sibling_context.actor = crate::ActorRef::first(crate::ActorId(2));
+        let runner = workbench_runner_for_test(&workbench);
+        let mut checked_workbenches = Vec::new();
+        for mut public_context in [context, sibling_context] {
+            let descriptor =
+                crate::ActorDescriptor::new("checked inspection", public_context.placement);
+            let owner = crate::resident_actor::WorkbenchPublicOwner::issue(
+                &public_context,
+                &descriptor,
+                None,
+            )
+            .expect("ephemeral public owner");
+            let authority = crate::resident_actor::WorkbenchCompilationAuthority::for_test(
+                public_context.clone(),
+            );
+            let private = Arc::new(
+                runner
+                    .begin_private_execution(
+                        public_context.clone(),
+                        owner,
+                        tidepool_runtime::session::PublicationDecision::new(),
+                    )
+                    .await
+                    .expect("private execution admission"),
+            );
+            assert_ne!(
+                private.private_scope,
+                public_context.placement.lexical_scope
+            );
+            public_context.placement.lexical_scope = private.private_scope;
+            let checked_workbench = ResidentActorWorkbench::new(
+                Arc::clone(&machines),
+                source.clone(),
+                None,
+                None,
+                vec![],
+            )
+            .with_compilation_authority(authority)
+            .with_private_execution(private);
+            checked_workbenches.push((public_context, checked_workbench));
+        }
+        let context = checked_workbenches[0].0.clone();
+        let sibling_context = checked_workbenches[1].0.clone();
+        for (index, cell) in [
             (
-                &context,
+                0,
                 "data InspectionPrivateType = InspectionPrivateType".to_owned(),
             ),
-            (
-                &context,
-                "checkedLookupValue <- pure (42 :: Int)".to_owned(),
-            ),
-            (
-                &sibling_context,
-                "privateSiblingValue <- pure (43 :: Int)".to_owned(),
-            ),
+            (0, "checkedLookupValue <- pure (42 :: Int)".to_owned()),
+            (1, "privateSiblingValue <- pure (43 :: Int)".to_owned()),
         ] {
-            let (_, prepared) = workbench
+            let (binding_context, checked_workbench) = &checked_workbenches[index];
+            let (_, prepared) = checked_workbench
                 .prepare_cell((*binding_context).clone(), cell.clone())
                 .await
                 .expect("checked binding compiles");
@@ -15570,7 +15609,11 @@ mod request_tests {
                 panic!("checked binding is executable")
             };
             assert_eq!(items.len(), 1);
-            let step = workbench
+            assert!(
+                matches!(&items[0].ready, PreparedCellStep::Checked { .. }),
+                "regression must install certified checked native output"
+            );
+            let step = checked_workbench
                 .begin_prepared_cell_item(
                     (*binding_context).clone(),
                     ParsedBlock {
@@ -15584,13 +15627,26 @@ mod request_tests {
                 .await
                 .expect("checked binding starts");
             let settled = match step {
-                ResidentWorkbenchStep::Running { fragment, outcome } => workbench
+                ResidentWorkbenchStep::Running { fragment, outcome } => checked_workbench
                     .settle_item((*binding_context).clone(), *fragment, *outcome)
                     .await
                     .expect("checked binding settles"),
                 other => other,
             };
             assert!(matches!(settled, ResidentWorkbenchStep::Committed { .. }));
+            checked_workbench
+                .access
+                .with_machine((*binding_context).clone(), |session, context, _| {
+                    let view = session
+                        .compile_view_in(context.placement.lexical_scope)
+                        .expect("private checked scope remains live");
+                    session.capture_inspection_inputs(&view).map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                    Ok(())
+                })
+                .await
+                .expect("checked interfaces retained immediately after each installation");
         }
         let inspection_source = source.clone();
         let (view, inputs, prepared) = workbench
