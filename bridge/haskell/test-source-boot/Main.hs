@@ -1,5 +1,7 @@
 module Main (main) where
 
+import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark)
+
 import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
 import Codec.CBOR.Read (deserialiseFromBytes)
@@ -171,6 +173,8 @@ exactCompilationCacheSafety expectedSource bytes = do
 
 main :: IO ()
 main = getArgs >>= \case
+  ["--execution-source-decode"] -> executionSourceDecodeChecks
+  "--execution-source-decode-benchmark" : iterations : files -> executionSourceDecodeBenchmark iterations files
   ["--exact-scope-binders"] -> exactScopeBinders
   ["--original-package-projection"] -> originalPackageProjection
   ["--original-package-cohort", coreRoot, output] -> originalPackageCohort coreRoot output
