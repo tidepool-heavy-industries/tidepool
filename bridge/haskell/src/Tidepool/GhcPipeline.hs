@@ -151,6 +151,7 @@ import Tidepool.CheckedPrefixImports
 import Tidepool.FamilyConsistency (validateCompilationFamilies, validateEnvironmentFamilies)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
+import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 import Tidepool.Introspection (normalizeLookupWildcards)
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), SessionScope(..)
@@ -1204,6 +1205,7 @@ data QuasiQuoteOrigins
 -- for this pipeline) simply fails to disambiguate, same as today.
 classifyQuasiQuoteOrigins :: HscEnv -> ParsedModule -> IO QuasiQuoteOrigins
 classifyQuasiQuoteOrigins hscEnv parsed
+  | not (xopt LangExt.QuasiQuotes (ms_hspp_opts (pm_mod_summary parsed))) = pure NoQuasiQuotes
   | null occurrences = pure NoQuasiQuotes
   | otherwise = do
       resolved <- mapM (resolveQuoterOrigin hscEnv imports) occurrences
@@ -1213,13 +1215,9 @@ classifyQuasiQuoteOrigins hscEnv parsed
   where
     hsMod = unLoc (pm_parsed_source parsed)
     imports = hsmodImports hsMod
-    occurrences = everything (++) (mkQ [] quasiQuoteRdrName) hsMod
+    occurrences = quasiQuoteOccurrences (pm_parsed_source parsed)
     isAllowlisted (Just origin) = Set.member origin pureQuasiQuoters
     isAllowlisted Nothing = False
-
-quasiQuoteRdrName :: HsUntypedSplice GhcPs -> [RdrName]
-quasiQuoteRdrName (HsQuasiQuote _ name _) = [name]
-quasiQuoteRdrName _ = []
 
 -- GHC enables dependency codegen from the QuasiQuotes extension alone. The
 -- harness enables that syntax for every input, including inputs without a
@@ -1252,8 +1250,7 @@ elideUnusedQuasiQuoteCodegen timing graph
     unsupported summary =
       hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary)
         || xopt LangExt.StaticPointers (ms_hspp_opts summary)
-    occurrences = everything (++) (mkQ [] quasiQuoteRdrName)
-      . unLoc . pm_parsed_source
+    occurrences = quasiQuoteOccurrences . pm_parsed_source
 
 -- | Diagnostic only (TIDEPOOL_MEMO_TRACE): honestly report which
 -- quasiquoters, if any, a module's last fresh compile actually saw --
@@ -3831,7 +3828,7 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
         && fingerprint == ms_hs_hash summary) $ liftIO (throwIO (ExecutionSourceChanged key))
     originalQuotes <- if xopt LangExt.QuasiQuotes (ms_hspp_opts summary)
       then do parsedOriginal <- parseModule summary
-              pure (everything (++) (mkQ [] quasiQuoteRdrName) (unLoc (pm_parsed_source parsedOriginal)))
+              pure (quasiQuoteOccurrences (pm_parsed_source parsedOriginal))
       else pure []
     unless (not (hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary))
         && not (gopt Opt_Pp (ms_hspp_opts summary))
@@ -3938,8 +3935,7 @@ planExactExecutionLoad admitted interfaces checkedInterfaces targetName sourceGr
     , xopt LangExt.QuasiQuotes (ms_hspp_opts summary)]
   let quoted = [(parsedModule, occurrences)
         | parsedModule <- parsed
-        , let occurrences = everything (++) (mkQ [] quasiQuoteRdrName)
-                (unLoc (pm_parsed_source parsedModule))
+        , let occurrences = quasiQuoteOccurrences (pm_parsed_source parsedModule)
         , not (null occurrences)]
       home = homeUnitId (hsc_home_unit initial)
       ownerKey owner = (unitString (moduleUnit owner), moduleNameString (moduleName owner))

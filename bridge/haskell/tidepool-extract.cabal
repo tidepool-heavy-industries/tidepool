@@ -15,6 +15,7 @@ extra-source-files:
   test-prepared-stg/ModuleProductB.hs
   test-cell-splitter/fixtures/declaration-join/*/*.hs
   test-cell-splitter/fixtures/session-fixities/*.hs
+  test-cell-splitter/fixtures/quasiquote-occurrences/*.hs
   test-cell-splitter/fixtures/unreachable-compile-time/*.hs
   test-source-boot/fixtures/*.hs
   test-source-boot/fixtures/*.hs-boot
@@ -68,6 +69,7 @@ library tidepool-extract-internal
     Tidepool.PrimOps
     Tidepool.PreparedStg
     Tidepool.PreparedRecovery
+    Tidepool.QuasiQuoteOccurrences
     Tidepool.PreparedBuiltins
     Tidepool.PreparedFacts
     Tidepool.PreparedFormatting
@@ -137,6 +139,7 @@ test-suite cell-splitter-test
                     HarnessSourceTest
                     InspectionRunnerTest
                     WorkerDiagnosticsTest
+                    QuasiQuoteOccurrencesTest
   build-depends:
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,
