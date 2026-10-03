@@ -53,7 +53,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       interfacePath = work </> "captured-skinny.hi"
   copyFile "test-source-boot/fixtures/FinalizedCoreFixture.hs" source
   libdir <- getLibdir
-  (artifact, bytes, summary, groups, tyconNames, instanceNames) <- runGhc (Just libdir) $ do
+  (artifact, bytes, summary, groups, tyconNames, instanceNames, packages) <- runGhc (Just libdir) $ do
     configure work
     target <- guessTarget source Nothing Nothing
     setTargets [target]
@@ -90,7 +90,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
             "FinalizedCoreFixture" interfacePath (hexBytes (SHA256.hash interfaceBytes)) []
       pure (artifact, bytes, summary {ms_hspp_buf = Nothing}, bindingGroups guts,
         map (getOccString . tyConName) (cg_tycons guts),
-        map (getOccString . is_dfun) (finalizedCoreSiteInstances finalized))
+        map (getOccString . is_dfun) (finalizedCoreSiteInstances finalized), cg_dep_pkgs guts)
   removeFile source
   exists <- doesFileExist source
   assert (not exists) "source-free roundtrip kept its source"
@@ -114,6 +114,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
         "fixture lost the non-exported private helper before capture"
       assert (map (getOccString . tyConName) (cg_tycons guts) == tyconNames)
         "canonical TyCon order changed"
+      assert (cg_dep_pkgs guts == packages) "canonical native package dependencies changed"
       assert (not (null instanceNames) &&
         map (getOccString . is_dfun) (finalizedCoreSiteInstances finalized) == instanceNames)
         "cold canonical site authority lost its local class instance"
