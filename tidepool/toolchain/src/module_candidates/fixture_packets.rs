@@ -183,10 +183,12 @@ fn source_boot_candidate_packet_producer() {
     if !matches!(fields[6], Value::Null) {
         let destination = PathBuf::from(text_field(&fields[6]));
         assert!(destination.is_absolute());
+        // Graph descriptors belong beside the delivered scope. Rename only
+        // its filename so later fixture scopes can reuse the writer's name.
         let scope = Arc::new(context)
-            .prepare_compilation(&delivery.join("scope"), producer)
+            .prepare_compilation(destination.parent().unwrap(), producer)
             .unwrap();
-        fs::copy(scope.manifest, destination).unwrap();
+        fs::rename(scope.manifest, destination).unwrap();
     }
     println!(
         "genuine fixture: Rust certification, full ArtifactView admission and production delivery passed"
