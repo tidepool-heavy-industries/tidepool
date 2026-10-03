@@ -110,6 +110,22 @@ async fn explicit_display_is_the_only_value_presentation() {
         )
         .await;
     assert_eq!(explicit_display_output(&shown)["text"], "41", "{shown}");
+    for (source, expected) in [
+        ("display (inspectFull True)", "True"),
+        (
+            "display (inspectFull (\"first\\nsecond\" :: Text))",
+            "first\nsecond",
+        ),
+    ] {
+        let inspected = campaign
+            .drive_actor_output(&store, committed(policy.as_ref(), source))
+            .await;
+        assert_eq!(
+            explicit_display_output(&inspected)["text"],
+            expected,
+            "{inspected}"
+        );
+    }
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
