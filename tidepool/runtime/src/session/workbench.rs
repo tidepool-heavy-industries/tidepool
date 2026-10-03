@@ -323,12 +323,47 @@ impl std::ops::Deref for WorkbenchDisplayOutput {
     }
 }
 
+/// The exact issued page, including retries whose Store outcome is unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchDisplayPublicationIdentity {
+    pub display: (i64, i64, i64),
+    pub page_ordinal: u64,
+}
+
+/// Publication state at the operation's terminal snapshot. A later Store
+/// reconciliation updates retained publication state and history, never this
+/// already-delivered execution receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum WorkbenchDisplayPublication {
+    Pending {
+        publication: WorkbenchDisplayPublicationIdentity,
+    },
+    Unconfirmed {
+        publication: WorkbenchDisplayPublicationIdentity,
+        detail: String,
+    },
+    Published {
+        publication: WorkbenchDisplayPublicationIdentity,
+        output: ActorOutputReference,
+    },
+    Refused {
+        publication: WorkbenchDisplayPublicationIdentity,
+        detail: String,
+    },
+}
+
 /// One effect boundary observed while evaluating an input unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchOperationReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<WorkbenchDisplayOutput>,
+    /// Every submitted display retains its page identity even if cancellation
+    /// freezes this receipt before publication completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_publication: Option<WorkbenchDisplayPublication>,
     pub id: WorkbenchOperationId,
     /// Open effect rows make the operation vocabulary extensible. This name
     /// is diagnostic metadata only and never drives behavior.
@@ -1763,6 +1798,48 @@ mod tests {
     }
 
     #[test]
+    fn display_publication_receipts_preserve_pending_page_identity() {
+        let publication = WorkbenchDisplayPublicationIdentity {
+            display: (3, 5, 7),
+            page_ordinal: 11,
+        };
+        let mut receipt = WorkbenchOperationReceipt {
+            display: None,
+            display_publication: Some(WorkbenchDisplayPublication::Pending { publication }),
+            id: WorkbenchOperationId {
+                execution: WorkbenchExecutionId::from_digest([3; 16]),
+                input_unit_index: 0,
+                effect_ordinal: 0,
+            },
+            effect: "Console.DisplayWith".into(),
+            disposition: WorkbenchOperationDisposition::Prepared,
+        };
+        let pending = serde_json::to_value(&receipt).unwrap();
+        assert!(pending.get("display").is_none());
+        assert_eq!(pending["displayPublication"]["status"], "pending");
+        assert_eq!(
+            pending["displayPublication"]["publication"]["display"],
+            serde_json::json!([3, 5, 7])
+        );
+        assert_eq!(
+            pending["displayPublication"]["publication"]["pageOrdinal"],
+            11
+        );
+
+        receipt.display_publication = Some(WorkbenchDisplayPublication::Published {
+            publication,
+            output: ActorOutputReference {
+                run: "run".into(),
+                sequence: 17,
+            },
+        });
+        let published = serde_json::to_value(receipt).unwrap();
+        assert_eq!(published["displayPublication"]["status"], "published");
+        assert_eq!(published["displayPublication"]["output"]["sequence"], 17);
+        assert_eq!(pending["displayPublication"]["status"], "pending");
+    }
+
+    #[test]
     fn response_statuses_are_closed_schema_backed_values() {
         let execution = WorkbenchExecutionId::from_digest([3; 16]);
         let response = WorkbenchResponse {
@@ -1781,6 +1858,7 @@ mod tests {
                 installed_bindings: vec!["answer".into()],
                 operations: vec![WorkbenchOperationReceipt {
                     display: None,
+                    display_publication: None,
                     id: WorkbenchOperationId {
                         execution,
                         input_unit_index: 0,

@@ -732,6 +732,7 @@ mod artifact_tests {
                     installed_bindings: vec![format!("private{index}")],
                     operations: vec![WorkbenchOperationReceipt {
                         display: None,
+                        display_publication: None,
                         id: WorkbenchOperationId {
                             execution: WorkbenchExecutionId::from_digest([index as u8; 16]),
                             input_unit_index: index,
