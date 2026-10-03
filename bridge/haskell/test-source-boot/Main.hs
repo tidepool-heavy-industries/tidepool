@@ -62,6 +62,7 @@ import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
 import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports, mi_usages, mi_decls)
 import GHC.Iface.Syntax (ifaceDeclImplicitBndrs)
 import GHC.Unit.Module.ModDetails (md_types)
+import GHC.Unit.Module.ModGuts (cg_binds)
 import GHC.Unit.Module (Module, mkModule, mkModuleName, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString, unitIdString, stringToUnit, GenWithIsBoot(..))
 import Numeric (showHex)
@@ -115,6 +116,7 @@ import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..), CheckedEnvironmentResult(..)
+  , finalizedTidyGuts
   , renderType, generatedScaffoldRecipe, activationPreviewInputType
   , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected
   , withResidentPipelineSelectedRequests )
@@ -2597,15 +2599,50 @@ finalizedFrontendOnce = withTiming $ withScratch $ \work -> do
       target = work </> "FinalizedSpliceTarget.hs"
       owner = mkModuleName "FinalizedSpliceOwner"
       unused = mkModuleName "FinalizedSpliceUnused"
-      executions expected = do
+      targetOwner = mkModule (stringToUnit "main") (mkModuleName "FinalizedSpliceTarget")
+      hasNativeResult expected = any (\(binder,rhs) ->
+        nameModule_maybe (idName binder) == Just targetOwner
+          && getOccString binder == "result" && containsLiteral expected rhs) . Core.flattenBinds
+      containsLiteral expected = \case
+        Core.Lit (LitNumber LitNumInt value) -> value == expected
+        Core.App function argument -> containsLiteral expected function || containsLiteral expected argument
+        Core.Lam _ body -> containsLiteral expected body
+        Core.Let binding body -> any (containsLiteral expected . snd) (Core.flattenBinds [binding])
+          || containsLiteral expected body
+        Core.Case scrutinee _ _ alternatives -> containsLiteral expected scrutinee
+          || any (\(Core.Alt _ _ rhs) -> containsLiteral expected rhs) alternatives
+        Core.Cast body _ -> containsLiteral expected body
+        Core.Tick _ body -> containsLiteral expected body
+        _ -> False
+      executions expected diagnostics = do
         actual <- lines <$> readFile counter
-        unless (sort actual == sort expected) $
-          fail ("native splice executed another number of times: " ++ show actual)
+        require "native splice executions" [("exact-inventory",sort actual == sort expected)]
+          diagnostics ("expected=" ++ show expected ++ "\nactual=" ++ show actual)
       capturedCount phase name diagnostics = length
         [line | line <- lines diagnostics, line == "tidepool-canonical-" ++ phase
           ++ " module=" ++ name]
+      require :: String -> [(String,Bool)] -> String -> String -> IO ()
+      require label checks diagnostics details = unless (all snd checks) $ do
+        hPutStrLn stderr (label ++ " assertions=" ++ show checks ++ "\n" ++ details)
+        hPutStrLn stderr diagnostics
+        fail (label ++ " failed: " ++ show [name | (name,False) <- checks])
+      preparedDetails :: PreparedPipelineResult -> String
+      preparedDetails prepared =
+        "warnings=" ++ show (prWarnings (pprPipelineResult prepared))
+        ++ "\nfinalized=" ++ show (map moduleNameString (Map.keys (pprFinalizedModules prepared)))
+        ++ "\nprepared=" ++ show (preparedNames prepared)
+        ++ "\nCore=" ++ showSDocUnsafe (ppr (prBinds (pprPipelineResult prepared)))
+        ++ "\nfinalized-Core=" ++ showSDocUnsafe (ppr
+          [(name,cg_binds (finalizedTidyGuts finalized))
+          | (name,finalized) <- Map.toAscList (pprFinalizedModules prepared)])
   forM_ ["FinalizedSpliceOwner.hs", "FinalizedSpliceUnused.hs", "FinalizedSpliceTarget.hs"] $ \name ->
     copyFile (fixture name) (work </> name)
+  -- CheckOnly stops before desugaring, where the fixture's incomplete-pattern
+  -- warning is issued. Also exercise a warning from native typechecking.
+  targetSource <- readFile target
+  evaluate (length targetSource) >> writeFile target
+    ("{-# OPTIONS_GHC -Wmissing-signatures #-}\n" ++ targetSource
+      ++ "\nnativeTypecheckWarning = ()\n")
   bracket (lookupEnv "TIDEPOOL_TEST_FINALIZATION_COUNTER")
     (maybe (unsetEnv "TIDEPOOL_TEST_FINALIZATION_COUNTER")
       (setEnv "TIDEPOOL_TEST_FINALIZATION_COUNTER")) $ \_ -> do
@@ -2614,37 +2651,44 @@ finalizedFrontendOnce = withTiming $ withScratch $ \work -> do
       let run = captureDiagnostics $
             compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] Nothing
       (result, diagnostics) <- run
-      executions ["owner", "target"]
-      unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult result))
-          && not (null (prWarnings (pprPipelineResult result)))
-          && Map.member owner (pprFinalizedModules result)
-          && Map.member unused (pprFinalizedModules result)
-          && "FinalizedSpliceUnused" `notElem` preparedNames result) $
-        fail "one frontend lost native result, diagnostics, final owner or lazy STG selection"
+      executions ["owner", "target"] diagnostics
+      require "cold finalized frontend"
+        [ ("native-result",hasNativeResult 42 (prBinds (pprPipelineResult result)))
+        , ("warnings",not (null (prWarnings (pprPipelineResult result))))
+        , ("provider-owner",Map.member owner (pprFinalizedModules result))
+        , ("unused-owner",Map.member unused (pprFinalizedModules result))
+        , ("lazy-STG","FinalizedSpliceUnused" `notElem` preparedNames result)
+        ] diagnostics (preparedDetails result)
       forM_ ["FinalizedSpliceOwner", "FinalizedSpliceUnused", "FinalizedSpliceTarget"] $ \name ->
-        unless (capturedCount "frontend" name diagnostics == 1
-            && capturedCount "finalization" name diagnostics == 1) $
-          fail ("canonical phase did not execute exactly once for " ++ name)
+        require ("canonical phase for " ++ name)
+          [("frontend-once",capturedCount "frontend" name diagnostics == 1)
+          ,("finalization-once",capturedCount "finalization" name diagnostics == 1)]
+          diagnostics (preparedDetails result)
       writeFile counter ""
       (checked, checkedDiagnostics) <- captureDiagnostics $
         compile CheckedEnvironment Set.empty GeneralCompile Nothing target [work] Nothing
       actual <- lines <$> readFile counter
-      unless (length (filter (== "target") actual) == 1
-          && length (filter (== "owner") actual) == capturedCount "frontend" "FinalizedSpliceOwner" checkedDiagnostics
-          && length (filter (== "owner") actual) <= 1
-          && all (`elem` ["owner", "target"]) actual
-          && isJust (crResultType checked) && not (null (crWarnings checked))) $
-        fail "checked frontend lost its captured type or warnings"
+      require "checked finalized frontend"
+        [("target-splice-once",length (filter (== "target") actual) == 1)
+        ,("provider-splice-capture",length (filter (== "owner") actual)
+          == capturedCount "frontend" "FinalizedSpliceOwner" checkedDiagnostics)
+        ,("provider-splice-at-most-once",length (filter (== "owner") actual) <= 1)
+        ,("splice-inventory",all (`elem` ["owner", "target"]) actual)
+        ,("result-type",isJust (crResultType checked))
+        ,("warnings",not (null (crWarnings checked)))]
+        checkedDiagnostics ("splices=" ++ show actual ++ "\nresult-type="
+          ++ show (fmap renderType (crResultType checked)) ++ "\nwarnings=" ++ show (crWarnings checked))
       -- A changed provider forces a fresh authoritative native frontend; its
       -- splice and the target splice must still each execute once.
       source <- T.pack <$> readFile (fixture "FinalizedSpliceOwner.hs")
       writeFile (work </> "FinalizedSpliceOwner.hs")
         (T.unpack (T.replace "[| 42 :: Int |]" "[| 43 :: Int |]" source))
       writeFile counter ""
-      (changed, _) <- run
-      executions ["owner", "target"]
-      unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult changed))) $
-        fail "canonical native provider reused the previous source result"
+      (changed, changedDiagnostics) <- run
+      executions ["owner", "target"] changedDiagnostics
+      require "changed finalized frontend"
+        [("native-result",hasNativeResult 43 (prBinds (pprPipelineResult changed)))]
+        changedDiagnostics (preparedDetails changed)
   putStrLn "finalized frontend: splice once, native bytecode, warnings and lazy STG passed"
 
 quasiQuoteCodegenTransition :: IO ()
