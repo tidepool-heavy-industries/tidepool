@@ -3291,14 +3291,20 @@ async fn explicit_display_respects_shared_budget_and_handles_survive_cell_failur
     let failed = campaign
         .drive_actor_output(
             &store,
-            dispatch_haskell_script(
+            super::test_campaign::dispatch_haskell_script_result(
                 policy.as_ref(),
                 include_str!("notebook_explicit_display_budget_failure.hs"),
             ),
         )
         .await;
-    assert_eq!(failed["status"], "rejected", "{failed}");
-    let displays: Vec<_> = failed["items"]
+    let Err(exomonad_actor::ResidentToolError::Invocation(
+        exomonad_actor::KernelInvocationFailure::Workbench(failure),
+    )) = failed
+    else {
+        panic!("authored display failure must preserve native failure receipts: {failed:?}")
+    };
+    let receipts = serde_json::to_value(&failure.receipts).unwrap();
+    let displays: Vec<_> = receipts
         .as_array()
         .unwrap()
         .iter()

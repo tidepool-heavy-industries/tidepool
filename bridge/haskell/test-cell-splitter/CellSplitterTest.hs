@@ -1507,7 +1507,9 @@ structuralDisplayCompilation selectedScope effectsRoot = bracket temporary remov
           rendered <- either fail pure (renderCellCheckSource template current)
           let path = root </> "CellCheck.hs"
           writeFile path rendered
-          compiler CheckedEnvironment mempty GeneralCompile scope path includes Nothing
+          compiler CheckedEnvironment mempty
+            (GeneratedInstanceCheck (cellGeneratedInstanceRecipe current) GeneralCompile)
+            scope path includes Nothing
     (accepted, _) <- checkCellInstances compile plan
     assertEqual "resolved authored Display instances retained" False
       (any (`elem` map structuralDisplayTargetName (cellPlanStructuralDisplayTargets accepted)) ["Custom", "Reexported"])
