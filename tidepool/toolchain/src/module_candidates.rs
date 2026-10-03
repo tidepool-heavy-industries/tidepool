@@ -386,26 +386,8 @@ impl ValidatedRecord {
     fn admit(
         record: Record,
         canonical: crate::certified_products::CertifiedModuleInterface,
-        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Option<Self> {
-        let reference = record.module_interface.as_ref()?;
-        let interface = &reference.interface;
-        let core_matches = match (&reference.core, canonical.core_bytes()) {
-            (Some(reference), Some(bytes)) => {
-                reference.bytes == bytes.len() as u64
-                    && reference.sha256 == validation.digest(bytes)
-            }
-            (None, None) => true,
-            _ => false,
-        };
-        if interface.toolchain_identity_sha256 != canonical.producer_sha256()
-            || interface.unit != canonical.unit()
-            || interface.module != canonical.module()
-            || interface.skinny_iface_sha256 != canonical.interface_sha256()
-            || interface.package_imports_sha256 != canonical.package_imports_sha256()
-            || reference.certificate_sha256 != validation.digest(canonical.certificate_bytes())
-            || !core_matches
-        {
+        if !canonical.matches_recovery_reference(record.module_interface.as_ref()?) {
             return None;
         }
         Some(Self {
@@ -1720,7 +1702,7 @@ fn select_records_inner(
             &canonical,
         )
         .ok()?;
-        let record = ValidatedRecord::admit(record, canonical, &mut package_validation)?;
+        let record = ValidatedRecord::admit(record, canonical)?;
         let product = matching.into_iter().next()?;
         if generation_dependent(&product) {
             continue;
@@ -2921,10 +2903,7 @@ mod tests {
         let canonical = record.module_interface_proof.as_ref().unwrap().clone();
         let reference = record.module_interface.as_ref().unwrap();
         let core = reference.core.as_ref().unwrap();
-        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-        assert!(
-            ValidatedRecord::admit(record.clone(), canonical.clone(), &mut validation).is_some()
-        );
+        assert!(ValidatedRecord::admit(record.clone(), canonical.clone()).is_some());
         let mismatches = [
             RecoveryModuleInterfaceRef {
                 interface: RecoveryJoinRef {
@@ -2992,17 +2971,10 @@ mod tests {
                 },
                 ..record.clone()
             };
-            assert!(
-                ValidatedRecord::admit(inconsistent, canonical.clone(), &mut validation).is_none()
-            );
+            assert!(ValidatedRecord::admit(inconsistent, canonical.clone()).is_none());
         }
         let other = candidate_fixture(root.path(), "Other");
-        assert!(ValidatedRecord::admit(
-            record,
-            other.module_interface_proof.unwrap(),
-            &mut validation,
-        )
-        .is_none());
+        assert!(ValidatedRecord::admit(record, other.module_interface_proof.unwrap(),).is_none());
     }
 
     #[test]

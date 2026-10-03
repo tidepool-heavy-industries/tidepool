@@ -333,6 +333,29 @@ impl CertifiedModuleInterface {
     pub(crate) fn requirements(&self) -> &BTreeMap<(String, String), [u8; 32]> {
         &self.receipt.interface_requirements
     }
+    /// A persisted descriptor must name the same authenticated contents.
+    /// Capture paths do not determine canonical identity.
+    pub(crate) fn matches_recovery_reference(
+        &self,
+        reference: &crate::recovery_artifacts::RecoveryModuleInterfaceRef,
+    ) -> bool {
+        let interface = &reference.interface;
+        let core_matches = match (&reference.core, &self.receipt.core) {
+            (Some(reference), Some(core)) => {
+                reference.bytes == core.bytes && reference.sha256 == core.sha256
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        interface.toolchain_identity_sha256 == self.producer_sha256
+            && interface.unit == self.receipt.unit
+            && interface.module == self.receipt.module
+            && interface.skinny_iface_sha256 == self.receipt.interface.sha256
+            && interface.package_imports_sha256 == self.receipt.package_imports.sha256
+            && reference.certificate_sha256 == sha(&self.certificate)
+            && core_matches
+    }
+
     /// Materialization can retain Core without making it available through an
     /// interface capability. Preparation requires a separate admission owner.
     pub(crate) fn core_bytes(&self) -> Option<&[u8]> {
