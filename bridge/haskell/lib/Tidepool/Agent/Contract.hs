@@ -262,10 +262,11 @@ asyncHaskellTools = AsyncHaskellTools
   { haskell = HaskellTool "Run an asynchronous resident Haskell cell." Asynchronous (toolEffectNames (Proxy @effects))
   }
 
--- | Ordinary notebooks and synchronous notebooks share the same resident scope.
+-- | Both notebooks use the same effects and resident scope. The synchronous
+-- endpoint holds the calling actor's next inference until the cell settles.
 data HaskellTools effects mode = HaskellTools
   { haskell :: mode :- HaskellCell effects
-  , haskellSync :: mode :- Sync (HaskellCell (SyncEffects effects))
+  , haskellSync :: mode :- Sync (HaskellCell effects)
   } deriving (Generic)
 
 haskellTools
@@ -273,8 +274,8 @@ haskellTools
   => HaskellTools effects (AsServerT (Eff effects))
 haskellTools = HaskellTools
   { haskell = HaskellTool "Run an asynchronous resident Haskell cell." Asynchronous (toolEffectNames (Proxy @effects))
-  , haskellSync = HaskellTool "Run a resident Haskell cell before the next inference." BeforeNextInference
-      (toolEffectNames (Proxy @(SyncEffects effects)))
+  , haskellSync = HaskellTool "Run a resident Haskell cell with the same effects before the next inference." BeforeNextInference
+      (toolEffectNames (Proxy @effects))
   }
 
 -- | Build a fire-and-forget 'Tool' (@output ~ ()@).

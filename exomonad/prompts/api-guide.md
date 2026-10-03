@@ -79,8 +79,8 @@ the enclosing call's completed context. Use `[label|orbit-motif|]`
 for compile-checked static assignment labels; use `labelFromText` for dynamic
 labels and handle its `Either`.
 
-With `import qualified Tidepool.Agent.Context as C`, only a synchronous
-profile can declare `ContextReadWrite`; async remains the default.
+Default `haskell` and `haskell_sync` share effects. Only an explicit synchronous
+profile declares `ContextReadWrite` (`import qualified Tidepool.Agent.Context as C`).
 `editableTexts` traverses authored text and eligible visible message/result
 bodies, not display previews; tool source/input and function
 arguments stay pinned. `C.trimText reason retained` prefixes exact retained

@@ -2,6 +2,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -17,12 +18,13 @@ import GHC.Generics (Generic)
 import Tidepool.Aeson.FromJSON (FromJSON)
 import Tidepool.Agent.Contract
   ( AgentSpec (..), AsyncEffects, Call, HaskellCell, KnownToolEffects
-  , JsonSchema, Sync, SyncEffects, (:-), defaultSpec, syncTool )
+  , JsonSchema, Subset, Sync, SyncEffects, (:-), defaultSpec, haskellTool, syncTool )
 import qualified Tidepool.Agent.Contract as A
 import qualified Tidepool.Agent.Context as C
 
 newtype CurateArgs = CurateArgs { proceed :: Bool }
-  deriving (Generic, FromJSON, JsonSchema)
+  deriving stock Generic
+  deriving anyclass (FromJSON, JsonSchema)
 
 data ContextTools effects mode = ContextTools
   { haskell :: mode :- HaskellCell effects
@@ -32,12 +34,15 @@ data ContextTools effects mode = ContextTools
   deriving Generic
 
 agentSpec
-  :: forall effects. (KnownToolEffects effects, AsyncEffects effects)
+  :: forall effects.
+     ( KnownToolEffects effects, AsyncEffects effects
+     , Subset effects (SyncEffects effects)
+     )
   => AgentSpec (ContextTools effects) effects
 agentSpec = defaultSpec
   { specTools = ContextTools
       { haskell = A.haskell (A.haskellTools @effects)
-      , haskellSync = A.haskellSync (A.haskellTools @effects)
+      , haskellSync = haskellTool "Edit this actor's context before the next inference."
       , curate = syncTool "Curate this actor's context and select its next model." curateContext
       }
   }
