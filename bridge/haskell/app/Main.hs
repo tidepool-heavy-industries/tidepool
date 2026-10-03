@@ -100,7 +100,7 @@ import Tidepool.DiagJson
   ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..), InputRejection(..), DependencyLoadFailure(..)
   , diagsFromSourceError, diagFromException, renderDiagsJson )
 import Tidepool.ExtractUtil (capitalize)
-import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
+import Tidepool.ExtractRequest (RequestShapeError(..), validateRequestShape, InspectionRequest(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.ExactScope
   ( ExactCompilation(..), ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)

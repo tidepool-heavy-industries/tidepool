@@ -467,7 +467,8 @@ test-suite worker-response-test
     bytestring,
     directory,
     process,
-    tidepool-extract-internal
+    tidepool-extract-internal,
+    unix
   default-language: GHC2024
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
