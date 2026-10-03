@@ -21,7 +21,7 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import GHC (runGhc, setSession, ms_mod_name, ms_hsc_src, parseModule, typecheckModule, Target(..))
 import GHC.Core qualified as Core
-import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy)
+import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy, intDataCon)
 import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
 import GHC.Builtin.Types (liftedTypeKind)
 import GHC.Types.Var (mkTyVar, VarBndr(..))
@@ -67,7 +67,7 @@ import System.IO (hClose, hFlush, hPutStrLn, hSeek, hSetFileSize, withBinaryFile
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
-import Tidepool.CertifiedProducts (encodeCertifiedProducts)
+import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.ExecutionEncode (encodeModuleProducts)
 
 import Tidepool.ExecutionProjection
@@ -3033,8 +3033,9 @@ verifyRetainedPackageWitness producer evidence = do
     forM_ [firstLog, secondLog] $ \diagnostics -> do
       unless (count "certified_package_global_requests" diagnostics == 1001
           && count "certified_package_owner_loads" diagnostics == 1
+          && count "certified_package_catalog_builds" diagnostics == 1
           && count "certified_package_owner_revalidations" diagnostics == 1) $
-        fail "package certification reread one owner for repeated or distinct symbols"
+        fail "package certification rebuilt one owner for repeated or distinct symbols"
       let actual = count "certified_package_revalidation_bytes" diagnostics
           repeatedBytes = count "certified_package_reference_bytes" diagnostics
       unless (actual > 0 && repeatedBytes == 1001 * actual) $
@@ -3076,6 +3077,26 @@ verifyRetainedPackageWitness producer evidence = do
         [("target", target)] evidence "" ""
       decode bytes' = either (fail . show) (pure . snd)
         (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes'))
+  let wired = preparedRootIdentity (dataConWorkId intDataCon)
+      identities = [package, package { symbolOccurrence = "id" },
+        package { symbolOccurrence = "fmap" }, constructor, wired]
+  forM_ identities $ \identity -> do
+    (identifier, _) <- resolvePackageGlobal producer identity >>= either fail pure
+    unless (preparedRootIdentity identifier == identity) $
+      fail "package catalog selected a noncanonical defining Name"
+  withTiming $ do
+    (_, diagnostics) <- captureDiagnostics
+      (encode (map (`global` 0) identities) >>= either fail pure)
+    unless (count "certified_package_global_requests" diagnostics == 5
+        && count "certified_package_owner_loads" diagnostics == 3
+        && count "certified_package_catalog_builds" diagnostics == 3
+        && count "certified_package_owner_revalidations" diagnostics == 3) $
+      fail "package catalog did not share ordinary, class, constructor and wired owner captures"
+  forM_ [package { symbolModule = "GHC.Internal.Prelude" },
+      package { symbolNamespace = "type" }] $ \identity ->
+    encode [global identity 0] >>= \case
+      Left _ -> pure ()
+      Right _ -> fail "package catalog admitted a reexport owner or another namespace"
   localBytes <- encodeProgram (localProgram [constructor, synthetic]) >>= either fail pure
   retainByteOracle "local-package" localBytes
   local <- decode localBytes

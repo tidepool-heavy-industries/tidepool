@@ -15,7 +15,7 @@ import qualified Data.ByteString as BS
 import Data.Foldable (fold)
 import Data.List (find, mapAccumL)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes, mapMaybe)
+import Data.Maybe (catMaybes)
 import qualified Data.Set as Set
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import qualified Data.Text as T
@@ -155,7 +155,7 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
       let packages = Map.fromListWith Set.union
             [ ((unit, name), Set.singleton (path, sha))
             | (unit, name, path, sha) <- packageWitnesses ]
-      (requests, loads) <- resolutionCounts
+      (requests, loads, catalogs) <- resolutionCounts
       let references = Map.fromListWith (+)
             [((path, sha), 1) | (_, _, path, sha) <- packageWitnesses]
       validated <- forM (Map.toAscList references) $ \((path, sha), count) -> do
@@ -167,6 +167,7 @@ encodeCertifiedProducts env cached exact fresh targets evidence productBytes evi
       let packagesValid = and [valid | (valid, _, _) <- validated]
       emitCount timing "certified_package_global_requests" requests
       emitCount timing "certified_package_owner_loads" loads
+      emitCount timing "certified_package_catalog_builds" catalogs
       emitCount timing "certified_package_owner_revalidations" (fromIntegral (Map.size references))
       emitCount timing "certified_package_revalidation_bytes" (sum [size | (_, size, _) <- validated])
       emitCount timing "certified_package_reference_bytes" (sum [size | (_, _, size) <- validated])
@@ -347,11 +348,40 @@ packageOwner resolvePackage packageRef identity generation = do
 
 type PackageGlobalResolver = SymbolIdentity -> IO (Either String (Id, PackageImportRoot))
 
--- This cache belongs to one certification. A module's defining interface is
+data PackageDeclarationCatalog = PackageDeclarationCatalog
+  { catalogOwner :: Module
+  , catalogParents :: Map.Map OccName [Name]
+  , catalogWiredGlobals :: Map.Map OccName (Map.Map Name TyThing)
+  }
+
+-- The captured interface owns canonical parent Names and wired exports. Index
+-- their occurrences once; loading a demanded parent still uses GHC's interface
+-- loader and never reconstructs a Name from its spelling.
+packageDeclarationCatalog :: Module -> ModIface -> PackageDeclarationCatalog
+packageDeclarationCatalog owner iface = PackageDeclarationCatalog owner parents wired
+  where
+    owned name = nameModule_maybe name == Just owner
+    parents = Map.fromListWith (flip (++))
+      [ (occurrence, [ifName declaration])
+      | (_, declaration) <- mi_decls iface
+      , owned (ifName declaration)
+      , occurrence <- Set.toAscList (Set.fromList
+          (nameOccName (ifName declaration) : ifaceDeclImplicitBndrs declaration))
+      , isVarOcc occurrence ]
+    wired = Map.fromListWith Map.union
+      [ (nameOccName name, Map.singleton name thing)
+      | available <- mi_exports iface, exported <- availNames available
+      , owned exported
+      , parent <- maybe [] pure (wiredInNameTyThing_maybe exported)
+      , thing@(AnId _) <- parent : implicitTyThings parent
+      , let name = getName thing
+      , owned name, isVarOcc (nameOccName name) ]
+
+-- This capture belongs to one certification. A module's defining interface is
 -- checked around its read; each demanded symbol is still resolved separately.
 -- Successful witnesses are checked again before publication, and nothing is
 -- retained across requests or changes to the compiler environment.
-newPackageGlobalResolver :: Bool -> HscEnv -> IO (PackageGlobalResolver, IO (Integer, Integer))
+newPackageGlobalResolver :: Bool -> HscEnv -> IO (PackageGlobalResolver, IO (Integer, Integer, Integer))
 newPackageGlobalResolver timing env = do
   state <- newIORef (0, Map.empty)
   let load owner = do
@@ -362,9 +392,9 @@ newPackageGlobalResolver timing env = do
             loaded <- loadPackageInterface env owner
             value <- case loaded of
               Left reason -> pure (Left reason)
-              Right (iface, witness) -> do
+              Right (catalog, witness) -> do
                 unchanged <- validatePackageImportRoot env witness
-                pure ((iface, witness) <$ unchanged)
+                pure ((catalog, witness) <$ unchanged)
             modifyIORef' state (\(requests, selected) ->
               (requests, Map.insert owner value selected))
             pure value
@@ -374,7 +404,8 @@ newPackageGlobalResolver timing env = do
         resolvePackageGlobalUsing env load identity
       counts = do
         (requests, interfaces) <- readIORef state
-        pure (requests, fromIntegral (Map.size interfaces))
+        pure (requests, fromIntegral (Map.size interfaces),
+          fromIntegral (length [() | Right _ <- Map.elems interfaces]))
   pure (resolve, counts)
 
 -- Recovery and certification share one canonical package owner. The Id comes
@@ -391,7 +422,7 @@ resolvePackageGlobal env identity = do
         Right () -> Right (identifier, witness)
 
 loadPackageInterface :: HscEnv -> Module
-  -> IO (Either String (ModIface, PackageImportRoot))
+  -> IO (Either String (PackageDeclarationCatalog, PackageImportRoot))
 loadPackageInterface env owner = do
   found <- packageImportRoot env owner
   case found of
@@ -400,11 +431,11 @@ loadPackageInterface env owner = do
       exact <- readExactInterface env owner
       case exact of
         Right (iface, location) | ml_hi_file location == packagePath witness ->
-          pure (Right (iface, witness))
+          pure (Right (packageDeclarationCatalog owner iface, witness))
         _ -> pure (Left "selected package interface is unavailable or changed")
 
 resolvePackageGlobalUsing :: HscEnv
-  -> (Module -> IO (Either String (ModIface, PackageImportRoot)))
+  -> (Module -> IO (Either String (PackageDeclarationCatalog, PackageImportRoot)))
   -> PackageGlobalResolver
 resolvePackageGlobalUsing env load identity
   | symbolNamespace identity /= "value" =
@@ -414,8 +445,8 @@ resolvePackageGlobalUsing env load identity
       found <- load owner
       case found of
         Left reason -> pure (Left (refusal reason))
-        Right (iface, witness) -> do
-          selected <- canonicalPackageGlobal env owner iface
+        Right (catalog, witness) -> do
+          selected <- canonicalPackageGlobal env catalog
             (mkVarOcc (T.unpack (symbolOccurrence identity)))
           pure $ case selected of
             Succeeded (AnId identifier) -> Right (identifier, witness)
@@ -431,26 +462,21 @@ packageRefusal identity reason = reason ++ ": " ++ T.unpack (symbolUnit identity
 -- An implicit Id is authenticated by its defining parent declaration; wired
 -- parents are authenticated by the exact interface's exported canonical Name.
 -- Reconstructing a Name from Module/OccName can mint a different Unique.
-canonicalPackageGlobal :: HscEnv -> Module -> ModIface -> OccName
+canonicalPackageGlobal :: HscEnv -> PackageDeclarationCatalog -> OccName
   -> IO (MaybeErr () TyThing)
-canonicalPackageGlobal env owner iface wanted = do
-  let owned name = nameModule_maybe name == Just owner
-      declarations =
-        [ ifName declaration
-        | (_, declaration) <- mi_decls iface
-        , owned (ifName declaration)
-        , nameOccName (ifName declaration) == wanted
-            || wanted `elem` ifaceDeclImplicitBndrs declaration ]
-      wiredParents = mapMaybe wiredInNameTyThing_maybe
-        [ name | available <- mi_exports iface, name <- availNames available, owned name ]
+canonicalPackageGlobal env catalog wanted = do
+  let owner = catalogOwner catalog
+      declarations = Map.findWithDefault [] wanted (catalogParents catalog)
   parents <- mapM loadCanonical declarations
-  let things = [thing | Succeeded thing <- parents] ++ wiredParents
-      candidates = Map.fromList
+  let owned name = nameModule_maybe name == Just owner
+      declared = Map.fromList
         [ (name, thing)
-        | parent <- things
+        | Succeeded parent <- parents
         , thing@(AnId _) <- parent : implicitTyThings parent
         , let name = getName thing
         , owned name, isVarOcc (nameOccName name), nameOccName name == wanted ]
+      candidates = Map.union
+        (Map.findWithDefault Map.empty wanted (catalogWiredGlobals catalog)) declared
   pure $ case Map.elems candidates of
     [thing] -> Succeeded thing
     _ -> Failed ()
