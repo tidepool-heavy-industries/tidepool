@@ -499,8 +499,8 @@ async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
     );
     following.async_cell(
         "async-publication",
-        "let asyncValue = sum notebookSamples + 36 :: Int\n\
-         let asyncAction = (pure asyncValue :: M Int)\n\
+        "let asyncValue = sum notebookSamples - 5 :: Int\n\
+         let asyncAction = (do { value <- notebookAction; pure (value + asyncValue) } :: M Int)\n\
          asyncAction",
     );
     let following = next_round(&mut rounds).await;

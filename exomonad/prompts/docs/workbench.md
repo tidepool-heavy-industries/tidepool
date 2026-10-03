@@ -26,9 +26,10 @@ The `haskell` tool schedules cells asynchronously by default, and an
 asynchronous-only host may expose no synchronous alternative. When a typed
 agent spec declares a synchronous notebook such as `haskell_sync`, that cell
 waits for completion before its caller continues to the next inference. The
-spec selects each notebook's scheduling and effect profile. The pause applies
-to that caller; it does not wait for actor-owned deferred children. Only a
-synchronous profile can include `ContextReadWrite`, which provides context
+default notebooks share the same effects; the spec can declare separate effect
+profiles. The pause applies to that caller; it does not wait for actor-owned
+deferred children. Only an explicit synchronous profile can include
+`ContextReadWrite`, which provides context
 editing, `setNextModel`, and `setNextEffort`.
 
 Context, next-model, and next-effort edits staged by a synchronous cell commit
