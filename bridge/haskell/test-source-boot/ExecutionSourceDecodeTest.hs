@@ -10,7 +10,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Char (ord)
 import Data.IORef (newIORef, readIORef)
-import Data.List (foldl', isInfixOf)
+import Data.List (isInfixOf)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import GHC.Clock (getMonotonicTimeNSec)
@@ -244,7 +244,8 @@ executionSourceDecodeBenchmark size files = do
       [] -> fail "captured graph has no selectable original source node"
     input <- newIORef (sha, bytes)
     forM_ [1 :: Int .. 4] $ \repetition -> do
-      let modes = [("fully-forced", FullGraph),
+      let modes :: [(String, Demand)]
+          modes = [("fully-forced", FullGraph),
             ("original-node-admission", OriginalNodeAdmission chosen),
             ("materialized-node", MaterializedNode chosen)]
       forM_ (if odd repetition then modes else reverse modes) $ \(mode, demand) -> do
