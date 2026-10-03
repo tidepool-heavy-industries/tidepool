@@ -1907,6 +1907,7 @@ pub(crate) fn fixture_finalized_product(
         &interface,
         product.interface_bytes(),
         &package_bytes,
+        product.source_sha256(),
     )
     .unwrap();
     let mut finalized =
@@ -1934,8 +1935,10 @@ fn validate_module_binding(
     interface: &CertifiedModuleInterface,
     actual_interface: &[u8],
     actual_packages: &[u8],
+    expected_source_sha256: Option<[u8; 32]>,
 ) -> CertResult<ValidatedModuleBinding> {
-    if !interface.home_units().contains(&witness.owner.unit)
+    if expected_source_sha256.is_some_and(|source| source != interface.source_sha256())
+        || !interface.home_units().contains(&witness.owner.unit)
         || witness
             .sources
             .values()
@@ -2019,6 +2022,7 @@ pub(crate) fn validate_original_module_interface(
         interface,
         product.interface_bytes(),
         product.package_imports_bytes(),
+        product.source_sha256(),
     )
     .map(|_| ())
 }
@@ -4014,7 +4018,7 @@ pub(crate) fn certify_products(
                     ProductOrigin::Fresh => module_interfaces.iter().find(|interface| {
                         interface.unit() == owner.unit && interface.module() == owner.module
                     }),
-                    ProductOrigin::Cached => candidates.and_then(|set| set.by_owner.get(&(owner.unit.clone(), owner.module.clone()))).and_then(|bundle| bundle.original_module_interface.as_ref()).or_else(|| module_interfaces
+                    ProductOrigin::Cached => candidates.and_then(|set| set.by_owner.get(&(owner.unit.clone(), owner.module.clone()))).filter(|bundle| bundle.owner == owner).and_then(|bundle| bundle.original_module_interface.as_ref()).or_else(|| module_interfaces
                         .iter()
                         .chain(inherited_module_interfaces.iter())
                         .find(|interface| {
@@ -4024,6 +4028,10 @@ pub(crate) fn certify_products(
                 .ok_or(CertificationError::Mismatch(
                     "native canonical module carrier",
                 ))?;
+                if canonical_interface.producer_sha256() != producer_sha256
+                    || canonical_interface.source_sha256() != source_sha {
+                    return Err(CertificationError::Mismatch("native canonical producer/source"));
+                }
                 let execution_source = match origin {
                     ProductOrigin::Fresh => execution_graph
                         .as_ref()
@@ -4047,7 +4055,7 @@ pub(crate) fn certify_products(
                     &mut validation,
                 )?;
                 let certification = encode_home_witness(&witness)?;
-                let binding = validate_module_binding(&witness, canonical_interface, &interface, &package_bytes)?;
+                let binding = validate_module_binding(&witness, canonical_interface, &interface, &package_bytes, Some(source_sha))?;
                 let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_finalized_certification(
                     owner, product_bytes, certification, binding,
                 ).with_source_sha256(source_sha);
