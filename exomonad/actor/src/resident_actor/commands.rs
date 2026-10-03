@@ -191,9 +191,11 @@ where
             // Only the owned workbench can install a command job in its
             // active notebook scope. The ordinary actor interpreter has no
             // such notebook binding owner.
-            CommandsReq::CommandRetainJobWith(_) => answer!(Err(CommandError::CommandUnavailable(
-                "command job bindings require an owned workbench".into(),
-            ),)),
+            CommandsReq::CommandRetainJobWith(_) => {
+                answer!(Err::<String, _>(CommandError::CommandUnavailable(
+                    "command job bindings require an owned workbench".into(),
+                ),))
+            }
             CommandsReq::CommandOutputWith(id, bytes) => answer!({
                 match usize::try_from(bytes) {
                     Ok(bytes) => jobs.output(owner, &id, bytes).await,

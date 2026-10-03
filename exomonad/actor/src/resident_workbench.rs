@@ -1428,9 +1428,7 @@ fn decode_tool_dispatch_reply(
     text: &str,
 ) -> Result<ToolDispatchReply, ResidentActorWorkbenchError> {
     serde_json::from_str(text).map_err(|error| {
-        ResidentActorWorkbenchError::ActorProtocol(format!(
-            "invalid tool dispatch reply: {error}"
-        ))
+        ResidentActorWorkbenchError::ActorProtocol(format!("invalid tool dispatch reply: {error}"))
     })
 }
 impl ToolDispatchError {
@@ -10877,9 +10875,12 @@ mod tool_dispatch_tests {
 
     #[test]
     fn malformed_completed_reply_is_not_a_dispatch_refusal() {
-        let error = decode_tool_dispatch_reply(r#"{"status":"success","output":{"ok":true}}"#)
-            .unwrap_err();
-        assert!(matches!(error, ResidentActorWorkbenchError::ActorProtocol(_)));
+        let error =
+            decode_tool_dispatch_reply(r#"{"status":"success","output":{"ok":true}}"#).unwrap_err();
+        assert!(matches!(
+            error,
+            ResidentActorWorkbenchError::ActorProtocol(_)
+        ));
 
         let error = decode_tool_dispatch_reply(
             r#"{"status":"refused","kind":"invalid_input","error":"bad input","tool":"inspect","detail":"wrong type"}"#,

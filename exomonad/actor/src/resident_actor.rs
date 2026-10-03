@@ -9768,13 +9768,7 @@ where
             // it and names it back when it prunes. It is defined only if the slot
             // actually prunes.
             let handle = format!("toolResult{ordinal}");
-            let payload = after_tool_wait::result_payload(
-                call,
-                &handle,
-                ordinal,
-                &output,
-                value,
-            );
+            let payload = after_tool_wait::result_payload(call, &handle, ordinal, &output, value);
             let started = std::time::Instant::now();
             let wait = crate::after_tool::wait();
             let observation = self.runtime_observation.clone();
