@@ -106,7 +106,7 @@ rust_filegroup(
         "src/session/fixtures/activation-input-receiver.hs": "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs",
         "src/session/fixtures/activation-input-replacement.hs": "tidepool/runtime/src/session/fixtures/activation-input-replacement.hs",
         "src/session/fixtures/checked-failed-display-cell.hs": "tidepool/runtime/src/session/fixtures/checked-failed-display-cell.hs",
-        "src/session/fixtures/checked-fold-outcome-template.hs": "tidepool/runtime/src/session/fixtures/checked-fold-outcome-template.hs",
+        "src/session/fixtures/checked-cell-template.hs": "tidepool/runtime/src/session/fixtures/checked-cell-template.hs",
         "src/session/fixtures/checked-home-relay.hs": "tidepool/runtime/src/session/fixtures/checked-home-relay.hs",
         "src/session/fixtures/checked-home-value.hs": "tidepool/runtime/src/session/fixtures/checked-home-value.hs",
         "src/session/fixtures/checked-interface-publication.hs": "tidepool/runtime/src/session/fixtures/checked-interface-publication.hs",
