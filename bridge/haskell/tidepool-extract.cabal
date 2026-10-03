@@ -144,6 +144,7 @@ test-suite cell-splitter-test
   build-depends:
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,
+    ghc-boot >= 9.12 && < 9.13,
     directory,
     bytestring,
     cborg,
