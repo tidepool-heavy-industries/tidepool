@@ -1307,6 +1307,7 @@ pub(crate) mod tests {
             source_items: Vec::new(),
             status,
             output: output.into(),
+            value: None,
             diagnostics: Vec::new(),
             failure_layer: None,
             warnings: Vec::new(),
@@ -3263,7 +3264,10 @@ pub(crate) mod tests {
             crate::actor_host::command_jobs_tests::result_presentation_cases().await
         {
             let response = match result {
-                Ok(value) => CallResponse::workbench(value),
+                Ok(ResidentToolResponse::Workbench(value)) => CallResponse::workbench(value),
+                Ok(ResidentToolResponse::Value(_)) => {
+                    panic!("command fixture must return a workbench receipt")
+                }
                 Err(error) => CallResponse::failure(&HostToolFailure::Dispatch(error)),
             };
             cases.push(case(

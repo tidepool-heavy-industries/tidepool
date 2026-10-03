@@ -773,8 +773,6 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
 
 #[tokio::test]
 async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() {
-    use exomonad_actor::ResidentToolEndpoint as _;
-
     let mut campaign = test_campaign::TestCampaign::start().await;
     let target = campaign
         .forest

@@ -1967,7 +1967,7 @@ async fn completed_command_output_survives_a_later_failure_in_the_same_computati
 pub(crate) async fn result_presentation_cases() -> Vec<(
     &'static str,
     &'static str,
-    Result<serde_json::Value, exomonad_actor::ResidentToolError>,
+    Result<exomonad_actor::ResidentToolResponse, exomonad_actor::ResidentToolError>,
     Vec<&'static str>,
     Option<bool>,
     bool,
@@ -1984,7 +1984,7 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
     backend_request(&mut campaign)
         .await
         .supply(Ok(backend.clone()));
-    let prefix = super::tests::dispatch_haskell_script_result(
+    let prefix = super::test_campaign::dispatch_haskell_script_response(
         campaign.root_installation.policy.as_ref(),
         include_str!("command_prefix_failure.hs"),
     )
@@ -2003,7 +2003,7 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
 
     let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
-    let running = tokio::spawn(policy.dispatch_json_boxed(ToolInvocation {
+    let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
         context: None,
         name: "bash".into(),
         arguments: ToolArguments::Structured(serde_json::json!({"cmd":"incomplete"})),
@@ -2047,7 +2047,7 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
     backend_request(&mut campaign)
         .await
         .supply(Ok(backend.clone()));
-    let recovery = super::tests::dispatch_haskell_script_result(
+    let recovery = super::test_campaign::dispatch_haskell_script_response(
         campaign.root_installation.policy.as_ref(),
         include_str!("command_binding_failure.hs"),
     )
@@ -2066,7 +2066,7 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
 
     let mut campaign = TestCampaign::start_with_shell().await;
     let policy = campaign.root_installation.policy.clone();
-    let running = tokio::spawn(policy.dispatch_json_boxed(ToolInvocation {
+    let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
         context: None,
         name: "bash".into(),
         arguments: ToolArguments::Structured(serde_json::json!({"cmd":"large"})),
@@ -2077,9 +2077,10 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
         .supply(Ok(backend.clone()));
     let large = running.await.unwrap();
     assert_eq!(backend.executions(), 1);
-    let large_output = large.as_ref().unwrap()["items"][0]["output"]
-        .as_str()
-        .unwrap();
+    let exomonad_actor::ResidentToolResponse::Workbench(receipt) = large.as_ref().unwrap() else {
+        panic!("named command must return a workbench receipt");
+    };
+    let large_output = &receipt.items[0].output;
     assert!(large_output.contains("BEGIN") && large_output.contains("END"));
     cases.push((
         "retained-result-reference-amid-large-output",
