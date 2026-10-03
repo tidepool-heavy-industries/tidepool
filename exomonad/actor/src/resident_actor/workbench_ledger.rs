@@ -7,7 +7,7 @@ struct WorkbenchExecutionRecord {
     invocation_work: Option<Arc<InvocationWork>>,
     cell_terminal: Option<crate::CellExit>,
     boundary_abort: Option<BoundaryAbortCleanup>,
-    display_settlements: Vec<Arc<DisplayOperationSettlement>>,
+    display_settlements: Arc<DisplayExecutionSettlement>,
 }
 
 #[derive(Clone, Default)]
@@ -60,83 +60,24 @@ pub(super) enum WorkbenchBoundaryRecord {
 }
 
 impl WorkbenchExecutions {
-    pub(super) fn retain_display_settlement(
-        &mut self,
-        settlement: Arc<DisplayOperationSettlement>,
-    ) -> Result<(), ResidentActorWorkbenchError> {
-        let record = self
-            .0
-            .values_mut()
-            .find(|record| record.request.execution_id() == Some(&settlement.id.execution))
-            .ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "display receipt has no admitted execution owner".into(),
-                )
-            })?;
-        if record
-            .display_settlements
-            .iter()
-            .any(|existing| existing.id == settlement.id)
-        {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "display operation already owns a settlement".into(),
-            ));
-        }
-        record.display_settlements.push(settlement);
-        Ok(())
+    pub(super) fn display_receipt_owner(
+        &self,
+        execution: &WorkbenchExecutionId,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+    ) -> Option<Arc<DisplayExecutionSettlement>> {
+        self.0
+            .get(&WorkbenchReplayKey::new(execution, invocation))
+            .map(|record| record.display_settlements.clone())
     }
 
     pub(super) fn freeze_display_receipts(
         &self,
         execution: &WorkbenchExecutionId,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
         result: &mut Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
     ) {
-        let Some(record) = self
-            .0
-            .values()
-            .find(|record| record.request.execution_id() == Some(execution))
-        else {
-            return;
-        };
-        let mut packets = record
-            .display_settlements
-            .iter()
-            .filter_map(|settlement| settlement.packet())
-            .collect::<Vec<_>>();
-        packets.sort_by_key(|packet| Arc::as_ptr(packet) as usize);
-        packets.dedup_by(|left, right| Arc::ptr_eq(left, right));
-        // Freeze all ready pages as one terminal snapshot. The publisher
-        // cannot retain Published until its page has crossed this fence.
-        let publications = packets
-            .iter()
-            .map(|packet| packet.publication.lock())
-            .collect::<Vec<_>>();
-        for settlement in &record.display_settlements {
-            let Some(packet) = settlement.packet() else {
-                continue;
-            };
-            let Some(index) = packets
-                .iter()
-                .position(|candidate| Arc::ptr_eq(candidate, &packet))
-            else {
-                continue;
-            };
-            let Some(snapshot) = settlement.freeze(&publications[index]) else {
-                continue;
-            };
-            let receipts = match &mut *result {
-                Ok(
-                    KernelStep::Continue(response)
-                    | KernelStep::ContinueLater(response)
-                    | KernelStep::Stop {
-                        output: response, ..
-                    },
-                ) => Some(&mut response.items),
-                Err(error) => error.receipts_mut(),
-            };
-            if let Some(receipts) = receipts {
-                merge_display_receipt(receipts, snapshot);
-            }
+        if let Some(owner) = self.display_receipt_owner(execution, invocation) {
+            owner.freeze_step(result);
         }
     }
 
@@ -149,12 +90,7 @@ impl WorkbenchExecutions {
         let mut observed = self
             .0
             .values()
-            .flat_map(|record| &record.display_settlements)
-            .filter_map(|settlement| {
-                settlement
-                    .observation()
-                    .map(|publication| (settlement.id.clone(), publication))
-            })
+            .flat_map(|record| record.display_settlements.observations())
             .collect::<Vec<_>>();
         observed.sort_by_key(|(id, _)| {
             (
@@ -257,7 +193,7 @@ impl WorkbenchExecutions {
                 invocation_work: None,
                 cell_terminal: None,
                 boundary_abort: None,
-                display_settlements: Vec::new(),
+                display_settlements: Arc::new(DisplayExecutionSettlement::new(execution.clone())),
             },
         );
     }
@@ -287,7 +223,7 @@ impl WorkbenchExecutions {
             .0
             .get(&key)
             .map(|record| record.display_settlements.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(|| Arc::new(DisplayExecutionSettlement::new(execution.clone())));
         self.0.insert(
             key,
             WorkbenchExecutionRecord {
@@ -461,63 +397,6 @@ impl WorkbenchExecutions {
                 WorkbenchExecutionState::Unconfirmed => None,
             })
             .collect()
-    }
-}
-
-fn merge_display_receipt(
-    receipts: &mut Vec<WorkbenchItemReceipt>,
-    snapshot: WorkbenchOperationReceipt,
-) {
-    let index = snapshot.id.input_unit_index;
-    if !receipts.iter().any(|item| item.index == index) {
-        receipts.push(WorkbenchItemReceipt {
-            index,
-            status: WorkbenchItemStatus::Stopped,
-            kind: None,
-            span: None,
-            source_items: Vec::new(),
-            output: String::new(),
-            diagnostics: Vec::new(),
-            warnings: Vec::new(),
-            installed_bindings: Vec::new(),
-            operations: Vec::new(),
-            terminal_transfer: None,
-            failure_layer: None,
-        });
-        receipts.sort_by_key(|item| item.index);
-    }
-    let receipt = receipts
-        .iter_mut()
-        .find(|item| item.index == index)
-        .expect("original display input unit");
-    let projected = receipt
-        .operations
-        .iter()
-        .find(|operation| operation.id == snapshot.id)
-        .is_some_and(|operation| operation.display.is_some());
-    if !projected {
-        if let Some(display) = &snapshot.display {
-            if !display.text.is_empty() {
-                if !receipt.output.is_empty() {
-                    receipt.output.push('\n');
-                }
-                receipt.output.push_str(&display.text);
-            }
-        }
-    }
-    if let Some(operation) = receipt
-        .operations
-        .iter_mut()
-        .find(|operation| operation.id == snapshot.id)
-    {
-        operation.disposition = snapshot.disposition;
-        operation.display = snapshot.display;
-        operation.display_publication = snapshot.display_publication;
-    } else {
-        receipt.operations.push(snapshot);
-        receipt
-            .operations
-            .sort_by_key(|operation| operation.id.effect_ordinal);
     }
 }
 

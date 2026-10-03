@@ -810,6 +810,11 @@ where
             retirement: kernel.retained_exit(),
             state: WorkbenchExecutionState {
                 effects: WorkbenchEffectState {
+                    display_receipt_owner: request.execution_id().and_then(|execution| {
+                        self.workbench_executions
+                            .lock()
+                            .display_receipt_owner(execution, invocation.as_ref())
+                    }),
                     park_effects: true,
                     context: context.clone(),
                     public_visibility: None,

@@ -1,6 +1,168 @@
 use super::*;
 use tidepool_runtime::session::{WorkbenchDisplayPublication, WorkbenchDisplayPublicationIdentity};
 
+/// Completion custody for one exact admitted execution record. Controls borrow
+/// this same owner so scheduler failure can freeze receipts without a journal,
+/// cursor, native effect owner, or retained Haskell root.
+pub(super) struct DisplayExecutionSettlement {
+    execution: WorkbenchExecutionId,
+    operations: Mutex<Vec<Arc<DisplayOperationSettlement>>>,
+}
+
+impl DisplayExecutionSettlement {
+    pub(super) fn new(execution: WorkbenchExecutionId) -> Self {
+        Self {
+            execution,
+            operations: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(super) fn retain(
+        &self,
+        settlement: Arc<DisplayOperationSettlement>,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        let mut operations = self.operations.lock();
+        if settlement.id.execution != self.execution
+            || operations
+                .iter()
+                .any(|existing| existing.id == settlement.id)
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "display operation differs from its original receipt owner or is already retained"
+                    .into(),
+            ));
+        }
+        operations.push(settlement);
+        Ok(())
+    }
+
+    pub(super) fn freeze_step(
+        &self,
+        result: &mut Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
+    ) {
+        let receipts = match result {
+            Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
+            | Ok(KernelStep::Stop {
+                output: response, ..
+            }) => Some(&mut response.items),
+            Err(error) => error.receipts_mut(),
+        };
+        self.freeze_receipts(receipts);
+    }
+
+    fn freeze_receipts(&self, mut receipts: Option<&mut Vec<WorkbenchItemReceipt>>) {
+        let operations = self.operations.lock();
+        let mut packets = operations
+            .iter()
+            .filter_map(|settlement| settlement.packet())
+            .collect::<Vec<_>>();
+        packets.sort_by_key(|packet| Arc::as_ptr(packet) as usize);
+        packets.dedup_by(|left, right| Arc::ptr_eq(left, right));
+        // Freeze all ready pages as one terminal snapshot. The publisher
+        // cannot retain Published until its page has crossed this fence.
+        let publications = packets
+            .iter()
+            .map(|packet| packet.publication.lock())
+            .collect::<Vec<_>>();
+        for settlement in &*operations {
+            let Some(packet) = settlement.packet() else {
+                continue;
+            };
+            let Some(index) = packets
+                .iter()
+                .position(|candidate| Arc::ptr_eq(candidate, &packet))
+            else {
+                continue;
+            };
+            let Some(snapshot) = settlement.freeze(&publications[index]) else {
+                continue;
+            };
+            if let Some(receipts) = receipts.as_deref_mut() {
+                merge_display_receipt(receipts, snapshot);
+            }
+        }
+    }
+
+    pub(super) fn observations(&self) -> Vec<(WorkbenchOperationId, WorkbenchDisplayPublication)> {
+        self.operations
+            .lock()
+            .iter()
+            .filter_map(|operation| {
+                operation
+                    .observation()
+                    .map(|publication| (operation.id.clone(), publication))
+            })
+            .collect()
+    }
+}
+
+impl crate::resident_tools::WorkbenchReceiptOwner for DisplayExecutionSettlement {
+    fn freeze(&self, reply: &mut crate::KernelWorkbenchReply) {
+        let receipts = match reply {
+            Ok(response) => Some(&mut response.items),
+            Err(error) => error.receipts_mut(),
+        };
+        self.freeze_receipts(receipts);
+    }
+}
+
+fn merge_display_receipt(
+    receipts: &mut Vec<WorkbenchItemReceipt>,
+    snapshot: WorkbenchOperationReceipt,
+) {
+    let index = snapshot.id.input_unit_index;
+    if !receipts.iter().any(|item| item.index == index) {
+        receipts.push(WorkbenchItemReceipt {
+            index,
+            status: WorkbenchItemStatus::Stopped,
+            kind: None,
+            span: None,
+            source_items: Vec::new(),
+            output: String::new(),
+            diagnostics: Vec::new(),
+            warnings: Vec::new(),
+            installed_bindings: Vec::new(),
+            operations: Vec::new(),
+            terminal_transfer: None,
+            failure_layer: None,
+        });
+        receipts.sort_by_key(|item| item.index);
+    }
+    let receipt = receipts
+        .iter_mut()
+        .find(|item| item.index == index)
+        .expect("original display input unit");
+    let projected = receipt
+        .operations
+        .iter()
+        .find(|operation| operation.id == snapshot.id)
+        .is_some_and(|operation| operation.display.is_some());
+    if !projected {
+        if let Some(display) = &snapshot.display {
+            if !display.text.is_empty() {
+                if !receipt.output.is_empty() {
+                    receipt.output.push('\n');
+                }
+                receipt.output.push_str(&display.text);
+            }
+        }
+    }
+    if let Some(operation) = receipt
+        .operations
+        .iter_mut()
+        .find(|operation| operation.id == snapshot.id)
+    {
+        operation.disposition = snapshot.disposition;
+        operation.display = snapshot.display;
+        operation.display_publication = snapshot.display_publication;
+    } else {
+        receipt.operations.push(snapshot);
+        receipt
+            .operations
+            .sort_by_key(|operation| operation.id.effect_ordinal);
+    }
+}
+
 /// One packet's retained settlement; receipts and the request share this
 /// bounded page without retaining execution state or Haskell roots.
 pub(super) struct DisplayPacketSettlement {
@@ -118,12 +280,17 @@ impl DisplayOperationSettlement {
             _ => None,
         };
         let receipt = WorkbenchOperationReceipt {
-            display_publication: Some(publication),
-            disposition: if display.is_some() {
-                self.success
-            } else {
-                WorkbenchOperationDisposition::Unknown
+            disposition: match &publication {
+                WorkbenchDisplayPublication::Published { .. } => self.success,
+                WorkbenchDisplayPublication::Refused { .. } => {
+                    WorkbenchOperationDisposition::Rejected
+                }
+                WorkbenchDisplayPublication::Pending { .. }
+                | WorkbenchDisplayPublication::Unconfirmed { .. } => {
+                    WorkbenchOperationDisposition::Unknown
+                }
             },
+            display_publication: Some(publication),
             display,
             id: self.id.clone(),
             effect: self.effect.clone(),
@@ -205,7 +372,9 @@ mod tests {
             let mut journal = WorkbenchExecutions::default();
             journal.begin(&execution, request_input.clone(), None);
             journal
-                .retain_display_settlement(settlement.clone())
+                .display_receipt_owner(&execution, None)
+                .unwrap()
+                .retain(settlement.clone())
                 .unwrap();
             let displays = Arc::new(Mutex::new(ActorDisplays::default()));
             let page = WorkbenchDisplayPage {
@@ -281,7 +450,7 @@ mod tests {
                 // The host answer is retained, but its waiter has never polled.
                 assert!(request.answer(DisplayPublicationOutcome::Published(output.clone())));
             }
-            journal.freeze_display_receipts(&execution, &mut result);
+            journal.freeze_display_receipts(&execution, None, &mut result);
             let frozen = frozen_reply(&result);
             let receipts = match &frozen {
                 Ok(response) => {
@@ -345,13 +514,196 @@ mod tests {
                     .unwrap(),
                 frozen.clone()
             );
-            journal.freeze_display_receipts(&execution, &mut result);
+            journal.freeze_display_receipts(&execution, None, &mut result);
             assert_eq!(
                 frozen_reply(&result),
                 frozen,
                 "freeze never rewrites delivered JSON or appends visible text twice"
             );
         }
+    }
+
+    #[test]
+    fn scheduler_terminal_freezes_only_the_exact_hosted_receipt_owner() {
+        for terminal_first in [false, true] {
+            let actor = ActorRef::first(crate::ActorId(37));
+            let execution = WorkbenchExecutionId::from_digest([23; 16]);
+            let key = |call: &str| {
+                crate::resident_tools::WorkbenchCallKey::from(
+                    exomonad_tool::ToolInvocationContext::external(
+                        "thread".into(),
+                        "turn".into(),
+                        call.into(),
+                        Some("outer".into()),
+                        None,
+                    ),
+                )
+            };
+            let first = key("first");
+            let second = key("second");
+            let input = WorkbenchRequest::from_cell_input("display value")
+                .with_execution_id(execution.clone());
+            let mut journal = WorkbenchExecutions::default();
+            journal.begin(&execution, input.clone(), Some(&first));
+            journal.begin(&execution, input, Some(&second));
+            let owner = journal
+                .display_receipt_owner(&execution, Some(&first))
+                .unwrap();
+            let other = journal
+                .display_receipt_owner(&execution, Some(&second))
+                .unwrap();
+            assert!(!Arc::ptr_eq(&owner, &other));
+            let operation = WorkbenchOperationId {
+                execution: execution.clone(),
+                input_unit_index: 0,
+                effect_ordinal: 0,
+            };
+            let settlement = Arc::new(DisplayOperationSettlement::new(
+                operation.clone(),
+                "Console.DisplayWith".into(),
+                WorkbenchOperationDisposition::Committed,
+            ));
+            owner.retain(settlement.clone()).unwrap();
+            let control = crate::WorkbenchExecutionControl::untracked();
+            control.bind_receipt_owner(owner.clone());
+            let displays = Arc::new(Mutex::new(ActorDisplays::default()));
+            let (request, answer) = displays
+                .lock()
+                .stage(
+                    actor,
+                    WorkbenchDisplayPage {
+                        identity: (0, 0, 0),
+                        text: "visible".into(),
+                        expansions: Vec::new(),
+                        unavailable: false,
+                    },
+                    None,
+                    false,
+                    8192,
+                    Some(operation),
+                )
+                .unwrap();
+            settlement.admit(&request);
+            let submission =
+                DisplayPublicationSubmission::new(displays.clone(), request.clone(), answer);
+            let output = tidepool_runtime::session::ActorOutputReference {
+                run: "run-1".into(),
+                sequence: 7,
+            };
+            if !terminal_first {
+                request.answer(DisplayPublicationOutcome::Published(output.clone()));
+            }
+            let fail = || KernelInvocationFailure::Failed {
+                actor,
+                detail: "scheduler worker stopped".into(),
+                receipts: Vec::new(),
+            };
+            let mut untouched = Err(fail());
+            journal.freeze_display_receipts(&execution, Some(&second), &mut untouched);
+            assert!(frozen_reply(&untouched).unwrap_err().receipts().is_empty());
+            assert!(other.observations().is_empty());
+            // Retained control carries only this metadata owner even when
+            // forest/journal custody and the discarded execution are gone.
+            drop(journal);
+            drop(owner);
+            let delivered = control.settle(Err(fail()));
+            assert_eq!(control.terminal_reply(), Some(delivered.clone()));
+            let receipt = &delivered.as_ref().unwrap_err().receipts()[0];
+            if terminal_first {
+                assert!(receipt.operations[0].display.is_none());
+                assert!(
+                    matches!(receipt.operations[0].display_publication, Some(WorkbenchDisplayPublication::Pending { publication }) if publication.display == request.page.identity && publication.page_ordinal == 1)
+                );
+                assert!(receipt.output.is_empty());
+            } else {
+                assert_eq!(
+                    receipt.operations[0].disposition,
+                    WorkbenchOperationDisposition::Committed
+                );
+                assert_eq!(
+                    receipt.operations[0].display.as_ref().unwrap().output,
+                    output
+                );
+                assert_eq!(receipt.output, "visible");
+            }
+            drop(submission);
+            if terminal_first {
+                request.answer(DisplayPublicationOutcome::Published(output));
+                displays.lock().reconcile(request.page.identity.2).unwrap();
+            }
+            assert_eq!(displays.lock().pending_count(), 0);
+            assert_eq!(
+                control.settle(Err(fail())),
+                delivered,
+                "late commit never rewrites the first delivered scheduler outcome"
+            );
+            assert!(matches!(
+                settlement.observation(),
+                Some(WorkbenchDisplayPublication::Published { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn definitive_host_refusal_freezes_rejected_operation_without_output() {
+        let actor = ActorRef::first(crate::ActorId(37));
+        let execution = WorkbenchExecutionId::from_digest([23; 16]);
+        let operation = WorkbenchOperationId {
+            execution: execution.clone(),
+            input_unit_index: 0,
+            effect_ordinal: 0,
+        };
+        let owner = Arc::new(DisplayExecutionSettlement::new(execution));
+        let settlement = Arc::new(DisplayOperationSettlement::new(
+            operation.clone(),
+            "Console.DisplayWith".into(),
+            WorkbenchOperationDisposition::Committed,
+        ));
+        owner.retain(settlement.clone()).unwrap();
+        let control = crate::WorkbenchExecutionControl::untracked();
+        control.bind_receipt_owner(owner);
+        let displays = Arc::new(Mutex::new(ActorDisplays::default()));
+        let (request, answer) = displays
+            .lock()
+            .stage(
+                actor,
+                WorkbenchDisplayPage {
+                    identity: (0, 0, 0),
+                    text: "visible".into(),
+                    expansions: Vec::new(),
+                    unavailable: false,
+                },
+                None,
+                false,
+                8192,
+                Some(operation),
+            )
+            .unwrap();
+        settlement.admit(&request);
+        let submission =
+            DisplayPublicationSubmission::new(displays.clone(), request.clone(), answer);
+        assert!(request.answer(DisplayPublicationOutcome::Refused(
+            "authority rejected before commit".into()
+        )));
+        let delivered = control.settle(Err(KernelInvocationFailure::Rejected {
+            actor,
+            detail: "display refused".into(),
+            receipts: Vec::new(),
+        }));
+        let receipt = &delivered.as_ref().unwrap_err().receipts()[0];
+        assert_eq!(
+            receipt.operations[0].disposition,
+            WorkbenchOperationDisposition::Rejected
+        );
+        assert!(receipt.operations[0].display.is_none());
+        assert!(receipt.output.is_empty());
+        assert!(matches!(
+            receipt.operations[0].display_publication,
+            Some(WorkbenchDisplayPublication::Refused { .. })
+        ));
+        drop(submission);
+        assert_eq!(displays.lock().pending_count(), 0);
+        assert!(!request.was_unconfirmed());
     }
 
     #[test]
@@ -382,5 +734,24 @@ mod tests {
             Some(DisplayPublicationOutcome::Unconfirmed(_))
         ));
         assert!(request.was_unconfirmed());
+        for (run, accepted) in [
+            ("🙂".repeat(256), true),
+            ("🙂".repeat(257), false),
+            ("\n".repeat(1024), true),
+            ("\n".repeat(1025), false),
+        ] {
+            let (request, _answer) =
+                DisplayPublication::channel(actor, 1, None, request.page.clone());
+            request.answer(DisplayPublicationOutcome::Published(
+                tidepool_runtime::session::ActorOutputReference { run, sequence: 7 },
+            ));
+            assert_eq!(
+                matches!(
+                    request.outcome(),
+                    Some(DisplayPublicationOutcome::Published(_))
+                ),
+                accepted
+            );
+        }
     }
 }

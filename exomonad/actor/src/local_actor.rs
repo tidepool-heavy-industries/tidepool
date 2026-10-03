@@ -2704,9 +2704,9 @@ fn fail_unconfirmed_task<B: KernelBehavior>(
     myself.stop(Some(detail));
 }
 
-fn settle_pending_workbench(pending: PendingWorkbench, reply: crate::KernelWorkbenchReply) {
+fn settle_pending_workbench(pending: PendingWorkbench, mut reply: crate::KernelWorkbenchReply) {
     if let Some(control) = pending.control {
-        control.settle(reply.clone());
+        reply = control.settle(reply);
         pending.hosted_cell.complete(&control);
     }
     let delivered = pending.reply.send(reply).is_ok();
@@ -2742,8 +2742,10 @@ pub(crate) fn tool_control_reply(
     }
 }
 
-fn settle_pending_tool(pending: PendingTool, reply: crate::KernelInvocationReply) {
-    pending.control.settle(tool_control_reply(&reply));
+fn settle_pending_tool(pending: PendingTool, mut reply: crate::KernelInvocationReply) {
+    if let Err(error) = pending.control.settle(tool_control_reply(&reply)) {
+        reply = Err(error);
+    }
     pending.hosted_cell.complete(&pending.control);
     let delivered = pending.reply.send(reply).is_ok();
     tracing::info!(

@@ -43,7 +43,8 @@ pub(crate) use owned_workbench::{
 };
 
 use display_settlement::{
-    DisplayOperationSettlement, DisplayPacketSettlement, DisplayReceiptSubmission,
+    DisplayExecutionSettlement, DisplayOperationSettlement, DisplayPacketSettlement,
+    DisplayReceiptSubmission,
 };
 use invocation_work::{
     ensure_workbench_execution_id, retain_invocation_cleanup_summary, InvocationWork,
@@ -634,6 +635,7 @@ fn valid_display_reference(
     reference: &tidepool_runtime::session::ActorOutputReference,
 ) -> bool {
     !reference.run.is_empty()
+        && reference.run.len() <= 1024
         && reference.sequence > 0
         && request
             .host_context()
@@ -2840,6 +2842,7 @@ where
 }
 
 struct WorkbenchEffectState {
+    display_receipt_owner: Option<Arc<DisplayExecutionSettlement>>,
     park_effects: bool,
     context: ActorSessionContext,
     public_visibility: Option<tidepool_runtime::session::PublicVisibilitySnapshot>,
@@ -9195,9 +9198,19 @@ where
                         None
                     };
                     if let Some(settlement) = &display_settlement {
-                        self.workbench_executions
-                            .lock()
-                            .retain_display_settlement(settlement.clone())?;
+                        let owner =
+                            execution_state
+                                .display_receipt_owner
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    ResidentActorWorkbenchError::ActorProtocol(
+                                        "display has no original admitted receipt owner".into(),
+                                    )
+                                })?;
+                        owner.retain(settlement.clone())?;
+                        if let Some(control) = &execution_state.control {
+                            control.bind_receipt_owner(owner.clone());
+                        }
                     }
                     current.inflight_effect = Some(WorkbenchEffectStamp {
                         display: None,
@@ -11227,9 +11240,11 @@ where
         };
         let execution = execution_state.request.execution_id().cloned();
         if let Some(execution) = execution.as_ref() {
-            self.workbench_executions
-                .lock()
-                .freeze_display_receipts(execution, &mut result);
+            self.workbench_executions.lock().freeze_display_receipts(
+                execution,
+                execution_state.invocation.as_ref(),
+                &mut result,
+            );
             let exit = match execution_state.effects.control.as_ref() {
                 Some(control) => control.finish_cell(execution.clone(), &result, cleanup_confirmed),
                 None => crate::CellExit::from_reply(
@@ -12696,6 +12711,11 @@ where
             );
             let mut execution_state = WorkbenchExecutionState {
                 effects: WorkbenchEffectState {
+                    display_receipt_owner: execution.as_ref().and_then(|execution| {
+                        self.workbench_executions
+                            .lock()
+                            .display_receipt_owner(execution, invocation.as_ref())
+                    }),
                     park_effects: false,
                     context: context.clone(),
                     public_visibility,

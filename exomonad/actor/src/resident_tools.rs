@@ -57,6 +57,10 @@ pub enum WorkbenchBoundaryReconciliation {
     Settled,
 }
 
+pub(crate) trait WorkbenchReceiptOwner: Send + Sync {
+    fn freeze(&self, reply: &mut crate::KernelWorkbenchReply);
+}
+
 pub struct WorkbenchExecutionControl {
     pub(crate) invocation: Option<WorkbenchCallKey>,
     publication: Arc<PublicationDecision>,
@@ -64,6 +68,7 @@ pub struct WorkbenchExecutionControl {
     reservation_attempt: crate::request::WorkbenchReservationAttempt,
     execution: std::sync::OnceLock<WorkbenchExecutionId>,
     context_binding: std::sync::OnceLock<Arc<dyn crate::HostedContextBinding>>,
+    receipt_owner: std::sync::OnceLock<Arc<dyn WorkbenchReceiptOwner>>,
     context_cancel_requested: std::sync::atomic::AtomicBool,
     cell_terminal: parking_lot::Mutex<Option<crate::CellExit>>,
     publication_waited: std::sync::atomic::AtomicBool,
@@ -108,6 +113,7 @@ impl WorkbenchExecutionControl {
             reservation_attempt: crate::request::WorkbenchReservationAttempt::fresh(),
             execution: std::sync::OnceLock::new(),
             context_binding: std::sync::OnceLock::new(),
+            receipt_owner: std::sync::OnceLock::new(),
             context_cancel_requested: std::sync::atomic::AtomicBool::new(false),
             cell_terminal: parking_lot::Mutex::new(None),
             publication_waited: std::sync::atomic::AtomicBool::new(false),
@@ -273,19 +279,39 @@ impl WorkbenchExecutionControl {
             .ok();
     }
 
+    pub(crate) fn bind_receipt_owner(&self, owner: Arc<dyn WorkbenchReceiptOwner>) {
+        if let Err(owner) = self.receipt_owner.set(owner) {
+            assert!(
+                Arc::ptr_eq(
+                    self.receipt_owner.get().expect("original receipt owner"),
+                    &owner
+                ),
+                "an execution control cannot replace its admitted receipt owner"
+            );
+        }
+    }
+
     /// The actor publishes the first terminal reply; transport failure may
     /// fill the slot only when no actor-owned reply arrived.
-    pub(crate) fn settle(&self, reply: crate::KernelWorkbenchReply) {
+    pub(crate) fn settle(
+        &self,
+        mut reply: crate::KernelWorkbenchReply,
+    ) -> crate::KernelWorkbenchReply {
         let _terminal = self.cell_terminal.lock();
         if self.settlement.send_if_modified(|current| {
-            if current.is_some() {
+            if let Some(current) = current {
+                reply = current.clone();
                 return false;
             }
-            *current = Some(reply);
+            if let Some(owner) = self.receipt_owner.get() {
+                owner.freeze(&mut reply);
+            }
+            *current = Some(reply.clone());
             true
         }) {
             self.changed.notify_waiters();
         }
+        reply
     }
 
     fn admit_cancellation(&self) -> (bool, Option<PublicationCancellation>) {
