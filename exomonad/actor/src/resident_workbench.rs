@@ -4115,8 +4115,11 @@ where
                                     Ok(session.resume(hole.clone(), (identity, key, allowance)))
                                 }
                                 ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayWith((issued, text, expansions, unavailable), _)) if input_received && published.is_none() && issued == identity => {
+                                    let output = tidepool_runtime::session::WorkbenchDisplayOutput { identity, text, expansions, unavailable };
+                                    crate::resident_actor::validate_display_page(&output.text, allowance)?;
+                                    crate::resident_actor::validate_display_metadata(&output)?;
                                     let callback = session.live_payload_handle_owned_by(hole.cont_id(), scope)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("display update has no retained callback".into()))?;
-                                    published = Some((tidepool_runtime::session::WorkbenchDisplayOutput { identity, text, expansions, unavailable }, callback));
+                                    published = Some((output, callback));
                                     Ok(session.resume(hole.clone(), identity))
                                 }
                                 _ => Err(ResidentActorWorkbenchError::ActorProtocol("display callback crossed an unauthorized boundary".into())),

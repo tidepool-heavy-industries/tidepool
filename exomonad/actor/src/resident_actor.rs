@@ -392,11 +392,61 @@ impl ResidentActorRecord {
 }
 
 const DEFAULT_DISPLAY_CHARACTER_ALLOWANCE: i64 = 8192;
+const DISPLAY_METADATA_BYTE_LIMIT: usize = 8192;
 
-/// Four UTF-8 bytes per character guarantees the renderer's accepted page fits
-/// the existing transport allowance without discarding part of its preview.
+/// Reserve the output separator and four UTF-8 bytes per character so an
+/// accepted page fits the existing transport allowance without truncation.
 fn display_character_allowance(remaining_bytes: usize) -> i64 {
-    (remaining_bytes / 4).min(DEFAULT_DISPLAY_CHARACTER_ALLOWANCE as usize) as i64
+    (remaining_bytes.saturating_sub(1) / 4).min(DEFAULT_DISPLAY_CHARACTER_ALLOWANCE as usize) as i64
+}
+
+pub(crate) fn validate_display_page(
+    text: &str,
+    allowance: i64,
+) -> Result<(), ResidentActorWorkbenchError> {
+    let allowance = allowance.clamp(0, DEFAULT_DISPLAY_CHARACTER_ALLOWANCE) as usize;
+    if text.len() > allowance * 4 || text.chars().take(allowance + 1).count() > allowance {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "display page exceeds its current output allowance".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_display_metadata(
+    output: &WorkbenchDisplayOutput,
+) -> Result<(), ResidentActorWorkbenchError> {
+    #[derive(serde::Serialize)]
+    struct Metadata<'a> {
+        identity: (i64, i64, i64),
+        expansions: &'a [(i64, String)],
+        unavailable: bool,
+    }
+
+    // Reject an oversized lower bound before allocating the escaped encoding.
+    let raw_bytes = output
+        .expansions
+        .iter()
+        .try_fold(0usize, |bytes, (_, label)| {
+            bytes.checked_add(label.len())?.checked_add(1)
+        });
+    if !raw_bytes.is_some_and(|bytes| bytes <= DISPLAY_METADATA_BYTE_LIMIT) {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "display metadata exceeds its encoded output budget".into(),
+        ));
+    }
+    let encoded = serde_json::to_vec(&Metadata {
+        identity: output.identity,
+        expansions: &output.expansions,
+        unavailable: output.unavailable,
+    })
+    .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+    if encoded.len() > DISPLAY_METADATA_BYTE_LIMIT {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "display metadata exceeds its encoded output budget".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -406,7 +456,7 @@ struct ActorDisplays {
 }
 
 struct DisplaySlot {
-    callback: Arc<RootCustody>,
+    callback: Option<Arc<RootCustody>>,
     keys: Vec<(i64, String)>,
     expanding: bool,
 }
@@ -431,20 +481,31 @@ impl ActorDisplays {
         mut output: WorkbenchDisplayOutput,
         callback: RootCustody,
         update: bool,
+        allowance: i64,
     ) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError> {
-        // Keys are an output description, not another unbounded output channel.
-        let key_bytes = output
-            .expansions
-            .iter()
-            .try_fold(0usize, |bytes, (_, label)| {
-                bytes.checked_add(label.len())?.checked_add(32)
-            });
-        if !key_bytes.is_some_and(|bytes| bytes <= 8192) {
+        validate_display_page(&output.text, allowance)?;
+        if update == (output.identity == (0, 0, 0)) {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "display expansion description exceeds its output budget".into(),
+                "display publication does not match its invocation authority".into(),
             ));
         }
-        output.text = crate::workbench_display::bounded_output(&output.text, 32768);
+        let slot = if output.identity == (0, 0, 0) {
+            let next_slot = self.next_slot.checked_add(1).ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol("display slot space exhausted".into())
+            })?;
+            let owner = actor_address(actor);
+            output.identity = (owner.0, owner.1, next_slot);
+            next_slot
+        } else {
+            let slot = Self::validate_identity(actor, output.identity)?;
+            if !self.slots.get(&slot).is_some_and(|slot| slot.expanding) {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "display slot is unavailable".into(),
+                ));
+            }
+            slot
+        };
+        validate_display_metadata(&output)?;
         let mut seen = std::collections::HashSet::new();
         if output
             .expansions
@@ -455,31 +516,13 @@ impl ActorDisplays {
                 "display contains invalid or duplicate expansion keys".into(),
             ));
         }
-        if update == (output.identity == (0, 0, 0)) {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "display publication does not match its invocation authority".into(),
-            ));
+        if !update {
+            self.next_slot = slot;
         }
-        let slot = if output.identity == (0, 0, 0) {
-            self.next_slot = self.next_slot.checked_add(1).ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol("display slot space exhausted".into())
-            })?;
-            let owner = actor_address(actor);
-            output.identity = (owner.0, owner.1, self.next_slot);
-            self.next_slot
-        } else {
-            let slot = Self::validate_identity(actor, output.identity)?;
-            if !self.slots.get(&slot).is_some_and(|slot| slot.expanding) {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "display slot is unavailable".into(),
-                ));
-            }
-            slot
-        };
         self.slots.insert(
             slot,
             DisplaySlot {
-                callback: Arc::new(callback),
+                callback: (!output.expansions.is_empty()).then(|| Arc::new(callback)),
                 keys: output.expansions.clone(),
                 expanding: false,
             },
@@ -505,8 +548,13 @@ impl ActorDisplays {
                     "display expansion key is unavailable".into(),
                 )
             })?;
+        let callback = selected.callback.clone().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "display expansion callback is unavailable".into(),
+            )
+        })?;
         selected.expanding = true;
-        Ok(selected.callback.clone())
+        Ok(callback)
     }
 }
 
@@ -537,12 +585,59 @@ mod display_tests {
             for scalar in ["a", "λ", "界", "🙂"] {
                 let page = scalar.repeat(allowance);
                 assert!(page.len() <= remaining);
+                if !page.is_empty() {
+                    assert!(page.len() + 1 <= remaining);
+                }
                 assert_eq!(
                     crate::workbench_display::bounded_output(&page, remaining),
                     page
                 );
             }
         }
+    }
+
+    #[test]
+    fn display_page_rejects_stale_or_ignored_character_grants() {
+        let current = display_character_allowance(9);
+        assert_eq!(current, 2);
+        assert!(validate_display_page("🙂🙂", current).is_ok());
+        assert!(validate_display_page("abc", current).is_err());
+        assert!(validate_display_page("🙂🙂🙂", current).is_err());
+        assert!(validate_display_page("", 0).is_ok());
+        assert!(validate_display_page("a", 0).is_err());
+        assert!(validate_display_page(&"a".repeat(8193), i64::MAX).is_err());
+    }
+
+    #[test]
+    fn display_metadata_budget_counts_encoded_labels_and_envelope() {
+        let mut output = WorkbenchDisplayOutput {
+            identity: (i64::MAX, i64::MAX, i64::MAX),
+            text: String::new(),
+            expansions: vec![(i64::MAX, String::new())],
+            unavailable: false,
+        };
+        let envelope = serde_json::to_vec(&serde_json::json!({
+            "identity": output.identity,
+            "expansions": output.expansions,
+            "unavailable": output.unavailable,
+        }))
+        .unwrap()
+        .len();
+        output.expansions[0].1 = "a".repeat(DISPLAY_METADATA_BYTE_LIMIT - envelope);
+        assert!(validate_display_metadata(&output).is_ok());
+        output.expansions[0].1.push('a');
+        assert!(validate_display_metadata(&output).is_err());
+
+        // JSON control escapes expand raw bytes; raw label length is not a cap.
+        for label in ["\0".repeat(1400), "\n\t\"\\\r".repeat(900)] {
+            assert!(label.len() < DISPLAY_METADATA_BYTE_LIMIT);
+            output.expansions[0].1 = label;
+            assert!(validate_display_metadata(&output).is_err());
+        }
+        output.expansions[0].1 = "🙂".repeat(1900);
+        assert!(validate_display_metadata(&output).is_ok());
+        output.expansions = (1..=300).map(|key| (key, String::new())).collect();
+        assert!(validate_display_metadata(&output).is_ok());
     }
 
     #[test]
@@ -4829,6 +4924,7 @@ where
         context: &ActorSessionContext,
         output: WorkbenchDisplayOutput,
         callback: RootCustody,
+        allowance: i64,
     ) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError> {
         let records = self.environment.actors.lock();
         let record = records
@@ -4837,10 +4933,11 @@ where
             .ok_or_else(|| {
                 ResidentActorWorkbenchError::ActorProtocol("display actor is unavailable".into())
             })?;
-        let published = record
-            .displays
-            .lock()
-            .publish(context.actor, output, callback, false);
+        let published =
+            record
+                .displays
+                .lock()
+                .publish(context.actor, output, callback, false, allowance);
         published
     }
 
@@ -4887,10 +4984,11 @@ where
                     "display actor retired during expansion".into(),
                 )
             })?;
-        let output = record
-            .displays
-            .lock()
-            .publish(context.actor, output, callback, true);
+        let output =
+            record
+                .displays
+                .lock()
+                .publish(context.actor, output, callback, true, allowance);
         drop(lease);
         output
     }
@@ -4915,7 +5013,7 @@ where
                 output,
                 callback,
             } => {
-                let output = self.publish_display(context, output, callback)?;
+                let output = self.publish_display(context, output, callback, allowance)?;
                 Ok((
                     ResidentActorBoundary::DisplayPublished {
                         continuation,
@@ -8149,12 +8247,8 @@ where
                         .expect("captured display retains its effect stamp")
                         .display = display.clone();
                     if let Some(display) = &mut display {
-                        let rendered = crate::workbench_display::bounded_output(
-                            &display.text,
-                            (*unit.display_remaining).min(32768),
-                        );
                         let rendered =
-                            next_fragment.present_output(&rendered, unit.display_remaining);
+                            next_fragment.present_output(&display.text, unit.display_remaining);
                         display.text.clone_from(&rendered);
                         current
                             .inflight_effect
@@ -10714,7 +10808,7 @@ where
                         _ => {
                             return Err(Self::failure(
                                 "prepared durable root lost its pending owner",
-                            ))
+                            ));
                         }
                     }
                 };
@@ -14115,12 +14209,12 @@ async fn tracked_stopped_projection(
         Err(mpsc::error::TrySendError::Full(_)) => {
             return AgentStopProjection::StoppedRetaining(
                 "host release observation unavailable: lifecycle channel full".into(),
-            )
+            );
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
             return AgentStopProjection::StoppedRetaining(
                 "host release observation unavailable: lifecycle channel closed".into(),
-            )
+            );
         }
     }
     match tokio::time::timeout(grace, release).await {
