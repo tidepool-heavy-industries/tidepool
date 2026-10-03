@@ -1814,6 +1814,61 @@ pub(crate) fn original_home_requirements_with_validation(
 
 /// Private construction proves a native issuer selected this same canonical
 /// carrier; recovery uses the full wire decoder instead.
+#[cfg(test)]
+pub(crate) fn fixture_finalized_product(
+    product: crate::recovery_artifacts::CertifiedRecoveryProduct,
+    producer: [u8; 32],
+) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
+    let mut witness = decode_home_witness(product.certification_bytes()).unwrap();
+    let package_bytes = if product.package_imports_bytes().is_empty() {
+        let value = value_array([
+            value_text("TPPKGROOTS"),
+            value_text("2"),
+            value_array([
+                value_text(&product.owner().unit),
+                value_text(&product.owner().module),
+                value_text(hex(&product.owner().skinny_iface_sha256)),
+            ]),
+            value_array([]),
+            value_array([]),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+        bytes
+    } else {
+        product.package_imports_bytes().to_vec()
+    };
+    let interface = finalized_module::fixture_interface(
+        producer,
+        &product.owner().unit,
+        &product.owner().module,
+        product.source_sha256().unwrap_or([1; 32]),
+        product.interface_bytes().to_vec(),
+        package_bytes.clone(),
+        witness.interface_requirements.clone(),
+        Some(b"fixture-core".to_vec()),
+    );
+    witness.finalized_module_sha256 = Some(sha(interface.certificate_bytes()));
+    let binding = validate_module_binding(
+        &witness,
+        &interface,
+        product.interface_bytes(),
+        &package_bytes,
+    )
+    .unwrap();
+    let mut finalized =
+        crate::recovery_artifacts::CertifiedRecoveryProduct::from_finalized_certification(
+            product.owner().clone(),
+            product.product_bytes().to_vec(),
+            encode_home_witness(&witness).unwrap(),
+            binding,
+        );
+    if let Some(source) = product.source_sha256() {
+        finalized = finalized.with_source_sha256(source);
+    }
+    finalized
+}
+
 pub(crate) struct ValidatedModuleBinding(CertifiedModuleInterface);
 impl ValidatedModuleBinding {
     pub(crate) fn into_interface(self) -> CertifiedModuleInterface {
@@ -2059,6 +2114,18 @@ pub(crate) fn bind_home_execution_source(
     }
     witness.execution_source_sha256 = Some(source_digest);
     encode_home_witness(&witness)
+}
+
+pub(crate) fn home_certification_digests_with_validation(
+    bytes: &[u8],
+    owner: &CachedHomeOwner,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<(Option<[u8; 32]>, Option<[u8; 32]>)> {
+    let witness = verify_home_witness_with_validation(bytes, owner, validation)?;
+    Ok((
+        witness.execution_source_sha256,
+        witness.finalized_module_sha256,
+    ))
 }
 
 pub(crate) fn home_execution_source_digest_with_validation(

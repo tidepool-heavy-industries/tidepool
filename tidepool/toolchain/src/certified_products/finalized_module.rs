@@ -202,7 +202,7 @@ pub(super) fn decode_envelope(value: &Value) -> CertResult<FinalizationEnvelope>
 
 /// Private construction binds immutable payloads and all canonical certificate
 /// facts together. Clones retain these same allocations; no mutation API exists.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct CertifiedModuleInterface {
     producer_sha256: [u8; 32],
     receipt: FinalizedModuleReceipt,
@@ -212,6 +212,19 @@ pub(crate) struct CertifiedModuleInterface {
     certificate: Arc<[u8]>,
     core: Option<Arc<[u8]>>,
 }
+
+impl PartialEq for CertifiedModuleInterface {
+    fn eq(&self, other: &Self) -> bool {
+        // Scratch capture paths and declared lengths do not create another
+        // durable owner for identical authenticated payloads.
+        self.producer_sha256 == other.producer_sha256
+            && self.certificate == other.certificate
+            && self.interface == other.interface
+            && self.package_imports == other.package_imports
+            && self.core == other.core
+    }
+}
+impl Eq for CertifiedModuleInterface {}
 
 impl CertifiedModuleInterface {
     pub(crate) fn unit(&self) -> &str {
@@ -499,4 +512,150 @@ pub(super) fn recover_interface(
         certificate: certificate.into(),
         core: core.map(Into::into),
     })
+}
+
+#[cfg(test)]
+pub(super) fn fixture_interface(
+    producer: [u8; 32],
+    unit: &str,
+    module: &str,
+    source_sha256: [u8; 32],
+    interface: Vec<u8>,
+    package_imports: Vec<u8>,
+    interface_requirements: BTreeMap<(String, String), [u8; 32]>,
+    core: Option<Vec<u8>>,
+) -> CertifiedModuleInterface {
+    let home_units = std::iter::once(unit.to_owned())
+        .chain(interface_requirements.keys().map(|(unit, _)| unit.clone()))
+        .collect();
+    let receipt = FinalizedModuleReceipt {
+        unit: unit.into(),
+        module: module.into(),
+        source_sha256,
+        interface: CapturedArtifactDescriptor {
+            relative_path: "module.hi".into(),
+            sha256: sha(&interface),
+            bytes: interface.len() as u64,
+        },
+        package_imports: CapturedArtifactDescriptor {
+            relative_path: "module.hi.packages".into(),
+            sha256: sha(&package_imports),
+            bytes: package_imports.len() as u64,
+        },
+        core: core.as_ref().map(|bytes| CapturedArtifactDescriptor {
+            relative_path: "module.core".into(),
+            sha256: sha(bytes),
+            bytes: bytes.len() as u64,
+        }),
+        interface_requirements,
+    };
+    let envelope = FinalizationEnvelope {
+        profile: FINALIZATION_PROFILE.into(),
+        home_units,
+        modules: BTreeMap::new(),
+    };
+    let certificate = canonical_certificate(producer, &envelope, &receipt).unwrap();
+    recover_interface(
+        producer,
+        certificate,
+        interface,
+        package_imports,
+        core,
+        &mut PackageInterfaceValidation::default(),
+    )
+    .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn interface(core: Option<Vec<u8>>) -> CertifiedModuleInterface {
+        let bytes = b"interface".to_vec();
+        let packages = value_array([
+            value_text("TPPKGROOTS"),
+            value_text("2"),
+            value_array([
+                value_text("home-a"),
+                value_text("Owner"),
+                value_text(hex(&sha(&bytes))),
+            ]),
+            value_array([]),
+            value_array([]),
+        ]);
+        let mut package_bytes = Vec::new();
+        ciborium::ser::into_writer(&packages, &mut package_bytes).unwrap();
+        fixture_interface(
+            [7; 32],
+            "home-a",
+            "Owner",
+            [8; 32],
+            bytes,
+            package_bytes,
+            BTreeMap::new(),
+            core,
+        )
+    }
+
+    #[test]
+    fn canonical_certificate_retains_exact_core_and_rejects_substitution() {
+        let module = interface(Some(b"tidy-core".to_vec()));
+        assert!(recover_interface(
+            [7; 32],
+            module.certificate_bytes().to_vec(),
+            module.interface_bytes().to_vec(),
+            module.package_imports_bytes().to_vec(),
+            Some(b"other-core".to_vec()),
+            &mut PackageInterfaceValidation::default()
+        )
+        .is_err());
+        assert!(recover_interface(
+            [9; 32],
+            module.certificate_bytes().to_vec(),
+            module.interface_bytes().to_vec(),
+            module.package_imports_bytes().to_vec(),
+            Some(b"tidy-core".to_vec()),
+            &mut PackageInterfaceValidation::default()
+        )
+        .is_err());
+        let cloned = module.clone();
+        assert!(Arc::ptr_eq(&module.interface, &cloned.interface));
+        assert!(Arc::ptr_eq(
+            module.core.as_ref().unwrap(),
+            cloned.core.as_ref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn explicit_absent_core_cannot_be_added_after_capture() {
+        let module = interface(None);
+        assert!(module.core_bytes().is_none());
+        assert!(recover_interface(
+            [7; 32],
+            module.certificate_bytes().to_vec(),
+            module.interface_bytes().to_vec(),
+            module.package_imports_bytes().to_vec(),
+            Some(b"core".to_vec()),
+            &mut PackageInterfaceValidation::default()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn complete_home_units_refuse_a_home_owner_as_package() {
+        let module = interface(None);
+        let envelope = FinalizationEnvelope {
+            profile: FINALIZATION_PROFILE.into(),
+            home_units: module.home_units().clone(),
+            modules: BTreeMap::new(),
+        };
+        let packages = BTreeMap::from([(
+            ("home-a".into(), "PackageClaim".into()),
+            PackageInterfaceWitness {
+                selected_path: "/tmp/claimed.hi".into(),
+                sha256: [1; 32],
+            },
+        )]);
+        assert!(envelope.validate_owners(&[], &packages).is_err());
+    }
 }

@@ -765,6 +765,7 @@ fn ref_owner(reference: &RecoveryArtifactRef) -> CachedHomeOwner {
 struct VerifiedCertification {
     bytes: Vec<u8>,
     execution_source_digest: Option<[u8; 32]>,
+    module_certificate_digest: Option<[u8; 32]>,
 }
 
 fn read_certification(
@@ -802,14 +803,15 @@ fn read_certification(
             path.to_path_buf(),
         ));
     }
-    let execution_source_digest =
-        crate::certified_products::home_execution_source_digest_with_validation(
+    let (execution_source_digest, module_certificate_digest) =
+        crate::certified_products::home_certification_digests_with_validation(
             &bytes, owner, validation,
         )
         .map_err(|_| RecoveryArtifactError::InvalidCertifiedOwners(path.to_path_buf()))?;
     Ok(VerifiedCertification {
         bytes,
         execution_source_digest,
+        module_certificate_digest,
     })
 }
 
@@ -1849,6 +1851,23 @@ pub(crate) fn verify_materialized_ref_with_validation(
     reference: &RecoveryArtifactRef,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<VerifiedRecoveryArtifact, RecoveryArtifactError> {
+    let interface = recover_module_interface(
+        recovery_root,
+        reference
+            .module_interface
+            .as_ref()
+            .ok_or(RecoveryArtifactError::InvalidReference)?,
+        validation,
+    )?;
+    verify_materialized_ref_with_module_interface(recovery_root, reference, &interface, validation)
+}
+
+pub(crate) fn verify_materialized_ref_with_module_interface(
+    recovery_root: &Path,
+    reference: &RecoveryArtifactRef,
+    canonical: &crate::certified_products::CertifiedModuleInterface,
+    validation: &mut PackageInterfaceValidation,
+) -> Result<VerifiedRecoveryArtifact, RecoveryArtifactError> {
     if reference.toolchain_identity_sha256 == [0; 32]
         || reference.unit.is_empty()
         || reference.module.is_empty()
@@ -1888,6 +1907,16 @@ pub(crate) fn verify_materialized_ref_with_validation(
         &owner,
         validation,
     )?;
+    if certification.module_certificate_digest
+        != reference
+            .module_interface
+            .as_ref()
+            .map(|reference| reference.certificate_sha256)
+    {
+        return Err(RecoveryArtifactError::InvalidCertifiedOwners(
+            certification_path,
+        ));
+    }
     if certification.execution_source_digest
         != reference
             .execution_source
@@ -1912,14 +1941,16 @@ pub(crate) fn verify_materialized_ref_with_validation(
         })
         .transpose()?;
     let product_bytes = read_checked(&product_path, &reference.product_sha256, validation)?;
-    let module_interface = recover_module_interface(
-        recovery_root,
-        reference
-            .module_interface
-            .as_ref()
-            .ok_or(RecoveryArtifactError::InvalidReference)?,
-        validation,
-    )?;
+    let module_interface = canonical.clone();
+    let canonical_ref = reference
+        .module_interface
+        .as_ref()
+        .ok_or(RecoveryArtifactError::InvalidReference)?;
+    if validation.digest(module_interface.certificate_bytes()) != canonical_ref.certificate_sha256 {
+        return Err(RecoveryArtifactError::InvalidModuleCertificate(
+            recovery_root.join(&canonical_ref.certificate_path),
+        ));
+    }
     if module_interface.producer_sha256() != reference.toolchain_identity_sha256
         || module_interface.unit() != reference.unit
         || module_interface.module() != reference.module

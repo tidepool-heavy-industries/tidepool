@@ -409,13 +409,38 @@ impl RecoveredArtifactInventory {
         let mut validation = PackageInterfaceValidation::default();
         let mut entries = Vec::new();
         let mut losses = Vec::new();
+        let mut verified_modules = Vec::new();
+        for reference in module_interfaces {
+            match recovery_artifacts::recover_module_interface(root, reference, &mut validation) {
+                Ok(interface) => verified_modules.push((reference, interface)),
+                Err(error) => losses.push((
+                    crate::artifact_inventory::ArtifactDescriptor::from_recovery_module_interface(
+                        reference,
+                    )
+                    .id,
+                    error,
+                )),
+            }
+        }
         let mut verified = Vec::new();
         for reference in products {
-            match recovery_artifacts::verify_materialized_ref_with_validation(
-                root,
-                reference,
-                &mut validation,
-            ) {
+            let captured = reference.module_interface.as_ref().and_then(|required| {
+                verified_modules
+                    .iter()
+                    .find(|(supplied, _)| *supplied == required)
+            });
+            let result = match captured {
+                Some((_, interface)) => {
+                    recovery_artifacts::verify_materialized_ref_with_module_interface(
+                        root,
+                        reference,
+                        interface,
+                        &mut validation,
+                    )
+                }
+                None => Err(recovery_artifacts::RecoveryArtifactError::InvalidReference),
+            };
+            match result {
                 Ok(artifact) => verified.push(artifact),
                 Err(error) => losses.push((
                     crate::artifact_inventory::ArtifactDescriptor::from_recovery_product(reference)
@@ -510,10 +535,7 @@ impl RecoveredArtifactInventory {
             }
             entries.push(entry);
         }
-        for reference in module_interfaces {
-            let interface =
-                recovery_artifacts::recover_module_interface(root, reference, &mut validation)
-                    .map_err(failure)?;
+        for (_, interface) in verified_modules {
             context.admit_producer(interface.producer_sha256())?;
             entries.push(ArtifactEntry::canonical(interface));
         }
