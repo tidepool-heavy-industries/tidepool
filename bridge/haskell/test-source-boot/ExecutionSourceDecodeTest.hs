@@ -1,4 +1,4 @@
-module ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark) where
+module ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots) where
 
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Decoding (Decoder)
@@ -16,6 +16,8 @@ import Data.Text.Encoding qualified as TE
 import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Stats (RTSStats(..), getRTSStats, getRTSStatsEnabled)
 import System.CPUTime (getCPUTime)
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath ((</>))
 import System.Mem (performGC)
 import Text.Read (readMaybe)
 import Tidepool.DependencyEvidence
@@ -167,6 +169,45 @@ forceNode node = forceIdentity (executionNodeIdentity node) + forceModule (execu
   + sum [chars unit' + chars name | (unit', name) <- executionNodeRequirements node]
 
 data Demand = FullGraph | OriginalNodeAdmission ExecutionSourceIdentity | MaterializedNode ExecutionSourceIdentity
+
+-- Compare these complete decoded-value snapshots byte for byte between
+-- baseline and candidate. Graph Eq compares the authenticated input bytes,
+-- while the benchmark's numeric checksum is only a forcing witness.
+executionSourceDecodeSnapshots :: FilePath -> [FilePath] -> IO ()
+executionSourceDecodeSnapshots output files = do
+  createDirectoryIfMissing True output
+  forM_ files $ \path -> do
+    bytes <- BS.readFile path
+    let sha = shaHex bytes
+    graph <- either fail pure (decodeExecutionSourceGraph sha bytes)
+    BS.writeFile (output </> sha ++ ".decoded.cbor") (encode (snapshot graph))
+  where
+    string = TString . T.pack
+    list item = TList . map item
+    maybe' item = maybe TNull item
+    key (unit, name) = TList [string unit, string name]
+    identity' original = list string [executionUnit original, executionModule original,
+      executionVersion original, executionIfaceSha256 original, executionNativeSha256 original]
+    module' node = TList [string (dependencyModuleUnit node), string (dependencyModuleName node),
+      TBool (dependencyModuleBoot node), string (dependencyModuleSource node),
+      list (\edge -> TList [string (renderDependencyQualifier (dependencyImportQualifier edge)),
+        string (dependencyImportName edge), TBool (dependencyImportBoot edge),
+        maybe' string (dependencyImportSelected edge)]) (dependencyModuleImports node),
+      string (show (dependencyModuleProduct node))]
+    snapshot graph = let evidence = executionGraphEvidence graph in TList
+      [ string (executionGraphSha256 graph), string (executionGraphProducer graph),
+        maybe' string (executionGraphSemantic graph), list string (executionGraphIncludes graph),
+        TList [string (fst (executionGeneratedOrigin graph)), string (snd (executionGeneratedOrigin graph))],
+        TList [TBool (dependencyCacheSafe evidence), TBool (dependencySelectionComplete evidence),
+          list (\row -> TList [string (dependencySourcePath row), string (dependencySourceSha256 row)]) (dependencySources evidence),
+          list (\row -> TList [string (renderDependencyQualifier (dependencyResolutionQualifier row)),
+            string (dependencyResolutionModule row), TBool (dependencyResolutionBoot row),
+            maybe' string (dependencyResolutionSelected row), list string (dependencyResolutionCandidates row)]) (dependencyResolutions evidence),
+          list string (dependencyPackages evidence), list module' (dependencyModules evidence)],
+        list (\owner' -> TList [identity' (executionOwnerIdentity owner'), TBool (executionOwnerFresh owner'),
+          maybe' string (executionOwnerOriginalGraph owner')]) (executionGraphOwners graph),
+        list (\(owner', imports) -> TList [key owner', list key imports]) (executionGraphExactImports graph),
+        list (\(unit, name, path, sha) -> list string [unit, name, path, sha]) (executionGraphPackages graph)]
 
 {-# NOINLINE decodedDemand #-}
 decodedDemand :: Demand -> String -> BS.ByteString -> Either String Int
