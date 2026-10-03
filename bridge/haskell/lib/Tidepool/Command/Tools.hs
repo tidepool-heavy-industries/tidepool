@@ -462,7 +462,7 @@ readRetained ReadOutput {session_id = key, stream = selected, offset = position,
               prefix = "Output unavailable: "
               detailBudget = max 0 (budget - utf8Bytes (prefix <> recovery))
               shownDetail = boundedErrorDetail detailBudget detail
-           in pure $ boundedResult budget (result (Rejected OpReadOutput (Just key) shownDetail NoSideEffect) (prefix <> shownDetail <> recovery))
+           in pure $ boundedResult budget (result (Rejected OpReadOutput (Just key) detail NoSideEffect) (prefix <> shownDetail <> recovery))
         Right details -> do
           let eof = Cmd.outputFinished details && Cmd.outputEnd details == Cmd.outputAvailableEnd details
               stream = outputStreamFact selectedStream
