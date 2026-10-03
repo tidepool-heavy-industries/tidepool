@@ -108,6 +108,7 @@ import Tidepool.ExactScope
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , readExactScope, revalidateExactScope, writeExactCompilation, extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
+import Tidepool.CellProgramState
 import GHC.Core.Type (splitFunTy_maybe)
 import Tidepool.CheckedCell (CheckedSignature(..), encodeCheckedSignature
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness)
@@ -1378,21 +1379,6 @@ runLegacyCellMode compiler caches args cellPath = do
 
 -- The worker owns all GHC passes of a cell. Interfaces produced here are
 -- type evidence; no value or effect is evaluated by this transaction.
-data ProgramCellState = ProgramCellState
-  { programPrologue :: SourcePrologue
-  , programExact :: ExactScope
-  , programValues :: [CompletedValueImport]
-  , programOriginal :: Maybe ((String,String),String)
-  , programOriginals :: [((String,String),String)]
-  , programRetained :: Map.Map SymbolIdentity Word64
-  , programPlans :: [CellSourcePlan]
-  , programPins :: [CheckedBinderPin]
-  , programExpressions :: [CellExpressionPlan]
-  , programCheckedSignatures :: [CheckedSignature]
-  , programSources :: [String]
-  , programDeclarations :: [(Int,String)]
-  }
-
 runCellProgramMode :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath
   -> ExactScope -> PlannedCellAdmission -> IO ExitCode
 runCellProgramMode compiler caches args cellPath exact planned = do
@@ -1412,8 +1398,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
       (fail "compiled cell reservation count differs from parser")
     root <- requireArg "--session-root" (requestSessionRoot args)
     let outDir = fromMaybe (takeDirectory cellPath </> "cell-program") (requestOutDir args)
-        initialState = ProgramCellState (cellPlanPrologue initial) exact [] Nothing [] (requestRetainedGenerations args)
-          [] [] [] [] [] []
+        initialState = initialProgramCellState (cellPlanPrologue initial) exact (requestRetainedGenerations args)
     createDirectoryIfMissing True outDir
     settled <- foldM (compileSegment timing admission template root outDir)
       initialState (zip [0::Int ..] (cellInferenceSegments initial))
@@ -1443,7 +1428,7 @@ runCellProgramMode compiler caches args cellPath exact planned = do
   reportDiagsWithWarnings attempted
   where
     compileSegment timing admission template root outDir state (segmentIndex, segment) = do
-      let offset = sum (map (length . cellPlanItems) (programPlans state))
+      let offset = programItemOffset state
           prefix = selectedProgramValues (programValues state)
           withPrefix = installProgramImports prefix (programOriginals state) segment
           scope = programExact state
@@ -1476,12 +1461,10 @@ runCellProgramMode compiler caches args cellPath exact planned = do
                 | value <- programValues state
                 , let kept = [(name,identifier) | (name,identifier) <- completedValueBinders value, name `notElem` declared]
                 , not (null kept)]
-          pure state { programExact = extended, programOriginal = original
-            , programOriginals = programOriginals state ++ maybe [] pure original
-            , programValues = remainingValues
-            , programPlans = programPlans state ++ [finalized]
-            , programSources = programSources state ++ [plannedSourceFromDirectory finalized]
-            , programDeclarations = programDeclarations state ++ [(offset,shaHex receipt)] }
+          pure $ recordDeclarationSegment finalized (plannedSourceFromDirectory finalized) (shaHex receipt)
+            $ state { programExact = extended, programOriginal = original
+              , programValues = remainingValues
+              , programOriginals = programOriginals state ++ maybe [] pure original }
         _ -> do
           let checkPath = directory </> "CellCheck.hs"
               checkingTemplate = either error id (replaceTemplateModuleHeader "module CellCheck where" template)
@@ -1497,11 +1480,8 @@ runCellProgramMode compiler caches args cellPath exact planned = do
           expressions <- cellExpressionEvidence compiled
           rendered <- either fail pure (renderCellCheckSource checkingTemplate checked)
           let globalSource = globalProgramKeys offset (length (cellPlanItems checked)) rendered
-              checkedState = state { programPlans = programPlans state ++ [checked]
-                , programPins = programPins state ++ crCheckedBinderPins compiled
-                , programExpressions = programExpressions state ++ map fst expressions
-                , programCheckedSignatures = programCheckedSignatures state ++ signatures ++ map snd expressions
-                , programSources = programSources state ++ [globalSource] }
+              checkedState = recordCheckedSegment checked (crCheckedBinderPins compiled)
+                (map fst expressions) (signatures ++ map snd expressions) globalSource state
           foldM (compileNative timing admission root outDir)
             checkedState (zip [offset..] (cellPlanItems checked))
 
