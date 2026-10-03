@@ -83,7 +83,7 @@ import Tidepool.ExecutionEncode (encodeModuleProducts)
 
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), projectPreparedModuleGroups
-  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, topBinders
+  , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, closeUnavailableOriginalGroups, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared )
 import Tidepool.ExecutionProjection (resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
@@ -1498,6 +1498,22 @@ structuralCandidate work = do
 
 originalProjectionProducts :: IO ()
 originalProjectionProducts = withScratch $ \work -> do
+  let identity unit moduleName' occurrence =
+        SymbolIdentity (T.pack unit) (T.pack moduleName') (T.pack "value") (T.pack occurrence) Nothing
+      unavailable = identity "main" "A" "unavailable"
+      middle = identity "main" "B" "middle"
+      terminal = identity "main" "C" "terminal"
+      unrelated = identity "main" "D" "unrelated"
+      owners = Map.fromList
+        [(unavailable, ("A", 0)), (middle, ("B", 3)),
+         (terminal, ("C", 7)), (unrelated, ("D", 2))]
+      dependencies = Map.fromList
+        [ (("B", 3), Set.singleton unavailable)
+        , (("C", 7), Set.singleton middle)
+        , (("D", 2), Set.empty) ]
+      blocked = closeUnavailableOriginalGroups dependencies owners (Set.singleton unavailable)
+  unless (blocked == Set.fromList [("B", 3), ("C", 7)]) $
+    fail "original product closure did not cross modules transitively or retained an unrelated group"
   copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing (work </> "MetadataQuoteSupport.hs") [work] Nothing

@@ -63,7 +63,7 @@ import Tidepool.GhcPipeline
 import Tidepool.ExecutionEncode
   ( encodeWireProgram, ModuleProductEncoding, prepareModuleProductEncoding
   , moduleProductInput, moduleProductBytes, encodeModuleProductInventory )
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelected, PreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedRootIdentity, resolveTextPackageUnit)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), OriginalGroupOmission(..), OriginalGroupOmissionReason(..), prepareProjectionWithReachability, projectSelected, PreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedModuleProductOmissions, preparedRootIdentity, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
@@ -616,6 +616,12 @@ writeModuleProducts :: OriginalInterfaceArtifacts -> FilePath -> Maybe PreparedM
 writeModuleProducts _ _ Nothing _ _ = pure (Map.empty, [])
 writeModuleProducts originalInterfaces outDir (Just inventory) interfaces packageRoots = do
   timing <- readTimingEnabled
+  forM_ (preparedModuleProductOmissions inventory) $ \(owner, omissions) ->
+    forM_ omissions $ \omission ->
+      hPutStrLn stderr ("module product group omitted: " ++ moduleNameString (moduleName owner)
+        ++ "#" ++ show (omittedOriginalOrdinal omission) ++ " "
+        ++ show (omittedOriginalBinders omission) ++ " "
+        ++ show (omittedOriginalReason omission))
   outcomes <- forM (preparedModuleProductOutcomes inventory) $ \(owner, outcome) -> do
     let name = moduleName owner
         key = (unitString (moduleUnit owner), moduleNameString name)
