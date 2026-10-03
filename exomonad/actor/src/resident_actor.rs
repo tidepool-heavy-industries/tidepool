@@ -382,6 +382,15 @@ struct ResidentActorRecord {
     displays: Arc<Mutex<ActorDisplays>>,
 }
 
+impl ResidentActorRecord {
+    fn owns_display_resources(&self, context: &ActorSessionContext) -> bool {
+        let placement = self.descriptor.placement();
+        self.terminal.is_none()
+            && placement.session == context.placement.session
+            && placement.resource_scope == context.placement.resource_scope
+    }
+}
+
 #[derive(Default)]
 struct ActorDisplays {
     next_slot: i64,
@@ -4791,9 +4800,7 @@ where
         let records = self.environment.actors.lock();
         let record = records
             .get(&context.actor)
-            .filter(|record| {
-                record.terminal.is_none() && record.descriptor.placement() == context.placement
-            })
+            .filter(|record| record.owns_display_resources(context))
             .ok_or_else(|| {
                 ResidentActorWorkbenchError::ActorProtocol("display actor is unavailable".into())
             })?;
@@ -4814,9 +4821,7 @@ where
             let records = self.environment.actors.lock();
             let record = records
                 .get(&context.actor)
-                .filter(|record| {
-                    record.terminal.is_none() && record.descriptor.placement() == context.placement
-                })
+                .filter(|record| record.owns_display_resources(context))
                 .ok_or_else(|| {
                     ResidentActorWorkbenchError::ActorProtocol(
                         "display actor is unavailable".into(),
@@ -4842,9 +4847,7 @@ where
         let records = self.environment.actors.lock();
         let record = records
             .get(&context.actor)
-            .filter(|record| {
-                record.terminal.is_none() && record.descriptor.placement() == context.placement
-            })
+            .filter(|record| record.owns_display_resources(context))
             .ok_or_else(|| {
                 ResidentActorWorkbenchError::ActorProtocol(
                     "display actor retired during expansion".into(),
