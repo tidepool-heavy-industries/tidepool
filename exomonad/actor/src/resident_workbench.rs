@@ -35,12 +35,12 @@ use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
     hide_preamble_exports, insert_preamble_imports, render_turn_compile_rejection,
     resident_cell_check_template, resident_workbench_templates, run_inspections, run_turn,
-    BoundBinder, CellCheck, CellCheckRequest, CompiledTurn, DeclarationReceipt,
-    ExpressionPresentation, HostBindingAuthority, HostBindingType, HostCarrier, HostPayload,
-    InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, PendingPreparedInstall,
-    PendingPreparedMode, ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome,
-    ResidentResumeError, ResidentSession, RootCustody, SourceImports, TurnClassification, TurnCode,
-    TurnKind, TurnRequest, TurnResult,
+    BoundBinder, CellCheck, CellCheckRequest, CompiledTurn, ExpressionPresentation,
+    HostBindingAuthority, HostBindingType, HostCarrier, HostPayload, InspectionQuery,
+    InspectionRequest, OutputSink, ParsedBlock, PendingPreparedInstall, PendingPreparedMode,
+    ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError,
+    ResidentSession, RootCustody, SourceImports, TurnClassification, TurnCode, TurnKind,
+    TurnRequest, TurnResult,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, spawn_blocking_in_span, CompileError, FailureClass,
@@ -13085,7 +13085,7 @@ mod request_tests {
                     .begin_private_execution(
                         context.clone(),
                         owner,
-                        Arc::new(tidepool_runtime::session::PublicationDecision::new()),
+                        tidepool_runtime::session::PublicationDecision::new(),
                     )
                     .await?,
             );
@@ -13103,7 +13103,11 @@ mod request_tests {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![])
             .with_json_input(Some(serde_json::json!(42)));
-        let scope = tidepool_runtime::compile_scope();
+        let scope = crate::call_timing::CallScope::new(
+            "cell",
+            context.actor.id.0,
+            context.actor.incarnation.0,
+        );
         let Err(error) = scope
             .run(workbench.prepare_cell(context.clone(), "let x = (42 :: Int)".into()))
             .await
