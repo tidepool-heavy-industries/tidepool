@@ -3,7 +3,7 @@
 module Main where
 
 import System.Environment (getArgs)
-import System.FilePath (takeBaseName, takeDirectory, takeFileName, normalise, (</>))
+import System.FilePath (takeBaseName, takeDirectory, normalise, (</>))
 import System.Directory (createDirectoryIfMissing, setCurrentDirectory, makeAbsolute, canonicalizePath, doesPathExist)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
@@ -38,6 +38,8 @@ import GHC.Types.Id (idName)
 import GHC.Types.Name.Occurrence (occNameString)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+
+import Tidepool.HarnessSource (spliceHarnessProfilePragma)
 
 import Tidepool.Binders
   ( extractBindersNamed
@@ -394,47 +396,6 @@ isInspectionTypeQuery query = case query of
   InspectTypeOf _ -> True
   _ -> False
 
--- | Prepend the harness language profile to scratch input copies. Inspection
--- requests profile every singleton fallback and their optional batch source;
--- other modes compile only the first input. Putting the profile in source
--- keeps it visible to GHC downsweep and source-based cache keys. Caller files
--- are never modified; diagnostics are shifted by the inserted line.
-spliceHarnessProfilePragma :: WorkerRequest -> IO WorkerRequest
-spliceHarnessProfilePragma args = case requestFiles args of
-  [] -> pure args
-  (file : rest) -> do
-    let outDir = fromMaybe (takeDirectory file </> takeBaseName file ++ "_cbor") (requestOutDir args)
-        profileCopy directory sourcePath = do
-          source <- readFile sourcePath
-          let scratchPath = directory </> takeFileName sourcePath
-          createDirectoryIfMissing True directory
-          writeFile scratchPath (harnessProfilePragmaLine ++ "\n" ++ source)
-          pure scratchPath
-    if null (requestInspections args)
-      then do
-        scratchPath <- profileCopy outDir file
-        pure args { requestFiles = scratchPath : rest }
-      else do
-        (_, files) <- foldM
-          (\(copies, paths) (index, sourcePath) -> do
-            copy <- case Map.lookup sourcePath copies of
-              Just existing -> pure existing
-              Nothing -> profileCopy (outDir </> "inspection-query-" ++ show index) sourcePath
-            pure (Map.insert sourcePath copy copies, paths ++ [copy]))
-          (Map.empty, []) (zip [0 :: Int ..] (file : rest))
-        batch <- case requestInspectTypeBatch args of
-          Nothing -> pure Nothing
-          Just sourcePath -> Just <$> profileCopy (outDir </> "inspection-type-batch") sourcePath
-        pure args
-          { requestFiles = files
-          , requestInspectTypeBatch = batch
-          }
-
--- | Harness language extensions. A cross-language consistency test pins this
--- to the runtime-owned canonical eval dialect.
-harnessProfilePragmaLine :: String
-harnessProfilePragmaLine =
-  "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}"
 
 -- | Whether a generic extraction needs stable session values in scope.
 hasSessionScope :: WorkerRequest -> Bool
