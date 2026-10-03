@@ -387,36 +387,44 @@ impl DeploymentModulePackage {
             if !owners.insert((owner.unit.clone(), owner.module.clone())) {
                 return Err(ModulePackageError::Format("duplicate module owner"));
             }
+            let evidence: super::shared_evidence::SharedEvidence =
+                serde_json::from_slice(&self.read_ref(&files.evidence, &mut remaining)?)
+                    .map_err(|_| ModulePackageError::Format("dependency evidence JSON"))?;
             let mut record = Record {
-                tag: "TPMCAN".into(),
-                version: super::RECORD_VERSION,
-                endpoint: producer.to_vec(),
-                include: owner.include,
-                unit: owner.unit,
-                module: owner.module,
-                source: owner.source,
-                source_sha256: owner.source_sha256,
-                target_source: owner.target_source,
-                products: self.read_ref(&files.products, &mut remaining)?,
-                interface: self.read_ref(&files.interface, &mut remaining)?,
-                package_imports: self.read_ref(&files.packages, &mut remaining)?,
-                evidence: serde_json::from_slice(&self.read_ref(&files.evidence, &mut remaining)?)
-                    .map_err(|_| ModulePackageError::Format("dependency evidence JSON"))?,
-                version_origin: owner
-                    .version_origin
-                    .unwrap_or(super::CandidateVersionOrigin::Ordinary),
-                original_owner: owner.original_owner.unwrap_or(super::OriginalOwner {
-                    unit: String::new(),
-                    module: String::new(),
-                    module_version: [0; 32],
-                    skinny_iface_sha256: [0; 32],
-                    product_sha256: [0; 32],
-                }),
-                original_certification: self.read_ref(&files.certification, &mut remaining)?,
-                module_interface: Some(files.module_interface.clone()),
+                evidence: evidence.clone(),
                 module_interface_proof: None,
-                execution_source_sha256: owner.execution_source_sha256,
                 execution_source: None,
+                data: super::RecordData {
+                    evidence: evidence
+                        .reference()
+                        .ok_or(ModulePackageError::Bounds)?
+                        .clone(),
+                    tag: "TPMCAN".into(),
+                    version: super::RECORD_VERSION,
+                    endpoint: producer.to_vec(),
+                    include: owner.include,
+                    unit: owner.unit,
+                    module: owner.module,
+                    source: owner.source,
+                    source_sha256: owner.source_sha256,
+                    target_source: owner.target_source,
+                    products: self.read_ref(&files.products, &mut remaining)?,
+                    interface: self.read_ref(&files.interface, &mut remaining)?,
+                    package_imports: self.read_ref(&files.packages, &mut remaining)?,
+                    version_origin: owner
+                        .version_origin
+                        .unwrap_or(super::CandidateVersionOrigin::Ordinary),
+                    original_owner: owner.original_owner.unwrap_or(super::OriginalOwner {
+                        unit: String::new(),
+                        module: String::new(),
+                        module_version: [0; 32],
+                        skinny_iface_sha256: [0; 32],
+                        product_sha256: [0; 32],
+                    }),
+                    original_certification: self.read_ref(&files.certification, &mut remaining)?,
+                    module_interface: Some(files.module_interface.clone()),
+                    execution_source_sha256: owner.execution_source_sha256,
+                },
             };
             if record.original_owner.owner() != super::computed_owner(&record) {
                 return Err(ModulePackageError::Format("original full owner"));

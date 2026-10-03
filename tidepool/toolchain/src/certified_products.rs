@@ -4068,7 +4068,7 @@ pub(crate) fn certify_products(
                     ProductOrigin::Fresh => module_interfaces.iter().find(|interface| {
                         interface.unit() == owner.unit && interface.module() == owner.module
                     }),
-                    ProductOrigin::Cached => candidates.and_then(|set| set.by_owner.get(&(owner.unit.clone(), owner.module.clone()))).filter(|bundle| bundle.owner == owner).and_then(|bundle| bundle.original_module_interface.as_ref()).or_else(|| module_interfaces
+                    ProductOrigin::Cached => candidates.and_then(|set| set.by_owner.get(&(owner.unit.clone(), owner.module.clone()))).filter(|bundle| bundle.owner == owner).map(|bundle| &bundle.original_module_interface).or_else(|| module_interfaces
                         .iter()
                         .chain(inherited_module_interfaces.iter())
                         .find(|interface| {
@@ -6188,7 +6188,7 @@ pub(crate) mod tests {
                 evidence: evidence.into(),
                 target_source: "target".into(),
                 origin: crate::module_candidates::CandidateOrigin::Ordinary,
-                original_module_interface: recovery.module_interface().cloned(),
+                original_module_interface: recovery.module_interface().unwrap().clone(),
                 original_execution: None,
                 execution_admitted: false,
             },

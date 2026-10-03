@@ -4,6 +4,64 @@
 use super::*;
 use std::time::Instant;
 
+// Inline evidence exists only in historical codec measurements and malformed
+// fixture inputs. Production disk readers accept RecordData with EvidenceRef.
+impl Serialize for Record {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&self.data, &mut encoded).map_err(serde::ser::Error::custom)?;
+        let mut value: Value =
+            ciborium::de::from_reader(encoded.as_slice()).map_err(serde::ser::Error::custom)?;
+        encoded.clear();
+        ciborium::ser::into_writer(&self.evidence, &mut encoded)
+            .map_err(serde::ser::Error::custom)?;
+        let evidence =
+            ciborium::de::from_reader(encoded.as_slice()).map_err(serde::ser::Error::custom)?;
+        let Value::Map(fields) = &mut value else {
+            return Err(serde::ser::Error::custom("candidate record map"));
+        };
+        let (_, proof) = fields
+            .iter_mut()
+            .find(|(key, _)| key == &Value::Text("evidence".into()))
+            .ok_or_else(|| serde::ser::Error::custom("candidate evidence field"))?;
+        *proof = evidence;
+        value.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Record {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = Value::deserialize(deserializer)?;
+        let Value::Map(fields) = &mut value else {
+            return Err(serde::de::Error::custom("candidate record map"));
+        };
+        let (_, proof) = fields
+            .iter_mut()
+            .find(|(key, _)| key == &Value::Text("evidence".into()))
+            .ok_or_else(|| serde::de::Error::custom("candidate evidence field"))?;
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&*proof, &mut encoded).map_err(serde::de::Error::custom)?;
+        let evidence: shared_evidence::SharedEvidence =
+            ciborium::de::from_reader(encoded.as_slice()).map_err(serde::de::Error::custom)?;
+        let reference = evidence
+            .reference()
+            .ok_or_else(|| serde::de::Error::custom("bounded dependency evidence"))?;
+        encoded.clear();
+        ciborium::ser::into_writer(reference, &mut encoded).map_err(serde::de::Error::custom)?;
+        *proof = ciborium::de::from_reader(encoded.as_slice()).map_err(serde::de::Error::custom)?;
+        encoded.clear();
+        ciborium::ser::into_writer(&value, &mut encoded).map_err(serde::de::Error::custom)?;
+        let data =
+            ciborium::de::from_reader(encoded.as_slice()).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            data,
+            evidence,
+            module_interface_proof: None,
+            execution_source: None,
+        })
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct LegacyRecord {
     tag: String,
@@ -23,33 +81,37 @@ struct LegacyRecord {
 
 impl LegacyRecord {
     fn into_current(self) -> Record {
+        let evidence: shared_evidence::SharedEvidence = self.evidence.into();
         let mut record = Record {
-            tag: self.tag,
-            version: RECORD_VERSION,
-            endpoint: self.endpoint,
-            include: self.include,
-            evidence: self.evidence.into(),
-            products: self.products,
-            unit: self.unit,
-            module: self.module,
-            source: self.source,
-            source_sha256: self.source_sha256,
-            interface: self.interface,
-            package_imports: self.package_imports,
-            target_source: self.target_source,
-            version_origin: CandidateVersionOrigin::Ordinary,
-            original_owner: OriginalOwner {
-                unit: String::new(),
-                module: String::new(),
-                module_version: [0; 32],
-                skinny_iface_sha256: [0; 32],
-                product_sha256: [0; 32],
-            },
-            original_certification: Vec::new(),
-            module_interface: None,
+            evidence: evidence.clone(),
             module_interface_proof: None,
-            execution_source_sha256: None,
             execution_source: None,
+            data: RecordData {
+                evidence: evidence.reference().unwrap().clone(),
+                tag: self.tag,
+                version: RECORD_VERSION,
+                endpoint: self.endpoint,
+                include: self.include,
+                products: self.products,
+                unit: self.unit,
+                module: self.module,
+                source: self.source,
+                source_sha256: self.source_sha256,
+                interface: self.interface,
+                package_imports: self.package_imports,
+                target_source: self.target_source,
+                version_origin: CandidateVersionOrigin::Ordinary,
+                original_owner: OriginalOwner {
+                    unit: String::new(),
+                    module: String::new(),
+                    module_version: [0; 32],
+                    skinny_iface_sha256: [0; 32],
+                    product_sha256: [0; 32],
+                },
+                original_certification: Vec::new(),
+                module_interface: None,
+                execution_source_sha256: None,
+            },
         };
         record.original_owner = OriginalOwner::from_owner(&computed_owner(&record));
         record
