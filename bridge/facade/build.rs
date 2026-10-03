@@ -131,9 +131,11 @@ fn emit_scaffold_package(repository: PathBuf) {
     println!("cargo:rerun-if-changed={}", prompts.display());
     let mut prompt_entries = Vec::new();
     collect_all(&prompts, &prompts, &mut prompt_entries);
-    entries.extend(prompt_entries.into_iter().map(|(relative, path)| {
-        (format!("prompts/{relative}"), path)
-    }));
+    entries.extend(
+        prompt_entries
+            .into_iter()
+            .map(|(relative, path)| (format!("prompts/{relative}"), path)),
+    );
     entries.sort();
     let entries: Vec<(String, PathBuf)> = entries
         .into_iter()
