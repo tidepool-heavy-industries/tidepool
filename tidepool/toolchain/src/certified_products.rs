@@ -3577,6 +3577,20 @@ pub(crate) fn certify_products(
             return Err(CertificationError::Mismatch("duplicate interface owner"));
         }
     }
+    // Finalized interface-only owners carry type authority even when they
+    // have no native groups. Their authenticated closure was admitted above.
+    for interface in &module_interfaces {
+        let key = (interface.unit().to_owned(), interface.module().to_owned());
+        let seal = interface.interface_sha256();
+        if admitted_interfaces
+            .insert(key, seal)
+            .is_some_and(|previous| previous != seal)
+        {
+            return Err(CertificationError::Mismatch(
+                "conflicting finalized interface owner",
+            ));
+        }
+    }
     if let Some(admission) = exact {
         for artifact in &admission.request.artifacts {
             let key = (
@@ -7198,6 +7212,99 @@ pub(crate) mod tests {
                 .producer_sha256(),
             canonical_producer
         );
+    }
+
+    #[test]
+    fn fresh_product_accepts_only_canonical_type_only_dependencies() {
+        let source = "module Fresh where";
+        let types_source = "module Types where";
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("Fresh.hs");
+        let types_path = directory.path().join("Types.hs");
+        std::fs::write(&input, source).unwrap();
+        std::fs::write(&types_path, types_source).unwrap();
+        let mut evidence = evidence(source);
+        evidence.sources.push(SourceEvidence {
+            path: types_path.clone(),
+            sha256: hex(&sha(types_source.as_bytes())),
+        });
+        evidence.modules.push(ModuleEvidence {
+            unit: "main".into(),
+            module: "Types".into(),
+            boot: false,
+            source: types_path,
+            imports: vec![],
+            product: ProductAvailability::InterfaceOnly,
+        });
+        let mut worker_evidence = evidence.clone();
+        worker_evidence.sources[0].path = input.clone();
+        worker_evidence.modules[0].source = input.clone();
+        let raw_evidence = serde_json::to_vec(&worker_evidence).unwrap();
+        let bytes = sidecar();
+        let parsed = ParsedModuleProducts::decode(&bytes, &empty_package_bundle()).unwrap();
+        let mut accepted = receipt(&bytes, &evidence, source);
+        accepted.dependency_witness_sha256 = sha(&raw_evidence);
+        accepted
+            .interface_requirements
+            .insert(("main".into(), "Types".into()), sha(&[0x42]));
+        let mut types = receipt(&bytes, &evidence, types_source);
+        types.module = "Types".into();
+        let mut receipt = CertifiedReceipt {
+            finalization: fixture_finalization(Some(directory.path()), &[accepted.clone(), types]),
+            modules: vec![accepted],
+            targets: BTreeMap::new(),
+            packages: BTreeMap::new(),
+        };
+        let types_key = ("main".into(), "Types".into());
+        receipt
+            .finalization
+            .modules
+            .get_mut(&types_key)
+            .unwrap()
+            .core = None;
+        let certify = |receipt: &CertifiedReceipt| {
+            certify_products(
+                None,
+                receipt,
+                &parsed,
+                &raw_evidence,
+                &input,
+                &evidence,
+                source,
+                b"producer",
+                &[],
+                None,
+            )
+        };
+        let certified = certify(&receipt).unwrap();
+        assert_eq!(certified.recovery_products.len(), 1);
+        assert_eq!(certified.module_interfaces.len(), 2);
+        assert!(certified
+            .module_interfaces
+            .iter()
+            .any(|interface| interface.module() == "Types" && interface.core_bytes().is_none()));
+        let mut missing = receipt.clone();
+        missing.finalization.modules.remove(&types_key);
+        assert!(matches!(
+            certify(&missing),
+            Err(CertificationError::Mismatch(
+                "finalized source/interface closure"
+            ))
+        ));
+        let mut changed = receipt.clone();
+        changed
+            .finalization
+            .modules
+            .get_mut(&types_key)
+            .unwrap()
+            .interface
+            .sha256 = [9; 32];
+        assert!(matches!(
+            certify(&changed),
+            Err(CertificationError::Mismatch(
+                "finalized source/interface closure"
+            ))
+        ));
     }
 
     #[test]
