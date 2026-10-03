@@ -112,7 +112,7 @@ import Tidepool.InspectionRunner (isInspectionTypeQuery, runInspectionRequests)
 import Tidepool.ExactScope
   ( ExactCompilation(..), ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
   , originalGroupFromProjected, originalGroupFromCandidate
-  , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
+  , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , readExactScope, revalidateExactScope, writeExactCompilation, extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CellProgramState
@@ -1132,7 +1132,10 @@ runLegacyCellMode compiler caches args cellPath = do
         | any ((== KDecl) . sbKind . cellAnalysisVerdict) (cellPlanItems initialPlan) ->
             Just <$> prepareOriginalCellDeclaration compiler caches args template outDir scope exact admission initialPlan
       _ -> pure Nothing
-    let checkPurpose = maybe GeneralCompile (\(_,_,inventory,exact) -> PlannedDeclarationCheck inventory exact) preparedDeclaration
+    let baseCheckPurpose = case checkedCellPurpose <$> (admittedScope >>= scopeCheckedCell) of
+          Just (HostInputCellCheck signature) -> HostActivationCheck signature
+          _ -> GeneralCompile
+        checkPurpose = maybe baseCheckPurpose (\(_,_,inventory,exact) -> PlannedDeclarationCheck inventory exact) preparedDeclaration
         checkedSelection = if isJust preparedDeclaration then CheckedEnvironment else
           maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)
         checkPlan plan = maybe plan (\(_,planned,_,_) -> plannedCheckPlan planned) preparedDeclaration
@@ -1153,7 +1156,7 @@ runLegacyCellMode compiler caches args cellPath = do
         let finalized = installCellDisplayDeclarations declarations analyzed
         finalizedSource <- either fail pure (renderCellCheckSource checkingTemplate finalized)
         writeFile modulePath finalizedSource
-        finalizedResult <- compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)) Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
+        finalizedResult <- compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)) Set.empty checkPurpose scope modulePath (requestIncludes args) (requestBuildProductsDir args)
         pure (finalized, finalizedSource, finalizedResult)
     -- Statement preparation checks these rendered pins in their actual value
     -- modules before any declaration commits or effect runs.

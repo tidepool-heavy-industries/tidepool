@@ -5,7 +5,7 @@ module Tidepool.CheckedCell
   , captureCheckedSignature, encodeCheckedSignature
   , CheckedTypeWitness, captureCheckedTypeWitness, sealCheckedTypeWitness
   , encodeCheckedTypeWitness, renderCheckedTypeWitness
-  , rewriteCheckedAnnotations
+  , rewriteCheckedAnnotations, rewriteHostInputType
   ) where
 
 import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeString, encodeBytes, encodeInt)
@@ -43,7 +43,7 @@ import qualified GHC.Data.Maybe as MErr
 import GHC.Types.Name (nameModule_maybe, nameOccName, wiredInNameTyThing_maybe)
 import GHC.Types.Name.Occurrence
   ( isDataOcc, isTcOcc, mkVarOcc, occNameString )
-import GHC.Types.Name.Reader (rdrNameOcc)
+import GHC.Types.Name.Reader (RdrName(..), rdrNameOcc)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Unit.Types (unitString)
 import GHC.Unit.Home (isHomeUnit, mkHomeModule)
@@ -143,6 +143,28 @@ resolveCheckedSignature env signature = do
       pure ty
     _ -> fail "checked signature did not resolve to an Id"
   where bytes = signatureInterface signature
+
+-- The host recipe owns this reserved AST slot. Its exact type comes from
+-- admitted compiler evidence, never from the spelling of a captured type.
+rewriteHostInputType :: HscEnv -> Int -> CheckedSignature -> ParsedModule -> IO ParsedModule
+rewriteHostInputType env expected signature parsed = do
+  exact <- resolveCheckedSignature env signature
+  count <- newIORef (0 :: Int)
+  rewritten <- everywhereM (mkM (replaceSlot count exact)) (pm_parsed_source parsed)
+  actual <- readIORef count
+  unless (actual == expected) (fail "host input recipe has missing or duplicated native type slots")
+  pure parsed { pm_parsed_source = rewritten }
+  where
+    replaceSlot :: IORef Int -> Type -> HsType GhcPs -> IO (HsType GhcPs)
+    replaceSlot count exact node@(HsTyVar _ promotion located)
+      | occNameString (rdrNameOcc (unLoc located)) == "TidepoolActivationInput" =
+          case (promotion, unLoc located) of
+            (NotPromoted, Unqual occurrence) | isTcOcc occurrence -> do
+              modifyIORef' count (+ 1)
+              pure (XHsType exact)
+            _ -> fail "host input native type slot is qualified or promoted"
+      | otherwise = pure node
+    replaceSlot _ _ node = pure node
 
 -- Only compiler-generated signature binders acquire exact Types. Authored
 -- source continues through ordinary GHC renaming and lexical lookup.

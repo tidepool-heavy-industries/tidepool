@@ -106,6 +106,12 @@ against the receipt; home Names must already exist in the admitted environment.
 The canonical activation witness remains a separate semantic equality contract:
 GHC binary bytes are not a canonical type fingerprint.
 
+Host input checking carries that same original witness through the protected
+`host-input-check1` admission. The generated `TidepoolActivationInput` type slot
+is replaced with the native type before renaming; it is not an imported type
+or a new alias. The initial check and preview compilation retain separate
+purposes and independently validate the resulting input type.
+
 This is a strict internal migration. Old three-field printed signatures are
 rejected. Deploy the Rust consumer and Haskell worker together and regenerate
 compiler-produced artifacts through their owning producers.

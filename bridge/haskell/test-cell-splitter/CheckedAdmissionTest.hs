@@ -33,7 +33,7 @@ checkedAdmissionChecks = withScratch $ \root -> do
       fields = [BindGen 7, InjectVal "Val7", TurnTemplate "bind" first,
         TurnTemplate "expr" second, TurnTemplate "bind" first]
       cell = CheckedCellAdmission "cell-admission" (digest source) (digest wrapper)
-        inventory ["Val7"] [] [] Nothing
+        inventory ["Val7"] [] [] Nothing AuthoredCellCheck
       item = CheckedItemAdmission AuthoredCheckedItem "item-admission" "cell-receipt" 2
         (digest source) "bind" ["café"] inventory ["Val7"]
         [CheckedSignature "__tidepool_cell_pin_2_café" "Int" (BS.singleton 0) []]

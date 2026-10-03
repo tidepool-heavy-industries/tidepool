@@ -143,7 +143,7 @@ import Data.Generics (everything, mkQ)
 import Data.Foldable (toList)
 import Data.Word (Word64)
 import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellDisplayTarget(..), CellGenericDeclaration(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations, omitCellDisplayDeclarations)
-import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations)
+import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType)
 import Tidepool.HomeProducts (hydrateCandidateHomeProductsWithOriginals)
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
@@ -187,7 +187,7 @@ import Tidepool.ExactHydration
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, revalidateExactScope, scopeValueInterfaces
+  ( ExactScope(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation, scopeExecutionNativeOwners )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceNode(..), ExecutionSourceIdentity(..)
@@ -805,6 +805,7 @@ residentStateOrigin selection variant
 
 data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
   | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
+  | HostActivationCheck CheckedSignature
   | HostActivationInputCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
   | ProgramItemCompile Bool [(String,CheckedSignature)] [((String,String),String)] [CompletedValueImport]
   | PlannedDeclarationCheck PlannedDeclarationInventory ExactScope
@@ -838,8 +839,15 @@ transformFor (CheckedItemCompile annotations original _) target env summary
           inventory <- hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure
           transformPlannedDeclarationImports inventory env annotated
   | otherwise = pure
-transformFor (HostActivationInputCompile annotations original values) target env summary =
-  transformFor (CheckedItemCompile annotations original values) target env summary
+transformFor (HostActivationCheck signature) target env summary
+  | ms_mod_name summary == target = rewriteHostInputType env 1 signature
+  | otherwise = pure
+transformFor (HostActivationInputCompile annotations original values) target env summary
+  | ms_mod_name summary == target = \parsed -> do
+      signature <- hostInputSignature annotations
+      typed <- rewriteHostInputType env 2 signature parsed
+      transformFor (CheckedItemCompile annotations original values) target env summary typed
+  | otherwise = pure
 transformFor (ProgramItemCompile _ annotations originals _) target env summary
   | ms_mod_name summary == target = \parsed -> do
       annotated <- rewriteCheckedAnnotations env annotations parsed
@@ -857,8 +865,11 @@ transformWithCompletedValues :: Maybe CompletedValueImports -> CompilePurpose ->
 transformWithCompletedValues captured purpose target env summary = case purpose of
   CellProgramCompile inner _ -> transformWithCompletedValues captured inner target env summary
   GeneratedScaffoldCompile _ inner -> transformWithCompletedValues captured inner target env summary
-  HostActivationInputCompile annotations original requested ->
-    transformWithCompletedValues captured (CheckedItemCompile annotations original requested) target env summary
+  HostActivationInputCompile annotations original requested
+    | ms_mod_name summary == target -> \parsed -> do
+        signature <- hostInputSignature annotations
+        typed <- rewriteHostInputType env 2 signature parsed
+        transformWithCompletedValues captured (CheckedItemCompile annotations original requested) target env summary typed
   CheckedItemCompile annotations original requested
     | ms_mod_name summary == target && not (null requested) -> \parsed -> do
         values <- maybe (fail "completed value interfaces were not installed in this request") pure captured
@@ -876,6 +887,10 @@ transformWithCompletedValues captured purpose target env summary = case purpose 
         inventories <- mapM (\(owner,fingerprint) -> hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure) originals
         transformProgramDeclarationImports inventories values env annotated
   _ -> transformFor purpose target env summary
+
+hostInputSignature :: [(String, CheckedSignature)] -> IO CheckedSignature
+hostInputSignature [(_, signature)] = pure signature
+hostInputSignature _ = fail "host input recipe has no unique native signature"
 
 -- | The seam values for one run, derived from the downsweep graph.
 data CompilePlan = CompilePlan
@@ -3571,6 +3586,7 @@ normalVariant :: CompilePurpose -> FilePath -> IO PipelineVariant
 normalVariant purpose path = do
   case originalPurpose purpose of
     HostActivationInputCompile {} -> fail "host activation input requires its sealed session admission"
+    HostActivationCheck {} -> fail "host activation check requires its sealed session admission"
     _ -> pure ()
   targetModName' <- targetModuleNameFor path
   pure PipelineVariant
@@ -4046,6 +4062,14 @@ sessionVariant purpose scope path = do
       hostAdmission = maybe False ((== Just HostActivationInput) . fmap itemPurpose . scopeCheckedItem) exact
   unless (hostPurpose == hostAdmission)
     (fail "host activation input has another compiler purpose")
+  let checkPurpose = case effectivePurpose of
+        HostActivationCheck signature -> Just signature
+        _ -> Nothing
+      checkAdmission = exact >>= scopeCheckedCell >>= \cell -> case checkedCellPurpose cell of
+        HostInputCellCheck signature -> Just signature
+        AuthoredCellCheck -> Nothing
+  unless (checkPurpose == checkAdmission)
+    (fail "host activation check has another compiler purpose")
   forM_ exact $ \admitted -> case capturedExact of
     Just original | scopeRequestSha256 original == scopeRequestSha256 admitted -> pure ()
     _ -> ioError (userError "planned declaration leaves its original compiler offer")

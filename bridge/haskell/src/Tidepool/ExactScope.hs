@@ -2,7 +2,7 @@
 
 module Tidepool.ExactScope
   ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..)
-  , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..)
+  , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..)
   , PlannedCellAdmission(..), PlannedCellSlot(..)
   , readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation, extendSourceSelectedOriginals
@@ -89,6 +89,9 @@ data CheckedDisplayAdmission = CheckedDisplayAdmission
   , displayValueInterfaces :: [ExactIfaceArtifact]
   } deriving (Eq, Show)
 
+data CheckedCellPurpose = AuthoredCellCheck | HostInputCellCheck CheckedSignature
+  deriving (Eq, Show)
+
 data CheckedCellAdmission = CheckedCellAdmission
   { checkedAdmissionDigest :: String
   , checkedCellSha256 :: String
@@ -98,6 +101,7 @@ data CheckedCellAdmission = CheckedCellAdmission
   , checkedReservedModules :: [String]
   , checkedValueInterfaces :: [ExactIfaceArtifact]
   , checkedPlannedCell :: Maybe PlannedCellAdmission
+  , checkedCellPurpose :: CheckedCellPurpose
   } deriving (Eq, Show)
 
 data PlannedCellSlot = PlannedPrologue Word64 | PlannedDeclaration Word64
@@ -550,11 +554,17 @@ decodeScope = do
     authCount <- decodeListLen
     purpose <- string
     case purpose of
-      "cell-check2" -> do
-        unless (authCount == 9) (fail "invalid cell-check admission")
+      tag | tag == "cell-check2" || tag == "host-input-check1" -> do
+        unless (authCount == if tag == "host-input-check1" then 10 else 9) (fail "invalid cell-check admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
           <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
           <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces <*> pure Nothing
+          <*> (if tag == "host-input-check1" then HostInputCellCheck <$> signature else pure AuthoredCellCheck)
+        case checkedCellPurpose admission of
+          HostInputCellCheck input -> unless (signatureKey input == "activation-input"
+            && null (checkedReservedModules admission) && map fst (checkedTurnTemplates admission) == ["bind"])
+              (fail "invalid host input check admission")
+          AuthoredCellCheck -> pure ()
         validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         unique "checked injected modules" (checkedInjectedModules admission)
         unique "checked reserved modules" (checkedReservedModules admission)
@@ -575,6 +585,7 @@ decodeScope = do
                 ("bind",2) -> PlannedBind <$> decodeWord64
                 ("expr",4) -> PlannedExpression <$> decodeWord64 <*> decodeWord64 <*> nonempty
                 _ -> fail "invalid compiled cell reservation")))
+          <*> pure AuthoredCellCheck
         validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         paths <- includePaths
         pure (Just admission,Nothing,Nothing,Just paths)

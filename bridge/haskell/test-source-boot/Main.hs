@@ -7,7 +7,7 @@ import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Data.ByteString.Lazy qualified as BSL
 import Control.Exception (SomeException, AsyncException(ThreadKilled), bracket, evaluate, finally, try, fromException)
 import Control.Concurrent (MVar, forkIO, killThread, newEmptyMVar, putMVar, takeMVar)
-import Control.Monad (foldM, forM, unless, void, when)
+import Control.Monad (foldM, forM, forM_, unless, void, when)
 import GHC.Clock (getMonotonicTimeNSec)
 import Data.Word (Word64)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
@@ -19,7 +19,7 @@ import Data.Maybe (catMaybes, isJust, isNothing, maybeToList)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
-import GHC (runGhc, setSession, ms_mod_name, ms_hsc_src, parseModule, typecheckModule, ParsedModule, TypecheckedModule(..), Target(..))
+import GHC (runGhc, setSession, ms_mod_name, ms_hsc_src, ms_hspp_buf, ms_hspp_file, parseModule, typecheckModule, ParsedModule, TypecheckedModule(..), Target(..))
 import GHC.Core qualified as Core
 import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy)
 import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
@@ -117,10 +117,10 @@ import Tidepool.FatIface (readExactInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
 import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule)
 import Tidepool.Session (sessionHiPath)
-import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
+import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), captureCheckedSignature, encodeCheckedSignature
-  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, rewriteCheckedAnnotations)
+  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, rewriteCheckedAnnotations, rewriteHostInputType)
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
 import Tidepool.Binders (BoundBinder(..))
 import Tidepool.ExecutionSource
@@ -520,7 +520,7 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
         { scopeInterfaces = scopeInterfaces base ++ [(value,valuePath ++ ".packages",digest valuePackages)]
         , scopeLexical = scopeLexical base ++ [(("main","Tidepool.Session.Val.G7"),requirements)]
         , scopeCheckedCell = Just (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
-            (replicate 64 '0') [] ["Tidepool.Session.Val.G7"] [] [value] Nothing) }
+            (replicate 64 '0') [] ["Tidepool.Session.Val.G7"] [] [value] Nothing AuthoredCellCheck) }
       scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath, ssValIfaces = [valueOwner] }
   isolated <- readCheckedValueImportAuthority environment [value]
   unless (case isolated of Left "incomplete exact interface dependency closure" -> True; _ -> False) $
@@ -1160,7 +1160,7 @@ exactExecutionValues = withTiming $ withScratch $ \work -> do
   writeExactMetadataScope scopePath []
   base <- readExactScope scopePath >>= either fail pure
   let admitted = base {scopeCheckedCell=Just (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
-        (replicate 64 '0') [] ["Tidepool.Session.Val.G8"] [] [value] Nothing)}
+        (replicate 64 '0') [] ["Tidepool.Session.Val.G8"] [] [value] Nothing AuthoredCellCheck)}
       scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath,ssValIfaces=[valueOwner]}
   withResidentPipelineSelected [work] $ \compile -> do
     (refused,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty
@@ -1788,7 +1788,28 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
         :: IO (Either SomeException ParsedModule))
       liftIO $ unless (case refused of Left _ -> True; Right _ -> False)
         (fail "native signature admitted a substituted Name inventory")
-  putStrLn "native checked signatures: 7 type shapes and substituted authority refusal passed"
+      let inputSignature = lookup "__tidepool_cell_pin_0_nominal" signatures
+          inputType = Map.lookup "__tidepool_cell_pin_0_nominal" original
+      signature <- maybe (fail "native nominal signature missing") pure inputSignature
+      expected <- maybe (fail "native nominal type missing") pure inputType
+      let parseSlot body = do
+            liftIO (writeFile target ("module CheckedNativeSignatures where\n" ++ body))
+            parseModule (summary { ms_hspp_buf = Nothing, ms_hspp_file = target })
+      slot <- parseSlot "__result :: TidepoolActivationInput\n__result = undefined\n"
+      native <- liftIO (rewriteHostInputType (crHscEnv checked) 1 signature slot)
+      result <- typecheckModule native
+      let (nativeEnvironment, _) = tm_internals_ result
+          actualInput = [idType identifier | identifier <- typeEnvIds (tcg_type_env nativeEnvironment)
+            , getOccString identifier == "__result"]
+      liftIO $ unless (case actualInput of [ty] -> eqType expected ty; _ -> False)
+        (fail "native host slot lost its nominal owner without a source import")
+      forM_ ["Int", "Missing.TidepoolActivationInput", "(TidepoolActivationInput, TidepoolActivationInput)"] $ \bad -> do
+        malformed <- parseSlot ("__result :: " ++ bad ++ "\n__result = undefined\n")
+        refusedSlot <- liftIO (try (rewriteHostInputType (crHscEnv checked) 1 signature malformed)
+          :: IO (Either SomeException ParsedModule))
+        liftIO $ unless (case refusedSlot of Left _ -> True; Right _ -> False)
+          (fail "host input admitted a missing, qualified or duplicated native slot")
+  putStrLn "native checked signatures: 7 shapes, source-free nominal slot and authority/slot refusals passed"
 
 hostActivationPurposeTest :: Maybe FilePath -> IO ()
 hostActivationPurposeTest destination = withScratch $ \work -> do
@@ -1836,7 +1857,30 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   encodedSignature <- either (fail . show) (pure . snd)
     (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString (encodeCheckedSignature checkedSignature))))
   _ <- decode (replace 9 (TList [encodedSignature]) authorization) >>= either fail pure
-  checkedSource <- either fail pure (replaceTemplateMarker "{{CHECKED_TYPE}}" "()" inputTemplate)
+  initialSignature <- captureCheckedSignature (crHscEnv original) "activation-input" inputType
+  initialTerm <- either (fail . show) (pure . snd)
+    (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString (encodeCheckedSignature initialSignature))))
+  let initialAuthorization = [text "host-input-check1",sha,sha,sha,TList [TList [text "bind",sha]]
+        ,empty,empty,empty,initialTerm,TList [text work]]
+      initialSource = "module HostActivationInput where\n__result :: TidepoolActivationInput\n__result = undefined\n"
+      initialSession = emptySessionScope {ssRoot=work,ssExactScope=Just path}
+  initialAdmitted <- decode initialAuthorization >>= either fail pure
+  unless (fmap checkedCellPurpose (scopeCheckedCell initialAdmitted) == Just (HostInputCellCheck initialSignature))
+    (fail "host input check lost its original native signature")
+  writeFile sourcePath initialSource
+  initialChecked <- runPipelineSessionSelected CheckedEnvironment Set.empty (HostActivationCheck initialSignature)
+    (Just initialSession) sourcePath [work] Nothing
+  unless (maybe False (eqType inputType) (crResultType initialChecked))
+    (fail "host input first check lost the original type")
+  forM_ [replace 0 (text "cell-check2") initialAuthorization
+        ,replace 6 (TList [text "unexpected-declaration"]) initialAuthorization] $ \invalid -> do
+    refused <- decode invalid
+    unless (case refused of Left _ -> True; Right _ -> False)
+      (fail "host input check admitted authored/declaration purpose substitution")
+  _ <- decode (replace 9 (TList [encodedSignature]) authorization) >>= either fail pure
+  untypedSource <- either fail pure (replaceTemplateMarker "{{CHECKED_TYPE}}" "()" inputTemplate)
+  resultSlot <- either fail pure (replaceTemplateMarker "__result :: Int" "__result :: TidepoolActivationInput" untypedSource)
+  checkedSource <- either fail pure (replaceTemplateMarker "__activationPreview :: Int" "__activationPreview :: TidepoolActivationInput" resultSlot)
   writeFile sourcePath checkedSource
   let session = emptySessionScope {ssRoot=work,ssExactScope=Just path}
       purpose = HostActivationInputCompile [("__tidepool_checked_annotation_0",
@@ -3367,8 +3411,6 @@ exerciseRefusalsWith requireAccepted work reuse = do
     `finally` BS.writeFile boot original
   reuse >>= requireAccepted "resident reuse after refusal"
 
-forM_ :: [a] -> (a -> IO b) -> IO ()
-forM_ values action = mapM_ action values
 
 manifest :: FilePath -> FilePath
 manifest work = work </> "module-candidates.cbor"
