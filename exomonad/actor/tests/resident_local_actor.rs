@@ -1242,7 +1242,7 @@ async fn resident_await_watch_case(case: WatchCase) {
             );
             command_backend.release.notify_one();
         }
-        if primary {
+        if primary && !direct_binding_cell {
             tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 while !actor.hosted_cell_computing() && !settled_call.is_finished() {
                     tokio::task::yield_now().await;
