@@ -1322,9 +1322,29 @@ async fn resident_await_watch_case(case: WatchCase) {
                     .expect("the authored result is the retained binding reference");
                 assert!(!binding.contains("session_id:"), "{settled:?}");
                 assert_eq!(
-                    settled["items"][0]["installed_bindings"],
+                    settled["items"][0]["installedBindings"],
                     serde_json::json!([binding]),
                     "the host tracks the binding on the item that requested it: {settled:?}"
+                );
+                assert_eq!(
+                    settled["items"][0]["output"], binding,
+                    "the authored Haskell result explicitly selects the retained reference"
+                );
+                let operations = settled["items"][0]["operations"]
+                    .as_array()
+                    .expect("retained binding effect receipts");
+                assert_eq!(operations.len(), 3, "{settled:?}");
+                assert!(
+                    operations
+                        .iter()
+                        .all(|operation| operation["effect"] == "command job"),
+                    "retaining and awaiting the job does not emit a presentation operation: {settled:?}"
+                );
+                assert!(
+                    operations
+                        .iter()
+                        .all(|operation| operation["display"].is_null()),
+                    "the effect receipt carries no display output: {settled:?}"
                 );
                 forest.shutdown().await;
                 return;

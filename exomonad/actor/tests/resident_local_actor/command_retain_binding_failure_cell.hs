@@ -4,3 +4,4 @@ do
   _ <- Cmd.retainJobBinding job
   _ <- Cmd.await job
   error "intentional failure after retaining and awaiting the command job"
+    `seq` pure job
