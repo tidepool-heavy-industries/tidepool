@@ -105,7 +105,8 @@ import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..), CheckedEnvironmentResult(..)
   , renderType, generatedScaffoldRecipe, activationPreviewInputType
-  , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected )
+  , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected
+  , withResidentPipelineSelectedRequests )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports)
@@ -794,72 +795,79 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
   supportB <- runPipelineSelected (PreparedProducts Nothing) (work </> "MetadataQuoteSupport.hs") [work]
   writeExecutionScope changedPath work supportB ["MetadataQuoteSupport"]
   copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")
-  withResidentPipelineSelected [work] $ \compile -> do
-    checked <- compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing
-    unless (fmap renderType (crResultType checked) == Just "Int") $
-      fail "retained quoter execution changed its result type"
-    native <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing
-    unless (fmap renderType (prResultType (pprPipelineResult native)) == Just "Int"
-        && hasIntResultLiteral 42 (prBinds (pprPipelineResult native))
-        && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult native)))))) $
-      fail "retained quoter native execution changed its result type"
+  withResidentPipelineSelectedRequests [work] $ \runRequest -> do
     let helperPath = work </> "MetadataQuoteSupport.hs"
-    copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
-    refused <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult)
-    unless (case refused of Left reason -> "ExecutionSourceChanged" `isInfixOf` show reason; _ -> False) $
-      fail "retained quoter executed a changed original source"
-    let preprocessor = work </> "changed-preprocessor"
-        preprocessMarker = work </> "preprocess-marker"
-    writeFile preprocessor ("#!/bin/sh\n: > " ++ show preprocessMarker ++ "\nexit 1\n")
-    permissions <- getPermissions preprocessor
-    setPermissions preprocessor permissions {executable=True}
-    preprocessingSource <- readFile "test-source-boot/fixtures/ExecutionChangedPreprocessor.hs"
-    writeFile helperPath (T.unpack (T.replace "EXECUTION_PREPROCESSOR" (T.pack preprocessor) (T.pack preprocessingSource)))
-    preprocessed <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult)
-    ranPreprocessor <- doesFileExist preprocessMarker
-    unless (case preprocessed of Left reason -> "ExecutionSourceChanged" `isInfixOf` show reason && not ranPreprocessor; _ -> False) $
-      fail "changed original source executed preprocessing before recipe admission"
-    copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
-    nativeB <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just changedScope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing
-    unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult nativeB))) $
-      fail "execution recipe B linked the previous source owner's bytecode"
-    copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" helperPath
-    nativeA <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing
-    unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult nativeA))) $
-      fail "execution recipe A/B/A retained a changed helper body"
-    let cancelMarker = work </> "cancel-marker"
+        cancelMarker = work </> "cancel-marker"
         quoterPath = work </> "MetadataQuoter.hs"
-    cancellingSource <- readFile "test-source-boot/fixtures/ExecutionCancellingQuoter.hs"
-    writeFile quoterPath (T.unpack (T.replace "\"EXECUTION_CANCEL_MARKER\"" (T.pack (show cancelMarker)) (T.pack cancellingSource)))
-    cancelled <- try (timeout 1500000 (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing)) :: IO (Either SomeException (Maybe CheckedEnvironmentResult))
-    beganExecution <- doesFileExist cancelMarker
-    unless (beganExecution && case cancelled of Right (Just _) -> False; _ -> True) $
-      fail "execution cancellation did not reach the scoped splice linker"
-    copyFile "test-source-boot/fixtures/MetadataQuoter.hs" quoterPath
-    copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
-    afterCancel <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just changedScope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing
-    unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult afterCancel))
-        && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult afterCancel)))))) $
-      fail "cancelled execution A leaked its linker view into B"
-    copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" helperPath
-    (hidden,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult))
-    unless (case hidden of
-      Left reason
-        | Just (OriginalSourceSelectionRejected
-            (ExecutionSourceUnavailable ("main", "MetadataQuoteSupport"))) <- fromException reason ->
-          not ("tidepool-timing phase=ghc_load" `isInfixOf` diagnostics)
-      _ -> False) $
-      fail ("hidden lexical import did not refuse its missing source-selection authority: "
-        ++ either show (const "unexpected success") hidden)
+    runRequest (pure ()) $ \compile -> do
+      checked <- compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing
+      unless (fmap renderType (crResultType checked) == Just "Int") $
+        fail "retained quoter execution changed its result type"
+      native <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing
+      unless (fmap renderType (prResultType (pprPipelineResult native)) == Just "Int"
+          && hasIntResultLiteral 42 (prBinds (pprPipelineResult native))
+          && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult native)))))) $
+        fail "retained quoter native execution changed its result type"
+      copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
+      refused <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult)
+      unless (case refused of Left reason -> "ExecutionSourceChanged" `isInfixOf` show reason; _ -> False) $
+        fail "retained quoter executed a changed original source"
+      let preprocessor = work </> "changed-preprocessor"
+          preprocessMarker = work </> "preprocess-marker"
+      writeFile preprocessor ("#!/bin/sh\n: > " ++ show preprocessMarker ++ "\nexit 1\n")
+      permissions <- getPermissions preprocessor
+      setPermissions preprocessor permissions {executable=True}
+      preprocessingSource <- readFile "test-source-boot/fixtures/ExecutionChangedPreprocessor.hs"
+      writeFile helperPath (T.unpack (T.replace "EXECUTION_PREPROCESSOR" (T.pack preprocessor) (T.pack preprocessingSource)))
+      preprocessed <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult)
+      ranPreprocessor <- doesFileExist preprocessMarker
+      unless (case preprocessed of Left reason -> "ExecutionSourceChanged" `isInfixOf` show reason && not ranPreprocessor; _ -> False) $
+        fail "changed original source executed preprocessing before recipe admission"
+      copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
+      nativeB <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just changedScope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing
+      unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult nativeB))) $
+        fail "execution recipe B linked the previous source owner's bytecode"
+      copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" helperPath
+      nativeA <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing
+      unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult nativeA))) $
+        fail "execution recipe A/B/A retained a changed helper body"
+    runRequest (pure ()) $ \compile -> do
+      cancellingSource <- readFile "test-source-boot/fixtures/ExecutionCancellingQuoter.hs"
+      writeFile quoterPath (T.unpack (T.replace "\"EXECUTION_CANCEL_MARKER\"" (T.pack (show cancelMarker)) (T.pack cancellingSource)))
+      cancelled <- try (timeout 1500000 (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing)) :: IO (Either SomeException (Maybe CheckedEnvironmentResult))
+      beganExecution <- doesFileExist cancelMarker
+      unless (beganExecution && case cancelled of Right (Just _) -> False; _ -> True) $
+        fail "execution cancellation did not reach the scoped splice linker"
+      terminal <- try (timeout 1000000 (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing)) :: IO (Either SomeException (Maybe CheckedEnvironmentResult))
+      unless (case terminal of Left _ -> True; Right _ -> False) $
+        fail "cancelled compiler callback remained usable"
+    runRequest (pure ()) $ \compile -> do
+      copyFile "test-source-boot/fixtures/MetadataQuoter.hs" quoterPath
+      copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperPath
+      afterCancel <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just changedScope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing
+      unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult afterCancel))
+          && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult afterCancel)))))) $
+        fail "cancelled execution A leaked its linker view into B"
+      copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" helperPath
+      (hidden,diagnostics) <- captureDiagnostics (try (compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult))
+      unless (case hidden of
+        Left reason
+          | Just (OriginalSourceSelectionRejected
+              (ExecutionSourceUnavailable ("main", "MetadataQuoteSupport"))) <- fromException reason ->
+            not ("tidepool-timing phase=ghc_load" `isInfixOf` diagnostics)
+        _ -> False) $
+        fail ("hidden lexical import did not refuse its missing source-selection authority: "
+          ++ either show (const "unexpected success") hidden)
   unless (null (scopeExecutionOwners originalScope)) (fail "legacy scope gained execution authority")
   putStrLn "exact retained quoter: metadata/native, missing/change/preprocess refusals, A/B/A, cancellation, hidden-import preflight passed"
 
@@ -1064,14 +1072,8 @@ exactToOrdinary = withTiming $ withScratch $ \work -> do
   writeExecutionScope scopePath work sealed ["ExecutionSealedQuoter"]
   writeExecutionScope hiddenPath work sealed []
   writeExecutionScope helperPath work helper ["MetadataQuoteSupport"]
-  withResidentPipelineSelected [work] $ \compile -> do
-    _ <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
-      (work </> "ExecutionSealedTarget.hs") [work] Nothing
-    ordinary <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile Nothing
-      (work </> "ExecutionClassQuoter.hs") [work] Nothing
-    unless ("ExecutionClassQuoter" `elem` preparedNames ordinary) $
-      fail "ordinary certification after an exact request omitted its source owner"
-    let ordinaryQuote = do
+  withResidentPipelineSelectedRequests [work] $ \runRequest -> do
+    let ordinaryQuote compile = do
           result <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
             (work </> "ExecutionClassQuoteTarget.hs") [work] Nothing
           assertSingleDiagnosticCollector (prHscEnv (pprPipelineResult result))
@@ -1080,50 +1082,64 @@ exactToOrdinary = withTiming $ withScratch $ \work -> do
               && not (isJust (lookupHpt (hsc_HPT (prHscEnv (pprPipelineResult result))) (mkModuleName "ExecutionHiddenOrphan")))
               && not (isJust (lookupHpt (hsc_HPT (prHscEnv (pprPipelineResult result))) (mkModuleName "Tidepool.Session.Val.G2")))) $
             fail "ordinary request inherited an exact execution environment"
-    ordinaryQuote
-    ordinaryQuote
-    _ <- compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "ExecutionSealedTarget.hs") [work] Nothing
-    afterExactLegacy <- compile CheckedEnvironment Set.empty GeneralCompile
-      (Just emptySessionScope {ssRoot=work,ssValIfaces=[valueModule]}) (work </> "CheckedValueConsumer.hs") [work] Nothing
-    unless (fmap renderType (crResultType afterExactLegacy) == Just "Int") $
-      fail "legacy value request inherited the preceding exact graph"
-    ordinaryQuote
-    (refused, refusalDiagnostics) <- captureDiagnostics $ try (compile CheckedEnvironment Set.empty GeneralCompile
-      (Just scope {ssExactScope=Just hiddenPath}) (work </> "ExecutionSealedTarget.hs") [work] Nothing)
-      :: IO (Either SomeException CheckedEnvironmentResult, String)
-    unless (case refused of
-      Left reason
-        | Just (OriginalSourceSelectionRejected
-            (ExecutionSourceUnavailable ("main", "ExecutionSealedQuoter"))) <- fromException reason ->
-          not ("tidepool-timing phase=ghc_load" `isInfixOf` refusalDiagnostics)
-      _ -> False) $
-      fail ("hidden original did not refuse its missing source-selection authority: "
-        ++ either show (const "unexpected success") refused)
-    ordinaryQuote
-    cancelling <- readFile "test-source-boot/fixtures/ExecutionCancellingQuoter.hs"
-    let marker = work </> "cancel-marker"
-    writeFile (work </> "MetadataQuoter.hs") (T.unpack (T.replace "EXECUTION_CANCEL_MARKER" (T.pack marker) (T.pack cancelling)))
-    cancelled <- timeout 1500000 (compile CheckedEnvironment Set.empty GeneralCompile
-      (Just scope {ssExactScope=Just helperPath}) (work </> "MetadataQuotedTarget.hs") [work] Nothing)
-    started <- doesFileExist marker
-    unless (isNothing cancelled && started) (fail "exact cancellation did not reach the real quoter")
-    copyFile "test-source-boot/fixtures/MetadataQuoter.hs" (work </> "MetadataQuoter.hs")
-    copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" (work </> "MetadataQuoteSupport.hs")
-    afterCancel <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
-      (work </> "MetadataQuotedTarget.hs") [work] Nothing
-    assertSingleDiagnosticCollector (prHscEnv (pprPipelineResult afterCancel))
-    unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult afterCancel))
-        && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult afterCancel)))))) $
-      fail "ordinary request after cancellation reused the old helper executable"
-    legacy <- compile CheckedEnvironment Set.empty GeneralCompile
-      (Just emptySessionScope {ssRoot=work,ssValIfaces=[valueModule]}) (work </> "CheckedValueConsumer.hs") [work] Nothing
-    unless (fmap renderType (crResultType legacy) == Just "Int") (fail "legacy value injection did not typecheck")
-    ordinaryQuote
-    provisional <- compile (PreparedProducts (Just (work </> "missing-candidates.cbor"))) Set.empty GeneralCompile Nothing
-      (work </> "ExecutionClassQuoteTarget.hs") [work] Nothing
-    unless (null (pprAcceptedCandidates provisional)) (fail "missing manifest unexpectedly admitted a candidate")
-    ordinaryQuote
+    runRequest (pure ()) $ \compile -> do
+      _ <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+        (work </> "ExecutionSealedTarget.hs") [work] Nothing
+      ordinary <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile Nothing
+        (work </> "ExecutionClassQuoter.hs") [work] Nothing
+      unless ("ExecutionClassQuoter" `elem` preparedNames ordinary) $
+        fail "ordinary certification after an exact request omitted its source owner"
+      ordinaryQuote compile
+      ordinaryQuote compile
+      _ <- compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
+        (work </> "ExecutionSealedTarget.hs") [work] Nothing
+      afterExactLegacy <- compile CheckedEnvironment Set.empty GeneralCompile
+        (Just emptySessionScope {ssRoot=work,ssValIfaces=[valueModule]}) (work </> "CheckedValueConsumer.hs") [work] Nothing
+      unless (fmap renderType (crResultType afterExactLegacy) == Just "Int") $
+        fail "legacy value request inherited the preceding exact graph"
+      ordinaryQuote compile
+      (refused, refusalDiagnostics) <- captureDiagnostics $ try (compile CheckedEnvironment Set.empty GeneralCompile
+        (Just scope {ssExactScope=Just hiddenPath}) (work </> "ExecutionSealedTarget.hs") [work] Nothing)
+        :: IO (Either SomeException CheckedEnvironmentResult, String)
+      unless (case refused of
+        Left reason
+          | Just (OriginalSourceSelectionRejected
+              (ExecutionSourceUnavailable ("main", "ExecutionSealedQuoter"))) <- fromException reason ->
+            not ("tidepool-timing phase=ghc_load" `isInfixOf` refusalDiagnostics)
+        _ -> False) $
+        fail ("hidden original did not refuse its missing source-selection authority: "
+          ++ either show (const "unexpected success") refused)
+      ordinaryQuote compile
+    runRequest (pure ()) $ \compile -> do
+      cancelling <- readFile "test-source-boot/fixtures/ExecutionCancellingQuoter.hs"
+      let marker = work </> "cancel-marker"
+      writeFile (work </> "MetadataQuoter.hs") (T.unpack (T.replace "EXECUTION_CANCEL_MARKER" (T.pack marker) (T.pack cancelling)))
+      cancelled <- timeout 1500000 (compile CheckedEnvironment Set.empty GeneralCompile
+        (Just scope {ssExactScope=Just helperPath}) (work </> "MetadataQuotedTarget.hs") [work] Nothing)
+      started <- doesFileExist marker
+      unless (isNothing cancelled && started) (fail "exact cancellation did not reach the real quoter")
+      terminal <- try (timeout 1000000 (compile CheckedEnvironment Set.empty GeneralCompile
+        (Just scope {ssExactScope=Just helperPath}) (work </> "MetadataQuotedTarget.hs") [work] Nothing))
+        :: IO (Either SomeException (Maybe CheckedEnvironmentResult))
+      unless (case terminal of Left _ -> True; Right _ -> False) $
+        fail "cancelled compiler callback remained usable"
+    runRequest (pure ()) $ \compile -> do
+      copyFile "test-source-boot/fixtures/MetadataQuoter.hs" (work </> "MetadataQuoter.hs")
+      copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" (work </> "MetadataQuoteSupport.hs")
+      afterCancel <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
+        (work </> "MetadataQuotedTarget.hs") [work] Nothing
+      assertSingleDiagnosticCollector (prHscEnv (pprPipelineResult afterCancel))
+      unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult afterCancel))
+          && not (isJust (hscCompileCoreExprHook (hsc_hooks (prHscEnv (pprPipelineResult afterCancel)))))) $
+        fail "ordinary request after cancellation reused the old helper executable"
+      legacy <- compile CheckedEnvironment Set.empty GeneralCompile
+        (Just emptySessionScope {ssRoot=work,ssValIfaces=[valueModule]}) (work </> "CheckedValueConsumer.hs") [work] Nothing
+      unless (fmap renderType (crResultType legacy) == Just "Int") (fail "legacy value injection did not typecheck")
+      ordinaryQuote compile
+      provisional <- compile (PreparedProducts (Just (work </> "missing-candidates.cbor"))) Set.empty GeneralCompile Nothing
+        (work </> "ExecutionClassQuoteTarget.hs") [work] Nothing
+      unless (null (pprAcceptedCandidates provisional)) (fail "missing manifest unexpectedly admitted a candidate")
+      ordinaryQuote compile
   putStrLn "exact to ordinary: successful, refused and cancelled scopes reset; ordinary reuse and provisional candidates remain valid"
 
 exactExecutionValues :: IO ()

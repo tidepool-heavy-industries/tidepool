@@ -1,7 +1,7 @@
 module Main where
 
 import Control.Exception (bracket, try)
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, unless, void)
 import Tidepool.DiagJson (DependencyLoadFailure(..), Diag(..), DiagSeverity(..))
 import System.Directory (copyFile, createDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
 import System.FilePath ((</>))
@@ -17,11 +17,11 @@ main = forM_ cases $ \(name, modules, joinAccepted, consumerAccepted) ->
   bracket temporary removeDirectoryRecursive $ \root -> do
     let fixture = "test-cell-splitter/fixtures/declaration-join" </> name
     forM_ modules $ \file -> copyFile (fixture </> file) (root </> file)
-    withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
-      let check file = try (runRequest $ \compile ->
-            compile CheckedEnvironment mempty GeneralCompile Nothing
-              (root </> file) [root] Nothing)
-            :: IO (Either DependencyLoadFailure CheckedEnvironmentResult)
+    withResidentPipelineSelectedRequests [root] $ \runRequest -> do
+      let check file = try (runRequest (pure ()) $ \compile ->
+            void (compile CheckedEnvironment mempty GeneralCompile Nothing
+              (root </> file) [root] Nothing))
+            :: IO (Either DependencyLoadFailure ())
       join <- check "Join.hs"
       assertOutcome name "join" joinAccepted join
       consumer <- check "Consumer.hs"

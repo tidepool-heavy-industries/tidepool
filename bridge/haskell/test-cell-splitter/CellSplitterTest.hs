@@ -3,8 +3,9 @@
 
 module Main where
 
-import Control.Monad (forM_, unless, when)
-import Control.Exception (SomeException, bracket, finally, fromException, throwIO, try)
+import Control.Monad (forM_, unless, void, when)
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (AsyncException(ThreadKilled), SomeException, bracket, evaluate, finally, fromException, throwIO, try)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, tails)
@@ -64,6 +65,10 @@ import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 
 main :: IO ()
 main = getArgs >>= \case
+  ["--compiler-lifecycle"] -> compilerLifecycleCompilation >> putStrLn "compiler lifecycle: 8 passed"
+  ["--memo-lifecycle"] -> memoLifecycleCompilation >> putStrLn "request memo lifecycle: 1 passed"
+  ["--metadata"] -> metadataCompilation >> putStrLn "metadata compilation: 1 passed"
+  ["--prepared-session"] -> preparedSessionLeafCompilation >> putStrLn "prepared session leaf: 1 passed"
   ["--check-source-request"] -> checkingSourceRequestRoundTrip >> putStrLn "checking source request: 1 passed"
   ["--ordered-segments"] -> orderedInferenceSegments >> putStrLn "ordered inference segments: 1 passed"
   ["--program-originals"] -> programOriginalImportsCompilation >> putStrLn "program original imports: 1 passed"
@@ -162,30 +167,33 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
         , "__result = " ++ body
         ]
   writeFile target (source "(Tidepool.Session.Lib.G3.a,Tidepool.Session.Lib.G1.a + Tidepool.Session.Lib.G2.b)")
-  withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
-    checked <- runRequest $ \compiler -> compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
-    let environment = crHscEnv checked
-    inventories <- mapM (\owner -> do
-      original <- maybe (fail "original Lib interface is absent") pure (lookupHpt (hsc_HPT environment) (mkModuleName owner))
-      hydratePlannedDeclarationInventory ("main",owner)
-        (show (mi_iface_hash (mi_final_exts (hm_iface original)))) environment >>= either fail pure)
-      ["Tidepool.Session.Lib.G1","Tidepool.Session.Lib.G2","Tidepool.Session.Lib.G3"]
-    writeFile target (source "(a,Tidepool.Session.Lib.G1.a + b)")
-    libdir <- getLibdir
-    transformed <- runGhc (Just libdir) $ do
-      setSession environment
-      targetSpec <- guessTarget target Nothing Nothing
-      setTargets [targetSpec]
-      _ <- depanal [] False
-      summary <- getModSummary (mkModuleName "ProgramOriginalConsumer")
-      parsed <- parseModule summary
-      liftIO (transformProgramDeclarationImports inventories Nothing environment parsed)
-    let rendered = "{-# LANGUAGE PatternSynonyms #-}\n" ++ showSDocUnsafe (ppr (pm_parsed_source transformed))
+  withResidentPipelineSelectedRequests [root] $ \runRequest -> do
+    rendered <- runRequest (pure ()) $ \compiler -> do
+      checked <- compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+      let environment = crHscEnv checked
+      inventories <- mapM (\owner -> do
+        original <- maybe (fail "original Lib interface is absent") pure (lookupHpt (hsc_HPT environment) (mkModuleName owner))
+        hydratePlannedDeclarationInventory ("main",owner)
+          (show (mi_iface_hash (mi_final_exts (hm_iface original)))) environment >>= either fail pure)
+        ["Tidepool.Session.Lib.G1","Tidepool.Session.Lib.G2","Tidepool.Session.Lib.G3"]
+      writeFile target (source "(a,Tidepool.Session.Lib.G1.a + b)")
+      libdir <- getLibdir
+      transformed <- runGhc (Just libdir) $ do
+        setSession environment
+        targetSpec <- guessTarget target Nothing Nothing
+        setTargets [targetSpec]
+        _ <- depanal [] False
+        summary <- getModSummary (mkModuleName "ProgramOriginalConsumer")
+        parsed <- parseModule summary
+        liftIO (transformProgramDeclarationImports inventories Nothing environment parsed)
+      let rendered = "{-# LANGUAGE PatternSynonyms #-}\n" ++ showSDocUnsafe (ppr (pm_parsed_source transformed))
+      _ <- evaluate (length rendered)
+      pure rendered
     writeFile target (rendered ++ "\n__legacy = Tidepool.Session.Lib.G1.Old\n")
-    _ <- runRequest $ \compiler -> compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+    runRequest (pure ()) $ \compiler -> void (compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing)
     writeFile target (rendered ++ "\n__legacy = Old\n")
-    rejected <- try (runRequest $ \compiler -> compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing)
-      :: IO (Either SomeException CheckedEnvironmentResult)
+    rejected <- try (runRequest (pure ()) $ \compiler -> void (compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing))
+      :: IO (Either SomeException ())
     case rejected of
       Left _ -> pure ()
       Right _ -> fail "replacing a declaration head retained its old child unqualified"
@@ -448,8 +456,8 @@ multilineLetCompilation = bracket temporary removeDirectoryRecursive $ \root -> 
         [ ("LetChecks", "let checks =\n      [1, 2]\n", "checks")
         , ("LetFindings", "let findings :: [Text]\n    findings =\n      [\"ready\"]\n", "findings")
         ]
-  withResidentPipelineSelectedRequests includes (const (pure ())) $ \runRequest ->
-    runRequest $ \compiler -> forM_ cases $ \(name, source, binder) -> do
+  withResidentPipelineSelectedRequests includes $ \runRequest ->
+    runRequest (pure ()) $ \compiler -> forM_ cases $ \(name, source, binder) -> do
       let path = root </> (name ++ ".hs")
       writeFile path (spliceTemplate (template name) source binder)
       _ <- compiler CheckedEnvironment mempty GeneralCompile Nothing path includes Nothing
@@ -927,8 +935,8 @@ pathInsensitiveWitnessCompilation = bracket temporary removeDirectoryRecursive $
     ]
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
-  (withResidentPipelineSelectedRequests [workDir] (const (pure ())) $ \runRequest ->
-      runRequest $ \compile -> do
+  (withResidentPipelineSelectedRequests [workDir] $ \runRequest ->
+      runRequest (pure ()) $ \compile -> do
         (_, coldLog) <- captureStderr root "path-insensitive-cold" $
           compile PreparedStg mempty GeneralCompile Nothing importer [rootA, sharedRoot] Nothing
         assertContains "cold compile resolves Dep from rootA"
@@ -1180,26 +1188,26 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
     , "import MetadataDependency"
     , "__tidepool_inspect_0 = value"
     ]
-  evictions <- newIORef []
+  recoveryClears <- newIORef (0 :: Int)
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
-  (withResidentPipelineSelectedRequests [root] (\name -> modifyIORef' evictions (name :)) $ \runRequest -> do
-      (checked, output) <- captureStderr root "metadata-check" $
-        runRequest $ \compiler ->
-          compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
-      inspected <- runInspection
-        (crHscEnv checked)
-        (crTargetTcGblEnv checked)
-        (crTargetRdrEnv checked)
-        (crInspectionProbes checked)
-        [InspectTypeOf "value", InspectModule "MetadataTarget" False]
-      case inspected of
-        [InspectionType "value" rendered _, InspectionBrowse "MetadataTarget" False entries] -> do
-          assertContains "inspection resolves a local probe without a target HPT interface"
-            "Box Int" rendered
-          unless (any ((== "__tidepool_inspect_0") . infoName) entries) $
-            fail "metadata inspection could not browse the checked target module"
-        _ -> fail ("metadata inspection returned an unexpected result: " ++ show inspected)
+  (withResidentPipelineSelectedRequests [root] $ \runRequest -> do
+      (_, output) <- captureStderr root "metadata-check" $
+        runRequest (modifyIORef' recoveryClears (+ 1)) $ \compiler -> do
+          checked <- compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+          inspected <- runInspection
+            (crHscEnv checked)
+            (crTargetTcGblEnv checked)
+            (crTargetRdrEnv checked)
+            (crInspectionProbes checked)
+            [InspectTypeOf "value", InspectModule "MetadataTarget" False]
+          case inspected of
+            [InspectionType "value" rendered _, InspectionBrowse "MetadataTarget" False entries] -> do
+              assertContains "inspection resolves a local probe without a target HPT interface"
+                "Box Int" rendered
+              unless (any ((== "__tidepool_inspect_0") . infoName) entries) $
+                fail "metadata inspection could not browse the checked target module"
+            _ -> fail ("metadata inspection returned an unexpected result: " ++ show inspected)
       assertEqual "exactly one checked target" 1
         (length (filter (isInfixOf "tidepool-checked module=MetadataTarget target=True") (lines output)))
       assertContains "metadata leaf skips its unused HPT interface"
@@ -1211,14 +1219,14 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
       unless (not ("tidepool-target phase=desugar" `isInfixOf` output || "phase=lowering " `isInfixOf` output)) $
         fail "metadata target entered the executable pipeline"
       writeFile dependency "module MetadataDependency where\nvalue = missingDependencyName\n"
-      rejected <- try (runRequest $ \compiler ->
-        compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing)
-        :: IO (Either SomeException CheckedEnvironmentResult)
+      rejected <- try (runRequest (modifyIORef' recoveryClears (+ 1)) $ \compiler -> do
+        _ <- compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+        pure ()) :: IO (Either SomeException ())
       case rejected of
         Left _ -> pure ()
         Right _ -> fail "metadata reused an invalid dependency"
-      evicted <- readIORef evictions
-      assertEqual "success and rejection each evict their target" 2 (length evicted))
+      cleared <- readIORef recoveryClears
+      assertEqual "successful close, failed attempt and rejected close clear recovery graphs" 3 cleared)
     `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
   where
     temporary = do
@@ -1233,8 +1241,8 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
 -- the final source consumer, so it must prepare successfully without creating
 -- a registration interface solely for itself.
 --
--- The ordinary request retains validation facts for its unused import. The
--- later every-module session request prepares that body when it needs it.
+-- The ordinary compile retains validation facts within this transaction. The
+-- later every-module session compile prepares that body when it needs it.
 preparedSessionLeafCompilation :: IO ()
 preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
   let scopeRoot = root </> "session"
@@ -1264,18 +1272,16 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
     ]
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
-  (withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
+  (withResidentPipelineSelected [root] $ \compiler -> do
       (ordinaryPrepared, ordinaryOutput) <- captureStderr root "prepared-session-ordinary" $
-        runRequest $ \compiler ->
-          compiler PreparedStg mempty GeneralCompile Nothing ordinary [root] Nothing
+        compiler PreparedStg mempty GeneralCompile Nothing ordinary [root] Nothing
       unless (all ((/= "SessionUnreachable") . moduleNameString . moduleName . pmModule)
           (pprModules ordinaryPrepared)) $
         fail "ordinary request prepared its unreachable import"
       when ("memo_completion" `isInfixOf` ordinaryOutput) $
         fail "ordinary request performed speculative memo completion"
       (prepared, output) <- captureStderr root "prepared-session-leaf" $
-        runRequest $ \compiler ->
-          compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing
+        compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing
       when (null (pprModules prepared)) $
         fail "prepared session leaf produced no prepared module"
       assertContains "prepared session leaf skips its unused registration interface"
@@ -1285,9 +1291,9 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
             (filter (isPrefixOf "tidepool-timing-module-detail ") (lines output))) $
         fail "prepared session leaf constructed an unused target interface"
       when ("tidepool-memo-miss module=SessionUnused" `isInfixOf` output) $
-        fail ("session tier recompiled a module the ordinary request memoized: " ++ output)
+        fail ("session tier recompiled a module the preceding compile memoized: " ++ output)
       when ("tidepool-memo-miss module=SessionConsumer" `isInfixOf` output) $
-        fail ("session tier recompiled a consumer the ordinary request memoized: " ++ output)
+        fail ("session tier recompiled a consumer the preceding compile memoized: " ++ output)
       assertContains "session tier prepares the previously validation-only import"
         "tidepool-memo-miss module=SessionUnreachable reason=executable-body-not-prepared" output
       unless (any ((== "SessionUnreachable") . moduleNameString . moduleName . pmModule)
@@ -1296,8 +1302,7 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
       previousDrop <- lookupEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE"
       forcedLog <- (do
           setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE" "SessionUnused"
-          snd <$> captureStderr root "prepared-session-interface-miss" (runRequest $ \compiler ->
-            compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing))
+          snd <$> captureStderr root "prepared-session-interface-miss" (compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing))
         `finally` maybe (unsetEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE")
                         (setEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE") previousDrop
       assertContains "session tier regenerates producer with missing interface"
@@ -1330,7 +1335,7 @@ structuralDisplayCompilation selectedScope effectsRoot = bracket temporary remov
         <> encodeListLen 0 <> encodeListLen 0 <> encodeListLen 0))
       pure (Just (SessionScope root [] (Just path) Nothing))
   let includes = ["lib", "test-cell-splitter", effectsRoot]
-  withResidentPipelineSelectedRequests includes (const (pure ())) $ \runRequest -> runRequest $ \compiler -> do
+  withResidentPipelineSelectedRequests includes $ \runRequest -> runRequest (pure ()) $ \compiler -> do
     let compile current = do
           rendered <- either fail pure (renderCellCheckSource template current)
           let path = root </> "CellCheck.hs"
@@ -1425,6 +1430,64 @@ structuralDisplayCompilation selectedScope effectsRoot = bracket temporary remov
       , "__tidepool_cell_check = do { {{CELL_BODY}} } :: Maybe ()"
       ]
 
+-- Escaping callbacks have no authority after their owning transaction closes.
+-- Rejection leaves the active or next transaction able to compile real source.
+compilerLifecycleCompilation :: IO ()
+compilerLifecycleCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let target = root </> "CompilerLifecycle.hs"
+      valid = "module CompilerLifecycle where\nanswer :: Int\nanswer = 42\n"
+  writeFile target valid
+  (releasedCompile, closedRunner) <- withResidentPipelineSelectedRequests [root] $ \runRequest -> do
+    released <- runRequest (pure ()) $ \compiler -> do
+      let compile = void (compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing)
+      assertRejected "nested transaction" (runRequest (pure ()) (\_ -> pure ()))
+      compile
+      assertRejected "compiler called on another thread" (onAnotherThread compile)
+      compile
+      pure compile
+    assertRejected "compiler called after request release" released
+    assertRejected "runner called on another thread" $
+      onAnotherThread (runRequest (pure ()) (\_ -> pure ()))
+    runRequest (pure ()) $ \compiler ->
+      void (compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing)
+    clears <- newIORef (0 :: Int)
+    runRequest (modifyIORef' clears (+ 1)) $ \compiler -> do
+      let compile = void (compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing)
+      writeFile target "module CompilerLifecycle where\nanswer :: Int\nanswer = missing\n"
+      assertRejected "invalid source" compile
+      readIORef clears >>= assertEqual "source failure clears external recovery graphs before retry" 1
+      writeFile target valid
+      compile
+    readIORef clears >>= assertEqual "request close clears external recovery graphs" 2
+    cancelled <- try (runRequest (pure ()) $ \compiler -> do
+      _ <- compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+      throwIO ThreadKilled) :: IO (Either SomeException ())
+    case cancelled of
+      Left failure | fromException failure == Just ThreadKilled -> pure ()
+      _ -> fail "request cancellation did not propagate"
+    runRequest (pure ()) $ \compiler ->
+      void (compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing)
+    pure (released, runRequest (pure ()) (\_ -> pure ()))
+  assertRejected "compiler called after resident close" releasedCompile
+  assertRejected "runner called after resident close" closedRunner
+  where
+    assertRejected label action = do
+      result <- try action :: IO (Either SomeException ())
+      case result of
+        Left _ -> pure ()
+        Right _ -> fail (label ++ " unexpectedly succeeded")
+    onAnotherThread action = do
+      settled <- newEmptyMVar
+      _ <- forkIO ((try action :: IO (Either SomeException ())) >>= putMVar settled)
+      takeMVar settled >>= either throwIO pure
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-compiler-lifecycle"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
 memoLifecycleCompilation :: IO ()
 memoLifecycleCompilation = bracket temporary removeDirectoryRecursive requestMemoLifecycle
   where
@@ -1440,6 +1503,7 @@ requestMemoLifecycle :: FilePath -> IO ()
 requestMemoLifecycle root = do
   let dependencyDir = root </> "Tidepool" </> "Session" </> "Lib"
       dependencyPath = dependencyDir </> "G1.hs"
+      libraryPath = root </> "MemoLibrary.hs"
       targetPath = root </> "MemoTarget.hs"
       otherTargetPath = root </> "MemoOther.hs"
       validDependency = unlines
@@ -1454,52 +1518,60 @@ requestMemoLifecycle root = do
         ]
   createDirectoryIfMissing True dependencyDir
   writeFile dependencyPath validDependency
+  writeFile libraryPath "module MemoLibrary (one) where\none :: Int\none = 1\n"
   writeFile targetPath $ unlines
     [ "module MemoTarget where"
     , "import Tidepool.Session.Lib.G1 (dependency)"
+    , "import MemoLibrary (one)"
     , "result :: Int"
-    , "result = dependency + 1"
+    , "result = dependency + one"
     ]
   writeFile otherTargetPath "module MemoOther where\nother :: Int\nother = 2\n"
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
-  (withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
-      -- Session entries are reusable only within one incarnation; an
-      -- incarnation-less request never reuses one and never keeps one.
+  (withResidentPipelineSelectedRequests [root] $ \runRequest -> do
       let compileIn scope purpose compiler = compiler PreparedStg mempty purpose scope targetPath [root] Nothing
           compile = compileIn Nothing
           incarnate = Just (SessionScope root [] Nothing (Just "7"))
           sessionMiss = "tidepool-memo-miss module=Tidepool.Session.Lib.G1"
           absentSession = sessionMiss ++ " reason=absent"
+          libraryMiss = "tidepool-memo-miss module=MemoLibrary"
+          absentLibrary = libraryMiss ++ " reason=absent"
           targetMiss = "tidepool-memo-miss module=MemoTarget"
-      (_, anonymousLog) <- captureStderr root "memo-anonymous"
-        (runRequest $ \compiler -> compile GeneralCompile compiler)
+          shape prepared = do
+            modules <- evaluate (length (pprModules prepared))
+            binds <- evaluate (length (prBinds (pprPipelineResult prepared)))
+            pure (modules, binds)
+      (_, anonymousLog) <- captureStderr root "memo-anonymous" $
+        runRequest (pure ()) $ \compiler -> void (compile GeneralCompile compiler)
       assertContains "cold request compiles the session dependency" absentSession anonymousLog
-      (_, nextRequestLog) <- captureStderr root "memo-next-request"
-        (runRequest $ \compiler -> compile GeneralCompile compiler)
-      assertContains "normal request exit evicts incarnation-less session entries"
+      assertContains "cold request compiles the library dependency" absentLibrary anonymousLog
+      (_, nextRequestLog) <- captureStderr root "memo-next-request" $
+        runRequest (pure ()) $ \compiler -> void (compile GeneralCompile compiler)
+      assertContains "normal request exit releases the session dependency"
         absentSession nextRequestLog
-      failedRequest <- try (captureStderr root "memo-exception" $ runRequest $ \compiler -> do
+      assertContains "normal request exit releases the library dependency" absentLibrary nextRequestLog
+      failedRequest <- try (captureStderr root "memo-exception" $ runRequest (pure ()) $ \compiler -> do
         _ <- compile GeneralCompile compiler
         throwIO (userError "request failure after compile"))
-        :: IO (Either SomeException (PipelineResult, String))
+        :: IO (Either SomeException ((), String))
       case failedRequest of
         Left _ -> pure ()
         Right _ -> fail "exception cleanup probe unexpectedly succeeded"
-      (_, afterExceptionLog) <- captureStderr root "memo-after-exception"
-        (runRequest $ \compiler -> compile GeneralCompile compiler)
-      assertContains "exceptional request exit evicts incarnation-less session entries"
+      (_, afterExceptionLog) <- captureStderr root "memo-after-exception" $
+        runRequest (pure ()) $ \compiler -> void (compile GeneralCompile compiler)
+      assertContains "exceptional request exit releases the session dependency"
         absentSession afterExceptionLog
-      runRequest $ \compiler -> do
+      runRequest (pure ()) $ \compiler -> do
         (_, coldLog) <- captureStderr root "memo-cold" (compileIn incarnate GeneralCompile compiler)
-        assertContains "incarnation's first request compiles the session dependency" absentSession coldLog
-        assertContains "cold request compiles its target" targetMiss coldLog
+        assertContains "fresh transaction compiles the session dependency" absentSession coldLog
+        assertContains "cold compile checks its target" targetMiss coldLog
         (_, warmLog) <- captureStderr root "memo-warm" (compileIn incarnate LookupTypeCompile compiler)
-        when (sessionMiss `isInfixOf` warmLog) $
+        when (sessionMiss `isInfixOf` warmLog || libraryMiss `isInfixOf` warmLog) $
           fail ("unchanged session dependency was not reused within one worker request: " ++ warmLog)
         assertContains "internal compile evicts its purpose-sensitive target" targetMiss warmLog
         writeFile dependencyPath invalidDependency
-        (changed, changedLog) <- captureStderr root "memo-changed"
+        (changed, _) <- captureStderr root "memo-changed"
           (try (compileIn incarnate GeneralCompile compiler) :: IO (Either DependencyLoadFailure PreparedPipelineResult))
         case changed of
           Left (DependencySourceFailure diagnostics) ->
@@ -1508,26 +1580,20 @@ requestMemoLifecycle root = do
               fail "changed invalid session dependency lost its exact source error"
           Left DependencyWorkerFailure -> fail "changed dependency became a worker failure"
           Right _ -> fail "changed invalid session dependency reused a stale memo entry"
-        -- Failure in GHC's load barrier precedes the prepared-front memo log.
-        assertContains "changed source was checked rather than a stale memo entry"
-          "Variable not in scope: missing :: Int" changedLog
-      writeFile dependencyPath validDependency
-      (restored, _) <- captureStderr root "memo-incarnate-restored"
-        (runRequest $ \compiler -> compileIn incarnate GeneralCompile compiler)
-      -- A transaction with no incarnation (a lookup, a plain eval) must not
-      -- discard another incarnation's session entries: in a live daemon one
-      -- lands between most pairs of a session's transactions.
-      _ <- captureStderr root "memo-anonymous-between"
-        (runRequest $ \compiler ->
-          compiler PreparedStg mempty GeneralCompile Nothing otherTargetPath [root] Nothing)
-      (incarnateWarm, incarnateWarmLog) <- captureStderr root "memo-incarnate-warm"
-        (runRequest $ \compiler -> compileIn incarnate GeneralCompile compiler)
-      when (sessionMiss `isInfixOf` incarnateWarmLog) $
-        fail ("an incarnation-less transaction evicted another incarnation's session entry: "
-          ++ incarnateWarmLog)
-      assertEqual "memo sanitization preserves complete prepared output"
-        (length (pprModules restored), length (prBinds (pprPipelineResult restored)))
-        (length (pprModules incarnateWarm), length (prBinds (pprPipelineResult incarnateWarm))))
+        writeFile dependencyPath validDependency
+        (_, retryLog) <- captureStderr root "memo-source-retry" (compileIn incarnate GeneralCompile compiler)
+        assertContains "source rejection resets graphs before same-request retry" absentSession retryLog
+      (restoredShape, restoredLog) <- captureStderr root "memo-incarnate-restored" $
+        runRequest (pure ()) $ \compiler -> compileIn incarnate GeneralCompile compiler >>= shape
+      assertContains "new transaction starts without the restored dependency" absentSession restoredLog
+      _ <- captureStderr root "memo-anonymous-between" $
+        runRequest (pure ()) $ \compiler ->
+          void (compiler PreparedStg mempty GeneralCompile Nothing otherTargetPath [root] Nothing)
+      (nextShape, nextLog) <- captureStderr root "memo-incarnate-next" $
+        runRequest (pure ()) $ \compiler -> compileIn incarnate GeneralCompile compiler >>= shape
+      assertContains "session incarnation does not retain GHC graphs across requests" absentSession nextLog
+      assertContains "library GHC graphs do not survive requests" absentLibrary nextLog
+      assertEqual "fresh requests preserve complete prepared output" restoredShape nextShape)
     `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
 
 captureStderr :: FilePath -> String -> IO a -> IO (a, String)
@@ -1614,8 +1680,8 @@ ambiguousOccurrenceHintCompilation = bracket temporary removeDirectoryRecursive 
     , "result :: Int"
     , "result = candidateSummary"
     ]
-  withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
-    rejected <- try (runRequest $ \compiler ->
+  withResidentPipelineSelectedRequests [root] $ \runRequest -> do
+    rejected <- try (runRequest (pure ()) $ \compiler ->
         compiler CheckedEnvironment mempty GeneralCompile Nothing targetPath [root] Nothing)
       :: IO (Either SourceError CheckedEnvironmentResult)
     case rejected of

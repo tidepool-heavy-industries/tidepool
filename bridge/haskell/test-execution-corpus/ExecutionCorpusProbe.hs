@@ -42,7 +42,7 @@ import Tidepool.ExecutionSchema
 import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PipelineResult(..), PreparedPipelineResult(..)
-  , runPipelineSelected, withResidentPipelineSelected
+  , runPipelineSelected, withResidentPipelineSelectedRequests
   , CompilePurpose(GeneralCompile) )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecovery )
@@ -69,14 +69,15 @@ main = getArgs >>= \arguments -> case arguments of
   [] -> mappingSelfTest
   ["--self-test"] -> mappingSelfTest
   "--batch" : requests ->
-    withResidentPipelineSelected [] $ \compiler ->
-      mapM_ (runProbe (\source includes ->
-        compiler PreparedStg Set.empty GeneralCompile Nothing source includes Nothing))
-        (splitRequests requests)
+    withResidentPipelineSelectedRequests [] $ \runRequest ->
+      mapM_ (\request -> runRequest (pure ()) $ \compiler ->
+        runProbe (\source includes ->
+          compiler PreparedStg Set.empty GeneralCompile Nothing source includes Nothing)
+          request) (splitRequests requests)
   _ -> runProbe (runPipelineSelected PreparedStg) arguments
 
 -- Each cohort remains a compiler transaction with its own output and cleanup.
--- The process and stable dependency memo are shared across the batch.
+-- The compiler process is shared; GHC graphs are released between cohorts.
 splitRequests :: [String] -> [[String]]
 splitRequests [] = []
 splitRequests arguments = case break (== "--next") arguments of
