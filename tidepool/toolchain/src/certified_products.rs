@@ -13,6 +13,12 @@ use tidepool_repr::execution_schema::{
     ProjectedGroup, RawModuleProduct, ResultContract, RuntimeRep, Signature, SymbolIdentity,
 };
 
+mod finalized_module;
+pub(crate) use finalized_module::CertifiedModuleInterface;
+pub use finalized_module::{
+    CapturedArtifactDescriptor, FinalizationEnvelope, FinalizedModuleReceipt,
+};
+
 use crate::cache::{DependencyEvidence, ProductAvailability};
 use crate::module_candidates::CandidateSet;
 use crate::recovery_artifacts::PackageInterfaceValidation;
@@ -124,6 +130,7 @@ pub struct CertifiedReceipt {
     pub modules: Vec<CertifiedModuleReceipt>,
     pub targets: BTreeMap<String, Vec<AcceptedGlobal>>,
     pub packages: BTreeMap<(String, String), PackageInterfaceWitness>,
+    pub finalization: FinalizationEnvelope,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -601,7 +608,7 @@ fn validate_global_witness(
     Ok(selected.owner.clone())
 }
 
-/// Decode the worker's bounded `TPCERT5` tuple with exact owner rows shared
+/// Decode the worker's bounded `TPCERT6` tuple with exact owner rows shared
 /// through an immutable dictionary. Older ownership formats are refused.
 /// Original groups and executable targets preserve their ordered witnesses.
 pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
@@ -623,14 +630,14 @@ fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
         return Err(CertificationError::Receipt("receipt header"));
     }
     let version = number(&header[1])?;
-    if version != 5 {
+    if version != 6 {
         return Err(CertificationError::UnsupportedVersion {
             format: CertificationFormat::ProductReceipt,
             found: version,
-            expected: 5,
+            expected: 6,
         });
     }
-    if header.len() != 6 {
+    if header.len() != 7 {
         return Err(CertificationError::Receipt("receipt header"));
     }
     let mut dictionary = GlobalDictionary::decode(&header[5])?;
@@ -733,10 +740,13 @@ fn decode_receipt_value(value: &Value) -> CertResult<CertifiedReceipt> {
             return Err(CertificationError::Receipt("duplicate package witness"));
         }
     }
+    let finalization = finalized_module::decode_envelope(&header[6])?;
+    finalization.validate_owners(&modules, &packages)?;
     Ok(CertifiedReceipt {
         modules,
         targets,
         packages,
+        finalization,
     })
 }
 
