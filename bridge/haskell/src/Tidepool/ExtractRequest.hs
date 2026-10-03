@@ -19,7 +19,6 @@ module Tidepool.ExtractRequest
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
-import Data.List (foldl')
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Bits ((.|.), shiftL, shiftR)

@@ -446,7 +446,7 @@ requestShapeValidation = do
       , ("cell mode", Cell), ("cell plan mode", CellPlan), ("cell template", CellTemplate "template")
       , ("cell output", CellOut "cell"), ("harness profile", HarnessProfile)
       , ("declaration join", DeclarationJoin "join"), ("declaration join output", DeclarationJoinOut "join-out")
-      , ("certification", CertifyHomeProducts), ("activation preview", ActivationPreview)
+      , ("activation preview", ActivationPreview)
       , ("cell fold turn", CellFoldTurn), ("inspection strictness", InspectionStrict)
       , ("inspection output", InspectOut "inspect"), ("type batch", InspectTypeBatch "batch")
       , ("inspection query", InspectType "Int")
@@ -456,7 +456,7 @@ requestShapeValidation = do
       [ ("cell mode", Cell), ("turn mode", Turn), ("classification mode", Classify)
       , ("inspection query", InspectType "Int"), ("session artifacts", SessionArtifacts "scope")
       , ("declaration join", DeclarationJoin "join"), ("candidate authority", ModuleCandidates "scope")
-      , ("certification", CertifyHomeProducts), ("activation preview", ActivationPreview)
+      , ("activation preview", ActivationPreview)
       , ("cell fold turn", CellFoldTurn), ("binding generation", BindGen 1)
       , ("retained generation", RetainedGeneration (SymbolIdentity "main" "M" "value" "x" Nothing) 1)
       ]
