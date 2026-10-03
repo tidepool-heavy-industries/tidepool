@@ -19,7 +19,6 @@
 //! a session turn has on-disk side effects (the iface write) and depends on
 //! mutable session state (the injected ifaces), so a cache hit would be wrong.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1066,11 +1065,8 @@ pub const SPLIT_SIGNATURE_ADVICE: &str =
 /// `default (Int, Double, Text)` declaration, and both survive into the
 /// whole-cell check template. Neither shape below is reachable by defaulting:
 ///
-/// * `GHC.Types.ZonkAny` is what GHC zonks an ungeneralized metavariable to.
-///   It reaches source when a checked binder's post-zonk type is replanted
-///   into the staged wrapper ([`run_turn_pinned`]), and the wrapper then
-///   fails with `Not in scope: type constructor or class GHC.Types.ZonkAny`.
-///   The type is already gone by then; no default list can name it.
+/// * `GHC.Types.ZonkAny` represents an ungeneralized metavariable. It cannot
+///   become a valid source-level annotation, and no default list can name it.
 /// * An overlap that GHC itself reports as depending on the instantiation of
 ///   a unification variable. Defaulting under `ExtendedDefaultRules` still
 ///   requires the ambiguous variable's constraint set to carry one of GHC's
@@ -2706,7 +2702,7 @@ pub fn compile_activation_input(
         .iter()
         .map(PathBuf::as_path)
         .collect::<Vec<_>>();
-    let result = run_turn_with_pin(
+    let result = run_turn_with_admission(
         TurnRequest {
             exact_context: view.exact_declaration_context().cloned(),
             session_id: Some(view.session()),
@@ -2724,7 +2720,6 @@ pub fn compile_activation_input(
             target: None,
             retained_imports: snapshot.admitted_retained_imports(),
         },
-        None,
         true,
         Some(admission.clone()),
         None,
@@ -3208,7 +3203,7 @@ fn check_cell_impl(
 /// When `req.verdict` is supplied, a missing template for the verdict's
 /// selector is caught here, before any process is spawned.
 pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
-    run_turn_with_pin(req, None, false, None, None)
+    run_turn_with_admission(req, false, None, None)
 }
 
 /// Select the precompiled native item from the complete immutable program.
@@ -3423,7 +3418,7 @@ pub fn run_checked_item(
     if prefix.cell_program().is_some() {
         return consume_cell_program_item(item_admission);
     }
-    run_turn_with_pin(req, None, false, Some(item_admission), None)
+    run_turn_with_admission(req, false, Some(item_admission), None)
 }
 
 /// Compile the closed deferred display recipe for the actual completed native
@@ -3495,7 +3490,7 @@ pub fn run_checked_display(
         target: None,
         retained_imports: &retained,
     };
-    run_turn_with_pin(req, None, false, None, Some(admission.clone()))
+    run_turn_with_admission(req, false, None, Some(admission.clone()))
 }
 
 /// Protected host-input recipe: the checked bind supplies the exact interface
@@ -3536,115 +3531,20 @@ pub fn assemble_checked_activation_module(
     source
 }
 
-/// Compile one staged bind using the types inferred by 'check_cell'. This is
-/// the join that prevents statement-at-a-time compilation from defaulting or
-/// generalizing a binder differently from the accepted whole cell.
-pub fn run_turn_pinned(
-    req: TurnRequest<'_>,
-    pins: &[CheckedBinderPin],
-) -> Result<TurnResult, TurnFailure> {
-    if pins.iter().any(|pin| pin.authority.is_some()) {
-        return Err(CompileError::ExtractFailed(
-            "runtime-admitted pins require the dedicated checked-item recipe".into(),
-        )
-        .into());
-    }
-    let Some(TurnClassification {
-        kind: TurnKind::Bind,
-        binders,
-        ..
-    }) = req.verdict.as_ref()
-    else {
-        return Err(CompileError::ExtractFailed(
-            "checked binder pins require an explicit bind verdict".into(),
-        )
-        .into());
-    };
-    if pins.len() != binders.len() {
-        return Err(CompileError::ExtractFailed(format!(
-            "checked binder pin count {} does not match binder count {}",
-            pins.len(),
-            binders.len()
-        ))
-        .into());
-    }
-    let pin = if binders.len() == 1 {
-        format!("{} :: {}", binders[0], pins[0].ty)
-    } else {
-        format!(
-            "({}) :: ({})",
-            binders.join(", "),
-            pins.iter()
-                .map(|pin| pin.ty.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    let imports = pins
-        .iter()
-        .flat_map(|pin| pin.imports.iter().map(String::as_str))
-        .collect::<BTreeSet<_>>();
-    let templates = req
-        .templates
-        .iter()
-        .map(|template| {
-            let source = if template.kind == TemplateSelector::Bind {
-                insert_checked_type_imports(&template.source, &imports)?
-            } else {
-                template.source.clone()
-            };
-            Ok(TurnTemplate {
-                kind: template.kind,
-                source,
-            })
-        })
-        .collect::<Result<Vec<_>, CompileError>>()?;
-    run_turn_with_pin(
-        TurnRequest {
-            templates: &templates,
-            ..req
-        },
-        Some(&pin),
-        false,
-        None,
-        None,
-    )
-}
-
-fn insert_checked_type_imports(
-    source: &str,
-    imports: &BTreeSet<&str>,
-) -> Result<String, CompileError> {
-    if imports.is_empty() {
-        return Ok(source.to_owned());
-    }
-    if !source.contains(PREAMBLE_DEFAULT_MARKER) {
-        return Err(CompileError::ExtractFailed(
-            "checked binder template has no import insertion point".into(),
-        ));
-    }
-    let specs = imports
-        .iter()
-        .map(|module| format!("qualified {module}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok(insert_preamble_imports(source, &specs))
-}
-
-/// The second compile granularity: one per input unit, after the whole-cell
-/// check has accepted the cell.
+/// Compile a fresh turn or a runtime-admitted recipe whose native products
+/// were not already prepared by the complete cell program.
 #[tracing::instrument(
     name = "turn_compile",
     level = "info",
     skip_all,
     fields(
         kind = req.verdict.as_ref().map_or("", |verdict| turn_kind_wire_name(verdict.kind)),
-        pinned = pin.is_some(),
+        checked = checked.is_some(),
+        display = display.is_some(),
     )
 )]
-fn run_turn_with_pin(
+fn run_turn_with_admission(
     req: TurnRequest<'_>,
-    pin: Option<&str>,
     activation_preview: bool,
     checked: Option<Arc<super::RuntimeCheckedItemAdmission>>,
     display: Option<Arc<super::RuntimeCheckedDisplayAdmission>>,
@@ -3705,9 +3605,6 @@ fn run_turn_with_pin(
     }
     if let Some(arg) = verdict_arg {
         cmd.turn_verdict(arg);
-    }
-    if let Some(pin) = pin {
-        cmd.turn_pin(pin);
     }
     if let Some(snapshot) = &snapshot {
         for (identity, generation) in snapshot.actual_retained_imports() {
@@ -8141,68 +8038,6 @@ mod tests {
             .find(|pin| pin.key == "__tidepool_cell_pin_0_h")
             .unwrap();
         assert_eq!(pin.ty, "Int");
-
-        let bind_template = |imports: &str| TurnTemplate {
-            kind: TemplateSelector::Bind,
-            source: format!(
-                "{{-# LANGUAGE NoImplicitPrelude #-}}\n\
-                 module SessionBind where\n\
-                 import Prelude\n\
-                 {imports}\
-                 __result :: IO Int\n\
-                 __result = do {{\n\
-                 {{{{TURN_STMT}}}}\n\
-                 ; pure ({{{{BINDERS}}}}) }}\n"
-            ),
-        };
-        let first_templates = [bind_template("")];
-        let first_pins = checked.pins_for_item(0).unwrap();
-        let first = run_turn_pinned(
-            TurnRequest {
-                exact_context: None,
-                session_id: None,
-                turn_text: &checked.items[0].source,
-                templates: &first_templates,
-                include: &[],
-                session_root: root.path(),
-                inject_modules: &[],
-                gen: 1,
-                verdict: Some(checked.items[0].verdict.clone()),
-                target: None,
-                retained_imports: &[],
-            },
-            &first_pins,
-        )
-        .unwrap();
-        let TurnResult::Bind { bound, .. } = first else {
-            panic!("first staged item was not a bind");
-        };
-        assert_eq!(bound[0].type_display, "Int");
-
-        let injected = vec![bound[0].module.clone()];
-        let second_templates = [bind_template(&format!("import {}\n", injected[0]))];
-        let second_pins = checked.pins_for_item(1).unwrap();
-        let second = run_turn_pinned(
-            TurnRequest {
-                exact_context: None,
-                session_id: None,
-                turn_text: &checked.items[1].source,
-                templates: &second_templates,
-                include: &[],
-                session_root: root.path(),
-                inject_modules: &injected,
-                gen: 2,
-                verdict: Some(checked.items[1].verdict.clone()),
-                target: None,
-                retained_imports: &[],
-            },
-            &second_pins,
-        )
-        .unwrap();
-        let TurnResult::Bind { bound, .. } = second else {
-            panic!("second staged item was not a bind");
-        };
-        assert_eq!(bound[0].type_display, "Int");
     }
 
     #[test]
@@ -8275,203 +8110,6 @@ mod tests {
             .heads
             .iter()
             .any(|head| head.module == "CellCheck" && head.name == "G"));
-
-        let session = tidepool_repr::SessionId((u64::from(std::process::id()) << 32) | 0x4345_4c4c);
-        let mut declarations = crate::session::SessionLib::open(
-            session,
-            root.path(),
-            crate::session::ModuleEnv::standalone_default(),
-        )
-        .unwrap()
-        .with_validation_include(vec![prelude.clone()]);
-        let generation = declarations.define("data G = G Int").unwrap();
-        let lib_module = format!("Tidepool.Session.Lib.G{}", generation.0);
-        let templates = [TurnTemplate {
-            kind: TemplateSelector::Bind,
-            source: format!(
-                "{{-# LANGUAGE NoImplicitPrelude #-}}\n\
-                 module SessionNominalBind where\n\
-                 import Prelude\n\
-                 import {lib_module}\n\
-                 __result :: IO (Maybe G)\n\
-                 __result = do {{\n\
-                 {{{{TURN_STMT}}}}\n\
-                 ; pure ({{{{BINDERS}}}}) }}\n"
-            ),
-        }];
-        let staged = run_turn_pinned(
-            TurnRequest {
-                exact_context: None,
-                session_id: None,
-                turn_text: &checked.items[1].source,
-                templates: &templates,
-                include: &[root.path(), prelude.as_path()],
-                session_root: root.path(),
-                inject_modules: &[],
-                gen: 1,
-                verdict: Some(checked.items[1].verdict.clone()),
-                target: None,
-                retained_imports: &[],
-            },
-            &pins,
-        )
-        .unwrap();
-        let TurnResult::Bind { bound, .. } = staged else {
-            panic!("same-cell nominal staged item was not a bind");
-        };
-        assert_eq!(bound[0].type_display, "Maybe G");
-    }
-
-    #[test]
-    fn checked_handler_pin_carries_qualified_type_imports() {
-        let extract = required_cell_test_worker();
-        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
-        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(
-            root.path().join("PinHandler.hs"),
-            "{-# LANGUAGE DataKinds, TypeOperators #-}\n\
-             module PinHandler (Handler, Box(..)) where\n\
-             import Control.Monad.Freer (Eff)\n\
-             import qualified Control.Monad.Freer.State as S\n\
-             type Handler a = Eff '[S.State Int] a\n\
-             data Box = Box\n",
-        )
-        .unwrap();
-        let prelude = tidepool_testing::eval_harness::prelude_path();
-        let effects = tidepool_testing::eval_harness::effects_include();
-        let include = [
-            root.path(),
-            prelude.as_path(),
-            effects[0].as_path(),
-            effects[1].as_path(),
-        ];
-        let template = concat!(
-            "{-# LANGUAGE NoImplicitPrelude #-}\n",
-            "{{CELL_PRAGMAS}}\n",
-            "module CellCheck where\n",
-            "import Prelude\n",
-            "{{CELL_IMPORTS}}\n",
-            "__tidepoolCellExpression :: value -> IO ()\n",
-            "__tidepoolCellExpression _ = pure ()\n",
-            "__tidepoolInEffectRow :: IO value -> IO value\n",
-            "__tidepoolInEffectRow = id\n",
-            "__tidepoolCellDisplayConstraint :: Show value => value -> ()\n",
-            "__tidepoolCellDisplayConstraint _ = ()\n",
-            "{{CELL_DECLS}}\n",
-            "__cell :: IO ()\n",
-            "__cell = do {\n",
-            "{{CELL_BODY}}\n",
-            "; pure () }\n",
-        );
-        let cell = concat!(
-            "import PinHandler (Handler)\n",
-            "import qualified PinHandler as Alias\n",
-            "let saved = (pure () :: Handler ())\n",
-            "let boxed = (1 :: Int, [Alias.Box])\n",
-        );
-        let checked = check_cell(CellCheckRequest {
-            exact_context: None,
-            session_id: None,
-            cell_text: cell,
-            template,
-            include: &include,
-            session_root: root.path(),
-            inject_modules: &[],
-            compile_generation: 0,
-            compile_view_evidence: "",
-        })
-        .unwrap();
-        let saved = checked
-            .pins
-            .iter()
-            .find(|pin| pin.key.ends_with("_saved"))
-            .expect("saved pin");
-        assert!(saved
-            .imports
-            .contains(&"Control.Monad.Freer.State".to_string()));
-        let boxed = checked
-            .pins
-            .iter()
-            .find(|pin| pin.key.ends_with("_boxed"))
-            .expect("boxed pin");
-        assert!(boxed.ty.contains("Alias.Box"));
-        assert!(
-            boxed.imports.is_empty(),
-            "authored alias import remains in the source"
-        );
-        let saved_item = checked
-            .items
-            .iter()
-            .find(|item| item.verdict.binders == ["saved"])
-            .expect("saved bind item");
-        let templates = [TurnTemplate {
-            kind: TemplateSelector::Bind,
-            source: assemble_bind_module(
-                "{-# LANGUAGE DataKinds, TypeOperators, ExtendedDefaultRules #-}\n\
-                 module PinStage where\n\
-                 import Prelude\n\
-                 import Data.Text (Text)\n\
-                 import Control.Monad.Freer (Eff)\n\
-                 import PinHandler (Handler)\n\
-                 default (Int, Double, Text)\n",
-                "",
-                "__result",
-                "'[]",
-                "{{TURN_STMT}}",
-                "({{BINDERS}})",
-                false,
-            ),
-        }];
-        let staged = run_turn_pinned(
-            TurnRequest {
-                exact_context: None,
-                session_id: None,
-                turn_text: &saved_item.source,
-                templates: &templates,
-                include: &include,
-                session_root: root.path(),
-                inject_modules: &[],
-                gen: 1,
-                verdict: Some(saved_item.verdict.clone()),
-                target: None,
-                retained_imports: &[],
-            },
-            std::slice::from_ref(saved),
-        )
-        .unwrap();
-        let TurnResult::Bind { wrapped_source, .. } = staged else {
-            panic!("Handler pin did not produce a staged bind");
-        };
-        assert!(wrapped_source.contains("import qualified Control.Monad.Freer.State"));
-        let fold_template = template.replacen(
-            "import Prelude\n",
-            "import Prelude\nimport PinHandler (Handler)\n",
-            1,
-        );
-        let (_, folded) = check_cell_with_fold(
-            CellCheckRequest {
-                exact_context: None,
-                session_id: None,
-                cell_text: "let saved = (pure () :: Handler ())\n",
-                template: &fold_template,
-                include: &include,
-                session_root: root.path(),
-                inject_modules: &[],
-                compile_generation: 0,
-                compile_view_evidence: "",
-            },
-            CellFoldTurn {
-                templates: &templates,
-                gen: 2,
-                retained_imports: &[],
-            },
-        )
-        .unwrap();
-        let Some(TurnResult::Bind { wrapped_source, .. }) = folded else {
-            panic!("worker did not complete its checked Handler fold");
-        };
-        assert!(wrapped_source.contains("import qualified Control.Monad.Freer.State"));
     }
 
     /// A local, minimal `Eff` so these two tests can exercise the REAL
