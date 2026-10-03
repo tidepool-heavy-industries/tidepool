@@ -16126,6 +16126,72 @@ mod request_tests {
     }
 
     #[tokio::test]
+    async fn parked_lookup_transaction_answers_uncancelled_varied_type_search() {
+        let (machines, context, source, _root) = actor_lookup_registry_fixture();
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        let step = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source.clone(),
+                Vec::new(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: concat!(
+                        "lookupValidation <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"pollResponse\"]) >>= \\result -> ",
+                        "if lookupIssue result == Nothing && not (null (lookupResults result)) ",
+                        "then pure True else error \"uncancelled varied lookup returned a typed failure\""
+                    ).into(),
+                },
+                Some(generated_bind_verdict("lookupValidation")),
+            )
+            .await
+            .expect("lookup fragment compiles and suspends");
+        let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
+            panic!("lookup effect should suspend the fragment")
+        };
+        let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+            panic!("lookup effect should park a continuation")
+        };
+        let continuation_id = hole.cont_id().to_owned();
+        let guard = ParkedHoleAbortGuard::new(
+            &workbench.access,
+            context.clone(),
+            continuation_id.clone(),
+            "uncancelled varied lookup qualification".into(),
+        );
+        let outcome = SLOT_CONTINUATION_OWNER
+            .scope(
+                guard.registration(),
+                workbench.resume_lookup(
+                    context.clone(),
+                    hole,
+                    real_lookup_request(varied_lookup_queries()),
+                    crate::UsagePointerTable::default(),
+                    None,
+                ),
+            )
+            .await
+            .expect("uncancelled production lookup resumes with its actual worker result");
+        let settled = workbench
+            .settle_item(context.clone(), *fragment, outcome)
+            .await
+            .expect("uncancelled varied lookup continuation settles");
+        assert!(
+            matches!(settled, ResidentWorkbenchStep::Committed { .. }),
+            "Haskell continuation must reject a typed inspection failure"
+        );
+        workbench
+            .access
+            .with_machine(context, move |session, _, _| {
+                assert!(!session.parked_holes().contains(&continuation_id.as_str()));
+                Ok(())
+            })
+            .await
+            .expect("production lookup consumed its owned parked continuation");
+    }
+
+    #[tokio::test]
     async fn cancelled_lookup_interrupts_its_started_compiler_request_and_recovers() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
         let workbench = Arc::new(ResidentActorWorkbench::new(
