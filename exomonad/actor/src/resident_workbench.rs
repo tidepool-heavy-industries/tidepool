@@ -4040,61 +4040,6 @@ where
         })
     }
 
-    /// Drive a display callback using its actor-issued input. No source is compiled.
-    pub(crate) async fn expand_display(
-        &self,
-        context: crate::ActorSessionContext,
-        callback: Arc<RootCustody>,
-        identity: (i64, i64, i64),
-        key: i64,
-        allowance: i64,
-    ) -> Result<
-        (tidepool_runtime::session::WorkbenchDisplayPage, RootCustody),
-        ResidentActorWorkbenchError,
-    > {
-        let allowance = allowance.clamp(0, 8192);
-        let mut context = context;
-        context.effect_policy = tidepool_effect::EffectRunPolicy::SuspendAll;
-        self.access.with_machine(context, move |session, context, _| {
-            let scope = context.placement.resource_scope;
-            let mut outcome = session.run_rooted_entry_borrowed("display_expansion", &callback, 0, scope, None)?;
-            let mut input_received = false;
-            let mut published = None;
-            loop {
-                match outcome {
-                    ResidentOutcome::Completed { .. } if input_received => return published.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("display callback completed without publishing detail".into())),
-                    ResidentOutcome::Suspended { hole, request, .. } => {
-                        let next = (|| {
-                            match ResidentRequest::decode(&request, session.data_con_table())? {
-                                ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayExpansionInputWith) if !input_received => {
-                                    input_received = true;
-                                    Ok(session.resume(hole.clone(), (identity, key, allowance)))
-                                }
-                                ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayWith((issued, text, expansions, unavailable), _)) if input_received && published.is_none() && issued == identity => {
-                                    let output = tidepool_runtime::session::WorkbenchDisplayPage { identity, text, expansions, unavailable };
-                                    crate::resident_actor::validate_display_page(&output.text, allowance)?;
-                                    crate::resident_actor::validate_display_metadata(&output)?;
-                                    let callback = session.live_payload_handle_owned_by(hole.cont_id(), scope)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("display update has no retained callback".into()))?;
-                                    published = Some((output, callback));
-                                    Ok(session.resume(hole.clone(), identity))
-                                }
-                                _ => Err(ResidentActorWorkbenchError::ActorProtocol("display callback crossed an unauthorized boundary".into())),
-                            }
-                        })();
-                        match next {
-                            Ok(next) => outcome = next?,
-                            Err(error) => {
-                                let _ = session.abort(hole.cont_id(), "display expansion rejected".into());
-                                return Err(error);
-                            }
-                        }
-                    }
-                    _ => return Err(ResidentActorWorkbenchError::ActorProtocol("display callback did not follow its input/publication protocol".into())),
-                }
-            }
-        }).await
-    }
-
     /// Apply the retained handler with invocation data. No source compiler is involved.
     pub(crate) async fn begin_tool(
         &self,
@@ -5812,6 +5757,8 @@ where
             // already does for a split cell's item install, instead of
             // running it under the checkout this closure used to hold for
             // `begin_ready_block`'s whole install-and-run.
+            let install_source = source.clone();
+            let install_type_modules = type_modules.clone();
             let stale = self
                 .access
                 .with_machine(context.clone(), move |session, context, _| {
@@ -7437,6 +7384,61 @@ where
                     })
             })
             .await
+    }
+
+    /// Drive a display callback using its actor-issued input. No source is compiled.
+    pub(crate) async fn expand_display(
+        &self,
+        context: crate::ActorSessionContext,
+        callback: Arc<RootCustody>,
+        identity: (i64, i64, i64),
+        key: i64,
+        allowance: i64,
+    ) -> Result<
+        (tidepool_runtime::session::WorkbenchDisplayPage, RootCustody),
+        ResidentActorWorkbenchError,
+    > {
+        let allowance = allowance.clamp(0, 8192);
+        let mut context = context;
+        context.effect_policy = tidepool_effect::EffectRunPolicy::SuspendAll;
+        self.access.with_machine(context, move |session, context, _| {
+            let scope = context.placement.resource_scope;
+            let mut outcome = session.run_rooted_entry_borrowed("display_expansion", &callback, 0, scope, None)?;
+            let mut input_received = false;
+            let mut published = None;
+            loop {
+                match outcome {
+                    ResidentOutcome::Completed { .. } if input_received => return published.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("display callback completed without publishing detail".into())),
+                    ResidentOutcome::Suspended { hole, request, .. } => {
+                        let next = (|| {
+                            match ResidentRequest::decode(&request, session.data_con_table())? {
+                                ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayExpansionInputWith) if !input_received => {
+                                    input_received = true;
+                                    Ok(session.resume(hole.clone(), (identity, key, allowance)))
+                                }
+                                ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayWith((issued, text, expansions, unavailable), _)) if input_received && published.is_none() && issued == identity => {
+                                    let output = tidepool_runtime::session::WorkbenchDisplayPage { identity, text, expansions, unavailable };
+                                    crate::resident_actor::validate_display_page(&output.text, allowance)?;
+                                    crate::resident_actor::validate_display_metadata(&output)?;
+                                    let callback = session.live_payload_handle_owned_by(hole.cont_id(), scope)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("display update has no retained callback".into()))?;
+                                    published = Some((output, callback));
+                                    Ok(session.resume(hole.clone(), identity))
+                                }
+                                _ => Err(ResidentActorWorkbenchError::ActorProtocol("display callback crossed an unauthorized boundary".into())),
+                            }
+                        })();
+                        match next {
+                            Ok(next) => outcome = next?,
+                            Err(error) => {
+                                let _ = session.abort(hole.cont_id(), "display expansion rejected".into());
+                                return Err(error);
+                            }
+                        }
+                    }
+                    _ => return Err(ResidentActorWorkbenchError::ActorProtocol("display callback did not follow its input/publication protocol".into())),
+                }
+            }
+        }).await
     }
 
     /// Capture the token root and an independently retained runtime capsule

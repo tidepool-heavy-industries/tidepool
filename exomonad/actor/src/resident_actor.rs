@@ -988,6 +988,8 @@ impl Drop for DisplayExpansionLease {
 
 #[cfg(test)]
 mod display_tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn terminal_page() -> WorkbenchDisplayPage {

@@ -679,34 +679,6 @@ impl RuntimeCheckedPrefix {
     }
 }
 
-fn refuse_ephemeral_declaration_replacement<'a>(
-    prefix: &RuntimeCheckedPrefix,
-    session: &PersistentSession,
-    snapshot: &RuntimeCheckedPrefixSnapshot,
-    names: impl Iterator<Item = &'a str>,
-) -> Result<(), SessionError> {
-    if prefix
-        .admission
-        .private_execution
-        .as_ref()
-        .is_none_or(|private| private.durable_owner.is_some())
-    {
-        return Ok(());
-    }
-    let names = names.collect::<std::collections::BTreeSet<_>>();
-    if session
-        .lib()
-        .log
-        .current_items_at(snapshot.visibility.declaration_tip)
-        .iter()
-        .flat_map(|(item, _)| item.value_names())
-        .any(|name| names.contains(name))
-    {
-        return Err(SessionError::UnsupportedPrivateValueReplacement);
-    }
-    Ok(())
-}
-
 fn validate_private_value_overlay<'a>(
     prefix: &RuntimeCheckedPrefix,
     session: &PersistentSession,
