@@ -254,7 +254,7 @@ pub struct ActorWorkbenchSource {
     workspace_modules: Arc<[String]>,
     installed_effect_support: Arc<[exomonad_tool::ToolEffectKey]>,
     request_evidence: Option<Arc<tidepool_runtime::session::SiteTypeEvidence>>,
-    request_helper_recipe: tidepool_toolchain::declaration_context::RequestHelperRecipe,
+    request_helper_recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
 }
 
 /// One prepared import environment for evaluation and inspection. Name
@@ -1451,7 +1451,7 @@ impl RequestWorkbenchScope<'_> {
         source.preamble = match (self.response, self.request) {
             (Some(_), Some(request)) => {
                 source.request_helper_recipe =
-                    tidepool_toolchain::declaration_context::RequestHelperRecipe::ActorReply;
+                    tidepool_toolchain::declaration_join::RequestHelperRecipe::ActorReply;
                 source.request_preamble(request, &context.haskell_effects_alias)
             }
             (None, None) => source.preamble.to_string(),
@@ -4087,7 +4087,7 @@ where
         let mut source = self.access.source.clone();
         if let (Some(_), Some(request)) = (&self.response, self.request) {
             source.request_helper_recipe =
-                tidepool_toolchain::declaration_context::RequestHelperRecipe::ActorReply;
+                tidepool_toolchain::declaration_join::RequestHelperRecipe::ActorReply;
             source.preamble = source
                 .request_preamble(request, &context.haskell_effects_alias)
                 .into();
@@ -4348,6 +4348,7 @@ where
                     include: prepared.include,
                     evidence,
                     declaration_imports: snapshot.view.workbench_imports(),
+                    request_evidence: source.request_evidence.clone(),
                 });
                 Ok(specification)
             })
@@ -4379,7 +4380,7 @@ where
                         reservation_specification.cell.specification_digest(),
                         reservation_specification._authority.authority_digest(),
                         reservation_specification.include.clone(),
-                        reservation_specification.source.request_evidence.clone(),
+                        reservation_specification.request_evidence.clone(),
                     ),
                     None => session.admit_native_setup_cell_in(
                         context.placement.lexical_scope,
@@ -4388,7 +4389,7 @@ where
                         reservation_specification.cell.specification_digest(),
                         reservation_specification._authority.authority_digest(),
                         reservation_specification.include.clone(),
-                        reservation_specification.source.request_evidence.clone(),
+                        reservation_specification.request_evidence.clone(),
                     ),
                 };
                 admitted.map_err(|error| {
@@ -4493,7 +4494,7 @@ where
                 source.preamble = match (response.as_ref(), request) {
                     (Some(_), Some(request)) => {
                         source.request_helper_recipe =
-                            tidepool_toolchain::declaration_context::RequestHelperRecipe::ActorReply;
+                            tidepool_toolchain::declaration_join::RequestHelperRecipe::ActorReply;
                         source.request_preamble(request, &context.haskell_effects_alias)
                     }
                     (None, None) => source.preamble.to_string(),
@@ -9517,6 +9518,7 @@ struct WorkbenchCompilationSpec {
     include: Vec<PathBuf>,
     evidence: String,
     declaration_imports: SourceImports,
+    request_evidence: Option<Arc<tidepool_runtime::session::SiteTypeEvidence>>,
 }
 
 struct PreparedCellStep {
@@ -9584,7 +9586,7 @@ where
     source.preamble = match (response, request) {
         (Some(_), Some(request)) => {
             source.request_helper_recipe =
-                tidepool_toolchain::declaration_context::RequestHelperRecipe::ActorReply;
+                tidepool_toolchain::declaration_join::RequestHelperRecipe::ActorReply;
             source.request_preamble(request, &context.haskell_effects_alias)
         }
         (None, None) => source.preamble.to_string(),
@@ -9606,7 +9608,9 @@ where
                 ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
             })?;
         let session_view = match &source.request_evidence {
-            Some(evidence) => session_view.with_request_type_evidence(evidence)?,
+            Some(evidence) => session_view
+                .with_request_type_evidence(evidence)
+                .map_err(ResidentActorWorkbenchError::Compile)?,
             None => session_view,
         };
         context
@@ -9623,7 +9627,9 @@ where
             ))?
             .with_scoped_injection();
         let session_view = match &source.request_evidence {
-            Some(evidence) => session_view.with_request_type_evidence(evidence)?,
+            Some(evidence) => session_view
+                .with_request_type_evidence(evidence)
+                .map_err(ResidentActorWorkbenchError::Compile)?,
             None => session_view,
         };
         context
@@ -9798,7 +9804,9 @@ where
             ))
         })?;
     let session_view = match &source.request_evidence {
-        Some(evidence) => session_view.with_request_type_evidence(evidence)?,
+        Some(evidence) => session_view
+            .with_request_type_evidence(evidence)
+            .map_err(ResidentActorWorkbenchError::Compile)?,
         None => session_view,
     };
     Ok(context
@@ -12265,7 +12273,7 @@ mod request_tests {
     async fn lookup_inspects_checked_bound_value_on_repeated_requests() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
         let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
         let mut sibling_context = context.clone();
         sibling_context.placement.lexical_scope = workbench
             .access
@@ -12304,15 +12312,10 @@ mod request_tests {
                 public_context.placement.lexical_scope
             );
             public_context.placement.lexical_scope = private.private_scope;
-            let checked_workbench = ResidentActorWorkbench::new(
-                Arc::clone(&machines),
-                source.clone(),
-                None,
-                None,
-                vec![],
-            )
-            .with_compilation_authority(authority)
-            .with_private_execution(private);
+            let checked_workbench =
+                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None)
+                    .with_compilation_authority(authority)
+                    .with_private_execution(private);
             checked_workbenches.push((public_context, checked_workbench));
         }
         let context = checked_workbenches[0].0.clone();
@@ -12374,7 +12377,7 @@ mod request_tests {
         let (view, inputs, prepared) = workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
-                let view = actor_compile_view(session, context, &inspection_source, &[])?;
+                let view = actor_compile_view(session, context, &inspection_source)?;
                 let inputs = session
                     .capture_inspection_inputs(view.session_view())
                     .map_err(|error| {
@@ -12495,13 +12498,11 @@ mod request_tests {
         let (batch, status) = workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
-                let batch =
-                    inspect_actor_batch(session, context, &inspection_source, &[], &queries)?;
+                let batch = inspect_actor_batch(session, context, &inspection_source, &queries)?;
                 let status = run_status_discovery(
                     session,
                     context,
                     &inspection_source,
-                    &[],
                     crate::status_tool::StatusDiscovery::Bindings,
                 )?;
                 Ok((batch, status))
@@ -12711,7 +12712,7 @@ mod request_tests {
     #[tokio::test]
     async fn actor_empty_snapshot_answers_uncancelled_type_search() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None);
         let (view, inputs, prepared) = workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
@@ -12753,12 +12754,11 @@ mod request_tests {
     #[tokio::test]
     async fn parked_actor_snapshot_answers_uncancelled_type_search() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None);
         let step = workbench
             .begin_fragment_split(
                 context.clone(),
                 source.clone(),
-                Vec::new(),
                 ParsedBlock {
                     ordinal: 1,
                     total: 1,
@@ -12846,12 +12846,11 @@ mod request_tests {
     #[tokio::test]
     async fn parked_lookup_transaction_answers_uncancelled_varied_type_search() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None);
         let step = workbench
             .begin_fragment_split(
                 context.clone(),
                 source.clone(),
-                Vec::new(),
                 ParsedBlock {
                     ordinal: 1,
                     total: 1,
@@ -14906,7 +14905,6 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                     source: cell,
                 },
                 items.remove(0),
-                4096,
             )
             .await
             .expect("admitted declaration settles");
@@ -15029,7 +15027,6 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                         source: observed.source.clone(),
                     },
                     item,
-                    4096,
                 )
                 .await
                 .expect("admitted JSON item executes");

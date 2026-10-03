@@ -51,7 +51,6 @@ fn fixture() -> (
         ActorWorkbenchSource::new("", Vec::new()),
         None,
         None,
-        Vec::new(),
     );
     (machines, workbench, session_id, retired, root)
 }

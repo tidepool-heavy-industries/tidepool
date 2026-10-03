@@ -1754,6 +1754,9 @@ fn watch_registration_refusal(error: crate::request::ReplyError) -> String {
         }
         ReplyError::AlreadySettled => "a request this watch names has already settled",
         ReplyError::UpdatePending => "a request this watch names has an update in flight",
+        ReplyError::ProgressTypeMismatch => {
+            "a request this watch names has an incompatible progress type"
+        }
     };
     format!("watch registration was rejected: {detail}")
 }
@@ -1788,6 +1791,9 @@ fn settlement_refusal(
         ),
         ReplyError::CancellationRequested => {
             format!("request {request} is being cancelled; acknowledge the cancellation instead")
+        }
+        ReplyError::ProgressTypeMismatch => {
+            format!("request {request} expects a different progress type")
         }
         ReplyError::AlreadySettled => format!("request {request} is already settled"),
         ReplyError::Stale => format!("request {request} is not active for this actor"),

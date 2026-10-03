@@ -354,7 +354,7 @@ pub type ActorSourceLayerResolver = std::sync::Arc<dyn ActorSourceLayers>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorCompileView {
     session: SessionCompileView,
-    request_helper_recipe: tidepool_toolchain::declaration_context::RequestHelperRecipe,
+    request_helper_recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
     external: SourceImports,
     source_layer: std::sync::Arc<[PathBuf]>,
 }
@@ -369,7 +369,7 @@ impl ActorCompileView {
 
     pub fn exact_compile_context(
         &self,
-    ) -> Option<std::sync::Arc<tidepool_toolchain::declaration_context::ExactCompileContext>> {
+    ) -> Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactCompileContext>> {
         self.session.exact_compile_context().map(|context| {
             std::sync::Arc::new(
                 (*context)
@@ -381,7 +381,7 @@ impl ActorCompileView {
 
     pub(crate) fn with_request_helper_recipe(
         mut self,
-        recipe: tidepool_toolchain::declaration_context::RequestHelperRecipe,
+        recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
     ) -> Self {
         self.request_helper_recipe = recipe;
         self
