@@ -280,7 +280,6 @@ fn wait_for_readers(
 
 #[cfg(unix)]
 fn set_pipe_nonblocking(pipe: &impl std::os::fd::AsRawFd) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
     // SAFETY: fcntl only reads and updates flags on this live pipe descriptor.
     let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
     if flags == -1 {
