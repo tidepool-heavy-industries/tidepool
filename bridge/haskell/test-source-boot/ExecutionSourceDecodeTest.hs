@@ -1,0 +1,269 @@
+module ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots) where
+
+import Codec.CBOR.Read (deserialiseFromBytes)
+import Codec.CBOR.Decoding (Decoder)
+import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
+import Codec.CBOR.Write (toStrictByteString)
+import Control.Exception (evaluate)
+import Control.Monad (forM_, unless, when)
+import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as BL
+import Data.Char (ord)
+import Data.IORef (newIORef, readIORef)
+import Data.List (isInfixOf)
+import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
+import GHC.Clock (getMonotonicTimeNSec)
+import GHC.Stats (RTSStats(..), getRTSStats, getRTSStatsEnabled)
+import System.CPUTime (getCPUTime)
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath ((</>))
+import System.Mem (performGC)
+import Text.Read (readMaybe)
+import Tidepool.DependencyEvidence
+import Tidepool.ExecutionSource
+import Tidepool.ExtractUtil (shaHex)
+
+-- Start with bytes issued by the production owner; mutate only the selected
+-- CBOR inventory/field so failures exercise the real admission decoder.
+fixtureBytes :: IO BS.ByteString
+fixtureBytes = do
+  let sha = replicate 64 'a'
+      source = "module Expr where\nanswer = 42\n"
+      original name = ExecutionSourceIdentity "main" name sha sha sha
+      evidence = DependencyEvidence True True
+        [DependencySource "@generated-source" (shaHex (TE.encodeUtf8 (T.pack source))),
+         DependencySource "/decoder-fixture/Support.hs" sha]
+        [] [] [DependencyModule "main" "Expr" False "@generated-source" [] ProductReady,
+               DependencyModule "main" "Support" False "/decoder-fixture/Support.hs" [] ProductReady]
+      recipe = ExecutionSourceRecipe sha Nothing [] ("/decoder-fixture/Expr.hs", source)
+        evidence [ExecutionSourceOwner (original "Expr") True Nothing,
+                  ExecutionSourceOwner (original "Support") True Nothing]
+        [(("main", "Expr"), [("main", "Support")])]
+        [("pkg", "Package", "/decoder-fixture/Package.hi", sha)]
+  case issueExecutionSourceRecipe recipe of
+    Right (Just graph) -> pure (executionGraphBytes graph)
+    result -> fail ("decoder fixture issuance failed: " ++ show result)
+
+at :: Int -> (Term -> Term) -> Term -> Term
+at index change (TList values) = TList
+  [if position == index then change value else value | (position, value) <- zip [0..] values]
+at _ _ _ = error "decoder fixture has a non-list row"
+
+duplicate :: Term -> Term
+duplicate (TList (first : rest)) = TList (first : first : rest)
+duplicate _ = error "decoder fixture has an empty inventory"
+
+encode :: Term -> BS.ByteString
+encode = toStrictByteString . encodeTerm
+
+decode :: BS.ByteString -> Either String ExecutionSourceGraph
+decode bytes = decodeExecutionSourceGraph (shaHex bytes) bytes
+
+expectParcelRejection :: String -> (forall state. Decoder state value) -> BS.ByteString -> IO ()
+expectParcelRejection label decoder encoded = case deserialiseFromBytes decoder (BL.fromStrict encoded) of
+  Left actual | label `isInfixOf` show actual -> pure ()
+  _ -> fail ("decoder lost duplicate gate: " ++ label)
+
+executionSourceDecodeChecks :: IO ()
+executionSourceDecodeChecks = do
+  bytes <- fixtureBytes
+  term <- case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
+    Right (remaining, value) | BL.null remaining -> pure value
+    _ -> fail "issued decoder fixture has malformed CBOR"
+  graph <- either fail pure (decode bytes)
+  unless (executionGraphBytes graph == bytes) (fail "decoder changed graph bytes")
+  let refuse label reason value = case decode (encode value) of
+        Left actual | reason `isInfixOf` actual -> pure ()
+        result -> fail (label ++ ": unexpected decoder result " ++ show result)
+      accept label value = either (fail . ((label ++ ": ") ++))
+        (\decoded -> evaluate (forceGraph decoded) >> pure ()) (decode (encode value))
+      include value = at 5 (const (TList [TString value])) term
+      unit value = at 8 (at 0 (at 0 (const (TString value)))) term
+      source value = at 6 (at 1 (const (TString value))) term
+      repeated count = at 7 (at 2 (const (TList
+        [TList [TString (T.pack ("/decoder-fixture/" ++ show index)), TString (T.replicate 64 "a")]
+        | index <- [1..count :: Int]]))) term
+  forM_
+    [ ("sources", "source paths", at 7 (at 2 duplicate) term)
+    , ("modules", "module owners", at 7 (at 4 duplicate) term)
+    , ("native", "native owners", at 8 duplicate term)
+    , ("exact owners", "exact owners", at 9 duplicate term)
+    , ("exact imports", "exact imports", at 9 (at 0 (at 2 duplicate)) term)
+    , ("packages", "package owners", at 10 duplicate term)
+    ] $ \(label, kind, value) -> refuse label ("duplicate original execution " ++ kind) value
+  accept "4096 source rows" (repeated 4096)
+  refuse "4097 source rows" "original execution inventory exceeds bound" (repeated 4097)
+  accept "65536 ASCII owner characters" (unit (T.replicate 65536 "x"))
+  refuse "65537 ASCII owner characters" "invalid original execution owner" (unit (T.replicate 65537 "x"))
+  accept "65536 astral owner characters" (unit (T.replicate 65536 "\x1f642"))
+  refuse "65537 astral owner characters" "invalid original execution owner" (unit (T.replicate 65537 "\x1f642"))
+  accept "65536 Unicode path characters" (include ("/" <> T.replicate 65535 "\x1f642"))
+  refuse "empty path precedes absolute check" "invalid original execution owner" (include "")
+  refuse "relative path after owner check" "relative original execution path" (include "relative")
+  refuse "text limit precedes owner limit" "original execution text exceeds bound"
+    (unit (T.replicate (4 * 1024 * 1024 + 1) "x"))
+  accept "source text at character limit" (source (T.replicate (4 * 1024 * 1024) "x"))
+  refuse "source text beyond character limit" "original execution text exceeds bound"
+    (source (T.replicate (4 * 1024 * 1024 + 1) "x"))
+  case decodeExecutionSourceGraph (replicate 64 '0') bytes of
+    Left "original execution graph digest differs" -> pure ()
+    _ -> fail "decoder lost digest rejection precedence"
+  let sha = T.pack (shaHex bytes)
+      parcel = encode (TList [TList [TList [TString sha, TBytes bytes], TList [TString sha, TBytes bytes]], TList []])
+      reference = TList [TString "main", TString "Support", TString (T.replicate 64 "a"),
+        TString (T.replicate 64 "a"), TString (T.replicate 64 "a"), TString sha]
+  expectParcelRejection "duplicate original execution graphs" decodeExecutionSources parcel
+  expectParcelRejection "duplicate original execution references" decodeExecutionSourceReferences (encode (TList [reference, reference]))
+  putStrLn "execution source decoder: 21 admission cases passed"
+
+chars :: String -> Int
+chars = foldl' (\total character -> total + ord character) 0
+
+optional :: (value -> Int) -> Maybe value -> Int
+optional force = maybe 0 force
+
+qualifier :: DependencyQualifier -> Int
+qualifier DependencyUnqualified = 1
+qualifier (DependencyThisUnit value) = 2 + chars value
+qualifier (DependencyOtherUnit value) = 3 + chars value
+
+boolean :: Bool -> Int
+boolean value = if value then 1 else 0
+
+forceIdentity :: ExecutionSourceIdentity -> Int
+forceIdentity original = sum (map chars [executionUnit original, executionModule original,
+  executionVersion original, executionIfaceSha256 original, executionNativeSha256 original])
+
+forceModule :: DependencyModule -> Int
+forceModule node = chars (dependencyModuleUnit node) + chars (dependencyModuleName node)
+  + boolean (dependencyModuleBoot node) + chars (dependencyModuleSource node)
+  + (dependencyModuleProduct node `seq` 1)
+  + sum [qualifier (dependencyImportQualifier edge) + chars (dependencyImportName edge)
+      + boolean (dependencyImportBoot edge) + optional chars (dependencyImportSelected edge)
+    | edge <- dependencyModuleImports node]
+
+-- Force every typed field and every String character. Strict ByteString input
+-- is already read and authenticated by SHA256 on each owning decode call.
+forceGraph :: ExecutionSourceGraph -> Int
+forceGraph graph = chars (executionGraphSha256 graph) + BS.length (executionGraphBytes graph)
+  + chars (executionGraphProducer graph) + optional chars (executionGraphSemantic graph)
+  + sum (map chars (executionGraphIncludes graph))
+  + chars (fst (executionGeneratedOrigin graph)) + chars (snd (executionGeneratedOrigin graph))
+  + boolean (dependencyCacheSafe evidence) + boolean (dependencySelectionComplete evidence)
+  + sum [chars (dependencySourcePath row) + chars (dependencySourceSha256 row) | row <- dependencySources evidence]
+  + sum [qualifier (dependencyResolutionQualifier row) + chars (dependencyResolutionModule row)
+      + boolean (dependencyResolutionBoot row) + optional chars (dependencyResolutionSelected row)
+      + sum (map chars (dependencyResolutionCandidates row)) | row <- dependencyResolutions evidence]
+  + sum (map chars (dependencyPackages evidence)) + sum (map forceModule (dependencyModules evidence))
+  + sum [forceIdentity (executionOwnerIdentity owner') + boolean (executionOwnerFresh owner')
+      + optional chars (executionOwnerOriginalGraph owner') | owner' <- executionGraphOwners graph]
+  + sum [chars unit' + chars name + sum [chars unit'' + chars name' | (unit'', name') <- imports]
+      | ((unit', name), imports) <- executionGraphExactImports graph]
+  + sum [chars unit' + chars name + chars path + chars sha | (unit', name, path, sha) <- executionGraphPackages graph]
+  where evidence = executionGraphEvidence graph
+
+forceNode :: ExecutionSourceNode -> Int
+forceNode node = forceIdentity (executionNodeIdentity node) + forceModule (executionNodeModule node)
+  + chars (executionNodeSourceSha256 node)
+  + sum [chars unit' + chars name | (unit', name) <- executionNodeRequirements node]
+
+data Demand = FullGraph | OriginalNodeAdmission ExecutionSourceIdentity | MaterializedNode ExecutionSourceIdentity
+
+-- Compare these complete decoded-value snapshots byte for byte between
+-- baseline and candidate. Graph Eq compares the authenticated input bytes,
+-- while the benchmark's numeric checksum is only a forcing witness.
+executionSourceDecodeSnapshots :: FilePath -> [FilePath] -> IO ()
+executionSourceDecodeSnapshots output files = do
+  createDirectoryIfMissing True output
+  forM_ files $ \path -> do
+    bytes <- BS.readFile path
+    let sha = shaHex bytes
+    graph <- either fail pure (decodeExecutionSourceGraph sha bytes)
+    BS.writeFile (output </> sha ++ ".decoded.cbor") (encode (snapshot graph))
+  where
+    string = TString . T.pack
+    list item = TList . map item
+    maybe' item = maybe TNull item
+    key (unit, name) = TList [string unit, string name]
+    identity' original = list string [executionUnit original, executionModule original,
+      executionVersion original, executionIfaceSha256 original, executionNativeSha256 original]
+    module' node = TList [string (dependencyModuleUnit node), string (dependencyModuleName node),
+      TBool (dependencyModuleBoot node), string (dependencyModuleSource node),
+      list (\edge -> TList [string (renderDependencyQualifier (dependencyImportQualifier edge)),
+        string (dependencyImportName edge), TBool (dependencyImportBoot edge),
+        maybe' string (dependencyImportSelected edge)]) (dependencyModuleImports node),
+      string (show (dependencyModuleProduct node))]
+    snapshot graph = let evidence = executionGraphEvidence graph in TList
+      [ string (executionGraphSha256 graph), string (executionGraphProducer graph),
+        maybe' string (executionGraphSemantic graph), list string (executionGraphIncludes graph),
+        TList [string (fst (executionGeneratedOrigin graph)), string (snd (executionGeneratedOrigin graph))],
+        TList [TBool (dependencyCacheSafe evidence), TBool (dependencySelectionComplete evidence),
+          list (\row -> TList [string (dependencySourcePath row), string (dependencySourceSha256 row)]) (dependencySources evidence),
+          list (\row -> TList [string (renderDependencyQualifier (dependencyResolutionQualifier row)),
+            string (dependencyResolutionModule row), TBool (dependencyResolutionBoot row),
+            maybe' string (dependencyResolutionSelected row), list string (dependencyResolutionCandidates row)]) (dependencyResolutions evidence),
+          list string (dependencyPackages evidence), list module' (dependencyModules evidence)],
+        list (\owner' -> TList [identity' (executionOwnerIdentity owner'), TBool (executionOwnerFresh owner'),
+          maybe' string (executionOwnerOriginalGraph owner')]) (executionGraphOwners graph),
+        list (\(owner', imports) -> TList [key owner', list key imports]) (executionGraphExactImports graph),
+        list (\(unit, name, path, sha) -> list string [unit, name, path, sha]) (executionGraphPackages graph)]
+
+{-# NOINLINE decodedDemand #-}
+decodedDemand :: Demand -> String -> BS.ByteString -> Either String Int
+decodedDemand demand sha bytes = do
+  graph <- decodeExecutionSourceGraph sha bytes
+  let selected original force = case executionSourceOriginalNode [graph] original sha of
+        Left reason -> Left (show reason)
+        Right node -> pure (force node)
+  case demand of
+    FullGraph -> pure (forceGraph graph)
+    OriginalNodeAdmission original -> selected original (const 1)
+    MaterializedNode original -> selected original forceNode
+
+-- Runs unchanged on baseline and candidate libraries. Full demand is distinct
+-- from ExactScope's original-node validation, which discards the returned node,
+-- and from materializing its source/import fields for downstream loading.
+-- Neither node workload consumes unrelated resolution-candidate strings.
+executionSourceDecodeBenchmark :: String -> [FilePath] -> IO ()
+executionSourceDecodeBenchmark size files = do
+  iterations <- case readMaybe size :: Maybe Int of
+    Just value | value > 0 && not (null files) -> pure value
+    _ -> fail "decoder benchmark needs positive iterations and captured graph files"
+  statistics <- getRTSStatsEnabled
+  unless statistics (fail "decoder benchmark requires +RTS -T")
+  forM_ files $ \path -> do
+    bytes <- BS.readFile path
+    sha <- evaluate (shaHex bytes)
+    graph <- either fail pure (decodeExecutionSourceGraph sha bytes)
+    _ <- evaluate (forceGraph graph)
+    let available = [executionOwnerIdentity owner' | owner' <- executionGraphOwners graph,
+          Right _ <- [executionSourceOriginalNode [graph] (executionOwnerIdentity owner') sha]]
+    chosen <- case available of
+      original : _ -> pure original
+      [] -> fail "captured graph has no selectable original source node"
+    input <- newIORef (sha, bytes)
+    forM_ [1 :: Int .. 4] $ \repetition -> do
+      let modes :: [(String, Demand)]
+          modes = [("fully-forced", FullGraph),
+            ("original-node-admission", OriginalNodeAdmission chosen),
+            ("materialized-node", MaterializedNode chosen)]
+      forM_ (if odd repetition then modes else reverse modes) $ \(mode, demand) -> do
+        expected <- either fail evaluate (decodedDemand demand sha bytes)
+        performGC
+        before <- getRTSStats
+        startCpu <- getCPUTime
+        startWall <- getMonotonicTimeNSec
+        forM_ [1..iterations] $ \_ -> do
+          (currentSha, currentBytes) <- readIORef input
+          actual <- either fail evaluate (decodedDemand demand currentSha currentBytes)
+          when (actual /= expected) (fail "decoder benchmark demand changed")
+        stopWall <- getMonotonicTimeNSec
+        stopCpu <- getCPUTime
+        performGC
+        after <- getRTSStats
+        putStrLn ("{\"input_sha256\":" ++ show sha ++ ",\"encoded_bytes\":" ++ show (BS.length bytes)
+          ++ ",\"mode\":" ++ show mode ++ ",\"checksum\":" ++ show expected
+          ++ ",\"iterations\":" ++ show iterations ++ ",\"repetition\":" ++ show repetition
+          ++ ",\"wall_ns\":" ++ show (stopWall-startWall) ++ ",\"cpu_ps\":" ++ show (stopCpu-startCpu)
+          ++ ",\"allocated_bytes\":" ++ show (allocated_bytes after-allocated_bytes before) ++ "}")

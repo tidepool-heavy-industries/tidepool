@@ -54,6 +54,8 @@ import Tidepool.PreparedStg (PreparedModule(..))
 import HarnessSourceTest (harnessSourceChecks)
 import InspectionRunnerTest (inspectionRunnerChecks)
 import WorkerDiagnosticsTest (runWorkerDiagnosticsTests)
+import QuasiQuoteOccurrencesTest (quasiQuoteOccurrenceChecks, quasiQuoteOccurrenceChecksWith)
+import QuasiQuoteOccurrencesBenchmark (quasiQuoteOccurrenceBenchmark)
 import CheckedAdmissionTest (checkedAdmissionChecks)
 import CellProgramStateTest (cellProgramStateChecks)
 import UnreachableCompileTimeTest (unreachableCompileTimeCompilation)
@@ -70,6 +72,9 @@ import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 
 main :: IO ()
 main = getArgs >>= \case
+  "--quasiquote-benchmark" : iterations : files -> quasiQuoteOccurrenceBenchmark iterations files
+  ["--quasiquote-occurrences"] -> quasiQuoteOccurrenceChecks
+  ["--untracked-compile-time"] -> untrackedCompileTimeCompilation >> putStrLn "untracked compile-time: origin and cold/warm checks passed"
   ["--compiler-boundaries"] -> compilerBoundaryChecks
   ["--checked-admission"] -> checkedAdmissionChecks
   ["--cell-accumulation"] -> cellProgramStateChecks
@@ -108,6 +113,7 @@ runAllTests = do
           "<cell-test>"
     (lexicalFlags, _, _) <- parseDynamicFilePragma flags lexicalOptions
     liftIO $ do
+      quasiQuoteOccurrenceChecksWith flags
       lexicalIslands lexicalFlags
       commentsPragmasAndLayout lexicalFlags
       declarationsBecomeOneCellItem flags

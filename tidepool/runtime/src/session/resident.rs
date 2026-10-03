@@ -3292,6 +3292,24 @@ where
             .map(|view| view.hide_value_names(&hidden))
     }
 
+    /// Capture checked value inputs while the matching resident view is owned.
+    pub fn capture_inspection_inputs(
+        &self,
+        view: &super::SessionCompileView,
+    ) -> Result<super::AdmittedInspectionInputs, SessionError> {
+        let current = self
+            .compile_view_in(view.lexical_scope())
+            .ok_or(SessionError::DeadScope(view.lexical_scope()))?;
+        if current.session() != view.session() || !current.is_current_for(view) {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let values = self.state.capture_value_interfaces(view, true)?;
+        Ok(super::AdmittedInspectionInputs::capture(
+            view.clone(),
+            values,
+        ))
+    }
+
     pub fn compile_view_for_execution(
         &self,
         execution: &super::PrivateExecutionAdmission,
@@ -7883,6 +7901,69 @@ mod authored_publication_tests {
             SessionLib::open(SessionId(402), root.path(), ModuleEnv::standalone_default()).unwrap();
         let session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(library));
         (root, session)
+    }
+
+    #[test]
+    fn inspection_capture_fences_visible_drift_and_foreign_sessions() {
+        let (_root, mut session) = startup_session();
+        let view = session.compile_view_in(ScopeId::ROOT).unwrap();
+        assert!(session
+            .capture_inspection_inputs(&view)
+            .unwrap()
+            .view()
+            .reachable_values()
+            .is_empty());
+        let foreign_root = tempfile::tempdir().unwrap();
+        let foreign_lib = SessionLib::open(
+            SessionId(403),
+            foreign_root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        let foreign =
+            TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(foreign_lib));
+        assert!(matches!(
+            foreign.capture_inspection_inputs(&view),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        let sibling = session.mint_isolated_scope();
+        let mut value = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session.state,
+            "sibling",
+            917,
+        );
+        value.value.identity.module = value.module.module_name();
+        value.scope = sibling;
+        session.state.bind_in(sibling, value).unwrap();
+        assert!(session
+            .capture_inspection_inputs(&view)
+            .unwrap()
+            .view()
+            .reachable_values()
+            .is_empty());
+        let mut value = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session.state,
+            "visible",
+            918,
+        );
+        value.value.identity.module = value.module.module_name();
+        let hidden_id = value.id;
+        session.state.bind(value).unwrap();
+        assert!(matches!(
+            session.capture_inspection_inputs(&view),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        session.hidden_host_bindings.insert(hidden_id, ());
+        let normalized = session.compile_view_in(ScopeId::ROOT).unwrap();
+        assert!(matches!(
+            session.capture_inspection_inputs(&normalized),
+            Err(SessionError::MissingRetainedValueInterface(_))
+        ));
+        let unhidden = session.state.compile_view_in(ScopeId::ROOT).unwrap();
+        assert!(matches!(
+            session.capture_inspection_inputs(&unhidden),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
     }
 
     fn startup_code(fail: bool) -> TurnCode<'static> {

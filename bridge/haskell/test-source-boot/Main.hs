@@ -1,5 +1,7 @@
 module Main (main) where
 
+import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots)
+
 import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
 import Codec.CBOR.Read (deserialiseFromBytes)
@@ -21,11 +23,11 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import GHC (runGhc, setSession, ms_mod_name, ms_hsc_src, parseModule, typecheckModule, Target(..))
 import GHC.Core qualified as Core
-import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy)
+import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy, intDataCon)
 import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
 import GHC.Builtin.Types (liftedTypeKind)
 import GHC.Types.Var (mkTyVar, VarBndr(..))
-import GHC.Types.Name.Occurrence (mkTyVarOcc)
+import GHC.Types.Name.Occurrence (mkTyVarOcc, mkVarOcc)
 import GHC.Types.SrcLoc (noSrcSpan)
 import Language.Haskell.Syntax.Specificity (ForAllTyFlag(..), Specificity(..))
 import GHC.Types.Id (idName, setIdName)
@@ -51,7 +53,8 @@ import Control.Monad.IO.Class (liftIO)
 import GHC.Driver.Session (targetProfile)
 import GHC.Driver.Hooks (hscCompileCoreExprHook)
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports)
+import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports, mi_decls)
+import GHC.Iface.Syntax (ifaceDeclImplicitBndrs)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module (Module, mkModule, mkModuleName, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString, stringToUnit, GenWithIsBoot(..))
@@ -59,15 +62,15 @@ import Numeric (showHex)
 import System.Directory
   ( copyFile, createDirectory, createDirectoryIfMissing, getTemporaryDirectory, removeDirectoryRecursive
   , removeFile, renameFile, listDirectory, doesFileExist, getPermissions, setPermissions, executable
-  , getModificationTime, setModificationTime )
+  , getModificationTime, setModificationTime, withCurrentDirectory, getCurrentDirectory )
 import System.Environment (getArgs, getExecutablePath, setEnv, lookupEnv, unsetEnv)
 import System.Exit (ExitCode(..))
-import System.FilePath ((</>), takeDirectory)
+import System.FilePath ((</>), takeDirectory, normalise)
 import System.IO (hClose, hFlush, hPutStrLn, hSeek, hSetFileSize, withBinaryFile, IOMode(WriteMode), SeekMode(AbsoluteSeek), openTempFile, stderr)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
-import Tidepool.CertifiedProducts (encodeCertifiedProducts)
+import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.ExecutionEncode (encodeModuleProducts)
 
 import Tidepool.ExecutionProjection
@@ -171,6 +174,9 @@ exactCompilationCacheSafety expectedSource bytes = do
 
 main :: IO ()
 main = getArgs >>= \case
+  ["--execution-source-decode"] -> executionSourceDecodeChecks
+  "--execution-source-decode-benchmark" : iterations : files -> executionSourceDecodeBenchmark iterations files
+  "--execution-source-decode-snapshots" : output : files -> executionSourceDecodeSnapshots output files
   ["--exact-scope-binders"] -> exactScopeBinders
   ["--original-package-projection"] -> originalPackageProjection
   ["--original-package-cohort", coreRoot, output] -> originalPackageCohort coreRoot output
@@ -204,6 +210,7 @@ main = getArgs >>= \case
   ["--home-instance-edges"] -> selectedHomeInstanceEdges
   ["--fresh", work] -> reuseFresh work >>= requireReused "fresh worker"
   ["--mixed-fresh", work, count] -> reuseFresh work >>= requireMixed (read count)
+  ["--resolution-paths"] -> resolutionPaths
   ["--mixed"] -> do
     setEnv "TIDEPOOL_TIMING" "1"
     forM_ [1, 10, 100] (mixedGraph False)
@@ -1900,7 +1907,7 @@ freshExecutionRecipeTest = withScratch $ \work -> do
   let original = ExactProduct "main" "Support" sha sha sha "" []
       scope = ExactScope "" sha sha sha
         [(ExactIfaceArtifact "main" "Support" "" sha [],"",sha)] [] [original]
-        [] [] Nothing Nothing Nothing Nothing Set.empty
+        [] [] Nothing Nothing Nothing Nothing Nothing Set.empty
       oversized = graph {executionGraphBytes=BS.replicate (executionSourceGraphBytesLimit+1) 0}
   bounded <- either (fail . show) pure
     (extendExactExecutionSourcesWithinBudget [oversized] [reference] scope)
@@ -3009,13 +3016,18 @@ verifyRetainedPackageWitness producer evidence = do
           ++ [global (package { symbolOccurrence = "id" }) 0]
         certify = do
           started <- getMonotonicTimeNSec
-          certified <- captureDiagnostics (encode repeated >>= either fail pure)
+          certified <- captureDiagnostics $ do
+            bytes <- encode repeated >>= either fail pure
+            _ <- evaluate (BS.length bytes)
+            pure bytes
           finished <- getMonotonicTimeNSec
           putStrLn ("package certification requests=1001 wall_ms="
             ++ show ((finished - started) `div` 1000000))
           pure certified
     (first, firstLog) <- certify
     (second, secondLog) <- certify
+    retainDiagnosticOracle "repeated-package-first" firstLog
+    retainDiagnosticOracle "repeated-package-second" secondLog
     unless (first == second) $ fail "repeated package certification changed its wire evidence"
     retainByteOracle "repeated-package" first
     repeatedTerm <- either (fail . show) (pure . snd)
@@ -3033,8 +3045,9 @@ verifyRetainedPackageWitness producer evidence = do
     forM_ [firstLog, secondLog] $ \diagnostics -> do
       unless (count "certified_package_global_requests" diagnostics == 1001
           && count "certified_package_owner_loads" diagnostics == 1
+          && count "certified_package_catalog_builds" diagnostics == 1
           && count "certified_package_owner_revalidations" diagnostics == 1) $
-        fail "package certification reread one owner for repeated or distinct symbols"
+        fail "package certification rebuilt one owner for repeated or distinct symbols"
       let actual = count "certified_package_revalidation_bytes" diagnostics
           repeatedBytes = count "certified_package_reference_bytes" diagnostics
       unless (actual > 0 && repeatedBytes == 1001 * actual) $
@@ -3076,6 +3089,77 @@ verifyRetainedPackageWitness producer evidence = do
         [("target", target)] evidence "" ""
       decode bytes' = either (fail . show) (pure . snd)
         (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes'))
+  let wired = preparedRootIdentity (dataConWorkId intDataCon)
+      identities = [package, package { symbolOccurrence = "id" },
+        package { symbolOccurrence = "fmap" }, constructor, wired]
+  lookupStarted <- getMonotonicTimeNSec
+  forM_ identities $ \identity -> do
+    (identifier, _) <- resolvePackageGlobal producer identity >>= either fail pure
+    _ <- evaluate (idName identifier)
+    unless (preparedRootIdentity identifier == identity) $
+      fail "package catalog selected a noncanonical defining Name"
+  lookupFinished <- getMonotonicTimeNSec
+  putStrLn ("standalone package lookups requests=5 wall_ms="
+    ++ show ((lookupFinished - lookupStarted) `div` 1000000))
+  let baseOwner = mkModule (stringToUnit "ghc-internal") (mkModuleName "GHC.Internal.Base")
+      implicit = package { symbolOccurrence = "fmap" }
+  (baseInterface, _) <- readExactInterface producer baseOwner >>= either (fail . show) pure
+  unless (any (\(_, declaration) -> mkVarOcc "fmap" `elem` ifaceDeclImplicitBndrs declaration)
+      (mi_decls baseInterface)) $
+    fail "package catalog fixture does not demand an implicit class binder"
+  implicitName <- case Set.toList (Set.fromList
+      [name | available <- mi_exports baseInterface, name <- availNames available
+        , nameModule_maybe name == Just baseOwner, nameOccName name == mkVarOcc "fmap"]) of
+    [name] -> pure name
+    _ -> fail "implicit class binder lacks one canonical exported Name"
+  forM_ [identities, reverse identities] $ \ordered -> do
+    forM_ ordered $ \identity -> do
+      (identifier, _) <- resolvePackageGlobal producer identity >>= either fail pure
+      _ <- evaluate (idName identifier)
+      when (identity == implicit) $ unless (idName identifier == implicitName) $
+        fail "package catalog minted another Unique for an implicit class binder"
+      when (identity == wired) $ unless (idName identifier == idName (dataConWorkId intDataCon)) $
+        fail "package catalog lost the wired-in defining Name"
+  withTiming $ do
+    let repeatedImplicit = replicate 32 implicit
+        ordered = identities ++ repeatedImplicit
+    (forward, forwardLog) <- captureDiagnostics
+      (encode (map (`global` 0) ordered) >>= either fail pure)
+    (backward, backwardLog) <- captureDiagnostics
+      (encode (map (`global` 0) (reverse ordered)) >>= either fail pure)
+    retainDiagnosticOracle "implicit-forward" forwardLog
+    retainDiagnosticOracle "implicit-backward" backwardLog
+    forwardTerm <- decode forward
+    backwardTerm <- decode backward
+    restored <- case backwardTerm of
+      TList [magic, version, modules, TList [TList [name, TList references]], packages, globals] ->
+        pure (TList [magic, version, modules, TList [TList [name, TList (reverse references)]], packages, globals])
+      _ -> fail "package catalog fixture lacks its target reference inventory"
+    unless (forwardTerm == restored) $
+      fail "package lookup order changed canonical witness inventory or reference order"
+    forM_ [forwardLog, backwardLog] $ \diagnostics ->
+      unless (count "certified_package_global_requests" diagnostics == 37
+          && count "certified_package_owner_loads" diagnostics == 3
+          && count "certified_package_catalog_builds" diagnostics == 3
+          && count "certified_package_owner_revalidations" diagnostics == 3) $
+        fail "repeated implicit lookup escaped its certification-owned catalog capture"
+  withTiming $ do
+    (_, diagnostics) <- captureDiagnostics
+      (encode (map (`global` 0) identities) >>= either fail pure)
+    retainDiagnosticOracle "five-package-identities" diagnostics
+    unless (count "certified_package_global_requests" diagnostics == 5
+        && count "certified_package_owner_loads" diagnostics == 3
+        && count "certified_package_catalog_builds" diagnostics == 3
+        && count "certified_package_owner_revalidations" diagnostics == 3) $
+      fail "package catalog did not share ordinary, class, constructor and wired owner captures"
+  forM_ [package { symbolModule = "GHC.Internal.Prelude" },
+      package { symbolNamespace = "type" }] $ \identity -> do
+    encode [global identity 0] >>= \case
+      Left _ -> pure ()
+      Right _ -> fail "package catalog admitted a reexport owner or another namespace"
+    resolvePackageGlobal producer identity >>= \case
+      Left _ -> pure ()
+      Right _ -> fail "standalone package lookup admitted a reexport owner or another namespace"
   localBytes <- encodeProgram (localProgram [constructor, synthetic]) >>= either fail pure
   retainByteOracle "local-package" localBytes
   local <- decode localBytes
@@ -3101,6 +3185,9 @@ verifyRetainedPackageWitness producer evidence = do
     retainByteOracle label bytes =
       lookupEnv "TIDEPOOL_CERTIFICATE_BYTE_ORACLE" >>= mapM_ (\prefix ->
         BS.writeFile (prefix ++ "-" ++ label ++ ".cbor") bytes)
+    retainDiagnosticOracle label diagnostics =
+      lookupEnv "TIDEPOOL_CERTIFICATE_BYTE_ORACLE" >>= mapM_ (\prefix ->
+        writeFile (prefix ++ "-" ++ label ++ ".log") diagnostics)
     sameRepeatedReferences references globals = case (references, globals) of
       (TInt firstIndex : rest, [firstWitness, secondWitness]) ->
         all (== TInt firstIndex) (take 999 rest)
@@ -3137,13 +3224,20 @@ verifyChangedPackageInterface producer identity evidence program global = withSc
       encode = encodeCertifiedProducts environment [] Nothing []
         [("target", program [global identity 0, global identity 0])] evidence "" ""
   first <- encode >>= either fail pure
+  (firstId, _) <- resolvePackageGlobal environment identity >>= either fail pure
   BS.writeFile path "invalid interface"
   encode >>= \case
     Left _ -> pure ()
     Right _ -> fail "package certification reused an owner after its interface changed"
+  resolvePackageGlobal environment identity >>= \case
+    Left _ -> pure ()
+    Right _ -> fail "standalone package lookup reused a changed interface"
   BS.writeFile path original
   restored <- encode >>= either fail pure
   unless (restored == first) $ fail "restored package interface did not recover certification"
+  (restoredId, _) <- resolvePackageGlobal environment identity >>= either fail pure
+  unless (idName restoredId == idName firstId) $
+    fail "restored standalone package lookup changed its canonical Name"
   putStrLn "package certification: changed interface refused and restored bytes recovered"
 
 withTiming :: IO a -> IO a
@@ -3163,6 +3257,68 @@ captureDiagnostics action = do
       hSeek output AbsoluteSeek 0
       diagnostics <- BSC.unpack <$> BS.hGetContents output
       pure (result, diagnostics)
+
+resolutionPaths :: IO ()
+resolutionPaths = do
+  original <- getCurrentDirectory
+  let fixtureRoot = original </> "test-source-boot" </> "fixtures"
+  withScratch $ \work -> withCurrentDirectory work $ do
+    forM_ ["InstanceOwner", "InstanceRelay", "InstanceConsumer"] $ \name ->
+      copyFile (fixtureRoot </> name ++ ".hs") (work </> name ++ ".hs")
+    createDirectory (work </> "padding")
+    createDirectory (work </> "later")
+    cwd <- getCurrentDirectory
+    let parentRoot = "padding" </> ".."
+        roots = [parentRoot, ".", work, "later", parentRoot]
+        target = work </> "InstanceConsumer.hs"
+        extensions = [".hs", ".lhs", ".hsig", ".lhsig"]
+        expectedNegative =
+          [normalise (root </> "Prelude" ++ extension)
+          | root <- [cwd, cwd </> parentRoot, cwd </> "later"], extension <- extensions]
+        resolution name evidence = case
+          [row | row <- dependencyResolutions evidence
+            , dependencyResolutionQualifier row == DependencyUnqualified
+            , dependencyResolutionModule row == name, not (dependencyResolutionBoot row)] of
+          [row] -> pure row
+          _ -> fail ("resolution path fixture lacks one import: " ++ name)
+        resolutionBytes evidence = renderDependencyEvidence (evidence
+          {dependencySources = [], dependencyModules = [], dependencyPackages = []})
+        verify evidence = do
+          package <- resolution "Prelude" evidence
+          unless (isNothing (dependencyResolutionSelected package)
+              && dependencyResolutionCandidates package == expectedNegative) $
+            fail "root aliases changed ordered negative package candidates or collapsed parent segments"
+          home <- resolution "InstanceRelay" evidence
+          let chosen = normalise (cwd </> "InstanceRelay.hs")
+          unless (dependencyResolutionSelected home == Just chosen
+              && dependencyResolutionCandidates home == [chosen]) $
+            fail "selected source cutoff retained a lower root or another extension"
+    cold <- runPipelineSelected (PreparedProducts Nothing) target roots
+    verify (pprDependencies cold)
+    writeManifestFor ["InstanceOwner"] work cold
+    withResidentPipelineSelected roots $ \compile -> do
+      let reuse = compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
+            Nothing target [] Nothing
+      warm <- reuse
+      verify (pprDependencies warm)
+      unless (resolutionBytes (pprDependencies warm) == resolutionBytes (pprDependencies cold)) $
+        fail "warm reuse changed serialized ordered resolution evidence"
+      unless (Set.fromList (map candidateModule (pprAcceptedCandidates warm))
+          == Set.fromList ["InstanceOwner"]) $
+        fail "root alias fixture failed to admit its unchanged candidate owners"
+      let source = work </> "Prelude.hs"
+      (do writeFile source (unlines ["{-# LANGUAGE PackageImports #-}"
+            , "module Prelude (module PackagePrelude) where"
+            , "import \"base\" Prelude as PackagePrelude"])
+          reuse >>= requireRefused "new home selection with root aliases")
+        `finally` removeFile source
+      restored <- reuse
+      verify (pprDependencies restored)
+      unless (resolutionBytes (pprDependencies restored) == resolutionBytes (pprDependencies cold)) $
+        fail "restored selection changed serialized ordered resolution evidence"
+      unless (length (pprAcceptedCandidates restored) == 1) $
+        fail "restored negative root evidence did not recover unchanged owners"
+    putStrLn "resolution-paths scenarios=4: cold/warm ordered aliases and parent roots, new home shadow refusal, restored selection passed"
 
 -- The fixed two-module SOURCE SCC is surrounded by ordinary candidate
 -- products. A separate case makes Independent1 a real ordinary+boot input;

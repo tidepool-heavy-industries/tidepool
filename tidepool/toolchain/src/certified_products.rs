@@ -325,7 +325,7 @@ fn retain_original_native(
 
 #[cfg(test)]
 thread_local! {
-    static ORIGINAL_PRODUCT_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static ORIGINAL_PRODUCT_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static HOME_CERTIFICATION_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -3555,7 +3555,7 @@ pub(crate) fn certify_target_owners_with_validation(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
     use tidepool_repr::execution_schema::testing;
@@ -4436,7 +4436,7 @@ mod tests {
         );
     }
 
-    fn original_witness_fixture(
+    pub(crate) fn original_witness_fixture(
         module: &str,
         import: Option<PendingImportOwner>,
         version: u8,
@@ -4576,7 +4576,7 @@ mod tests {
         )
     }
 
-    fn recovered_witness_fixtures(
+    pub(crate) fn recovered_witness_fixtures(
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     ) -> Vec<CertifiedRecoveredOriginal> {
         let root = tempfile::tempdir().unwrap();

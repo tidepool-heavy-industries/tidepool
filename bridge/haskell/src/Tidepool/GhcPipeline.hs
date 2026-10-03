@@ -151,6 +151,7 @@ import Tidepool.CheckedPrefixImports
 import Tidepool.FamilyConsistency (validateCompilationFamilies, validateEnvironmentFamilies)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
+import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 import Tidepool.Introspection (normalizeLookupWildcards)
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), SessionScope(..)
@@ -1213,13 +1214,9 @@ classifyQuasiQuoteOrigins hscEnv parsed
   where
     hsMod = unLoc (pm_parsed_source parsed)
     imports = hsmodImports hsMod
-    occurrences = everything (++) (mkQ [] quasiQuoteRdrName) hsMod
+    occurrences = quasiQuoteOccurrences (ms_hspp_opts (pm_mod_summary parsed)) (pm_parsed_source parsed)
     isAllowlisted (Just origin) = Set.member origin pureQuasiQuoters
     isAllowlisted Nothing = False
-
-quasiQuoteRdrName :: HsUntypedSplice GhcPs -> [RdrName]
-quasiQuoteRdrName (HsQuasiQuote _ name _) = [name]
-quasiQuoteRdrName _ = []
 
 -- GHC enables dependency codegen from the QuasiQuotes extension alone. The
 -- harness enables that syntax for every input, including inputs without a
@@ -1252,8 +1249,7 @@ elideUnusedQuasiQuoteCodegen timing graph
     unsupported summary =
       hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary)
         || xopt LangExt.StaticPointers (ms_hspp_opts summary)
-    occurrences = everything (++) (mkQ [] quasiQuoteRdrName)
-      . unLoc . pm_parsed_source
+    occurrences parsed = quasiQuoteOccurrences (ms_hspp_opts (pm_mod_summary parsed)) (pm_parsed_source parsed)
 
 -- | Diagnostic only (TIDEPOOL_MEMO_TRACE): honestly report which
 -- quasiquoters, if any, a module's last fresh compile actually saw --
@@ -3137,20 +3133,26 @@ dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
         | summary <- graphSummaries
         , (qualifier, imported) <- ms_srcimps summary
         ]
-      roots = nub (concatMap (importPaths . ms_hspp_opts) graphSummaries)
+      roots = nubOrd (concatMap (importPaths . ms_hspp_opts) graphSummaries)
       moduleRelative name =
         map (\c -> if c == '.' then pathSeparator else c) (moduleNameString name)
-      rawCandidates name isBoot =
-        [ root </> moduleRelative name ++ extension
-        | root <- roots
+      homeLookup (OtherPkg _) = False
+      homeLookup _ = True
+  -- Root normalization belongs to this evidence capture. The worker holds its
+  -- request's working directory until compilation returns; filesystem absence
+  -- and selected-source checks still run freshly at their admission boundaries.
+  absoluteRoots <- if any (\(qualifier, _, _) -> homeLookup qualifier) allImports
+    then mapM (fmap normalise . makeAbsolute) roots
+    else pure []
+  let candidatesFor name isBoot =
+        [ normalise (root </> moduleRelative name ++ extension)
+        | root <- absoluteRoots
         , extension <- if isBoot then [".hs-boot", ".lhs-boot"]
             else [".hs", ".lhs", ".hsig", ".lhsig"]
         ]
   absoluteCandidates <- forM allImports $ \(qualifier, imported, isBoot) -> do
-    candidates <- case qualifier of
-      OtherPkg _ -> pure []
-      _ -> mapM (fmap normalise . makeAbsolute) (rawCandidates imported isBoot)
-    let chosen = homeSelection qualifier imported isBoot
+    let candidates = if homeLookup qualifier then candidatesFor imported isBoot else []
+        chosen = homeSelection qualifier imported isBoot
         throughSelected = case chosen of
           Nothing -> candidates
           Just path -> case break (== path) candidates of
@@ -3161,7 +3163,7 @@ dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
       , dependencyResolutionModule = moduleNameString imported
       , dependencyResolutionBoot = isBoot
       , dependencyResolutionSelected = chosen
-      , dependencyResolutionCandidates = nub throughSelected
+      , dependencyResolutionCandidates = nubOrd throughSelected
       }
   moduleNodes <- forM (zip graphSummaries summarySources) $ \(summary, sourcePath) -> do
     let name = ms_mod_name summary
@@ -3831,7 +3833,7 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
         && fingerprint == ms_hs_hash summary) $ liftIO (throwIO (ExecutionSourceChanged key))
     originalQuotes <- if xopt LangExt.QuasiQuotes (ms_hspp_opts summary)
       then do parsedOriginal <- parseModule summary
-              pure (everything (++) (mkQ [] quasiQuoteRdrName) (unLoc (pm_parsed_source parsedOriginal)))
+              pure (quasiQuoteOccurrences (ms_hspp_opts summary) (pm_parsed_source parsedOriginal))
       else pure []
     unless (not (hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary))
         && not (gopt Opt_Pp (ms_hspp_opts summary))
@@ -3938,8 +3940,7 @@ planExactExecutionLoad admitted interfaces checkedInterfaces targetName sourceGr
     , xopt LangExt.QuasiQuotes (ms_hspp_opts summary)]
   let quoted = [(parsedModule, occurrences)
         | parsedModule <- parsed
-        , let occurrences = everything (++) (mkQ [] quasiQuoteRdrName)
-                (unLoc (pm_parsed_source parsedModule))
+        , let occurrences = quasiQuoteOccurrences (ms_hspp_opts (pm_mod_summary parsedModule)) (pm_parsed_source parsedModule)
         , not (null occurrences)]
       home = homeUnitId (hsc_home_unit initial)
       ownerKey owner = (unitString (moduleUnit owner), moduleNameString (moduleName owner))
@@ -4273,7 +4274,7 @@ sessionVariant purpose scope path = do
                   hsc0 <- getSession
                   case selectedExact of
                     Just admitted | isJust (scopeCheckedCell admitted) || isJust (scopeCheckedItem admitted)
-                        || isJust (scopeCheckedDisplay admitted) -> do
+                        || isJust (scopeCheckedDisplay admitted) || isJust (scopeCheckedInspection admitted) -> do
                       let wanted = map (moduleNameString . renderSessionModule) needed
                           artifacts = [value | value <- scopeValueInterfaces admitted, exactModule value `elem` wanted]
                       when (length artifacts /= length needed) $ liftIO $ ioError $ userError

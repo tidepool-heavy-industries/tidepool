@@ -186,6 +186,20 @@ main = getArgs >>= \case
         JoinRejected ArtifactChanged _ | outcomeInput rejected == rejectedInput
           , outcomeArtifact rejected == Nothing -> pure ()
         other -> fail ("changed artifact did not produce bound rejection: " ++ show other)
+      liftIO $ case implementationArtifacts input of
+        entry : _ -> do
+          let path = exactPath (artifactInterface entry)
+          bracket (BS.readFile path) (BS.writeFile path) $ \_ -> do
+            BS.writeFile path (BS.singleton 0)
+            inspectedChanged <- inspectDeclarationArtifacts initial (implementationArtifacts input)
+            case inspectionResult inspectedChanged of
+              Left (ArtifactChanged, _) -> pure ()
+              other -> fail ("mutated interface passed worker inventory admission: " ++ show other)
+            joinedChanged <- validateDeclarationJoin initial input
+            case outcomeDecision joinedChanged of
+              JoinRejected ArtifactChanged _ | outcomeInput joinedChanged == input -> pure ()
+              other -> fail ("mutated interface passed worker join admission: " ++ show other)
+        [] -> fail "fixture implementation artifacts unexpectedly empty"
       -- Retrying an already published reservation cannot overwrite its bytes.
       before <- liftIO (BS.readFile (root </> "Joined.hi"))
       collision <- liftIO (try (buildJoinedInterface hydrated joined (root </> "Joined.hi")
