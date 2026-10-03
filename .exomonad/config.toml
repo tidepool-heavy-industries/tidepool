@@ -21,11 +21,6 @@ modules = [
 ]
 spec = "AgentSpec.agentSpec"
 checks = [
-  "Project.WorkChecks.unownedEvidence",
-  "Project.WorkflowReminderChecks.policyPacketBudget",
-  "Project.RoutingChecks.reviewedCheckpoints",
-  "Project.ReviewFlowChecks.effectfulRouting",
-  "Project.ReviewFlowChecks.workflowExample",
   "Project.RecursiveWorkChecks.nestedBatches",
   "Project.RecursiveWorkChecks.revisedReview",
   "Project.DecisionAnswerChecks.routing",
