@@ -32,6 +32,7 @@ library tidepool-extract-internal
   exposed-modules:
     Tidepool.Binders
     Tidepool.CborEncode
+    Tidepool.CellProgramState
     Tidepool.CheckedCell
     Tidepool.CheckedPrefixImports
     Tidepool.CompileInputPolicy
@@ -126,6 +127,7 @@ test-suite cell-splitter-test
   main-is:          CellSplitterTest.hs
   hs-source-dirs:   test-cell-splitter
   other-modules:    UnreachableCompileTimeTest
+                    CellProgramStateTest
   build-depends:
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,

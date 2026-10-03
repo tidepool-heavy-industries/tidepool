@@ -51,6 +51,7 @@ import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..), SessionScope(..)
   , mkThinSessionIface, writeSessionIface, injectSessionIface, renderSessionModule )
 import Tidepool.PreparedStg (PreparedModule(..))
+import CellProgramStateTest (cellProgramStateChecks)
 import UnreachableCompileTimeTest (unreachableCompileTimeCompilation)
 import Tidepool.Timing
   ( InterfaceStage(..), InterfaceReuse(..), measureModuleInterface )
@@ -65,6 +66,7 @@ import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 
 main :: IO ()
 main = getArgs >>= \case
+  ["--cell-accumulation"] -> cellProgramStateChecks
   ["--request-validation"] -> requestValidationChecks
   ["--check-source-request"] -> checkingSourceRequestRoundTrip >> putStrLn "checking source request: 1 passed"
   ["--ordered-segments"] -> orderedInferenceSegments >> putStrLn "ordered inference segments: 1 passed"
