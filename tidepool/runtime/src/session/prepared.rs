@@ -740,7 +740,7 @@ pub struct SiteTypeEvidence {
     constructors: Vec<SymbolIdentity>,
     input: TypeNodeId,
     answer: TypeNodeId,
-    request_context: Option<Arc<tidepool_toolchain::declaration_context::ExactCompileContext>>,
+    request_context: Option<Arc<tidepool_toolchain::declaration_join::ExactCompileContext>>,
 }
 
 impl SiteTypeEvidence {
@@ -755,30 +755,24 @@ impl SiteTypeEvidence {
         signatures: tidepool_toolchain::checked_cell::RequestTypeSignatures,
         artifacts: &tidepool_toolchain::artifact_inventory::ArtifactView,
     ) -> Result<Self, crate::CompileError> {
-        let declarations = tidepool_toolchain::declaration_context::ExactDeclarationContext::new(
+        let declarations = tidepool_toolchain::declaration_join::ExactDeclarationContext::new(
             &[],
             &[],
             Vec::new(),
         )?
         .extend_interface_artifacts(artifacts)?;
         self.request_context = Some(Arc::new(
-            tidepool_toolchain::declaration_context::ExactCompileContext::new(Arc::new(
-                declarations,
-            ))
-            .with_request_types(Arc::new(signatures)),
+            tidepool_toolchain::declaration_join::ExactCompileContext::new(Arc::new(declarations))
+                .with_request_types(Arc::new(signatures)),
         ));
         Ok(self)
     }
 
     pub(crate) fn compile_context(
         &self,
-        declarations: Option<
-            &Arc<tidepool_toolchain::declaration_context::ExactDeclarationContext>,
-        >,
-    ) -> Result<
-        Arc<tidepool_toolchain::declaration_context::ExactCompileContext>,
-        crate::CompileError,
-    > {
+        declarations: Option<&Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+    ) -> Result<Arc<tidepool_toolchain::declaration_join::ExactCompileContext>, crate::CompileError>
+    {
         let request = self.request_context.as_ref().ok_or_else(|| {
             crate::CompileError::ExtractFailed(
                 "request type evidence lacks its original compiler authentication".into(),
@@ -786,7 +780,7 @@ impl SiteTypeEvidence {
         })?;
         let base = match declarations {
             Some(declarations) => (**declarations).clone(),
-            None => tidepool_toolchain::declaration_context::ExactDeclarationContext::new(
+            None => tidepool_toolchain::declaration_join::ExactDeclarationContext::new(
                 &[],
                 &[],
                 Vec::new(),
@@ -795,7 +789,7 @@ impl SiteTypeEvidence {
         let declarations =
             Arc::new(base.extend_interface_artifacts(request.declarations().artifact_view())?);
         Ok(Arc::new(
-            tidepool_toolchain::declaration_context::ExactCompileContext::new(declarations)
+            tidepool_toolchain::declaration_join::ExactCompileContext::new(declarations)
                 .with_request_types(
                     request
                         .request_types()

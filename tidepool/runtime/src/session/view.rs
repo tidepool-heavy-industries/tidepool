@@ -138,7 +138,7 @@ pub struct SessionCompileView {
     pub(super) next_value_generation: Generation,
     pub(super) projection: Arc<CompileViewProjection>,
     pub(super) request_context:
-        Option<Arc<tidepool_toolchain::declaration_context::ExactCompileContext>>,
+        Option<Arc<tidepool_toolchain::declaration_join::ExactCompileContext>>,
 }
 
 /// Immutable lexical metadata shared by readers of the same exact view.
@@ -305,11 +305,11 @@ impl SessionCompileView {
     #[must_use]
     pub fn exact_compile_context(
         &self,
-    ) -> Option<Arc<tidepool_toolchain::declaration_context::ExactCompileContext>> {
+    ) -> Option<Arc<tidepool_toolchain::declaration_join::ExactCompileContext>> {
         self.request_context.clone().or_else(|| {
             self.projection.exact_context.as_ref().map(|declarations| {
                 Arc::new(
-                    tidepool_toolchain::declaration_context::ExactCompileContext::new(
+                    tidepool_toolchain::declaration_join::ExactCompileContext::new(
                         declarations.clone(),
                     ),
                 )

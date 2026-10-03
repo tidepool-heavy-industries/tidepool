@@ -3458,7 +3458,7 @@ where
             .get(&entry.id)
             .cloned()
             .ok_or_else(invalid)?;
-        if !provenance.authenticated_inputs.contains(&site) {
+        if !provenance.authenticated_inputs.contains_key(&site) {
             return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
         }
         let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
@@ -4873,7 +4873,8 @@ where
 
     fn provenance_for(&self, code: &TurnCode<'_>) -> Result<Arc<ProgramProvenance>, ResidentError> {
         let mut provenance = ProgramProvenance::from_sites(&code.sites)?;
-        let authenticated = if let Some(certification) = code.certification.as_ref() {
+        let certification = code.certification.as_ref().as_ref();
+        let authenticated = if let Some(certification) = certification {
             if let Some(execution) = &certification.checked_execution {
                 if !execution.matches_target(&code.prepared) {
                     return Err(ResidentError::UnsupportedCheckedTurn);
@@ -4925,11 +4926,7 @@ where
         } else {
             false
         };
-        if authenticated {
-            let certification = code
-                .certification
-                .as_ref()
-                .expect("authenticated compiler bundle");
+        if let Some(certification) = certification.filter(|_| authenticated) {
             let descriptors = certification.artifact_view.descriptors();
             let home_units = descriptors
                 .iter()

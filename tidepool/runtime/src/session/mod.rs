@@ -2553,7 +2553,13 @@ fn validate_rendered_module(
     let preamble = format!("{pragmas}\nmodule TidepoolDeclarationTypes where\n");
     let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let results = match inspection::run_inspections_strict(InspectionRequest {
-        exact_context: exact_context.cloned(),
+        exact_context: exact_context.map(|declarations| {
+            std::sync::Arc::new(
+                tidepool_toolchain::declaration_join::ExactCompileContext::new(
+                    std::sync::Arc::clone(declarations),
+                ),
+            )
+        }),
         preamble: &preamble,
         imports: &imports,
         include: &include_refs,
