@@ -152,7 +152,27 @@ pub struct RuntimeCellAdmission {
 /// It never authorizes authored private writes or declarations.
 enum NativeCellPurpose {
     Setup,
-    HostActivation([u8; 32]),
+    HostActivation {
+        input_commitment: [u8; 32],
+        input_type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+    },
+}
+
+impl NativeCellPurpose {
+    fn frame_authorization(&self, frame: &mut impl FnMut(&[u8])) {
+        match self {
+            Self::Setup => frame(b"TidepoolNativeSetupAdmission1"),
+            Self::HostActivation {
+                input_commitment,
+                input_type_witness,
+            } => {
+                frame(b"TidepoolHostActivationAdmission1");
+                frame(input_commitment);
+                frame(&input_type_witness.metadata_digest());
+                frame(&input_type_witness.commitment());
+            }
+        }
+    }
 }
 
 /// An admission lifetime exists before the lazy machine bootstrap and is
@@ -1240,8 +1260,18 @@ impl RuntimeCellAdmission {
     pub(super) fn is_host_activation(&self) -> bool {
         matches!(
             self.native_purpose,
-            Some(NativeCellPurpose::HostActivation(_))
+            Some(NativeCellPurpose::HostActivation { .. })
         )
+    }
+    pub(super) fn host_activation_input_witness(
+        &self,
+    ) -> Option<&Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>> {
+        match &self.native_purpose {
+            Some(NativeCellPurpose::HostActivation {
+                input_type_witness, ..
+            }) => Some(input_type_witness),
+            _ => None,
+        }
     }
     pub fn view(&self) -> &SessionCompileView {
         &self.view
@@ -2097,6 +2127,7 @@ impl PersistentSession {
         &mut self,
         scope: ScopeId,
         input_commitment: [u8; 32],
+        input_type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
         specification: Arc<dyn Any + Send + Sync>,
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
@@ -2111,7 +2142,10 @@ impl PersistentSession {
             include_paths,
             None,
             None,
-            Some(NativeCellPurpose::HostActivation(input_commitment)),
+            Some(NativeCellPurpose::HostActivation {
+                input_commitment,
+                input_type_witness,
+            }),
         )
     }
 
@@ -2452,13 +2486,8 @@ impl PersistentSession {
                 frame(parent.as_bytes());
             }
         }
-        match &native_purpose {
-            Some(NativeCellPurpose::Setup) => frame(b"TidepoolNativeSetupAdmission1"),
-            Some(NativeCellPurpose::HostActivation(input_commitment)) => {
-                frame(b"TidepoolHostActivationAdmission1");
-                frame(input_commitment);
-            }
-            None => {}
+        if let Some(purpose) = &native_purpose {
+            purpose.frame_authorization(&mut frame);
         }
         let digest = *digest.finalize().as_bytes();
         let planned = planned.map(|mut planned| {
@@ -2719,6 +2748,68 @@ impl PersistentSession {
 mod tests {
     use super::*;
     use crate::session::{ModuleEnv, SessionId, SessionLib};
+
+    #[test]
+    fn host_purpose_binds_whole_native_payload_and_semantic_input_identity() {
+        use ciborium::value::Value;
+        let text = |value: &str| Value::Text(value.into());
+        let witness = |payload: u8, shape: &str| {
+            let mut structure = Vec::new();
+            ciborium::into_writer(
+                &Value::Array(vec![text("literal"), text("nat"), text(shape)]),
+                &mut structure,
+            )
+            .unwrap();
+            let mut bytes = Vec::new();
+            // Structural codec evidence; this native payload is not executed.
+            ciborium::into_writer(
+                &Value::Array(vec![
+                    text("TPCANONICALINPUTTYPE1"),
+                    text("1"),
+                    Value::Array(vec![
+                        text("TPCHECKEDSIGNATURE2"),
+                        text("activation-input"),
+                        text("presentation"),
+                        Value::Bytes(vec![payload]),
+                        Value::Array(vec![]),
+                    ]),
+                    Value::Bytes(structure),
+                    Value::Array(vec![]),
+                ]),
+                &mut bytes,
+            )
+            .unwrap();
+            let encoded = bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            Arc::new(serde_json::from_value::<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>(serde_json::Value::String(encoded)).unwrap())
+        };
+        let original = witness(1, "1");
+        let payload_changed = witness(2, "1");
+        let semantic_changed = witness(1, "2");
+        assert_eq!(original, payload_changed);
+        assert_eq!(original.commitment(), payload_changed.commitment());
+        assert_ne!(
+            original.metadata_digest(),
+            payload_changed.metadata_digest()
+        );
+        assert_ne!(original.commitment(), semantic_changed.commitment());
+        let digest = |witness: Arc<_>| {
+            let purpose = NativeCellPurpose::HostActivation {
+                input_commitment: [7; 32],
+                input_type_witness: witness,
+            };
+            let mut digest = blake3::Hasher::new();
+            purpose.frame_authorization(&mut |bytes| {
+                digest.update(&(bytes.len() as u64).to_le_bytes());
+                digest.update(bytes);
+            });
+            *digest.finalize().as_bytes()
+        };
+        assert_ne!(digest(original.clone()), digest(payload_changed));
+        assert_ne!(digest(original), digest(semantic_changed));
+    }
 
     #[test]
     fn initial_interface_inventory_refuses_missing_extra_duplicate_and_changed_bytes() {

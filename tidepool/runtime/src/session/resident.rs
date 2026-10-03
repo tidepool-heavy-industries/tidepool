@@ -396,7 +396,7 @@ impl RuntimeActivationInput {
     }
 
     pub fn placeholder_source(&self) -> String {
-        format!("sessionInput <- pure (undefined :: ({}))", self.input_type)
+        "sessionInput <- pure (undefined :: TidepoolActivationInput)".into()
     }
 }
 
@@ -2600,12 +2600,8 @@ where
         {
             return Err(ResidentError::InvalidActivationInput { site: input.site });
         }
-        let turn_template = super::turn::assemble_checked_activation_module(
-            preamble,
-            effect_stack,
-            input.input_type(),
-            preview_budget,
-        );
+        let turn_template =
+            super::turn::assemble_checked_activation_module(preamble, effect_stack, preview_budget);
         let injected_modules = self
             .state
             .compile_view_in(scope)
@@ -2631,10 +2627,12 @@ where
         frame(input.input_type.as_bytes());
         frame(&input.type_evidence.commitment());
         frame(&input.input_type_witness.commitment());
+        frame(&input.input_type_witness.metadata_digest());
         let input_commitment = *digest.finalize().as_bytes();
         let admission = self.state.admit_host_activation_cell_in(
             scope,
             input_commitment,
+            input.input_type_witness.clone(),
             retained_source,
             specification.specification_digest(),
             authority_digest,

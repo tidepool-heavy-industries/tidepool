@@ -414,9 +414,17 @@ pub struct ModuleCandidateOffer {
 // the invocation builder can perform its ordinary lossy CLI conversion.
 enum CheckedPurpose {
     Cell,
+    HostInputCell,
     Item,
     HostActivationInput,
     Display,
+}
+
+/// The original host witness travels only with its dedicated compiler purpose.
+/// Authored and planned cells cannot attach host input signature authority.
+pub enum CheckedCellPurpose<'a> {
+    Authored,
+    HostActivationInput(&'a crate::checked_cell::CanonicalInputTypeWitness),
 }
 
 fn checked_search_authorization(
@@ -449,6 +457,7 @@ fn checked_search_authorization(
     fields[0] = Value::Text(
         match purpose {
             CheckedPurpose::Cell => "cell-check2",
+            CheckedPurpose::HostInputCell => "host-input-check1",
             CheckedPurpose::Item => "checked-item2",
             CheckedPurpose::HostActivationInput => "host-activation-input1",
             CheckedPurpose::Display => "checked-display2",
@@ -457,6 +466,35 @@ fn checked_search_authorization(
     );
     fields.push(Value::Array(paths));
     Ok(authorization)
+}
+
+fn checked_cell_authorization(
+    purpose: CheckedCellPurpose<'_>,
+    specification: &crate::checked_cell::CheckedCellSpecification,
+    values: &crate::checked_cell::CheckedValueInputs,
+    include: &[PathBuf],
+) -> Result<Value, CompileError> {
+    let mut authorization = specification.manifest_value()?;
+    let Value::Array(fields) = &mut authorization else {
+        unreachable!("closed cell authorization")
+    };
+    fields.push(values.baseline_authorization());
+    let purpose = match purpose {
+        CheckedCellPurpose::Authored => CheckedPurpose::Cell,
+        CheckedCellPurpose::HostActivationInput(witness) => {
+            if !specification.reserved_declaration_modules.is_empty()
+                || specification.cell_source
+                    != "sessionInput <- pure (undefined :: TidepoolActivationInput)"
+            {
+                return Err(CompileError::ExtractFailed(
+                    "host input witness requires its reserved binder-only compiler slot".into(),
+                ));
+            }
+            fields.push(crate::checked_cell::encode_signature(witness.signature()));
+            CheckedPurpose::HostInputCell
+        }
+    };
+    checked_search_authorization(purpose, authorization, include)
 }
 
 fn checked_offer_context(
@@ -759,6 +797,7 @@ impl ModuleCandidateOffer {
         scratch: &Path,
         context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
         specification: crate::checked_cell::CheckedCellSpecification,
+        purpose: CheckedCellPurpose<'_>,
         checked_values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         retained_interfaces: &[Arc<crate::checked_cell::CheckedValueArtifact>],
     ) -> Result<Self, CompileError> {
@@ -776,10 +815,6 @@ impl ModuleCandidateOffer {
                 "checked initial interface inventory differs from injected owners".into(),
             ));
         }
-        let mut authorization = specification.manifest_value()?;
-        let Value::Array(fields) = &mut authorization else {
-            unreachable!("closed cell authorization")
-        };
         let publication_context = checked_offer_context(context)?;
         let context = checked_value_context(
             Some(publication_context.clone()),
@@ -787,9 +822,8 @@ impl ModuleCandidateOffer {
             retained_interfaces,
         )?;
         let checked_values = crate::checked_cell::CheckedValueInputs::capture(checked_values)?;
-        fields.push(checked_values.baseline_authorization());
         let authorization =
-            checked_search_authorization(CheckedPurpose::Cell, authorization, include)?;
+            checked_cell_authorization(purpose, &specification, &checked_values, include)?;
         Ok(Self {
             selected: immutable_candidates_in_context(
                 &context,
@@ -3953,6 +3987,113 @@ fn store_memo(
 #[cfg(test)]
 mod typed_site_tests {
     use super::*;
+
+    fn host_input_witness(payload: &[u8]) -> crate::checked_cell::CanonicalInputTypeWitness {
+        let text = |value: &str| Value::Text(value.into());
+        let mut structure = Vec::new();
+        ciborium::into_writer(
+            &Value::Array(vec![text("literal"), text("nat"), text("1")]),
+            &mut structure,
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        // This codec fixture carries no executable GHC IfaceType.
+        ciborium::into_writer(
+            &Value::Array(vec![
+                text("TPCANONICALINPUTTYPE1"),
+                text("1"),
+                Value::Array(vec![
+                    text("TPCHECKEDSIGNATURE2"),
+                    text("activation-input"),
+                    text("presentation"),
+                    Value::Bytes(payload.to_vec()),
+                    Value::Array(vec![]),
+                ]),
+                Value::Bytes(structure),
+                Value::Array(vec![]),
+            ]),
+            &mut bytes,
+        )
+        .unwrap();
+        crate::checked_cell::CanonicalInputTypeWitness::from_bytes(&bytes).unwrap()
+    }
+
+    #[test]
+    fn host_input_authorization_preserves_native_payload_and_refuses_authored_or_planned_recipe() {
+        let witness = host_input_witness(&[1, 2, 3]);
+        let substituted = host_input_witness(&[3, 2, 1]);
+        assert_eq!(witness, substituted);
+        assert_eq!(witness.commitment(), substituted.commitment());
+        assert_ne!(witness.metadata_digest(), substituted.metadata_digest());
+        let specification = crate::checked_cell::CheckedCellSpecification {
+            admission_digest: [7; 32],
+            cell_source: "sessionInput <- pure (undefined :: TidepoolActivationInput)".into(),
+            template_source: "protected template".into(),
+            turn_templates: Vec::new(),
+            injected_modules: Vec::new(),
+            reserved_declaration_modules: Vec::new(),
+        };
+        let values = crate::checked_cell::CheckedValueInputs::capture(Vec::new()).unwrap();
+        let include = [PathBuf::from("/source/original")];
+        let authorization = checked_cell_authorization(
+            CheckedCellPurpose::HostActivationInput(&witness),
+            &specification,
+            &values,
+            &include,
+        )
+        .unwrap();
+        let fields = authorization.as_array().unwrap();
+        assert_eq!(fields.len(), 10);
+        assert_eq!(fields[0], Value::Text("host-input-check1".into()));
+        assert_eq!(
+            fields[8],
+            crate::checked_cell::encode_signature(witness.signature())
+        );
+        assert_eq!(
+            fields[9],
+            Value::Array(vec![Value::Text("/source/original".into())])
+        );
+        let substituted = checked_cell_authorization(
+            CheckedCellPurpose::HostActivationInput(&substituted),
+            &specification,
+            &values,
+            &include,
+        )
+        .unwrap();
+        assert_ne!(authorization, substituted);
+        let authored = checked_cell_authorization(
+            CheckedCellPurpose::Authored,
+            &specification,
+            &values,
+            &include,
+        )
+        .unwrap();
+        assert_eq!(authored.as_array().unwrap().len(), 9);
+        assert_eq!(
+            authored.as_array().unwrap()[0],
+            Value::Text("cell-check2".into())
+        );
+        let mut authored_recipe = specification.clone();
+        authored_recipe.cell_source = "let authored = 1".into();
+        assert!(checked_cell_authorization(
+            CheckedCellPurpose::HostActivationInput(&witness),
+            &authored_recipe,
+            &values,
+            &include
+        )
+        .is_err());
+        let mut planned_recipe = specification;
+        planned_recipe
+            .reserved_declaration_modules
+            .push("Tidepool.Session.Lib.G1".into());
+        assert!(checked_cell_authorization(
+            CheckedCellPurpose::HostActivationInput(&witness),
+            &planned_recipe,
+            &values,
+            &include
+        )
+        .is_err());
+    }
 
     #[cfg(unix)]
     #[test]

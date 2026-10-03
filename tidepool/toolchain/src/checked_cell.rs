@@ -106,7 +106,9 @@ impl PartialEq for CanonicalInputTypeWitness {
 impl Eq for CanonicalInputTypeWitness {}
 
 impl CanonicalInputTypeWitness {
-    pub(crate) fn metadata_digest(&self) -> [u8; 32] {
+    /// Seal of the complete compiler-issued payload, including its native
+    /// signature. Semantic equality alone does not authenticate that payload.
+    pub fn metadata_digest(&self) -> [u8; 32] {
         self.metadata_digest
     }
     pub fn commitment(&self) -> [u8; 32] {
@@ -2602,7 +2604,7 @@ fn read_table(root: &Path) -> Result<tidepool_repr::DataConTable, CompileError> 
     Ok(table)
 }
 
-fn encode_signature(signature: &ExactCheckedSignature) -> Value {
+pub(crate) fn encode_signature(signature: &ExactCheckedSignature) -> Value {
     array([
         text("TPCHECKEDSIGNATURE2"),
         text(&signature.key),

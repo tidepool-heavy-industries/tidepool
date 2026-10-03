@@ -3021,6 +3021,12 @@ fn check_cell_impl(
             temp.path(),
             context,
             specification,
+            match admission.host_activation_input_witness() {
+                Some(witness) => {
+                    tidepool_toolchain::artifacts::CheckedCellPurpose::HostActivationInput(witness)
+                }
+                None => tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
+            },
             admission
                 .interfaces()
                 .iter()
@@ -3497,7 +3503,6 @@ pub fn run_checked_display(
 pub fn assemble_checked_activation_module(
     preamble: &str,
     effect_stack: &str,
-    input_type: &str,
     budget: usize,
 ) -> String {
     let preamble = super::insert_preamble_imports(
@@ -3519,7 +3524,7 @@ pub fn assemble_checked_activation_module(
         .expect("bind assembler ends with its prepared scaffold")
         .to_owned();
     source.push_str(&format!(
-        "__activationPreview :: ({input_type}) -> Eff {effect_stack} ({TEXT_ALIAS}.Text, Bool)\n\
+        "__activationPreview :: TidepoolActivationInput -> Eff {effect_stack} ({TEXT_ALIAS}.Text, Bool)\n\
          __activationPreview __activationInput = pure ({{{{ACTIVATION_PREVIEW}}}})\n\
          __tidepoolActivationConstraint :: TidepoolInspection.WorkbenchDisplay value => value -> ()\n\
          __tidepoolActivationConstraint _ = ()\n\
@@ -5932,6 +5937,7 @@ mod tests {
                 scratch.path(),
                 None,
                 specification,
+                tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
                 vec![(artifact.owner(), artifact.bytes_owned().clone())],
                 std::slice::from_ref(&artifact),
             )?;
@@ -6036,6 +6042,7 @@ mod tests {
             scratch.path(),
             None,
             following,
+            tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
             vec![(artifact.owner(), artifact.bytes_owned().clone())],
             std::slice::from_ref(&artifact),
         )
@@ -6071,6 +6078,7 @@ mod tests {
             next_scratch.path(),
             None,
             next_specification,
+            tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
             vec![(artifact.owner(), artifact.bytes_owned().clone())],
             std::slice::from_ref(&artifact),
         )
@@ -6140,6 +6148,7 @@ mod tests {
                     injected_modules: vec![artifact.owner().module_name()],
                     reserved_declaration_modules: vec![]
                 },
+                tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
                 vec![(artifact.owner(), Arc::from(&b"changed interface"[..]))],
                 std::slice::from_ref(&artifact),
             )
@@ -6192,6 +6201,7 @@ mod tests {
             temp.path(),
             admission.view().exact_declaration_context().cloned(),
             specification,
+            tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
             Vec::new(),
             &[],
         )?;
