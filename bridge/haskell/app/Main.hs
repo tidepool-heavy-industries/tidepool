@@ -118,7 +118,7 @@ import Tidepool.ExactScope
   , originalGroupFromProjected, originalGroupFromCandidate
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), validateCandidateCanonicalInterfaceProof, canonicalCertificateSha256
-  , readExactScope, revalidateExactScope, writeExactCompilation, extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
+  , readExactScope, revalidateExactScope, writeExactCompilation, scopeValueInterfaces, extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CellProgramState
 import GHC.Core.Type (splitFunTy_maybe)
@@ -422,12 +422,16 @@ data CertifiedOriginalProducts = CertifiedOriginalProducts
   , certifiedFinalizedArtifacts :: FinalizedModuleArtifacts
   }
 
--- These captures were admitted by the request's exact-scope/candidate owner.
--- They remain originals rather than becoming new finalizations from source SHA.
+-- Captures come from the exact scope, including its admitted checked values,
+-- or the candidate owner. Their original bytes supply type dependency seals;
+-- this lookup does not turn checked values into source finalizations or native
+-- execution recipes.
 retainedOriginalInterfaces :: PreparedPipelineResult -> [ExactIfaceArtifact]
 retainedOriginalInterfaces prepared =
   [artifact | scope <- maybe [] pure (compilationScope <$> pprExactCompilation prepared)
     , (artifact, _, _) <- scopeInterfaces scope]
+  ++ [artifact | scope <- maybe [] pure (compilationScope <$> pprExactCompilation prepared)
+    , artifact <- scopeValueInterfaces scope]
   ++ [ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
         (candidateInterface candidate) (candidateInterfaceSha256 candidate)
         (candidateInterfaceRequirements candidate)

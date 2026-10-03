@@ -117,13 +117,7 @@ impl InputFixture {
         let view = PersistentSession::new(Some(library), crate::DEFAULT_NURSERY_SIZE)
             .compile_view_in(ScopeId::ROOT)
             .unwrap();
-        let producer = compiled(compile_turn(
-            &view,
-            &recipe,
-            source,
-            &[],
-            FixtureCompilation::Startup,
-        ));
+        let producer = compiled(compile_turn(&view, &recipe, source, &[]));
         assert_startup_origin("producer", &producer, true);
         let TurnResult::Bind {
             compiled: receiver,
@@ -134,7 +128,6 @@ impl InputFixture {
             &recipe,
             include_str!("fixtures/activation-input-receiver.hs"),
             &[],
-            FixtureCompilation::Startup,
         )
         else {
             panic!("native protocol receiver is a real retained Haskell binding");
@@ -278,11 +271,6 @@ impl InputFixture {
     }
 }
 
-enum FixtureCompilation {
-    Startup,
-    Scoped,
-}
-
 fn assert_startup_origin(label: &str, compiled: &CompiledTurn, requires_input: bool) {
     let proof = compiled
         .certification
@@ -349,26 +337,17 @@ fn compile_turn(
     recipe: &InputRecipe,
     source: &str,
     retained: &[(tidepool_repr::execution_schema::SymbolIdentity, u64)],
-    purpose: FixtureCompilation,
 ) -> TurnResult {
     let imports = view.turn_imports(&SourceImports::new());
     let templates = resident_workbench_templates(&recipe.preamble, &recipe.row, &imports);
     let include = view.include_paths(&recipe.include);
     let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let injected = view.injected_module_names();
+    assert!(injected.is_empty(), "startup has no retained environment");
+    assert!(retained.is_empty(), "startup has no retained native inputs");
     run_turn(TurnRequest {
-        exact_context: match purpose {
-            FixtureCompilation::Startup => {
-                assert!(injected.is_empty(), "startup has no retained environment");
-                assert!(retained.is_empty(), "startup has no retained native inputs");
-                None
-            }
-            FixtureCompilation::Scoped => view.exact_compile_context(),
-        },
-        session_id: match purpose {
-            FixtureCompilation::Startup => None,
-            FixtureCompilation::Scoped => Some(view.session()),
-        },
+        exact_context: None,
+        session_id: None,
         turn_text: source,
         templates: &templates,
         include: &include,
@@ -379,7 +358,7 @@ fn compile_turn(
         target: None,
         retained_imports: retained,
     })
-    .expect("compile actual fixture or original-value probe")
+    .expect("compile actual startup fixture")
 }
 
 fn compiled(result: TurnResult) -> CompiledTurn {
@@ -531,21 +510,120 @@ fn original_value_probe(
     source: &str,
     value: i64,
 ) {
-    let view = resident.compile_view_in(ScopeId::ROOT).unwrap();
-    let compiled = compiled(compile_turn(
-        &view,
-        recipe,
-        source,
-        &resident.prepared_retained(),
-        FixtureCompilation::Scoped,
-    ));
+    use crate::session::{CellCheckRequest, TemplateSelector};
+    use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+
+    let previous_context = resident.run_context();
+    let original_bindings = resident.binding_names_in(ScopeId::ROOT);
+    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    let private_scope = execution.private_scope();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: private_scope,
+            ..previous_context
+        })
+        .unwrap();
+    let view = execution.view();
+    let imports = view.turn_imports(&SourceImports::new());
+    let template = resident_cell_check_template(&recipe.preamble, &recipe.row, &imports);
+    let templates = resident_workbench_templates(&recipe.preamble, &recipe.row, &imports);
+    // An authored checked bind evaluates the original input and its display;
+    // its selected value interfaces come from runtime admission.
+    let source = format!("originalInputProbe <- pure (({source}), T.pack (P.show ({source})))");
+    let specification = Arc::new(CheckedCellSpecification {
+        admission_digest: [0; 32],
+        cell_source: source.clone(),
+        template_source: template.clone(),
+        turn_templates: templates
+            .iter()
+            .map(|template| {
+                let kind = match template.kind {
+                    TemplateSelector::Decl => "decl",
+                    TemplateSelector::Bind => "bind",
+                    TemplateSelector::BindDiscard => "binddiscard",
+                    TemplateSelector::Expr => "expr",
+                };
+                (kind.into(), template.source.clone())
+            })
+            .collect(),
+        injected_modules: view.injected_module_names(),
+        reserved_declaration_modules: Vec::new(),
+    });
+    let admission = resident
+        .admit_cell_for_execution(
+            execution.clone(),
+            0,
+            specification.clone(),
+            specification.specification_digest(),
+            recipe.digest(),
+            view.include_paths(&recipe.include),
+        )
+        .expect("admit the original-value probe with its selected checked interfaces");
+    let view = admission.view();
+    let includes = admission.include_paths().to_vec();
+    let include = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let injected = view.injected_module_names();
+    let checked = turn::check_cell_admitted(
+        CellCheckRequest {
+            exact_context: view.exact_compile_context(),
+            session_id: Some(view.session()),
+            cell_text: &source,
+            template: &template,
+            include: &include,
+            session_root: view.session_root(),
+            inject_modules: &injected,
+            compile_generation: admission.initial_value_generation().0,
+            compile_view_evidence: "",
+        },
+        admission.clone(),
+        &templates,
+    )
+    .expect("check the original-value probe through runtime admission");
+    let item = checked.checked_item(0).unwrap();
+    let prefix = resident
+        .begin_checked_prefix(admission, item.clone())
+        .unwrap();
+    let reservation = resident.admit_checked_item(prefix, item).unwrap();
+    let snapshot = reservation.snapshot();
+    let view = snapshot.view();
+    let injected = snapshot.compiler_prefix().injected_modules();
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = turn::run_checked_item(
+        TurnRequest {
+            exact_context: view.exact_compile_context(),
+            session_id: Some(view.session()),
+            turn_text: &source,
+            templates: &templates,
+            include: &include,
+            session_root: view.session_root(),
+            inject_modules: &injected,
+            gen: reservation.generation().0,
+            verdict: Some(checked.items[0].verdict.clone()),
+            target: None,
+            retained_imports: snapshot.admitted_retained_imports(),
+        },
+        reservation.clone(),
+    )
+    .expect("compile the admitted original-value probe")
+    else {
+        panic!("original-value probe must be a checked bind");
+    };
+    assert_eq!(bound.len(), 1);
     let ResidentOutcome::Completed { result, .. } = resident
-        .run_with_sites("originalInputProbe", compiled.code())
+        .run_bind_with_sites(
+            "originalInputProbe",
+            compiled.code(),
+            &bound[0],
+            reservation.generation(),
+        )
         .expect("call mounted original input through its checked value interface")
     else {
         panic!("pure original-input probe must complete");
     };
-    // The resident expression wrapper returns value plus its workbench display.
+    resident.set_run_context(previous_context).unwrap();
+    resident.retire_scope(private_scope);
+    assert_eq!(resident.binding_names_in(ScopeId::ROOT), original_bindings);
     assert_eq!(
         result.to_json(),
         serde_json::json!([value, value.to_string()])
