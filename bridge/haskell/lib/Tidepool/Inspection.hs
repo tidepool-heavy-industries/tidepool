@@ -15,7 +15,7 @@ module Tidepool.Inspection
     display,
     expand,
     DisplayHandle,
-    DisplayRoot,
+    DisplayRoot (..),
     ExpansionKey,
     expansions,
     WorkbenchDisplay (..),
@@ -51,7 +51,7 @@ import Tidepool.Agent.Watch.Internal
 import Tidepool.Inspection.Display
 import Tidepool.Inspection.Tree
 import Tidepool.Effects.Core
-  ( Console (Print, DisplayWith, DisplayExpandWith, DisplayAllowanceWith, DisplayExpansionInputWith), DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
+  ( Console (DisplayWith, DisplayExpandWith, DisplayAllowanceWith, DisplayExpansionInputWith), DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
 import Tidepool.Worktree (HeadState (..), renderGitOid, renderWorktreeError)
 import Prelude
 
@@ -137,8 +137,8 @@ instance Display WatchFailure where
 
 data FullInspection = FullInspection ([Text] -> Int -> (Text, Bool)) DisplayTree
 
--- | Retain the value and render only the display allowance when observed.
--- Explicit inspection uses a larger preview, not an unbounded serialization.
+-- | Retain the value's structural renderer. Explicit display keeps its ordinary
+-- allowance and expansion keys; inspection never serializes an unbounded value.
 class FullDisplay a where
   inspectFull :: a -> FullInspection
 
@@ -153,6 +153,9 @@ instance FullDisplay Text where
 
 instance FullDisplay [Char] where
   inspectFull value = FullInspection (\_ budget -> rawString budget value) (StringLeaf value)
+
+instance Display FullInspection where
+  displayTree (FullInspection _ tree) = tree
 
 instance WorkbenchDisplay FullInspection where
   workbenchDisplay (FullInspection render _) = render [] 65536
@@ -239,7 +242,7 @@ instance WorkbenchDisplay (ProgressState a) where
      in ("ProgressRejected · " <> text, omitted)
 
 
--- | The previous display and an ordinary action that continues its retained
+-- | A retained display page and an ordinary action that continues its
 -- rendering. An exhausted page has an empty, exhausted successor.
 -- The representation is a closure so the resident binding owner retains it
 -- without deep-forcing the tree or the recursively available future pages.

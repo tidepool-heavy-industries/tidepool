@@ -1,4 +1,4 @@
-display $ case __NAME__ of
+display . inspectFull $ case __NAME__ of
   WatchReady reply ->
     let value = responseValue reply
     in candidateRevision value == "candidate-9828"

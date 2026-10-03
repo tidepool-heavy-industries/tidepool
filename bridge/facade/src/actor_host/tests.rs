@@ -4167,6 +4167,7 @@ async fn socket_postsubmission_error_and_retirement_report_retention() {
 async fn selected_context_child_reaches_its_supervisor_through_parent_agent() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
+    let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
     let root_id = campaign.actor.identity();
     let setup = dispatch_haskell_script(root.as_ref(), include_str!("notification_setup.hs")).await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
@@ -4234,7 +4235,11 @@ async fn selected_context_child_reaches_its_supervisor_through_parent_agent() {
     assert_eq!(sent["status"], "committed", "{sent:?}");
     let policy = child.policy.clone();
     let poll = tokio::spawn(async move {
-        dispatch_haskell_script(policy.as_ref(), "pollNotification receipt").await
+        dispatch_haskell_script(
+            policy.as_ref(),
+            "_ <- pollNotification receipt >>= display . show",
+        )
+        .await
     });
     let poll_command = campaign
         .next_deployment(
@@ -4249,7 +4254,10 @@ async fn selected_context_child_reaches_its_supervisor_through_parent_agent() {
     let result = observe_notification_receipt(&poll_command, root_id, inbox_key, &inbox);
     assert_eq!(result, Ok(exomonad_actor::NotificationState::Accepted));
     poll_command.observed(result);
-    let observed = poll.await.unwrap();
+    let observed = campaign
+        .drive_actor_output(&output_store, poll)
+        .await
+        .unwrap();
     assert!(
         observed.to_string().contains("NotificationAccepted"),
         "{observed:?}"
@@ -4262,6 +4270,7 @@ async fn selected_context_child_reaches_its_supervisor_through_parent_agent() {
 async fn notification_admission_and_poll_preserve_typed_request_bindings() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
+    let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
     let setup = dispatch_haskell_script(root.as_ref(), include_str!("notification_setup.hs")).await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
@@ -4326,9 +4335,21 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
         "receipt",
         "(Right receipt :: Either NotificationError NotificationReceipt)",
     ] {
-        let shown = dispatch_haskell_script(root.as_ref(), cell).await;
+        let shown = campaign
+            .drive_actor_output(
+                &output_store,
+                dispatch_haskell_script(root.as_ref(), &format!("display ({cell})")),
+            )
+            .await;
         assert_eq!(shown["status"], "committed", "{shown:?}");
-        let output = shown["items"][0]["output"].as_str().unwrap();
+        let output = shown["items"][0]["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|operation| operation.get("display"))
+            .unwrap()["text"]
+            .as_str()
+            .unwrap();
         assert!(
             output.starts_with("notification ") && output.ends_with(&accepted),
             "{output}"
@@ -4336,7 +4357,11 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
     }
     let policy = root.clone();
     let poll = tokio::spawn(async move {
-        dispatch_haskell_script(policy.as_ref(), "pollNotification receipt").await
+        dispatch_haskell_script(
+            policy.as_ref(),
+            "_ <- pollNotification receipt >>= display . show",
+        )
+        .await
     });
     let poll_command = campaign
         .next_deployment(
@@ -4412,14 +4437,21 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
         Ok(exomonad_actor::NotificationState::Unconfirmed)
     );
     poll_command.observed(result);
-    let observed = poll.await.unwrap();
+    let observed = campaign
+        .drive_actor_output(&output_store, poll)
+        .await
+        .unwrap();
     assert_eq!(observed["status"], "committed", "{observed:?}");
     assert!(
         observed.to_string().contains("NotificationAccepted"),
         "{observed:?}"
     );
-    let unchanged =
-        dispatch_haskell_script(child.policy.as_ref(), "inspectFull sessionInput").await;
+    let unchanged = campaign
+        .drive_actor_output(
+            &output_store,
+            dispatch_haskell_script(child.policy.as_ref(), "display sessionInput"),
+        )
+        .await;
     assert_eq!(unchanged["status"], "committed", "{unchanged:?}");
     assert!(
         unchanged.to_string().contains("original assignment"),
@@ -4431,8 +4463,12 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
     let reply =
         dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput :: Text)").await;
     assert_eq!(reply["status"], "replied", "{reply:?}");
-    let answer =
-        dispatch_haskell_script(root.as_ref(), "inspectFull <$> pollResponse answer").await;
+    let answer = campaign
+        .drive_actor_output(
+            &output_store,
+            dispatch_haskell_script(root.as_ref(), "_ <- pollResponse answer >>= display . show"),
+        )
+        .await;
     assert_eq!(answer["status"], "committed", "{answer:?}");
     assert!(
         answer.to_string().contains("original assignment"),
@@ -4538,6 +4574,7 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
 async fn held_native_delivery_preserves_typed_request_bindings() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
+    let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
     let setup = dispatch_haskell_script(root.as_ref(), include_str!("notification_setup.hs")).await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
@@ -4603,8 +4640,12 @@ async fn held_native_delivery_preserves_typed_request_bindings() {
     let reply =
         dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput :: Text)").await;
     assert_eq!(reply["status"], "replied", "{reply:?}");
-    let answer =
-        dispatch_haskell_script(root.as_ref(), "inspectFull <$> pollResponse answer").await;
+    let answer = campaign
+        .drive_actor_output(
+            &output_store,
+            dispatch_haskell_script(root.as_ref(), "_ <- pollResponse answer >>= display . show"),
+        )
+        .await;
     assert_eq!(answer["status"], "committed", "{answer:?}");
     assert!(
         answer.to_string().contains("original assignment"),

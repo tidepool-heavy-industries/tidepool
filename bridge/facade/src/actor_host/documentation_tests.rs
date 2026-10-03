@@ -110,6 +110,22 @@ async fn explicit_display_is_the_only_value_presentation() {
         )
         .await;
     assert_eq!(explicit_display_output(&shown)["text"], "41", "{shown}");
+    for (source, expected) in [
+        ("display (inspectFull True)", "True"),
+        (
+            "display (inspectFull (\"first\\nsecond\" :: Text))",
+            "first\nsecond",
+        ),
+    ] {
+        let inspected = campaign
+            .drive_actor_output(&store, committed(policy.as_ref(), source))
+            .await;
+        assert_eq!(
+            explicit_display_output(&inspected)["text"],
+            expected,
+            "{inspected}"
+        );
+    }
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -934,7 +950,7 @@ async fn watch_documentation_request_options_reports_progress_then_settles() {
         .filter(|snippet| snippet.contains("let progressOptions = assignment"))
         .collect();
     assert_eq!(snippets.len(), 1, "one complete documented progress setup");
-    committed(root.as_ref(), snippets[0]).await;
+    displayed(&mut campaign, root.as_ref(), snippets[0]).await;
     let child = campaign
         .next_deployment(
             "documented progress child policy installation",
@@ -963,24 +979,46 @@ async fn watch_documentation_request_options_reports_progress_then_settles() {
     // Exercise the real resident actor path, without a model/provider execution claim.
     committed(child.policy.as_ref(), "reportProgress [\"finding\"]").await;
     campaign.await_watch_ready().await;
-    let progress = committed(
+    let progress = displayed(
+        &mut campaign,
         root.as_ref(),
         include_str!("watch_documentation_progress.hs"),
     )
     .await;
-    assert_eq!(progress["items"][2]["output"], "True", "{progress}");
-    assert_eq!(progress["items"][3]["output"], "True", "{progress}");
+    let pages: Vec<_> = progress["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["operations"].as_array().unwrap())
+        .filter_map(|operation| operation.get("display").map(|display| &display["text"]))
+        .collect();
+    assert_eq!(
+        pages,
+        vec![&serde_json::json!("True"), &serde_json::json!("True")],
+        "{progress}"
+    );
     let reply =
         dispatch_haskell_script(child.policy.as_ref(), "respond (\"final report\" :: Text)").await;
     assert_eq!(reply["status"], "replied", "{reply}");
     campaign.await_watch_ready().await;
-    let settled = committed(
+    let settled = displayed(
+        &mut campaign,
         root.as_ref(),
         include_str!("watch_documentation_settled.hs"),
     )
     .await;
-    assert_eq!(settled["items"][2]["output"], "True", "{settled}");
-    assert_eq!(settled["items"][3]["output"], "True", "{settled}");
+    let pages: Vec<_> = settled["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["operations"].as_array().unwrap())
+        .filter_map(|operation| operation.get("display").map(|display| &display["text"]))
+        .collect();
+    assert_eq!(
+        pages,
+        vec![&serde_json::json!("True"), &serde_json::json!("True")],
+        "{settled}"
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -1018,7 +1056,7 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
         (
             "preview-oversized-text",
             "oversizedTextPreview",
-            "past the 32 KiB cap; expand with `inspectFull sessionInput`",
+            "past the 32 KiB cap; expand with `display sessionInput`",
             "respond (Report 1)",
         ),
         (
@@ -1090,12 +1128,17 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
         if label == "preview-oversized-text" {
             assert!(activation.message.len() < 33 * 1024);
             assert!(!activation.message.contains("RETAINED-ASSIGNMENT-TAIL"));
-            let retained = committed(
+            let retained = displayed(
+                &mut campaign,
                 child.as_ref().unwrap().policy.as_ref(),
-                "T.isSuffixOf \"RETAINED-ASSIGNMENT-TAIL\" sessionInput",
+                "display (T.isSuffixOf \"RETAINED-ASSIGNMENT-TAIL\" sessionInput)",
             )
             .await;
-            assert_eq!(retained["items"][0]["output"], "True", "{retained}");
+            assert_eq!(
+                explicit_display_output(&retained)["text"],
+                "True",
+                "{retained}"
+            );
         }
         let result = dispatch_haskell_script(child.as_ref().unwrap().policy.as_ref(), reply).await;
         assert_eq!(result["status"], "replied", "{result:?}");
@@ -1149,7 +1192,13 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
         .await;
     let output = explicit_display_output(&shown)["text"].as_str().unwrap();
     assert!(output.starts_with("WatchReady"), "{shown}");
-    assert!(!output.contains("candidate-9828"), "{shown}");
+    assert!(
+        !explicit_display_output(&shown)["expansions"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{shown}"
+    );
     let expanded = campaign
         .drive_actor_output(
             &store,
@@ -1159,11 +1208,14 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
             ),
         )
         .await;
-    assert!(
-        explicit_display_output(&expanded)["text"]
-            .as_str()
-            .unwrap()
-            .contains("candidate-9828"),
+    assert_eq!(
+        explicit_display_output(&expanded)["text"],
+        output,
+        "{expanded}"
+    );
+    assert_eq!(
+        explicit_display_output(&expanded)["expansions"],
+        explicit_display_output(&shown)["expansions"],
         "{expanded}"
     );
     committed(root.as_ref(), &format!("let retained = {saved} ()")).await;
@@ -1193,7 +1245,7 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
         let exact = campaign
             .drive_actor_output(&store, committed(root.as_ref(), &source))
             .await;
-        assert_eq!(exact["items"][0]["output"], "True", "{exact}");
+        assert_eq!(explicit_display_output(&exact)["text"], "True", "{exact}");
     }
     let before = campaign
         .forest
@@ -1215,7 +1267,10 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
     let two = campaign
         .drive_actor_output(&store, committed(root.as_ref(), &inspect))
         .await;
-    assert_eq!(one["items"][0]["output"], two["items"][0]["output"]);
+    assert_eq!(
+        explicit_display_output(&one)["text"],
+        explicit_display_output(&two)["text"]
+    );
     assert_eq!(
         campaign
             .forest
@@ -1319,9 +1374,15 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         .split("```haskell\n")
         .skip(1)
     {
-        committed(root.as_ref(), block.split_once("```").unwrap().0).await;
+        displayed(
+            &mut campaign,
+            root.as_ref(),
+            block.split_once("```").unwrap().0,
+        )
+        .await;
     }
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         if rich_response {
             include_str!("../actor_host_fixtures/generic_actor/rich_response_setup.hs")
@@ -1477,19 +1538,29 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         }
         presented.insert(activation.id.actor());
     }
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         "let sharedAfterUnfold = (\"later parent value\" :: Text)",
     )
     .await;
     for child in &children {
-        let inherited = committed(child.policy.as_ref(), "sharedAfterUnfold").await;
+        let inherited = displayed(
+            &mut campaign,
+            child.policy.as_ref(),
+            "display sharedAfterUnfold",
+        )
+        .await;
         assert_eq!(
-            inherited["items"][0]["output"].as_str().unwrap().trim(),
+            explicit_display_output(&inherited)["text"]
+                .as_str()
+                .unwrap()
+                .trim(),
             "ready"
         );
     }
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         include_str!("../actor_host_fixtures/generic_actor/response_computation.hs"),
     )
@@ -1506,26 +1577,41 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         assert_eq!(result["status"], "replied", "{result:?}");
     }
     campaign.await_watch_ready().await;
-    let first = committed(root.as_ref(), "pollWatch joined").await;
-    let second = committed(root.as_ref(), "pollWatch joined").await;
+    let first = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "firstState <- pollWatch joined\ndisplay firstState",
+    )
+    .await;
+    let second = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "secondState <- pollWatch joined\ndisplay secondState",
+    )
+    .await;
     for observation in [&first, &second] {
-        assert!(observation["items"][0]["output"]
+        assert!(explicit_display_output(observation)["text"]
             .as_str()
             .unwrap()
             .starts_with("WatchReady"));
     }
-    let saved = first["items"][0]["installedBindings"][0].as_str().unwrap();
-    let full = committed(root.as_ref(), &format!("inspectFull ({saved} ())")).await;
-    assert!(full["items"][0]["output"]
+    let full = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "display (inspectFull firstState)",
+    )
+    .await;
+    assert!(explicit_display_output(&full)["text"]
         .as_str()
         .unwrap()
         .contains("ReplyAvailable"));
-    committed(
-        root.as_ref(),
+    displayed(
+        &mut campaign, root.as_ref(),
         "import Tidepool.Actors.Observe (actorContext)\ncontext <- actorContext\ncontextFirstUsage context\ncontextLatestUsage context",
     )
     .await;
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         "let worker = responseActor (fst workers)\nlet task = 9 :: Int",
     )
@@ -1541,9 +1627,9 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         if rich_response {
             break;
         }
-        committed(root.as_ref(), example(document)).await;
-        committed(
-            root.as_ref(),
+        displayed(&mut campaign, root.as_ref(), example(document)).await;
+        displayed(
+            &mut campaign, root.as_ref(),
             "let readyLabel = \"followup-result\" :: WatchLabel\nready <- watch readyLabel (awaitResponse response)",
         )
         .await;
@@ -1551,15 +1637,19 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
             dispatch_haskell_script(domain.policy.as_ref(), "respond (Report sessionInput)").await;
         assert_eq!(reply["status"], "replied", "{reply:?}");
         campaign.await_watch_ready().await;
-        let result = committed(root.as_ref(), "pollResponse response").await;
-        assert!(result["items"][0]["output"]
+        let result = displayed(
+            &mut campaign,
+            root.as_ref(),
+            "responseState <- pollResponse response\ndisplay responseState",
+        )
+        .await;
+        assert!(explicit_display_output(&result)["text"]
             .as_str()
             .unwrap()
             .starts_with("ResponseReady"));
-        let saved = result["items"][0]["installedBindings"][0].as_str().unwrap();
-        let full = committed(root.as_ref(), &format!("inspectFull ({saved} ())")).await;
+        let full = displayed(&mut campaign, root.as_ref(), "display (show responseState)").await;
         assert!(
-            full["items"][0]["output"]
+            explicit_display_output(&full)["text"]
                 .as_str()
                 .unwrap()
                 .contains("Report 9"),
@@ -1639,8 +1729,13 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
         assert_eq!(child.supervisor_parent, Some(campaign.actor.identity()));
         if child.label.ends_with("/exact") {
             assert_eq!(child.context_parent, Some(campaign.actor.identity()));
-            let inherited = committed(child.policy.as_ref(), "inspectFull parentOnly").await;
-            assert_eq!(inherited["items"][0]["output"], "41");
+            let inherited = displayed(
+                &mut campaign,
+                child.policy.as_ref(),
+                "display (inspectFull parentOnly)",
+            )
+            .await;
+            assert_eq!(explicit_display_output(&inherited)["text"], "41");
         } else {
             assert_eq!(child.context_parent, None);
             assert_eq!(child.fork_effort, Some(exomonad_actor::ForkEffort::Medium));
@@ -1658,7 +1753,12 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
 async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    committed(root.as_ref(), include_str!("fixtures/route.hs")).await;
+    displayed(
+        &mut campaign,
+        root.as_ref(),
+        include_str!("fixtures/route.hs"),
+    )
+    .await;
     let mut children = Vec::new();
     let mut bindings = Vec::new();
     {
@@ -1766,60 +1866,84 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     };
     let review = dispatch_haskell_script(reviewer.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(review["status"], "replied", "{review}");
-    let state = committed(root.as_ref(), "pollRoute forwarding\npollRoute broken").await;
-    assert_eq!(state["items"][0]["output"], "RouteCompleted");
+    let state = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "_ <- pollRoute forwarding >>= display . show\n_ <- pollRoute broken >>= display . show",
+    )
+    .await;
+    assert_eq!(explicit_display_texts(&state)[0], "RouteCompleted");
     assert!(
-        state["items"][1]["output"]
-            .as_str()
-            .unwrap()
-            .contains("deliberate route failure"),
+        explicit_display_texts(&state)[1].contains("deliberate route failure"),
         "{state}"
     );
-    let recovered = committed(root.as_ref(), "recovered <- listRoutes\ninspectFull (length recovered)\nstates <- traverse pollRoute recovered\ninspectFull states").await;
-    assert_eq!(recovered["items"][1]["output"], "3", "{recovered}");
+    let recovered = displayed(&mut campaign, root.as_ref(), "recovered <- listRoutes\n_ <- display $ inspectFull (length recovered)\nstates <- traverse pollRoute recovered\n_ <- display (show states)").await;
+    assert_eq!(explicit_display_texts(&recovered)[0], "3", "{recovered}");
     assert!(
-        recovered["items"][3]["output"]
-            .as_str()
-            .unwrap()
-            .contains("deliberate route failure"),
+        explicit_display_texts(&recovered)[1].contains("deliberate route failure"),
         "{recovered}"
     );
-    let foreign = committed(
+    let foreign = displayed(
+        &mut campaign,
         consumer.policy.as_ref(),
-        "owned <- listRoutes\ninspectFull (length owned)",
+        "owned <- listRoutes\n_ <- display $ inspectFull (length owned)",
     )
     .await;
-    assert_eq!(foreign["items"][1]["output"], "0", "{foreign}");
+    assert_eq!(explicit_display_texts(&foreign)[0], "0", "{foreign}");
     let reply = dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
-    committed(root.as_ref(), "stopAgent (responseActor producer)").await;
-    committed(root.as_ref(), "unavailable <- request @Text (responseActor producer) (assignment forwardedLabel (\"lost target\" :: Text))\nhandled <- route (awaitSettled unavailable) (\\settled -> case settled of { ReplyUnavailable _ -> pure (); ReplyAvailable _ -> error \"unexpected success\" })").await;
-    let handled = committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
-        "pollRoute handled\nforgetRoute forwarding\nforgetRoute broken",
+        "stopAgent (responseActor producer)",
     )
     .await;
-    assert_eq!(handled["items"][0]["output"], "RouteCompleted", "{handled}");
-    assert_eq!(handled["items"][1]["output"], "WatchForgotten", "{handled}");
-    assert_eq!(handled["items"][2]["output"], "WatchForgotten", "{handled}");
-    let forgotten = committed(root.as_ref(), "pollRoute broken").await;
+    displayed(&mut campaign, root.as_ref(), "unavailable <- request @Text (responseActor producer) (assignment forwardedLabel (\"lost target\" :: Text))\nhandled <- route (awaitSettled unavailable) (\\settled -> case settled of { ReplyUnavailable _ -> pure (); ReplyAvailable _ -> error \"unexpected success\" })").await;
+    let handled = displayed(
+        &mut campaign, root.as_ref(),
+        "_ <- pollRoute handled >>= display . show\n_ <- forgetRoute forwarding >>= display . show\n_ <- forgetRoute broken >>= display . show",
+    )
+    .await;
     assert_eq!(
-        forgotten["items"][0]["output"], "RouteRejected ReplyStale",
+        explicit_display_texts(&handled)[0],
+        "RouteCompleted",
+        "{handled}"
+    );
+    assert_eq!(
+        explicit_display_texts(&handled)[1],
+        "WatchForgotten",
+        "{handled}"
+    );
+    assert_eq!(
+        explicit_display_texts(&handled)[2],
+        "WatchForgotten",
+        "{handled}"
+    );
+    let forgotten = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "_ <- pollRoute broken >>= display . show",
+    )
+    .await;
+    assert_eq!(
+        explicit_display_texts(&forgotten)[0],
+        "RouteRejected ReplyStale",
         "{forgotten}"
     );
-    let retained = committed(
+    let retained = displayed(
+        &mut campaign,
         root.as_ref(),
-        "retained <- listRoutes\ninspectFull (length retained)",
+        "retained <- listRoutes\n_ <- display $ inspectFull (length retained)",
     )
     .await;
-    assert_eq!(retained["items"][1]["output"], "2", "{retained}");
+    assert_eq!(explicit_display_texts(&retained)[0], "2", "{retained}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
 async fn configured_modules_are_available_to_resident_declarations_from_frozen_sources() {
-    let campaign = TestCampaign::start_with_config(
+    let mut campaign = TestCampaign::start_with_config(
         exomonad_actor::ResearchPolicy::default(), |admission| admission, |config| {
             let authored = config.workspace.join(".exomonad");
             std::fs::create_dir_all(authored.join("Project")).unwrap();
@@ -1830,11 +1954,16 @@ async fn configured_modules_are_available_to_resident_declarations_from_frozen_s
             std::fs::write(authored.join("Project/Work.hs"), "invalid edited source").unwrap();
         },
     ).await;
-    let policy = campaign.root_installation.policy.as_ref();
-    let result = committed(policy, "saved <- pure candidate\ninspectFull saved").await;
-    assert_eq!(result["items"][1]["output"], "Preparation 7");
-    let declaration = committed(policy, "readDelivery :: Delivery -> Int\nreadDelivery (Preparation n) = n\nreadDelivery (Complete n) = n\ninspectFull (readDelivery candidate)").await;
-    assert_eq!(declaration["items"][1]["output"], "7");
+    let policy = campaign.root_installation.policy.clone();
+    let result = displayed(
+        &mut campaign,
+        policy.as_ref(),
+        "saved <- pure candidate\ndisplay (show saved)",
+    )
+    .await;
+    assert_eq!(explicit_display_output(&result)["text"], "Preparation 7");
+    let declaration = displayed(&mut campaign, policy.as_ref(), "readDelivery :: Delivery -> Int\nreadDelivery (Preparation n) = n\nreadDelivery (Complete n) = n\ndisplay (readDelivery candidate)").await;
+    assert_eq!(explicit_display_output(&declaration)["text"], "7");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -1868,29 +1997,27 @@ async fn work_actor_consumes_later_progress_without_rearming() {
     for (questions, expected, effects) in [
         ("[first]", "[[\"question-a\"]]", "1"),
         ("[first]", "[[\"question-a\"]]", "1"),
-        ("[first,second]", "[[\"question-a\", \"question-b\"]]", "2"),
+        ("[first,second]", "[[\"question-a\",\"question-b\"]]", "2"),
     ] {
         committed(
             producer.policy.as_ref(),
             &format!("import Tidepool.Agent.Reply (pollReply)\nreportProgress (WorkProgress [] {questions})\npollReply sessionReply"),
         )
         .await;
-        let observed = committed(root.as_ref(), "view <- readWork forwarding\ninspectFull (map (map questionKey . workQuestions . sourceProgress) (collectedWork view))\nActor.call wakes (RoutingCount 0 id)").await;
-        assert_eq!(observed["items"][1]["output"], expected, "{observed}");
-        assert_eq!(observed["items"][2]["output"], effects, "{observed}");
+        let observed = displayed(&mut campaign, root.as_ref(), "import qualified Prelude as Haskell\nview <- readWork forwarding\n_ <- display (Haskell.show (map (map questionKey . workQuestions . sourceProgress) (collectedWork view)))\n_ <- Actor.call wakes (RoutingCount 0 id) >>= display").await;
+        assert_eq!(
+            explicit_display_texts(&observed),
+            [expected, effects],
+            "{observed}"
+        );
     }
     let replied =
         dispatch_haskell_script(producer.policy.as_ref(), "respond (\"finished\" :: Text)").await;
     assert_eq!(replied["status"], "replied", "{replied}");
-    let closed = committed(root.as_ref(), "view <- readWork forwarding\ninspectFull (map Exomonad.Contrib.Routing.sourceStatus (collectedWork view))\nfinishWork forwarding").await;
-    assert_eq!(closed["items"][1]["output"], "[WorkClosed]", "{closed}");
-    assert!(
-        closed["items"][2]["output"]
-            .as_str()
-            .unwrap()
-            .starts_with("Completed"),
-        "{closed}"
-    );
+    let closed = displayed(&mut campaign, root.as_ref(), "view <- readWork forwarding\n_ <- display (show (map Exomonad.Contrib.Routing.sourceStatus (collectedWork view)))\n_ <- finishWork forwarding >>= display . show").await;
+    let pages = explicit_display_texts(&closed);
+    assert_eq!(pages[0], "[WorkClosed]", "{closed}");
+    assert!(pages[1].starts_with("Completed"), "{closed}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -2073,9 +2200,10 @@ async fn independent_admission_rejects_inheritance_and_supervised_escape() {
         .replace("withContext (selected id)", "withContext inherited")
         .replace("peer <- unfold", "peerAttempt <- attemptUnfold");
     committed(root.as_ref(), &inherited).await;
-    let result = committed(
+    let result = displayed(
+        &mut campaign,
         root.as_ref(),
-        "inspectFull (either show (const \"unexpected acceptance\") peerAttempt)",
+        "display (either show (const \"unexpected acceptance\") peerAttempt)",
     )
     .await;
     assert!(
@@ -2092,19 +2220,16 @@ async fn independent_admission_rejects_inheritance_and_supervised_escape() {
         .replace("projectHead", "currentCheckout")
         .replace("peer <- unfold", "standaloneAttempt <- attemptUnfold");
     committed(worker.policy.as_ref(), &attempted).await;
-    let result = committed(
-        worker.policy.as_ref(),
-        "inspectFull (either show (const \"unexpected acceptance\") standaloneAttempt)\npollReply sessionReply",
+    let result = displayed(
+        &mut campaign, worker.policy.as_ref(),
+        "_ <- display (either show (const \"unexpected acceptance\") standaloneAttempt)\n_ <- pollReply sessionReply >>= display . show",
     )
     .await;
     assert!(
-        result["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("only a top-level actor"),
+        explicit_display_texts(&result)[0].contains("only a top-level actor"),
         "{result}"
     );
-    assert_eq!(result["items"][1]["output"], "ReplyOpen", "{result}");
+    assert_eq!(explicit_display_texts(&result)[1], "ReplyOpen", "{result}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -2142,10 +2267,11 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
     let (observer, _observer_binding) = next_project_worker(&mut campaign).await;
     assert!(observer.supervisor_parent.is_none());
     assert_eq!(observer.creator, worker.creator);
-    let unshared = committed(observer.policy.as_ref(), "let retainedPeer = sessionInput\nvisibleBefore <- snapshot\ninspectFull (length (snapshotActors visibleBefore))\nshareObservation retainedPeer retainedPeer").await;
-    assert_eq!(unshared["items"][2]["output"], "1", "{unshared}");
+    let unshared = displayed(&mut campaign, observer.policy.as_ref(), "let retainedPeer = sessionInput\nvisibleBefore <- snapshot\n_ <- display (length (snapshotActors visibleBefore))\n_ <- shareObservation retainedPeer retainedPeer >>= display . show").await;
+    assert_eq!(explicit_display_texts(&unshared)[0], "1", "{unshared}");
     assert_eq!(
-        unshared["items"][3]["output"], "ObservationUnauthorized",
+        explicit_display_texts(&unshared)[1],
+        "ObservationUnauthorized",
         "{unshared}"
     );
     assert_eq!(
@@ -2164,19 +2290,21 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
             .contains(&worker.label),
         "{status}"
     );
-    let shared = committed(
-        root.as_ref(),
-        "shareObservation (responseActor peerObserver) (responseActor peer)",
+    let shared = displayed(
+        &mut campaign, root.as_ref(),
+        "_ <- shareObservation (responseActor peerObserver) (responseActor peer) >>= display . show",
     )
     .await;
     assert_eq!(
-        shared["items"][0]["output"], "ObservationShared",
+        explicit_display_output(&shared)["text"],
+        "ObservationShared",
         "{shared}"
     );
-    let observed = committed(observer.policy.as_ref(), "visibleAfter <- snapshot\ninspectFull (length (snapshotActors visibleAfter))\nstopAgent retainedPeer").await;
-    assert_eq!(observed["items"][1]["output"], "2", "{observed}");
+    let observed = displayed(&mut campaign, observer.policy.as_ref(), "visibleAfter <- snapshot\n_ <- display (length (snapshotActors visibleAfter))\n_ <- stopAgent retainedPeer >>= display . show").await;
+    assert_eq!(explicit_display_texts(&observed)[0], "2", "{observed}");
     assert_eq!(
-        observed["items"][2]["output"], "StopUnauthorized",
+        explicit_display_texts(&observed)[1],
+        "StopUnauthorized",
         "{observed}"
     );
     assert_eq!(
@@ -2231,13 +2359,14 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
     )
     .await;
     assert_eq!(result["status"], "replied", "{result}");
-    let result = committed(
+    let result = displayed(
+        &mut campaign,
         observer.policy.as_ref(),
-        "settled <- pollResponse followup\ninspectFull settled",
+        "settled <- pollResponse followup\ndisplay (show settled)",
     )
     .await;
     assert!(
-        result["items"][1]["output"]
+        explicit_display_output(&result)["text"]
             .as_str()
             .unwrap()
             .contains("after planner retirement accepted"),
@@ -2251,13 +2380,15 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         })
         .await
         .unwrap();
-    let stale = committed(
+    let stale = displayed(
+        &mut campaign,
         observer.policy.as_ref(),
-        "shareObservation retainedPeer retainedPeer",
+        "_ <- shareObservation retainedPeer retainedPeer >>= display . show",
     )
     .await;
     assert_eq!(
-        stale["items"][0]["output"], "ObservationRecipientUnavailable",
+        explicit_display_output(&stale)["text"],
+        "ObservationRecipientUnavailable",
         "{stale}"
     );
     campaign.forest.shutdown().await;
@@ -2290,12 +2421,14 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         .commit_empty("workspace program")
         .unwrap();
     let root = campaign.root_installation.policy.clone();
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         &format!("let sourceHead = GitOid \"{}\"", source.as_str()),
     )
     .await;
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         include_str!("../../../../.exomonad/workspace/checks/project_delivery_setup.hs"),
     )
@@ -2328,7 +2461,8 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     )
     .await;
     assert_eq!(replied["status"], "replied", "{replied}");
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         include_str!("../../../../.exomonad/workspace/checks/project_review_start.hs"),
     )
@@ -2360,32 +2494,21 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     );
     assert!(launched.starts_with(review_instructions));
     assert!(launched.contains("Runtime policy ("));
-    let evidence = committed(reviewer.policy.as_ref(), "inspectFull (reviewInput sessionInput)\nlet RetainedImplementer repairTarget = repairOwner sessionInput\ninspectFull (agentIdentity repairTarget)").await;
+    let evidence = displayed(&mut campaign, reviewer.policy.as_ref(), "_ <- display . show $ (reviewInput sessionInput)\nlet RetainedImplementer repairTarget = repairOwner sessionInput\n_ <- display . show $ (agentIdentity repairTarget)").await;
     assert!(
-        evidence["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("focused candidate check"),
+        explicit_item_display_text(&evidence, 0).contains("focused candidate check"),
         "{evidence}"
     );
     assert!(
-        evidence["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("reportedChecks"),
+        explicit_item_display_text(&evidence, 0).contains("reportedChecks"),
         "authored check summaries remain claims: {evidence}"
     );
     assert!(
-        evidence["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("open product gate"),
+        explicit_item_display_text(&evidence, 0).contains("open product gate"),
         "{evidence}"
     );
     assert_eq!(
-        evidence["items"][2]["output"]
-            .as_str()
-            .unwrap()
+        explicit_item_display_text(&evidence, 2)
             .split_whitespace()
             .collect::<String>(),
         format!(
@@ -2394,17 +2517,23 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             implementer.actor.identity().incarnation.0
         )
     );
-    committed(
+    displayed(
+        &mut campaign,
         reviewer.policy.as_ref(),
         include_str!("../../../../.exomonad/workspace/checks/project_review_repair.hs"),
     )
     .await;
-    let pending = committed(
+    let pending = displayed(
+        &mut campaign,
         reviewer.policy.as_ref(),
-        "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply",
+        "import Tidepool.Agent.Reply (pollReply)\n_ <- pollReply sessionReply >>= display . show",
     )
     .await;
-    assert_eq!(pending["items"][1]["output"], "ReplyOpen", "{pending}");
+    assert_eq!(
+        explicit_item_display_text(&pending, 1),
+        "ReplyOpen",
+        "{pending}"
+    );
     let implementer_actor = implementer.actor.identity();
     campaign
         .next_deployment(
@@ -2420,9 +2549,9 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             },
         )
         .await;
-    let repair_packet = committed(
+    let repair_packet = displayed(&mut campaign,
         implementer.policy.as_ref(),
-        "inspectFull (taskSource (repairAssignment sessionInput), repairInput sessionInput, repairFindings sessionInput)",
+        "_ <- display . show $ (taskSource (repairAssignment sessionInput), repairInput sessionInput, repairFindings sessionInput)",
     ).await;
     for expected in [
         source.as_str(),
@@ -2435,12 +2564,14 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             "missing {expected} from typed repair packet: {repair_packet}"
         );
     }
-    let repair = committed(implementer.policy.as_ref(), "inspectFull sessionInput").await;
+    let repair = displayed(
+        &mut campaign,
+        implementer.policy.as_ref(),
+        "_ <- display (show sessionInput)",
+    )
+    .await;
     assert!(
-        repair["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("preserve the product gate"),
+        explicit_item_display_text(&repair, 0).contains("preserve the product gate"),
         "{repair}"
     );
     let revised = campaign
@@ -2457,9 +2588,14 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     )
     .await;
     assert_eq!(replied["status"], "replied", "{replied}");
-    let result = committed(reviewer.policy.as_ref(), "state <- pollWatch repaired\ninspectFull (fmap (either (const False) (const True) . settledValue) state)").await;
-    assert_eq!(result["items"][1]["output"], "WatchReady True", "{result}");
-    committed(
+    let result = displayed(&mut campaign, reviewer.policy.as_ref(), "state <- pollWatch repaired\n_ <- display . show $ (fmap (either (const False) (const True) . settledValue) state)").await;
+    assert_eq!(
+        explicit_item_display_text(&result, 1),
+        "WatchReady True",
+        "{result}"
+    );
+    displayed(
+        &mut campaign,
         reviewer.policy.as_ref(),
         include_str!("../../../../.exomonad/workspace/checks/project_design_question.hs"),
     )
@@ -2469,7 +2605,12 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert_eq!(expert.fork_effort, Some(exomonad_actor::ForkEffort::Medium));
     assert_eq!(expert.supervisor_parent, Some(reviewer.actor.identity()));
     assert_eq!(expert.context_parent, None);
-    let question = committed(expert.policy.as_ref(), "inspectFull sessionInput").await;
+    let question = displayed(
+        &mut campaign,
+        expert.policy.as_ref(),
+        "_ <- display (show sessionInput)",
+    )
+    .await;
     for expected in [
         revised.as_str(),
         "focused repair check",
@@ -2502,16 +2643,18 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         &format!("respond (AmendPlan (PlanAmendment (GitOid \"{}\") (GitOid \"{}\") [\"plans/feature.md\"] \"retain the preparation gate\" [\"feature review\"] [\"boundary evidence\"]))", revised.as_str(), amendment.as_str()),
     ).await;
     assert_eq!(answered["status"], "replied", "{answered}");
-    let decision = committed(reviewer.policy.as_ref(), "design <- pollWatch designReady\ninspectFull (fmap settledValue design)\npollReply sessionReply").await;
+    let decision = displayed(&mut campaign, reviewer.policy.as_ref(), "design <- pollWatch designReady\n_ <- display . show $ (fmap settledValue design)\n_ <- pollReply sessionReply >>= display . show").await;
     assert!(
-        decision["items"][1]["output"]
-            .as_str()
-            .unwrap()
-            .contains("retain the preparation gate"),
+        explicit_item_display_text(&decision, 1).contains("retain the preparation gate"),
         "{decision}"
     );
-    assert_eq!(decision["items"][2]["output"], "ReplyOpen", "{decision}");
-    committed(
+    assert_eq!(
+        explicit_item_display_text(&decision, 2),
+        "ReplyOpen",
+        "{decision}"
+    );
+    displayed(
+        &mut campaign,
         reviewer.policy.as_ref(),
         include_str!("../../../../.exomonad/workspace/checks/project_plan_incorporation.hs"),
     )
@@ -2531,9 +2674,10 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             },
         )
         .await;
-    let offered = committed(
+    let offered = displayed(
+        &mut campaign,
         implementer.policy.as_ref(),
-        "inspectFull (incorporationAmendment sessionInput)",
+        "_ <- display . show $ (incorporationAmendment sessionInput)",
     )
     .await;
     assert!(
@@ -2551,32 +2695,44 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     let incorporated = dispatch_haskell_script(implementer.policy.as_ref(),
         &format!("respond (Incorporated (incorporationAmendment sessionInput) (GitOid \"{}\") [\"read exact plan at resulting head\"])", incorporated_head.trimmed())).await;
     assert_eq!(incorporated["status"], "replied", "{incorporated}");
-    let checked = committed(reviewer.policy.as_ref(), "incorporation <- pollWatch planReady\ninspectFull (fmap settledValue incorporation)\npollReply sessionReply").await;
+    let checked = displayed(&mut campaign, reviewer.policy.as_ref(), "incorporation <- pollWatch planReady\n_ <- display . show $ (fmap settledValue incorporation)\n_ <- pollReply sessionReply >>= display . show").await;
     for expected in [
         "Incorporated",
         incorporated_head.trimmed(),
         "read exact plan at resulting head",
     ] {
         assert!(
-            checked["items"][1]["output"]
-                .as_str()
-                .unwrap()
-                .contains(expected),
+            explicit_item_display_text(&checked, 1).contains(expected),
             "{checked}"
         );
     }
-    assert_eq!(checked["items"][2]["output"], "ReplyOpen", "{checked}");
-    let questions = committed(
+    assert_eq!(
+        explicit_item_display_text(&checked, 2),
+        "ReplyOpen",
+        "{checked}"
+    );
+    let questions = displayed(
+        &mut campaign,
         reviewer.policy.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/project_review_questions.hs"),
+        &include_str!("../../../../.exomonad/workspace/checks/project_review_questions.hs")
+            .replace("inspectFull ", "_ <- display . show $ ")
+            .replace(
+                "pollReply sessionReply",
+                "_ <- pollReply sessionReply >>= display . show",
+            )
+            .replace(
+                "pollResponse reviewer",
+                "_ <- pollResponse reviewer >>= display . show",
+            ),
     )
     .await;
     assert_eq!(
-        questions["items"].as_array().unwrap().last().unwrap()["output"],
+        explicit_display_texts(&questions).last().copied().unwrap(),
         "ReplyOpen",
         "{questions}"
     );
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         &format!(
             "let incorporatedHead = GitOid \"{}\"",
@@ -2584,15 +2740,28 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         ),
     )
     .await;
-    let pending = committed(
+    let pending = displayed(
+        &mut campaign,
         root.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/project_decision_return.hs"),
+        &include_str!("../../../../.exomonad/workspace/checks/project_decision_return.hs")
+            .replace("inspectFull ", "_ <- display . show $ ")
+            .replace(
+                "pollReply sessionReply",
+                "_ <- pollReply sessionReply >>= display . show",
+            )
+            .replace(
+                "pollResponse reviewer",
+                "_ <- pollResponse reviewer >>= display . show",
+            ),
     )
     .await;
     assert!(pending.to_string().contains("ResponsePending"), "{pending}");
     // Carries the producing actor's own progress, so this poll answers "is
     // it moving" without a second round trip.
-    assert!(pending.to_string().contains("state="), "{pending}");
+    assert!(
+        pending.to_string().contains("pendingActorState"),
+        "{pending}"
+    );
     let delivery = campaign
         .next_deployment(
             "decision request update",
@@ -2612,9 +2781,15 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         .contains("Preparation retains the boundary"));
     assert!(presentation.message().contains(incorporated_head.trimmed()));
     presentation.presented();
-    let status = committed(root.as_ref(), "pollRequestUpdate clarification").await;
+    let status = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "_ <- pollRequestUpdate clarification >>= display . show",
+    )
+    .await;
     assert_eq!(
-        status["items"][0]["output"], "Right UpdatePresented",
+        explicit_item_display_text(&status, 0),
+        "Right UpdatePresented",
         "{status}"
     );
     // Source incorporation remains distinct from presenting the accepted decision.
@@ -2634,9 +2809,19 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         std::fs::read_to_string(review_tree.cwd().join("plans/feature.md")).unwrap(),
         "Preparation retains the open product gate.\n"
     );
-    let propagated = committed(
+    let propagated = displayed(
+        &mut campaign,
         reviewer.policy.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/project_decision_consumer.hs"),
+        &include_str!("../../../../.exomonad/workspace/checks/project_decision_consumer.hs")
+            .replace("inspectFull ", "_ <- display . show $ ")
+            .replace(
+                "pollReply sessionReply",
+                "_ <- pollReply sessionReply >>= display . show",
+            )
+            .replace(
+                "pollResponse reviewer",
+                "_ <- pollResponse reviewer >>= display . show",
+            ),
     )
     .await;
     assert!(
@@ -2644,7 +2829,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         "{propagated}"
     );
     assert_eq!(
-        propagated["items"].as_array().unwrap().last().unwrap()["output"],
+        explicit_display_texts(&propagated).last().copied().unwrap(),
         "ReplyOpen",
         "{propagated}"
     );
@@ -2663,9 +2848,10 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             "missing {expected} from fresh context: {selected}"
         );
     }
-    let consumer_context = committed(
+    let consumer_context = displayed(
+        &mut campaign,
         consumer.policy.as_ref(),
-        "inspectFull (taskContext sessionInput)",
+        "_ <- display . show $ (taskContext sessionInput)",
     )
     .await;
     assert!(
@@ -2687,9 +2873,10 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             .trimmed(),
         incorporated_head.trimmed()
     );
-    let attention = committed(
+    let attention = displayed(
+        &mut campaign,
         root.as_ref(),
-        "remaining <- pollProgress reviewQuestions\ninspectFull remaining",
+        "remaining <- pollProgress reviewQuestions\n_ <- display (show remaining)",
     )
     .await;
     assert!(
@@ -2697,29 +2884,21 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         "{attention}"
     );
     assert!(
-        !attention["items"][1]["output"]
-            .as_str()
-            .unwrap()
-            .contains("questionKey = \"semantics\""),
+        !explicit_item_display_text(&attention, 1).contains("questionKey = \"semantics\""),
         "answered question survived: {attention}"
     );
-    let original = committed(
+    let original = displayed(
+        &mut campaign,
         root.as_ref(),
-        "original <- pollResponse worker\ninspectFull original",
+        "original <- pollResponse worker\n_ <- display (show original)",
     )
     .await;
     assert!(
-        original["items"][1]["output"]
-            .as_str()
-            .unwrap()
-            .contains(candidate.as_str()),
+        explicit_item_display_text(&original, 1).contains(candidate.as_str()),
         "{original}"
     );
     assert!(
-        !original["items"][1]["output"]
-            .as_str()
-            .unwrap()
-            .contains(revised.as_str()),
+        !explicit_item_display_text(&original, 1).contains(revised.as_str()),
         "repair changed the original response: {original}"
     );
     campaign.forest.shutdown().await;
@@ -2745,30 +2924,39 @@ async fn route_reply_case(cancel: bool) {
         .commit_empty("workspace program")
         .unwrap();
     let root = campaign.root_installation.policy.clone();
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         "let routeCampaign = \"route-reply\" :: CampaignLabel",
     )
     .await;
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         &format!("let sourceHead = GitOid \"{}\"", source.as_str()),
     )
     .await;
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         include_str!("../../../../.exomonad/workspace/checks/route-reply-setup.hs"),
     )
     .await;
     let (lead, _lead_binding) = next_project_worker(&mut campaign).await;
-    committed(
+    displayed(
+        &mut campaign,
         lead.policy.as_ref(),
         include_str!("../../../../.exomonad/workspace/checks/route-reply-worker.hs"),
     )
     .await;
     let (worker, _worker_binding) = next_project_worker(&mut campaign).await;
     if cancel {
-        let result = committed(root.as_ref(), "cancelRequest lead").await;
+        let result = displayed(
+            &mut campaign,
+            root.as_ref(),
+            "_ <- cancelRequest lead >>= display . show",
+        )
+        .await;
         assert!(
             result.to_string().contains("CancellationRequested"),
             "{result}"
@@ -2784,11 +2972,17 @@ async fn route_reply_case(cancel: bool) {
     let outcome = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let result = if cancel {
-                committed(lead.policy.as_ref(), "pollRoute forwarding").await
+                displayed(
+                    &mut campaign,
+                    lead.policy.as_ref(),
+                    "_ <- pollRoute forwarding >>= display . show",
+                )
+                .await
             } else {
-                committed(
+                displayed(
+                    &mut campaign,
                     root.as_ref(),
-                    "answer <- pollResponse lead\ninspectFull answer",
+                    "answer <- pollResponse lead\n_ <- display $ inspectFull answer",
                 )
                 .await
             };
@@ -2806,9 +3000,9 @@ async fn route_reply_case(cancel: bool) {
             outcome.to_string().contains("CancellationRequested"),
             "{outcome}"
         );
-        let pending = committed(
-            lead.policy.as_ref(),
-            "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply",
+        let pending = displayed(
+            &mut campaign, lead.policy.as_ref(),
+            "import Tidepool.Agent.Reply (pollReply)\n_ <- pollReply sessionReply >>= display . show",
         )
         .await;
         assert!(
@@ -2817,7 +3011,12 @@ async fn route_reply_case(cancel: bool) {
         );
     } else {
         let response = outcome;
-        let route = committed(lead.policy.as_ref(), "pollRoute forwarding").await;
+        let route = displayed(
+            &mut campaign,
+            lead.policy.as_ref(),
+            "_ <- pollRoute forwarding >>= display . show",
+        )
+        .await;
         assert!(route.to_string().contains("RouteCompleted"), "{route}");
         assert!(
             response.to_string().contains("exact-candidate"),
@@ -2831,7 +3030,7 @@ async fn route_reply_case(cancel: bool) {
 
 #[tokio::test]
 async fn frozen_prompt_bytes_round_trip_through_haskell() {
-    let campaign = workspace_campaign_with(|authored| {
+    let mut campaign = workspace_campaign_with(|authored| {
         let config = authored.join("config.toml");
         let mut text = std::fs::read_to_string(&config).unwrap();
         text.push_str("literal = \"prompts/literal.md\"\n");
@@ -2843,16 +3042,15 @@ async fn frozen_prompt_bytes_round_trip_through_haskell() {
         .unwrap();
     })
     .await;
-    let result = committed(
-        campaign.root_installation.policy.as_ref(),
-        "inspectFull (fmap (map fromEnum . T.unpack) (workspacePrompt \"literal\"))",
+    let policy = campaign.root_installation.policy.clone();
+    let result = displayed(
+        &mut campaign,
+        policy.as_ref(),
+        "display (show (fmap (map fromEnum . T.unpack) (workspacePrompt \"literal\")))",
     )
     .await;
-    // The list layout breaks a line after every comma (`treeParts`, for
-    // line-based paging); this assertion cares about the exact byte values
-    // round-tripping, not the display's line breaks, so it strips them
-    // before comparing.
-    let output = result["items"][0]["output"]
+    // Explicit Show preserves the exact code points, including control bytes.
+    let output = explicit_display_output(&result)["text"]
         .as_str()
         .unwrap_or_else(|| panic!("{result}"));
     assert_eq!(
@@ -3094,7 +3292,12 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     )
     .await;
     let root = campaign.root_installation.policy.clone();
-    committed(root.as_ref(), include_str!("work_notification.hs")).await;
+    displayed(
+        &mut campaign,
+        root.as_ref(),
+        include_str!("work_notification.hs"),
+    )
+    .await;
     let source = campaign
         .next_deployment(
             "the progress source",
@@ -3143,8 +3346,8 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     let key = "work-router-inbox";
     admit_notification(&message, key.into(), &inbox);
     publication.await.unwrap();
-    let wrong_owner = committed(root.as_ref(),
-        "view <- readWork collector\nlet [receipt] = [r | Notice _ (Right r) <- workNotices view]\npollNotification receipt"
+    let wrong_owner = displayed(&mut campaign, root.as_ref(),
+        "view <- readWork collector\nlet [receipt] = [r | Notice _ (Right r) <- workNotices view]\n_ <- pollNotification receipt >>= display . show"
     ).await;
     assert!(
         wrong_owner.to_string().contains("NotificationUnauthorized"),
@@ -3154,7 +3357,7 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     let query = tokio::spawn(async move {
         committed(
             policy.as_ref(),
-            "R.call (workNotification (R.client collector)) receipt",
+            "_ <- R.call (workNotification (R.client collector)) receipt >>= display . show",
         )
         .await
     });
@@ -3172,27 +3375,55 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     let observed = observe_notification_receipt(&poll, campaign.actor.identity(), key, &inbox);
     assert_eq!(observed, Ok(exomonad_actor::NotificationState::Accepted));
     poll.observed(observed);
-    let result = query.await.unwrap();
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let result = campaign.drive_actor_output(&store, query).await.unwrap();
     assert!(
         result.to_string().contains("NotificationAccepted"),
         "{result}"
     );
-    let replaced = committed(root.as_ref(),
-        "collector <- R.replace collector (workDefinition sources (notifyWork owner (workMessage id)))\nR.call (workNotification (R.client collector)) receipt"
+    let replaced = displayed(&mut campaign, root.as_ref(),
+        "collector <- R.replace collector (workDefinition sources (notifyWork owner (workMessage id)))\n_ <- R.call (workNotification (R.client collector)) receipt >>= display . show"
     ).await;
     assert!(
         replaced.to_string().contains("NotificationUnauthorized"),
         "{replaced}"
     );
-    let retained = committed(
+    let retained = displayed(
+        &mut campaign,
         root.as_ref(),
-        "inspectFull . length . workNotices <$> readWork collector",
+        "_ <- readWork collector >>= display . length . workNotices",
     )
     .await;
-    assert_eq!(retained["items"][0]["output"], "1", "{retained}");
+    assert_eq!(
+        explicit_display_output(&retained)["text"],
+        "1",
+        "{retained}"
+    );
     committed(root.as_ref(), "finishWork collector").await;
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
+}
+
+fn explicit_item_display_text(reply: &serde_json::Value, item: usize) -> &str {
+    reply["items"][item]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|operation| operation.get("display"))
+        .unwrap_or_else(|| panic!("structured display missing from item {item}: {reply}"))["text"]
+        .as_str()
+        .unwrap()
+}
+
+fn explicit_display_texts(reply: &serde_json::Value) -> Vec<&str> {
+    reply["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["operations"].as_array().unwrap())
+        .filter_map(|operation| operation.get("display"))
+        .map(|display| display["text"].as_str().unwrap())
+        .collect()
 }
 
 fn explicit_display_output(reply: &serde_json::Value) -> &serde_json::Value {
