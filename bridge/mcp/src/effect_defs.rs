@@ -604,9 +604,12 @@ macro_rules! console_effect_def {
                 { ctor DisplayExpandWith, method display_expand_with,
                   args { selection: "((Int, Int, Int), Int)" as ((i64, i64, i64), i64) },
                   ret "[(Int, Text)]" },
+                { ctor DisplayAllowanceWith, method display_allowance_with,
+                  args { },
+                  ret "Int" },
                 { ctor DisplayExpansionInputWith, method display_expansion_input_with,
                   args { },
-                  ret "((Int, Int, Int), Int)" },
+                  ret "((Int, Int, Int), Int, Int)" },
             ],
             helpers [
                 { name say, sig "forall effs. Member Console effs => Text -> Eff effs ()",
@@ -1821,7 +1824,8 @@ mod tests {
                 "Print :: Text -> Console ()",
                 "DisplayWith :: ((Int, Int, Int), Text, [(Int, Text)]) -> payload -> Console (Int, Int, Int)",
                 "DisplayExpandWith :: ((Int, Int, Int), Int) -> Console [(Int, Text)]",
-                "DisplayExpansionInputWith :: Console ((Int, Int, Int), Int)",
+                "DisplayAllowanceWith :: Console Int",
+                "DisplayExpansionInputWith :: Console ((Int, Int, Int), Int, Int)",
             ]
         );
         assert!(d.type_defs.is_empty());

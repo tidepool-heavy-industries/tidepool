@@ -27,5 +27,6 @@ pub enum ConsoleReq {
         tidepool_bridge::HaskellValue,
     ),
     DisplayExpandWith(((i64, i64, i64), i64)),
+    DisplayAllowanceWith,
     DisplayExpansionInputWith,
 }

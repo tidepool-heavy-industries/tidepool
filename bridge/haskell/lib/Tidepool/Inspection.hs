@@ -52,7 +52,7 @@ import Tidepool.Agent.Watch.Internal
 import Tidepool.Inspection.Display
 import Tidepool.Inspection.Tree
 import Tidepool.Effects.Core
-  ( Console (Print, DisplayWith, DisplayExpandWith, DisplayExpansionInputWith), DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
+  ( Console (Print, DisplayWith, DisplayExpandWith, DisplayAllowanceWith, DisplayExpansionInputWith), DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
 import Tidepool.Worktree (HeadState (..), renderGitOid, renderWorktreeError)
 import Prelude
 
@@ -70,8 +70,10 @@ instance Display (DisplayHandle value) where
 -- actor's ordinary resource scope; the returned handle does not contain it.
 display :: (DisplayRoot value, Member Console effects) => value -> Eff effects (DisplayHandle value)
 display value = do
-  let state = newDisplayState 8192 (displayRoot value)
-  identity <- publishDisplay (0, 0, 0) state
+  allowance <- send DisplayAllowanceWith
+  let budget = displayBudget allowance
+      state = newDisplayState budget (displayRoot value)
+  identity <- publishDisplay budget (0, 0, 0) state
   pure (DisplayHandle identity (displayStateKeys state))
 
 -- | The key must come from this handle's current expansion description.
@@ -93,25 +95,31 @@ instance DisplayRoot Text where
 instance DisplayRoot [Char] where
   displayRoot = StringLeaf
 
-publishDisplay :: forall effects. Member Console effects => (Int, Int, Int) -> DisplayState -> Eff effects (Int, Int, Int)
-publishDisplay identity state =
-  send (DisplayWith (identity, displayPresentation state,
+-- The host grants this allowance before any tree is demanded. Its shared
+-- byte budget must never truncate a page after the renderer retains its suffix.
+displayBudget :: Int -> Int
+displayBudget = max 0 . min 8192
+
+publishDisplay :: forall effects. Member Console effects => Int -> (Int, Int, Int) -> DisplayState -> Eff effects (Int, Int, Int)
+publishDisplay budget identity state =
+  send (DisplayWith (identity, displayPresentation budget state,
     [(expansionKeyNumber key, label) | (key, label) <- displayStateKeys state])
     ((\(_ :: Int) -> do
-      (issued, selected) <- send DisplayExpansionInputWith
-      case expandDisplayState 8192 (expansionKeyFromNumber selected) state of
+      (issued, selected, allowance) <- send DisplayExpansionInputWith
+      let granted = displayBudget allowance
+      case expandDisplayState granted (expansionKeyFromNumber selected) state of
         Nothing -> error "display expansion key is unavailable"
         Just detail -> do
-          _ <- publishDisplay issued detail
+          _ <- publishDisplay granted issued detail
           pure ()) :: Int -> Eff effects ()))
 
 -- Legacy custom renderers can report omitted detail without a resumable tree.
 -- Preserve that fact inside the same bounded output as the visible prefix.
-displayPresentation :: DisplayState -> Text
-displayPresentation state
+displayPresentation :: Int -> DisplayState -> Text
+displayPresentation budget state
   | displayStateUnavailable state =
       let marker = "\n[display detail unavailable]"
-      in Text.take (8192 - Text.length marker) (displayStateText state) <> marker
+      in Text.take budget (Text.take (max 0 (budget - Text.length marker)) (displayStateText state) <> marker)
   | otherwise = displayStateText state
 
 instance Display ReplyError where
