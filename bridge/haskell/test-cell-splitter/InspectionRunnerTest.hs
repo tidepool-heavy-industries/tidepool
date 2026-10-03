@@ -1,14 +1,15 @@
 module InspectionRunnerTest (inspectionRunnerChecks) where
 
-import Control.Exception (AsyncException(..), Exception(..), asyncExceptionToException, asyncExceptionFromException, SomeAsyncException, SomeException, bracket, fromException, throwIO, toException, try)
+import Control.Exception (AsyncException(..), Exception(..), asyncExceptionToException, asyncExceptionFromException, SomeAsyncException, SomeException, IOException, bracket, fromException, throwIO, toException, try)
 import GHC.Types.SourceError (mkSrcErr)
 import GHC.Types.Error (emptyMessages)
 import Control.Monad (unless)
 import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (hClose, openTempFile)
+import System.IO.Error (isDoesNotExistError, isUserError, ioeGetErrorString, ioeGetFileName)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), DependencyLoadFailure(..))
-import Tidepool.ExtractRequest (RequestField(..), InspectionRequest(..), WorkerRequest(..), workerArgv, workerRequestFromArgv)
+import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), workerArgv, workerRequestFromArgv)
 import Tidepool.GhcPipeline (CompilePurpose(..))
 import Tidepool.InspectionRunner (runInspectionRequests)
 import Tidepool.Introspection (InspectionResult(..))
@@ -58,7 +59,7 @@ inspectionRunnerChecks = do
     let batched = (request [Input "first", Input "second"] [InspectType "a", InspectType "b"])
           { requestInspectTypeBatch = Just batch }
         reset = writeIORef calls [] >> writeIORef inspected []
-        rejectBatch :: Exception exception => exception -> CompilePurpose -> FilePath -> IO FilePath
+        rejectBatch :: Exception e => e -> CompilePurpose -> FilePath -> IO FilePath
         rejectBatch exception purpose path = do
           value <- record purpose path
           if path == batch then throwIO exception else pure value
@@ -94,29 +95,41 @@ inspectionRunnerChecks = do
     mapM_ (\exception -> do
       reset
       failed <- try (runInspectionRequests batched (rejectBatch exception) inspect) :: IO (Either SomeException [InspectionResult])
-      assert "worker failure and cancellation never choose singleton fallback" (either (const True) (const False) failed)
       failureCalls <- readIORef calls
       assert "non-source failure compiles only batch" (length failureCalls == 1)
       case fromException exception :: Maybe SomeAsyncException of
         Just _ -> assert "async exception retains its category" (either (maybe False (const True) . (fromException :: SomeException -> Maybe SomeAsyncException)) (const False) failed)
-        Nothing -> pure ()) [toException DependencyWorkerFailure, toException ThreadKilled, toException (TestCancellation "cancel")]
+        Nothing -> assert "worker failure retains the infrastructure category"
+          (either (\caught -> case fromException caught of
+            Just DependencyWorkerFailure -> True
+            _ -> False) (const False) failed))
+      [toException DependencyWorkerFailure, toException ThreadKilled, toException (TestCancellation "cancel")]
     reset
     missing <- try (runInspectionRequests (batched {requestInspectTypeBatch = Just (batch ++ ".missing")}) record inspect) :: IO (Either SomeException [InspectionResult])
-    assert "missing batch file propagates before compiler or fallback" (either (const True) (const False) missing)
+    assert "missing batch file retains filesystem error and path"
+      (isIOFailure (\exception -> isDoesNotExistError exception
+        && ioeGetFileName exception == Just (batch ++ ".missing")) missing)
     missingCalls <- readIORef calls
     assert "unreadable producer has no compiler calls" (null missingCalls)
     reset
     invalid <- try (runInspectionRequests (mixed {requestInspectTypeBatch = Just batch}) record inspect) :: IO (Either SomeException [InspectionResult])
-    assert "mixed batches are rejected before compiling" (either (const True) (const False) invalid)
+    assert "mixed batches report the batch admission error"
+      (isUserFailure "inspection type batch requires at least two type queries and no other query kinds" invalid)
     invalidCalls <- readIORef calls
     assert "invalid batch has no compiler calls" (null invalidCalls)
   let mismatched = mixed { requestFiles = [] }
   writeIORef calls []
   mismatch <- try (runInspectionRequests mismatched record inspect) :: IO (Either SomeException [InspectionResult])
-  assert "source/query count mismatch is rejected" (either (const True) (const False) mismatch)
+  assert "source/query count mismatch reports the shape admission error"
+    (isUserFailure "inspection request must carry exactly one source per query" mismatch)
   mismatchCalls <- readIORef calls
   assert "count mismatch has no compiler calls" (null mismatchCalls)
   where
+    isIOFailure :: (IOException -> Bool) -> Either SomeException [InspectionResult] -> Bool
+    isIOFailure predicate (Left exception) = maybe False predicate (fromException exception)
+    isIOFailure _ _ = False
+    isUserFailure message = isIOFailure
+      (\exception -> isUserError exception && ioeGetErrorString exception == message)
     isDependencySource :: Either SomeException [InspectionResult] -> Bool
     isDependencySource (Left exception) = case fromException exception of
       Just (DependencySourceFailure _) -> True
