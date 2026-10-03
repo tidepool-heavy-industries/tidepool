@@ -73,7 +73,7 @@ import qualified Tidepool.ExecutionSchema as Execution
 import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
   ( PreparedModule(..), PreparedBodyCache, newPreparedBodyCache
-  , evictPreparedBodyMatching )
+  )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots
   , preparedRecoveryClosure, growPreparedRecovery )
@@ -120,8 +120,8 @@ import Tidepool.Session
   , preparedApplyEntryTargetName, preparedApplyValueTargetName
   , parseSessionModule, sessionHiPath )
 import Tidepool.FatIface
-  ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching
-  , OwnerInterfaceCache, newOwnerInterfaceCache, evictOwnerInterfaceMatching )
+  ( FatIfaceCache, newFatIfaceCache
+  , OwnerInterfaceCache, newOwnerInterfaceCache )
 import Tidepool.SessionArtifacts
   ( mkBoundBinders, parseValModule )
 import Tidepool.Metadata
@@ -158,8 +158,8 @@ type Compiler =
   -> IO result
 
 -- | Compiler-owned recovery caches. The resident pipeline invokes their
--- scoped eviction callback when a transaction ends; one-shot compilation
--- owns fresh caches for its invocation.
+-- transaction owns these GHC values; one-shot compilation owns fresh caches
+-- for its invocation.
 data RecoveryCaches = RecoveryCaches
   { rcFatIface :: FatIfaceCache
   , rcOwnerIface :: OwnerInterfaceCache
@@ -169,21 +169,6 @@ data RecoveryCaches = RecoveryCaches
 freshRecoveryCaches :: IO RecoveryCaches
 freshRecoveryCaches = RecoveryCaches
   <$> newFatIfaceCache <*> newOwnerInterfaceCache <*> newPreparedBodyCache
-
--- | True for a 'Module' whose cached recovery state must not survive past
--- this transaction: one of the transaction's target modules, or any
--- @Tidepool.Session.*@ module. These caches carry no incarnation, so unlike
--- 'Tidepool.GhcPipeline.sanitizeMemo' they drop every session module.
-staleRecoveryModule :: ModuleName -> Module -> Bool
-staleRecoveryModule targetModName' owner =
-  moduleName owner == targetModName'
-    || isJust (parseSessionModule (moduleNameString (moduleName owner)))
-
-evictRecoveryCaches :: RecoveryCaches -> ModuleName -> IO ()
-evictRecoveryCaches caches targetModName' = do
-  evictFatIfaceMatching (rcFatIface caches) (staleRecoveryModule targetModName')
-  evictOwnerInterfaceMatching (rcOwnerIface caches) (staleRecoveryModule targetModName')
-  evictPreparedBodyMatching (rcPreparedBodies caches) (staleRecoveryModule targetModName')
 
 data LocatedCellRejection = LocatedCellRejection CellSourceSpan String
   deriving Show
@@ -216,10 +201,10 @@ main = do
     then do
       hSetBinaryMode stdin True
       hSetBinaryMode stdout True
-      caches <- freshRecoveryCaches
-      withResidentPipelineSelectedRequests [] (evictRecoveryCaches caches) $ \runRequest ->
+      withResidentPipelineSelectedRequests [] (const (pure ())) $ \runRequest ->
         WorkerServer.runWorkerLoop $ \serveTransaction ->
-          runRequest $ \compiler ->
+          runRequest $ \compiler -> do
+            caches <- freshRecoveryCaches
             serveTransaction (\cwd argv ->
               setCurrentDirectory cwd >> runWorkerInvocation compiler caches argv)
     else do

@@ -123,8 +123,9 @@ import GHC.Types.Var.Set (isEmptyVarSet)
 import Language.Haskell.Syntax.Specificity (Specificity (SpecifiedSpec))
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import Control.Applicative ((<|>))
+import Control.Concurrent (myThreadId)
 import Control.Exception
-  ( finally, bracket, try, catch, throwIO, IOException )
+  ( Exception, finally, bracket, mask, onException, try, catch, throwIO, IOException )
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes)
 import Data.List (find, isPrefixOf, isInfixOf, nub, nubBy, sort, sortOn, intercalate)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
@@ -772,6 +773,24 @@ exactCompileCycle :: PipelineSelection result -> PipelineVariant -> Bool
 exactCompileCycle selection variant =
   isJust (candidateManifestFor selection) || isJust (pvExactScope variant)
 
+-- The worker owns one interpreter. An interrupted retirement leaves it
+-- unusable; a later request must not borrow its partially unloaded symbols.
+data ResidentAvailability = ResidentAvailable | ResidentBusy | ResidentPoisoned
+  deriving (Eq)
+
+data CompilerTransactionFailure
+  = CompilerTransactionBusy
+  | CompilerTransactionPoisoned
+  | CompilerTransactionReleased
+  | CompilerTransactionWrongThread
+  | CompilerTransactionFailed
+  deriving (Show)
+
+instance Exception CompilerTransactionFailure
+
+data CompilerPhase = CompilerReady | CompilerRunning | CompilerFailed | CompilerClosed
+  deriving (Eq)
+
 data ResidentStateOrigin = OrdinarySourceState | LegacySourceFreeState | ExactState
   deriving (Eq)
 
@@ -1008,7 +1027,7 @@ data MemoValidity = MemoValidity
     -- '.hi' it was compiled from. 'lookupValidMemo' requires this field to
     -- match the CURRENT request's incarnation, in addition to the source
     -- hash and home-dependency checks above, before reusing a session
-    -- module's entry -- see 'sanitizeMemo'.
+    -- module's entry within its owning transaction.
   , memoIncarnation :: Maybe String
   }
 
@@ -2138,20 +2157,10 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                               sameRetained = memoRetained validity == retainedFor modSum
                               sameHomeDependencies =
                                 memoHomeDependencies validity == homeDependencyWitnesses modSum
-                              -- A 'Tidepool.Session.*' module's name is only
-                              -- unique within one session incarnation (its
-                              -- generation counter restarts at 0 on a fresh
-                              -- incarnation at the same root, and a warm
-                              -- daemon can serve several incarnations'
-                              -- requests). 'sanitizeMemo' lets a session
-                              -- entry outlive its producing transaction only
-                              -- when the request carries an incarnation
-                              -- identity, so this entry's own recorded
-                              -- incarnation must match the CURRENT request's
-                              -- one -- an absent identity on either side
-                              -- (an older caller, or a one-shot compile)
-                              -- never matches, so it always misses exactly
-                              -- as it did before this check existed. Every
+                              -- Session generations are incarnation-local,
+                              -- even within a multi-operation transaction.
+                              -- Reuse requires both sides to name that owner.
+                              -- Every
                               -- non-session module is exempt: its identity
                               -- is not incarnation-scoped.
                               sameIncarnation =
@@ -3247,9 +3256,7 @@ withResidentPipelineSelected
   -> IO a
 withResidentPipelineSelected baseIncludes useCompiler =
   withResidentPipelineSelectedRequests baseIncludes (const (pure ())) $ \runRequest ->
-    useCompiler $ \selection retained purpose mscope path extraIncludes buildProductsDir ->
-      runRequest $ \compile ->
-        compile selection retained purpose mscope path extraIncludes buildProductsDir
+    runRequest useCompiler
 
 -- | Keep transaction-scoped compiler state across every compile needed to
 -- prepare one cell, then remove it before admitting the next transaction.
@@ -3273,37 +3280,68 @@ withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
     retainedRef <- liftIO (newIORef emptyRetainedContext)
     hscForRetained <- getSession
     setSession (installRetainedUnfoldingsPlugin retainedRef hscForRetained)
-    cache   <- liftIO newIfaceCache
-    memoRef <- liftIO (newIORef Map.empty)
-    requestTargetsRef <- liftIO (newIORef Set.empty)
-    stateOriginRef <- liftIO (newIORef OrdinarySourceState)
+    availability <- liftIO (newIORef ResidentAvailable)
+    ownerThread <- liftIO myThreadId
     let baseImportPaths = importPaths dflags'
     reifyGhc $ \session ->
-      let finishRequest = do
-            targets <- atomicModifyIORef' requestTargetsRef (\pending -> (Set.empty, pending))
-            forM_ (Set.toList targets) $ \targetModName' -> do
-              sanitizeMemo targetModName' memoRef
-              evictRecovery targetModName'
-          compile :: Word64 -> ResidentCompiler
-          compile requestIdentity selection retained purpose mscope path extraIncludes buildProductsDir = do
-            targetModName' <- targetModuleNameFor path
-            modifyIORef' requestTargetsRef (Set.insert targetModName')
-            -- The target's parsed tree depends on the compile purpose (for
-            -- example, lookup compilation normalizes wildcards). Source and
-            -- dependency hashes cannot distinguish those variants, so never
-            -- reuse a target entry across internal compiles. Session
-            -- dependencies remain warm until the compiler transaction ends.
-            evictTargetMemo targetModName' memoRef
-            (writeIORef retainedRef (retainedContext retained) >>
-              reflectGhc
-                (residentCompileOne selection cache memoRef retainedRef stateOriginRef dflags' baseImportPaths
-                  timing requestIdentity purpose mscope path extraIncludes buildProductsDir)
-                session)
-              `finally` writeIORef retainedRef emptyRetainedContext
+      let resetSession = reflectGhc
+            (getSession >>= liftIO . freshExactState >>= setSession) session
           runRequest :: RequestRunner
-          runRequest action = do
+          runRequest action = bracket acquire release $ \() -> do
+            -- These caches contain GHC values tied to this environment, not
+            -- portable products. No cache entry survives its owning bracket.
+            cache <- newIfaceCache
+            memoRef <- newIORef Map.empty
+            stateOriginRef <- newIORef OrdinarySourceState
+            requestTargetsRef <- newIORef Set.empty
+            phase <- newIORef CompilerReady
             requestIdentity <- newTimingRequestIdentity
-            action (compile requestIdentity) `finally` finishRequest
+            let compile :: ResidentCompiler
+                compile selection retained purpose mscope path extraIncludes buildProductsDir = mask $ \restore -> do
+                  caller <- myThreadId
+                  unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
+                  previous <- atomicModifyIORef' phase $ \state ->
+                    (if state == CompilerReady then CompilerRunning else state, state)
+                  case previous of
+                    CompilerReady -> pure ()
+                    CompilerRunning -> throwIO CompilerTransactionBusy
+                    CompilerFailed -> throwIO CompilerTransactionFailed
+                    CompilerClosed -> throwIO CompilerTransactionReleased
+                  result <- restore (do
+                    targetModName' <- targetModuleNameFor path
+                    modifyIORef' requestTargetsRef (Set.insert targetModName')
+                    -- Target source can be transformed differently by each
+                    -- purpose, even when its bytes have not changed.
+                    evictTargetMemo targetModName' memoRef
+                    (writeIORef retainedRef (retainedContext retained) >>
+                      reflectGhc
+                        (residentCompileOne selection cache memoRef retainedRef stateOriginRef dflags' baseImportPaths
+                          timing requestIdentity purpose mscope path extraIncludes buildProductsDir)
+                        session)
+                      `finally` writeIORef retainedRef emptyRetainedContext)
+                    `onException` writeIORef phase CompilerFailed
+                  writeIORef phase CompilerReady
+                  pure result
+                finish = do
+                  writeIORef phase CompilerClosed
+                  writeIORef memoRef Map.empty
+                  targets <- atomicModifyIORef' requestTargetsRef (\pending -> (Set.empty, pending))
+                  forM_ (Set.toList targets) evictRecovery
+            action compile `finally` finish
+          acquire = do
+            caller <- myThreadId
+            unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
+            previous <- atomicModifyIORef' availability $ \state ->
+              (if state == ResidentAvailable then ResidentBusy else state, state)
+            case previous of
+              ResidentAvailable -> pure ()
+              ResidentBusy -> throwIO CompilerTransactionBusy
+              ResidentPoisoned -> throwIO CompilerTransactionPoisoned
+          release () = do
+            writeIORef availability ResidentPoisoned
+            writeIORef retainedRef emptyRetainedContext
+            resetSession
+            writeIORef availability ResidentAvailable
       in useRequests runRequest
 
 type ResidentCompiler = forall result.
@@ -3323,8 +3361,8 @@ type RequestRunner = forall requestResult.
 -- 'withResidentPipelineSelected' booted. Patches @importPaths@ for THIS cycle only
 -- (see 'withResidentPipelineSelected'), compiles with the shared 'ModIfaceCache' +
 -- 'GutsMemo'. The transaction boundary established by
--- 'withResidentPipelineSelectedRequests' sanitizes the memo after both
--- successful and exceptional transactions (see 'sanitizeMemo').
+-- 'withResidentPipelineSelectedRequests' releases its GHC-valued memo after
+-- both successful and exceptional transactions.
 -- Captures a fresh start time so every request gets its own compile summary.
 --
 -- The resident and direct paths select the same pipeline variant. This is an
@@ -3382,55 +3420,6 @@ compileSearchPaths variant requested ordinaryBase = case pvExactScope variant >>
   Just admitted -> do
     unless (requested == admitted) (throwIO SearchInputsChanged)
     pure admitted
-
--- | Retained-entry cap for @Tidepool.Session.*@ 'GutsMemo' entries once
--- 'sanitizeMemo' lets them outlive their producing transaction (below).
--- Sized for SEVERAL live incarnations sharing one warm daemon at once --
--- the per-child-sessions lane mints a fresh 'ssIncarnation' for each
--- selected-context child, so a busy daemon is not serving one session's
--- worth of growth -- not tuned from a measured per-entry byte size; revisit
--- once that measurement exists.
-sessionMemoCap :: Int
-sessionMemoCap = 8000
-
--- | Strip transaction-scoped entries from the shared 'GutsMemo' after a
--- compiler transaction: always the target module compiled by it, and every
--- @Tidepool.Session.*@ entry ('parseSessionModule' recognizes both @Val@ and
--- @Lib@ kinds) that was produced without a session incarnation identity.
--- Such an entry can never be reused: 'lookupValidMemo' requires a session
--- entry's recorded 'memoIncarnation' to equal the CURRENT request's
--- incarnation, and an absent identity never matches. An entry recorded under
--- an incarnation stays, whatever the finishing transaction carried: the same
--- lookup check already keeps a same-named module from another incarnation (a
--- restart, whose generation counter restarts at 0, or another session on the
--- same warm daemon) from reusing it, so a transaction with no incarnation
--- (a lookup, a plain eval, a one-shot compile) must not discard what a later
--- request in a live incarnation will reuse.
--- Reusable library entries stay warm either way; capped by recency
--- ('gmeCycle', the request identity that produced or last reused an entry)
--- once retained session entries exceed 'sessionMemoCap', so an unbounded
--- accumulation across a long-lived session or several concurrent
--- incarnations cannot grow the memo forever.
-sanitizeMemo :: ModuleName -> IORef GutsMemo -> IO ()
-sanitizeMemo targetModName' memoRef =
-  modifyIORef' memoRef $ capSessionEntries . Map.filterWithKey keep
-  where
-    keep mn entry = mn /= targetModName'
-      && (isNothing (parseSessionModule (moduleNameString mn))
-          || isJust (memoIncarnation (gmeValidity entry)))
-    capSessionEntries memo =
-      let (sessionEntries, otherEntries) = Map.partitionWithKey
-            (\mn _ -> isJust (parseSessionModule (moduleNameString mn))) memo
-          overflow = Map.size sessionEntries - sessionMemoCap
-      in if overflow <= 0
-        then memo
-        else
-          -- Oldest-'gmeCycle'-first, so the entries a later cycle just
-          -- reused (a fresh 'gmeCycle' stamped on every insert, including a
-          -- promoted validation-only entry) are never the ones dropped.
-          let oldestFirst = sortOn (gmeCycle . snd) (Map.toList sessionEntries)
-              retained = drop overflow oldestFirst
-          in Map.union otherEntries (Map.fromList retained)
 
 evictTargetMemo :: ModuleName -> IORef GutsMemo -> IO ()
 evictTargetMemo targetModName' memoRef =
