@@ -391,7 +391,7 @@ processFile compiler caches timing args path = do
     let preparedTargets = case requestTargets args of
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
-    originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprProductInterfaces prepared) outDir
+    originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) outDir
     (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces caches path hscEnv (pprProductInterfaces prepared) (pprModules prepared) preparedTargets
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args) (pprAcceptedCandidates prepared) (compilationScope <$> pprExactCompilation prepared)
     if null preparedArtifacts
@@ -414,6 +414,16 @@ data CertifiedOriginalProducts = CertifiedOriginalProducts
   { certifiedOriginalDependencies :: DependencyEvidence
   , certifiedOriginalProducts :: [ModuleProductEncoding]
   }
+
+-- These captures were admitted by the request's exact-scope/candidate owner.
+-- They remain originals rather than becoming new finalizations from source SHA.
+retainedOriginalInterfaces :: PreparedPipelineResult -> [ExactIfaceArtifact]
+retainedOriginalInterfaces prepared =
+  [artifact | scope <- maybe [] pure (compilationScope <$> pprExactCompilation prepared)
+    , (artifact, _, _) <- scopeInterfaces scope]
+  ++ [ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
+        (candidateInterface candidate) (candidateInterfaceSha256 candidate) []
+     | candidate <- pprAcceptedCandidates prepared]
 
 writeCertifiedProductsKeeping
   :: OriginalInterfaceArtifacts -> FilePath -> HscEnv -> PreparedPipelineResult -> Maybe PreparedModuleProducts
@@ -980,7 +990,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
         warnTexts   = map T.pack (prWarnings result)
     -- Projection remains outside compileVariants. Its entry is the settled
     -- scaffold, and its constructors join the shared metadata before write.
-    originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprProductInterfaces prepared) outDir
+    originalInterfaces <- newOriginalInterfaceArtifacts hscEnv (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) outDir
     (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces caches compiledPath hscEnv (pprProductInterfaces prepared) preparedModules
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
       (requestRetainedGenerations args) (pprAcceptedCandidates prepared) (compilationScope <$> pprExactCompilation prepared)
@@ -1479,7 +1489,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       environment = prHscEnv result
       binds = prBinds result
   inventory <- certifyPlannedDeclaration original environment >>= either fail pure
-  originalInterfaces <- newOriginalInterfaceArtifacts environment (pprProductInterfaces prepared) directory
+  originalInterfaces <- newOriginalInterfaceArtifacts environment (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) directory
   (artifacts, productContext) <- prepareArtifacts originalInterfaces caches sourcePath environment (pprProductInterfaces prepared) (pprModules prepared)
     ["__result"] [] (requestRetainedGenerations args) (pprAcceptedCandidates prepared)
     (compilationScope <$> pprExactCompilation prepared)

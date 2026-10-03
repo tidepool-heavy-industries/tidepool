@@ -2031,7 +2031,7 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   unless (fmap renderType (crResultType checked) == Just "Int") $
     fail "host checked annotation changed the inferred input"
   actualInput <- either fail pure (activationPreviewInputType (crTargetTcGblEnv checked))
-  originalInterfaces <- newOriginalInterfaceArtifacts (crHscEnv checked) Map.empty work
+  originalInterfaces <- newOriginalInterfaceArtifacts (crHscEnv checked) Map.empty [] work
   let witness ty = captureCheckedTypeWitness (crHscEnv checked) ty
         >>= maybe (fail "complete fixture type has no canonical witness") pure
       sealedBytes ty = do
@@ -2070,7 +2070,7 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
         ty <- maybe (fail "owner fixture has no input type") pure (prResultType pipeline)
         raw <- captureCheckedTypeWitness (prHscEnv pipeline) ty
           >>= maybe (fail "owner fixture has no canonical witness") pure
-        artifacts <- newOriginalInterfaceArtifacts (prHscEnv pipeline) (pprProductInterfaces produced) work
+        artifacts <- newOriginalInterfaceArtifacts (prHscEnv pipeline) (pprFinalizedModules produced) [] work
         sealed <- sealCheckedTypeWitness artifacts raw
           >>= maybe (fail "owner fixture lacks its original interface") pure
         maybe (fail "owner witness is unsealed") (pure . toStrictByteString) (encodeCheckedTypeWitness sealed)
