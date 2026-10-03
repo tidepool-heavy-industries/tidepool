@@ -375,7 +375,6 @@ struct InventoryState {
     indices: BTreeMap<ArtifactId, NodeIndex>,
     payloads: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     owners: BTreeMap<ExactModuleIdentity, ArtifactId>,
-    modules: BTreeMap<String, ArtifactId>,
     roots: BTreeMap<ArtifactId, usize>,
     graph_visits: AtomicU64,
     view_queries: AtomicU64,
@@ -481,23 +480,19 @@ impl ArtifactInventory {
                 additions.insert(id, entry);
             }
         }
-        let owners = additions
-            .values()
-            .map(|entry| (entry.descriptor.owner.clone(), entry.descriptor.id))
-            .collect::<BTreeMap<_, _>>();
-        let modules = additions
-            .values()
-            .map(|entry| (entry.descriptor.owner.module.clone(), entry.descriptor.id))
-            .collect::<BTreeMap<_, _>>();
-        if owners.len() != additions.len() || modules.len() != additions.len() {
-            return Err(failure(
-                "one original owner or module has differing artifacts",
-            ));
+        let mut owners = BTreeMap::new();
+        for entry in additions.values() {
+            let owner = &entry.descriptor.owner;
+            if owners.insert(owner.clone(), entry.descriptor.id).is_some() {
+                return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
+                    owner: owner.clone(),
+                }));
+            }
         }
         for entry in additions.values() {
             state
                 .admission_owner_lookups
-                .fetch_add(2, Ordering::Relaxed);
+                .fetch_add(1, Ordering::Relaxed);
             if let Some(existing_id) = state.owners.get(&entry.descriptor.owner) {
                 tracing::warn!(
                     existing = ?state.payloads[existing_id].descriptor,
@@ -507,9 +502,6 @@ impl ArtifactInventory {
                 return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
                     owner: entry.descriptor.owner.clone(),
                 }));
-            }
-            if state.modules.contains_key(&entry.descriptor.owner.module) {
-                return Err(failure("same module occurs under multiple units"));
             }
             for (owner, dependency) in entry
                 .requirements
@@ -569,9 +561,6 @@ impl ArtifactInventory {
                 state.graph.add_edge(source, target, dependency.clone());
             }
             state.owners.insert(entry.descriptor.owner.clone(), id);
-            state
-                .modules
-                .insert(entry.descriptor.owner.module.clone(), id);
             state.payloads.insert(id, entry);
         }
         // Root registration occurs under the same lock as admission, so another
@@ -651,7 +640,6 @@ impl Drop for ViewLease {
             state.reclaimed_nodes += 1;
             let entry = state.payloads.remove(id).expect("owned payload");
             state.owners.remove(&entry.descriptor.owner);
-            state.modules.remove(&entry.descriptor.owner.module);
         }
         state.reclamation_elapsed_ns += started.elapsed().as_nanos() as u64;
         // Parent drops after the lock guard, preserving recursive release.
@@ -987,8 +975,19 @@ mod tests {
         }
     }
     fn entry(name: &str, requirements: &[&str]) -> ArtifactEntry {
+        entry_in_unit(
+            "unit",
+            name,
+            requirements.iter().map(|name| module(name)).collect(),
+        )
+    }
+    fn entry_in_unit(
+        unit: &str,
+        name: &str,
+        requirements: Vec<ExactModuleIdentity>,
+    ) -> ArtifactEntry {
         let owner = CachedHomeOwner {
-            unit: "unit".into(),
+            unit: unit.into(),
             module: name.into(),
             module_version: ModuleVersion([1; 32]),
             skinny_iface_sha256: digest(name.as_bytes()),
@@ -1004,12 +1003,131 @@ mod tests {
             vec![],
             certification,
         );
-        ArtifactEntry::original(
-            [2; 32],
-            product,
-            requirements.iter().map(|name| module(name)).collect(),
-        )
-        .unwrap()
+        ArtifactEntry::original([2; 32], product, requirements).unwrap()
+    }
+
+    #[test]
+    fn same_module_in_distinct_units_admits_together_with_exact_dependencies() {
+        let inventory = ArtifactInventory::default();
+        let first = entry_in_unit("cohort-a", "EpochModule", vec![]);
+        let first_owner = first.descriptor.owner.clone();
+        let first_id = first.descriptor.id;
+        let second = entry_in_unit("cohort-b", "EpochModule", vec![first_owner.clone()]);
+        let second_owner = second.descriptor.owner.clone();
+        let second_id = second.descriptor.id;
+        let view = inventory
+            .admit(&inventory.empty_view(), vec![first, second])
+            .unwrap();
+        assert_eq!(view.descriptors().len(), 2);
+        let entries =
+            view.entries_for_owners([first_owner.clone(), second_owner.clone()].into_iter());
+        assert_eq!(entries[&first_owner].descriptor.id, first_id);
+        assert_eq!(entries[&second_owner].descriptor.id, second_id);
+        assert_eq!(
+            view.dependencies(),
+            vec![(second_id, first_id, ArtifactDependency::Interface)]
+        );
+        let selected = view.select_roots(vec![second_id]).unwrap();
+        assert_eq!(selected.root_entries().len(), 1);
+        assert_eq!(selected.root_entries()[0].descriptor.owner, second_owner);
+        drop(view);
+        assert_eq!(selected.descriptors().len(), 2);
+        assert_eq!(inventory.node_count(), 2);
+        drop(selected);
+        assert_eq!(inventory.node_count(), 0);
+    }
+
+    #[test]
+    fn same_module_in_distinct_units_admits_successively_and_reclaims_independently() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let first_entry = entry_in_unit("cohort-a", "EpochModule", vec![]);
+        let first_owner = first_entry.descriptor.owner.clone();
+        let second_entry = entry_in_unit("cohort-b", "EpochModule", vec![]);
+        let second_owner = second_entry.descriptor.owner.clone();
+        let first = inventory.admit(&empty, vec![first_entry.clone()]).unwrap();
+        let captured = first.clone();
+        let second = inventory.admit(&first, vec![second_entry]).unwrap();
+        assert_eq!(second.descriptors().len(), 2);
+        assert_eq!(
+            first
+                .entries_for_owners([first_owner.clone(), second_owner].into_iter())
+                .keys()
+                .collect::<Vec<_>>(),
+            vec![&first_owner],
+            "retaining a same-named foreign unit does not expose it through an older view"
+        );
+        drop(second);
+        assert_eq!(inventory.node_count(), 1);
+        drop(first);
+        assert_eq!(inventory.node_count(), 1);
+        assert_eq!(captured.descriptors()[0].owner, first_owner);
+        drop(captured);
+        assert_eq!(inventory.node_count(), 0);
+        let readmitted = inventory.admit(&empty, vec![first_entry]).unwrap();
+        assert_eq!(readmitted.descriptors()[0].owner, first_owner);
+        drop(readmitted);
+        assert_eq!(inventory.node_count(), 0);
+    }
+
+    #[test]
+    fn exact_owner_conflicts_are_atomic_in_one_batch_and_later_admission() {
+        for simultaneous in [true, false] {
+            let inventory = ArtifactInventory::default();
+            let empty = inventory.empty_view();
+            let original = entry_in_unit("cohort-a", "EpochModule", vec![]);
+            let owner = original.descriptor.owner.clone();
+            let ArtifactPayload::Original(product) = &original.payload else {
+                panic!("expected an original fixture");
+            };
+            let conflicting = ArtifactEntry::original([3; 32], product.clone(), vec![]).unwrap();
+            let retained = if simultaneous {
+                empty.clone()
+            } else {
+                inventory.admit(&empty, vec![original.clone()]).unwrap()
+            };
+            let mut incoming = vec![conflicting, entry("Unrelated", &[])];
+            if simultaneous {
+                incoming.push(original.clone());
+            }
+            let failure = inventory.admit(&retained, incoming).unwrap_err();
+            assert!(matches!(failure, CompileError::ArtifactInventory(error)
+                if error.failure == ArtifactInventoryFailure::OwnerConflict { owner: owner.clone() }));
+            assert_eq!(inventory.node_count(), usize::from(!simultaneous));
+            if !simultaneous {
+                assert_eq!(retained.entries()[0].as_ref(), &original);
+                let duplicate = inventory.admit(&retained, vec![original]).unwrap();
+                assert_eq!(duplicate.descriptors().len(), 1);
+                drop(duplicate);
+            }
+            drop(retained);
+            assert_eq!(inventory.node_count(), 0);
+        }
+    }
+
+    #[test]
+    fn same_module_in_another_unit_does_not_satisfy_missing_exact_dependency() {
+        let inventory = ArtifactInventory::default();
+        let retained = inventory
+            .admit(
+                &inventory.empty_view(),
+                vec![entry_in_unit("cohort-b", "EpochModule", vec![])],
+            )
+            .unwrap();
+        let missing = ExactModuleIdentity {
+            unit: "cohort-a".into(),
+            module: "EpochModule".into(),
+        };
+        let failure = inventory
+            .admit(
+                &retained,
+                vec![entry_in_unit("main", "Consumer", vec![missing.clone()])],
+            )
+            .unwrap_err();
+        assert!(matches!(failure, CompileError::ArtifactInventory(error)
+            if matches!(&error.failure, ArtifactInventoryFailure::MissingDependency { required, .. }
+                if required == &missing)));
+        assert_eq!(inventory.node_count(), 1);
     }
     #[test]
     fn retained_views_reclaim_after_last_reader_without_copying_payloads() {
@@ -1138,7 +1256,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             inventory.metrics().admission_owner_lookups - after.admission_owner_lookups,
-            3
+            2
         );
         drop(second);
         drop(view);

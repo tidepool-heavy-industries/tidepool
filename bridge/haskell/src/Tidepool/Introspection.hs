@@ -80,6 +80,7 @@ import Tidepool.ExtractRequest
     StructuredNameNamespace (..), StructuredNameScope (..)
   )
 import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.Session (parseSessionModule)
 
 data InfoEntry = InfoEntry
   { infoName :: String,
@@ -507,7 +508,7 @@ runInspection hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
       (Just _, Nothing) -> liftIO (ioError (userError "inspection could not resolve Eff type constructor"))
       _ -> pure ()
     let context = AvailabilityContext hscEnv tcGblEnv effTyCon row
-    snd <$> foldM (inspect context) (0 :: Int, []) requests
+    reverse . snd <$> foldM (inspect context) (0 :: Int, []) requests
   where
     inspect context (typeIndex, results) request = case request of
       InspectTypeOf expression ->
@@ -516,29 +517,29 @@ runInspection hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
               Just identifier -> do
                 availability <- liftIO $ signatureAvailability context (idType identifier)
                 let display = renderType (idType identifier)
-                pure (typeIndex + 1, results ++ [InspectionType expression display availability])
+                pure (typeIndex + 1, InspectionType expression display availability : results)
               Nothing -> missing binder
       InspectNameInfo query -> do
         result <- inspectName context rdrEnv query
-        pure (typeIndex, results ++ [result])
+        pure (typeIndex, result : results)
       InspectScope -> do
         let names = nub [name | gre <- globalRdrEnvElts rdrEnv, let name = greName gre,
               not ("__tidepool_" `isPrefixOf` occNameString (nameOccName name))]
         entries <- browseEntries context True names
-        pure (typeIndex, results ++ [InspectionBrowse "" True
-          (sortOn (\entry -> (infoModule entry, infoName entry, infoKind entry)) entries)])
+        pure (typeIndex, InspectionBrowse "" True
+          (sortOn (\entry -> (infoModule entry, infoName entry, infoKind entry)) entries) : results)
       InspectModule moduleName expanded -> do
         result <- inspectModule context moduleName expanded
-        pure (typeIndex, results ++ [result])
+        pure (typeIndex, result : results)
       InspectTypeSearch query -> do
         result <- inspectTypeSearch context rdrEnv inspectionProbes query
-        pure (typeIndex, results ++ [result])
+        pure (typeIndex, result : results)
       InspectStructuredInfoOf query -> do
         result <- inspectStructured rdrEnv StructuredInfo query
-        pure (typeIndex, results ++ [result])
+        pure (typeIndex, result : results)
       InspectStructuredTypeOf query -> do
         result <- inspectStructured rdrEnv StructuredType query
-        pure (typeIndex, results ++ [result])
+        pure (typeIndex, result : results)
     missing binder = liftIO (ioError (userError ("inspection module did not expose " ++ binder)))
 
 inspectTypeSearch :: (GhcMonad m) => AvailabilityContext -> GlobalRdrEnv -> Map.Map String Id -> String -> m InspectionResult
@@ -571,11 +572,13 @@ inspectStructured rdrEnv mode query = do
 namesInScope :: GhcMonad m => GlobalRdrEnv -> StructuredInspection -> m (Either String ([Name], [Name]))
 namesInScope rdrEnv query = case structuredScope query of
   StructuredCurrentScope -> pure (Right (filter matches currentNames, currentNames))
-  StructuredPublicModule requested -> handleSourceError (\_ -> pure (Left requested)) $ do
-    mdl <- findModule (mkModuleName requested) Nothing
-    resolvedInfo <- getModuleInfo mdl
-    let visible = nub (maybe [] modInfoExports resolvedInfo)
-    pure (Right (filter matches visible, visible))
+  StructuredPublicModule requested
+    | isJust (parseSessionModule requested) -> pure (Left requested)
+    | otherwise -> handleSourceError (\_ -> pure (Left requested)) $ do
+        mdl <- findModule (mkModuleName requested) Nothing
+        resolvedInfo <- getModuleInfo mdl
+        let visible = nub (maybe [] modInfoExports resolvedInfo)
+        pure (Right (filter matches visible, visible))
   where
     currentNames = nub (map greName (globalRdrEnvElts rdrEnv))
     matches name = matchesNameQuery (structuredName query) name

@@ -7,6 +7,9 @@ module Tidepool.DependencyEvidence
   , DependencyResolution(..)
   , DependencyModule(..)
   , DependencyImport(..)
+  , DependencyQualifier(..)
+  , renderDependencyQualifier
+  , parseDependencyQualifier
   , ProductAvailability(..)
   , sourceEvidence
   , sourceEvidenceWithFingerprint
@@ -17,7 +20,7 @@ module Tidepool.DependencyEvidence
 
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
-import Data.List (intercalate, nub, sort)
+import Data.List (intercalate, nub, sort, stripPrefix)
 import Control.Monad (forM)
 import Numeric (showHex)
 import GHC.Fingerprint.Type (Fingerprint)
@@ -54,8 +57,29 @@ data ProductAvailability
   | ProductProjectionRejected
   deriving (Eq, Show)
 
+-- Constructor order preserves the ordering of the existing wire spellings.
+data DependencyQualifier
+  = DependencyUnqualified
+  | DependencyOtherUnit String
+  | DependencyThisUnit String
+  deriving (Eq, Ord, Show)
+
+-- | Encode only at a dependency-evidence or exact-compilation wire boundary.
+renderDependencyQualifier :: DependencyQualifier -> String
+renderDependencyQualifier DependencyUnqualified = "none"
+renderDependencyQualifier (DependencyThisUnit unit) = "this:" ++ unit
+renderDependencyQualifier (DependencyOtherUnit unit) = "other:" ++ unit
+
+-- | Validate the versioned wire qualifier before admitting typed evidence.
+parseDependencyQualifier :: String -> Maybe DependencyQualifier
+parseDependencyQualifier "none" = Just DependencyUnqualified
+parseDependencyQualifier value
+  | Just unit <- stripPrefix "this:" value, not (null unit) = Just (DependencyThisUnit unit)
+  | Just unit <- stripPrefix "other:" value, not (null unit) = Just (DependencyOtherUnit unit)
+  | otherwise = Nothing
+
 data DependencyImport = DependencyImport
-  { dependencyImportQualifier :: String
+  { dependencyImportQualifier :: DependencyQualifier
   , dependencyImportName :: String
   , dependencyImportBoot :: Bool
   , dependencyImportSelected :: Maybe FilePath
@@ -67,7 +91,7 @@ data DependencySource = DependencySource
   }
 
 data DependencyResolution = DependencyResolution
-  { dependencyResolutionQualifier :: String
+  { dependencyResolutionQualifier :: DependencyQualifier
   , dependencyResolutionModule :: String
   , dependencyResolutionBoot :: Bool
   , dependencyResolutionSelected :: Maybe FilePath
@@ -138,7 +162,7 @@ renderDependencyEvidence evidence =
       "{\"path\":" ++ jsonString (dependencySourcePath item)
         ++ ",\"sha256\":" ++ jsonString (dependencySourceSha256 item) ++ "}"
     resolution item =
-      "{\"qualifier\":" ++ jsonString (dependencyResolutionQualifier item)
+      "{\"qualifier\":" ++ jsonString (renderDependencyQualifier (dependencyResolutionQualifier item))
         ++ ",\"module\":" ++ jsonString (dependencyResolutionModule item)
         ++ ",\"boot\":" ++ bool (dependencyResolutionBoot item)
         ++ ",\"selected\":" ++ maybe "null" jsonString (dependencyResolutionSelected item)
@@ -152,7 +176,7 @@ renderDependencyEvidence evidence =
         ++ ",\"imports\":[" ++ comma (map importNode (dependencyModuleImports item)) ++ "]"
         ++ ",\"product\":" ++ jsonString (productAvailability (dependencyModuleProduct item)) ++ "}"
     importNode item =
-      "{\"qualifier\":" ++ jsonString (dependencyImportQualifier item)
+      "{\"qualifier\":" ++ jsonString (renderDependencyQualifier (dependencyImportQualifier item))
         ++ ",\"module\":" ++ jsonString (dependencyImportName item)
         ++ ",\"boot\":" ++ bool (dependencyImportBoot item)
         ++ ",\"selected\":" ++ maybe "null" jsonString (dependencyImportSelected item) ++ "}"

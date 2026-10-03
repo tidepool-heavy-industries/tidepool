@@ -127,6 +127,7 @@ import Control.Exception
   ( finally, bracket, try, catch, throwIO, IOException )
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes)
 import Data.List (find, isPrefixOf, isInfixOf, nub, nubBy, sort, sortOn, intercalate)
+import Data.Containers.ListUtils (nubOrd)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
 import Numeric (showHex)
 import System.Environment (lookupEnv)
@@ -150,6 +151,7 @@ import Tidepool.CheckedPrefixImports
 import Tidepool.FamilyConsistency (validateCompilationFamilies, validateEnvironmentFamilies)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
+import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 import Tidepool.Introspection (normalizeLookupWildcards)
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), SessionScope(..)
@@ -175,7 +177,7 @@ import Tidepool.RetainedUnfoldings
 import Tidepool.TurnSource (extractModuleName)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..)
-  , DependencyModule(..), DependencyImport(..), ProductAvailability(..)
+  , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , sourceEvidenceWithFingerprint )
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), freshExactState, hydrateExactScope
@@ -1212,13 +1214,9 @@ classifyQuasiQuoteOrigins hscEnv parsed
   where
     hsMod = unLoc (pm_parsed_source parsed)
     imports = hsmodImports hsMod
-    occurrences = everything (++) (mkQ [] quasiQuoteRdrName) hsMod
+    occurrences = quasiQuoteOccurrences (ms_hspp_opts (pm_mod_summary parsed)) (pm_parsed_source parsed)
     isAllowlisted (Just origin) = Set.member origin pureQuasiQuoters
     isAllowlisted Nothing = False
-
-quasiQuoteRdrName :: HsUntypedSplice GhcPs -> [RdrName]
-quasiQuoteRdrName (HsQuasiQuote _ name _) = [name]
-quasiQuoteRdrName _ = []
 
 -- GHC enables dependency codegen from the QuasiQuotes extension alone. The
 -- harness enables that syntax for every input, including inputs without a
@@ -1251,8 +1249,7 @@ elideUnusedQuasiQuoteCodegen timing graph
     unsupported summary =
       hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary)
         || xopt LangExt.StaticPointers (ms_hspp_opts summary)
-    occurrences = everything (++) (mkQ [] quasiQuoteRdrName)
-      . unLoc . pm_parsed_source
+    occurrences parsed = quasiQuoteOccurrences (ms_hspp_opts (pm_mod_summary parsed)) (pm_parsed_source parsed)
 
 -- | Diagnostic only (TIDEPOOL_MEMO_TRACE): honestly report which
 -- quasiquoters, if any, a module's last fresh compile actually saw --
@@ -2821,7 +2818,10 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
                 , key `Set.member` direct, key `Set.member` originalOwners]
           exactImportKey candidate qualifier name =
             let key = (candidateUnit candidate,name)
-                local = qualifier == "none" || qualifier == "this:" ++ candidateUnit candidate
+                local = case qualifier of
+                  DependencyUnqualified -> True
+                  DependencyThisUnit unit -> unit == candidateUnit candidate
+                  DependencyOtherUnit _ -> False
             in if local && key `Set.member` originalOwners then Just key else Nothing
           -- A historical source path can become pathless only after the
           -- recipe resolves the complete dependency tuple to this original.
@@ -2835,7 +2835,7 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
                 pure (qualifier,name,False,Nothing)
           candidateImportsMatch candidate node =
             let historical = mapM (\imported -> normalizeImport candidate
-                  (qualifierText (candidateImportQualifier imported))
+                  (candidateDependencyQualifier (candidateImportQualifier imported))
                   (candidateImportModule imported) (candidateImportBoot imported)
                   (candidateImportSelected imported)) (candidateImports candidate)
                 currentImports = mapM (\imported -> normalizeImport candidate
@@ -2870,9 +2870,9 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
               && sum (map (BS.length . executionGraphBytes) combinedGraphs) <= 4 * 1024 * 1024
           candidateExecutionMatches candidate = graphInventoryMatches
             && either (const False) (const True) (candidateProof candidate)
-          qualifierText CandidateUnqualified = "none"
-          qualifierText (CandidateThisUnit unit) = "this:" ++ unit
-          qualifierText (CandidateOtherUnit unit) = "other:" ++ unit
+          candidateDependencyQualifier CandidateUnqualified = DependencyUnqualified
+          candidateDependencyQualifier (CandidateThisUnit unit) = DependencyThisUnit unit
+          candidateDependencyQualifier (CandidateOtherUnit unit) = DependencyOtherUnit unit
       preflight <- fmap catMaybes $ forM candidates $ \candidate ->
         case (Map.lookup (mkModuleName (candidateModule candidate)) summaries,
               Map.lookup (candidateModule candidate) currentModules) of
@@ -2913,11 +2913,8 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
                         recorded <- and <$> mapM (fmap (either (const False) (const True))
                           . validatePackageImportRoot env) (packageInterfaces roots)
                         selectedImports <- forM (ms_textual_imps summary ++ ms_srcimps summary) $ \(qualifier, name) -> do
-                          let qualifierKey = case qualifier of
-                                NoPkgQual -> "none"
-                                ThisPkg unit -> "this:" ++ unitString unit
-                                OtherPkg unit -> "other:" ++ unitString unit
-                              exact = exactImportKey candidate qualifierKey (moduleNameString (unLoc name))
+                          let exact = exactImportKey candidate (dependencyQualifier qualifier)
+                                (moduleNameString (unLoc name))
                           resolved <- case exact >>= (`Map.lookup` provenOriginals candidate) of
                             Just _ -> pure Nothing
                             Nothing -> Just <$> findImportedModule env (unLoc name) qualifier
@@ -3067,6 +3064,11 @@ revalidateAcceptedCandidates candidates = and <$> forM candidates (\candidate ->
     :: IO (Either IOException Bool)
   pure (either (const False) id readBack))
 
+dependencyQualifier :: PkgQual -> DependencyQualifier
+dependencyQualifier NoPkgQual = DependencyUnqualified
+dependencyQualifier (ThisPkg unit) = DependencyThisUnit (unitString unit)
+dependencyQualifier (OtherPkg unit) = DependencyOtherUnit (unitString unit)
+
 -- | Capture import-resolution witnesses from the exact module graph. Package
 -- imports have no selected home path; their ordered absent home candidates
 -- remain evidence because creating one later would introduce shadowing.
@@ -3075,7 +3077,7 @@ revalidateAcceptedCandidates candidates = and <$> forM candidates (\candidate ->
 -- import, including negative candidates for newly discovered dependencies.
 sourceEvidenceGraph
   :: Maybe ExactScope -> ModuleGraph
-  -> (ModuleGraph, [((String, String, Bool), [(String, String, Bool, String)])])
+  -> (ModuleGraph, [((String, String, Bool), [(DependencyQualifier, String, Bool, String)])])
 sourceEvidenceGraph Nothing graph = (graph, [])
 sourceEvidenceGraph (Just scope) graph =
   (mkModuleGraph (map strip nodes), map importsFor summaries)
@@ -3090,14 +3092,11 @@ sourceEvidenceGraph (Just scope) graph =
         NoPkgQual -> Just unit
         ThisPkg requested | unitString requested == unit -> Just unit
         _ -> Nothing
-    qualifierKey NoPkgQual = "none"
-    qualifierKey (ThisPkg unit) = "this:" ++ unitString unit
-    qualifierKey (OtherPkg unit) = "other:" ++ unitString unit
     importsFor summary =
       ((unitString (moduleUnit (ms_mod summary)), moduleNameString (ms_mod_name summary),
         ms_hsc_src summary == HsBootFile),
        sort . nub $
-         [(qualifierKey qualifier, moduleNameString (unLoc imported), boot, unit)
+         [(dependencyQualifier qualifier, moduleNameString (unLoc imported), boot, unit)
          | (boot, edges) <- [(False, ms_textual_imps summary), (True, ms_srcimps summary)]
          , (qualifier, imported) <- edges
          , Just unit <- [selected qualifier imported]])
@@ -3113,9 +3112,6 @@ dependencyEvidenceFor
 dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
   let graphSummaries = [summary | ModuleNode _ summary <- mgModSummaries' graph]
       factsByName = Map.fromList moduleFacts
-      qualifierKey NoPkgQual = "none"
-      qualifierKey (ThisPkg unit) = "this:" ++ unitString unit
-      qualifierKey (OtherPkg unit) = "other:" ++ unitString unit
   summarySources <- forM graphSummaries $ \summary ->
     case ml_hs_file (ms_location summary) of
       Nothing -> pure Nothing
@@ -3137,31 +3133,37 @@ dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
         | summary <- graphSummaries
         , (qualifier, imported) <- ms_srcimps summary
         ]
-      roots = nub (concatMap (importPaths . ms_hspp_opts) graphSummaries)
+      roots = nubOrd (concatMap (importPaths . ms_hspp_opts) graphSummaries)
       moduleRelative name =
         map (\c -> if c == '.' then pathSeparator else c) (moduleNameString name)
-      rawCandidates name isBoot =
-        [ root </> moduleRelative name ++ extension
-        | root <- roots
+      homeLookup (OtherPkg _) = False
+      homeLookup _ = True
+  -- Root normalization belongs to this evidence capture. The worker holds its
+  -- request's working directory until compilation returns; filesystem absence
+  -- and selected-source checks still run freshly at their admission boundaries.
+  absoluteRoots <- if any (\(qualifier, _, _) -> homeLookup qualifier) allImports
+    then mapM (fmap normalise . makeAbsolute) roots
+    else pure []
+  let candidatesFor name isBoot =
+        [ normalise (root </> moduleRelative name ++ extension)
+        | root <- absoluteRoots
         , extension <- if isBoot then [".hs-boot", ".lhs-boot"]
             else [".hs", ".lhs", ".hsig", ".lhsig"]
         ]
   absoluteCandidates <- forM allImports $ \(qualifier, imported, isBoot) -> do
-    candidates <- case qualifier of
-      OtherPkg _ -> pure []
-      _ -> mapM (fmap normalise . makeAbsolute) (rawCandidates imported isBoot)
-    let chosen = homeSelection qualifier imported isBoot
+    let candidates = if homeLookup qualifier then candidatesFor imported isBoot else []
+        chosen = homeSelection qualifier imported isBoot
         throughSelected = case chosen of
           Nothing -> candidates
           Just path -> case break (== path) candidates of
             (higher, _ : _) -> higher ++ [path]
             _ -> candidates ++ [path]
     pure DependencyResolution
-      { dependencyResolutionQualifier = qualifierKey qualifier
+      { dependencyResolutionQualifier = dependencyQualifier qualifier
       , dependencyResolutionModule = moduleNameString imported
       , dependencyResolutionBoot = isBoot
       , dependencyResolutionSelected = chosen
-      , dependencyResolutionCandidates = nub throughSelected
+      , dependencyResolutionCandidates = nubOrd throughSelected
       }
   moduleNodes <- forM (zip graphSummaries summarySources) $ \(summary, sourcePath) -> do
     let name = ms_mod_name summary
@@ -3175,7 +3177,7 @@ dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
       , dependencyModuleBoot = isBoot
       , dependencyModuleSource = maybe "" id sourcePath
       , dependencyModuleImports =
-          [ DependencyImport (qualifierKey qualifier) (moduleNameString imported) boot
+          [ DependencyImport (dependencyQualifier qualifier) (moduleNameString imported) boot
               (homeSelection qualifier imported boot)
           | (qualifier, imported, boot) <- directImports
           ]
@@ -3199,7 +3201,9 @@ dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
       complete = sourcesComplete && not (any (moduleFactHasDependentFiles . snd) moduleFacts)
         && not hasUntrackedExecution
         && all (\resolution -> not (null (dependencyResolutionCandidates resolution))
-              || "other:" `isPrefixOf` dependencyResolutionQualifier resolution)
+              || case dependencyResolutionQualifier resolution of
+                  DependencyOtherUnit _ -> True
+                  _ -> False)
              absoluteCandidates
       packages = sort
         [ moduleNameString imported
@@ -3725,7 +3729,7 @@ selectCurrentSourceOriginals admitted recipe sourceGraph = do
               [(dependencyImportQualifier edge,dependencyImportName edge,dependencyImportBoot edge)
               | node <- selectedModules, edge <- dependencyModuleImports node]
               `Set.union` Set.fromList
-                [(qualifierKey qualifier,moduleNameString (unLoc name),False)
+                [(dependencyQualifier qualifier,moduleNameString (unLoc name),False)
                 | (summary,imported@(qualifier,name),key) <- hiddenImports
                 , key `Set.member` selectedKeys
                 , not (permitsGeneratedScaffoldImport scaffold summary key imported)]
@@ -3753,10 +3757,6 @@ selectCurrentSourceOriginals admitted recipe sourceGraph = do
               [(executionNodeIdentity node,executionGraphSha256 (executionNodeGraph node)) | node <- nodes] evidence
         setSession initial
         pure (Just selected)
-  where
-    qualifierKey NoPkgQual = "none"
-    qualifierKey (ThisPkg unit) = "this:" ++ unitString unit
-    qualifierKey (OtherPkg unit) = "other:" ++ unitString unit
 
 data ValidatedOriginalSources = ValidatedOriginalSources
   { validatedOriginalGraph :: ModuleGraph
@@ -3833,7 +3833,7 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
         && fingerprint == ms_hs_hash summary) $ liftIO (throwIO (ExecutionSourceChanged key))
     originalQuotes <- if xopt LangExt.QuasiQuotes (ms_hspp_opts summary)
       then do parsedOriginal <- parseModule summary
-              pure (everything (++) (mkQ [] quasiQuoteRdrName) (unLoc (pm_parsed_source parsedOriginal)))
+              pure (quasiQuoteOccurrences (ms_hspp_opts summary) (pm_parsed_source parsedOriginal))
       else pure []
     unless (not (hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary))
         && not (gopt Opt_Pp (ms_hspp_opts summary))
@@ -3863,7 +3863,10 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
         (Map.lookup importedKey selected)
       let path' = dependencyModuleSource (executionNodeModule child)
       unless (not (dependencyImportBoot imported)
-          && (dependencyImportQualifier imported == "none" || dependencyImportQualifier imported == "this:" ++ fst key)
+          && (case dependencyImportQualifier imported of
+                DependencyUnqualified -> True
+                DependencyThisUnit unit -> unit == fst key
+                DependencyOtherUnit _ -> False)
           && dependencyImportSelected imported == Just path') $
         liftIO (throwIO (ExecutionSourceResolutionChanged key))
       pure (tuple imported (Just path'))
@@ -3887,7 +3890,7 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
         originalNegative resolution
           | (fst key,dependencyResolutionModule resolution) `Set.member` originalNames = []
           | otherwise = negative resolution
-    let negativePaths = nub (concatMap negative currentResolutions ++ concatMap originalNegative originalResolutions)
+    let negativePaths = nubOrd (concatMap negative currentResolutions ++ concatMap originalNegative originalResolutions)
     present <- liftIO (filterM doesFileExist negativePaths)
     unless (null present) $ liftIO (throwIO (ExecutionSourceSearchChanged key present))
     let proof = [(artifact,path',sha) | (artifact,path',sha) <- scopeInterfaces admitted
@@ -3926,7 +3929,7 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
       OutOfDateItem _ _ -> liftIO (throwIO (ExecutionSourceChanged key))
   setSession env {hsc_targets=hsc_targets initial}
   pure (ValidatedOriginalSources executionGraph extraTargets current
-    (nub (concatMap fst observations)) (Set.toAscList (Set.fromList (concatMap snd observations))))
+    (nubOrd (concatMap fst observations)) (Set.toAscList (Set.fromList (concatMap snd observations))))
 
 planExactExecutionLoad
   :: ExactScope -> [(ExactIfaceArtifact, ModIface)] -> [(ExactIfaceArtifact, ModIface)] -> ModuleName
@@ -3937,8 +3940,7 @@ planExactExecutionLoad admitted interfaces checkedInterfaces targetName sourceGr
     , xopt LangExt.QuasiQuotes (ms_hspp_opts summary)]
   let quoted = [(parsedModule, occurrences)
         | parsedModule <- parsed
-        , let occurrences = everything (++) (mkQ [] quasiQuoteRdrName)
-                (unLoc (pm_parsed_source parsedModule))
+        , let occurrences = quasiQuoteOccurrences (ms_hspp_opts (pm_mod_summary parsedModule)) (pm_parsed_source parsedModule)
         , not (null occurrences)]
       home = homeUnitId (hsc_home_unit initial)
       ownerKey owner = (unitString (moduleUnit owner), moduleNameString (moduleName owner))
@@ -4272,7 +4274,7 @@ sessionVariant purpose scope path = do
                   hsc0 <- getSession
                   case selectedExact of
                     Just admitted | isJust (scopeCheckedCell admitted) || isJust (scopeCheckedItem admitted)
-                        || isJust (scopeCheckedDisplay admitted) -> do
+                        || isJust (scopeCheckedDisplay admitted) || isJust (scopeCheckedInspection admitted) -> do
                       let wanted = map (moduleNameString . renderSessionModule) needed
                           artifacts = [value | value <- scopeValueInterfaces admitted, exactModule value `elem` wanted]
                       when (length artifacts /= length needed) $ liftIO $ ioError $ userError

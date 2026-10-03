@@ -49,7 +49,7 @@ import Tidepool.PackageWitness
 import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyModule(..), DependencyImport(..), DependencyResolution(..), renderDependencyEvidence
-  , revalidateDependencyEvidence )
+  , DependencyQualifier, renderDependencyQualifier, revalidateDependencyEvidence )
 
 data ExactScope = ExactScope
   { scopeManifestPath :: FilePath
@@ -64,6 +64,7 @@ data ExactScope = ExactScope
   , scopeCheckedCell :: Maybe CheckedCellAdmission
   , scopeCheckedItem :: Maybe CheckedItemAdmission
   , scopeCheckedDisplay :: Maybe CheckedDisplayAdmission
+  , scopeCheckedInspection :: Maybe [ExactIfaceArtifact]
   , scopeIncludePaths :: Maybe [FilePath]
   -- Request-local source proof roots are revalidated by subsequent stages;
   -- they are never serialized as baseline lexical authority.
@@ -311,7 +312,7 @@ data ExactCompilation = ExactCompilation
   { compilationScope :: ExactScope
   , compilationTransaction :: Word64
   , compilationSource :: FilePath
-  , compilationImports :: [((String, String, Bool), [(String, String, Bool, String)])]
+  , compilationImports :: [((String, String, Bool), [(DependencyQualifier, String, Bool, String)])]
   , compilationSourceSelection :: Maybe SourceSelectedOriginals
   } deriving (Eq, Show)
 
@@ -320,6 +321,7 @@ scopeValueInterfaces scope =
   maybe [] checkedValueInterfaces (scopeCheckedCell scope)
     ++ maybe [] itemValueInterfaces (scopeCheckedItem scope)
     ++ maybe [] displayValueInterfaces (scopeCheckedDisplay scope)
+    ++ maybe [] id (scopeCheckedInspection scope)
 
 -- Scope v6 separates the bounded metadata envelope from the independently
 -- bounded original graph bytes. The request hash seals each path and digest.
@@ -440,7 +442,7 @@ writeExactCompilation compilation evidence = do
       encodeArray values = E.encodeListLen (fromIntegral (length values)) <> mconcat values
       text = E.encodeString . T.pack
       importRow (qualifier, name, boot, unit) = encodeArray
-        [text qualifier, text name, E.encodeBool boot, text unit]
+        [text (renderDependencyQualifier qualifier), text name, E.encodeBool boot, text unit]
       moduleRow ((unit, name, boot), edges) = encodeArray
         [text unit, text name, E.encodeBool boot, encodeArray (map importRow edges)]
       receipt = encodeArray
@@ -542,14 +544,22 @@ decodeScope = do
     pure (graphs, references)
     else pure ([], [])
   nullPurpose <- if version == "6" then (== TypeNull) <$> peekTokenType else pure False
-  (checked, checkedItem, checkedDisplay, includes) <- if version == "2" || nullPurpose
+  (checked, checkedItem, checkedDisplay, inspectionValues, includes) <- if version == "2" || nullPurpose
     then do
       when nullPurpose decodeNull
-      pure (Nothing,Nothing,Nothing,Nothing)
+      pure (Nothing,Nothing,Nothing,Nothing,Nothing)
     else do
     authCount <- decodeListLen
     purpose <- string
     case purpose of
+      "inspection1" -> do
+        unless (authCount == 4) (fail "invalid inspection admission")
+        injected <- bounded 4096 nonempty
+        values <- valueInterfaces
+        unique "inspection injected modules" injected
+        validateInterfaces injected values
+        paths <- includePaths
+        pure (Nothing,Nothing,Nothing,Just values,Just paths)
       "cell-check2" -> do
         unless (authCount == 9) (fail "invalid cell-check admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
@@ -559,7 +569,7 @@ decodeScope = do
         unique "checked injected modules" (checkedInjectedModules admission)
         unique "checked reserved modules" (checkedReservedModules admission)
         paths <- includePaths
-        pure (Just admission,Nothing,Nothing,Just paths)
+        pure (Just admission,Nothing,Nothing,Nothing,Just paths)
       "cell-program1" -> do
         unless (authCount == 14) (fail "invalid compiled cell admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
@@ -577,7 +587,7 @@ decodeScope = do
                 _ -> fail "invalid compiled cell reservation")))
         validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         paths <- includePaths
-        pure (Just admission,Nothing,Nothing,Just paths)
+        pure (Just admission,Nothing,Nothing,Nothing,Just paths)
       tag | tag == "checked-item2" || tag == "host-activation-input1" -> do
         unless (authCount == 19) (fail "invalid checked-item admission")
         admissionDigest <- digestField
@@ -631,7 +641,7 @@ decodeScope = do
             (fail "invalid host activation input admission")
         paths <- includePaths
         pure (Nothing, Just (CheckedItemAdmission role admissionDigest receiptDigest index sourceDigest kind binders
-          templates injected signatures liftPlan presentation generation prefix valueImports observation planned values valueInputs), Nothing, Just paths)
+          templates injected signatures liftPlan presentation generation prefix valueImports observation planned values valueInputs), Nothing, Nothing, Just paths)
       "checked-display2" -> do
         unless (authCount == 18) (fail "invalid checked-display admission")
         admission <- CheckedDisplayAdmission <$> digestField <*> digestField <*> decodeWord64
@@ -651,10 +661,10 @@ decodeScope = do
             && all ((`elem` displayInjectedModules admission) . fst) (displayValueImports admission))
           (fail "invalid display presentation or imported owner")
         paths <- includePaths
-        pure (Nothing,Nothing,Just admission,Just paths)
+        pure (Nothing,Nothing,Just admission,Nothing,Just paths)
       _ -> fail "unsupported exact compile purpose"
   pure (ExactScope "" "" producer semantic interfaces lexical products [] executionOwners
-    checked checkedItem checkedDisplay includes Set.empty, descriptors)
+    checked checkedItem checkedDisplay inspectionValues includes Set.empty, descriptors)
   where
     includePaths = bounded 4096 $ do
       path <- absolute

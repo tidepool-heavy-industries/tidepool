@@ -450,7 +450,21 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             workspace,
             recipes,
             recipe,
-        } => tidepool::exomonad::check_recipe(workspace, recipes, recipe).await,
+        } => {
+            if std::env::var("RUST_LOG").is_ok_and(|filter| !filter.is_empty()) {
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_writer(std::io::stderr)
+                    .with_env_filter(tidepool_codegen::debug::tracing_env_filter("off"))
+                    .try_init()
+                    .map_err(|error| {
+                        std::io::Error::other(format!(
+                            "could not initialize Exomonad check tracing: {error}"
+                        ))
+                    })?;
+            }
+            tidepool::exomonad::check_recipe(workspace, recipes, recipe).await
+        }
         Command::Init {
             workspace,
             session,

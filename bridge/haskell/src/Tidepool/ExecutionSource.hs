@@ -20,7 +20,7 @@ import Control.Exception (Exception)
 import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
-import Data.List (nub, sort)
+import Data.List (sort)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as Map
@@ -147,14 +147,14 @@ issueExecutionSourceRecipe recipe
       <> encodeBool (dependencySelectionComplete evidence)
       <> list (\source -> encodeListLen 2 <> text' (dependencySourcePath source)
           <> text' (dependencySourceSha256 source)) (dependencySources evidence)
-      <> list (\row -> encodeListLen 5 <> text' (dependencyResolutionQualifier row)
+      <> list (\row -> encodeListLen 5 <> text' (renderDependencyQualifier (dependencyResolutionQualifier row))
           <> text' (dependencyResolutionModule row) <> encodeBool (dependencyResolutionBoot row)
           <> optional' text' (dependencyResolutionSelected row)
           <> list text' (dependencyResolutionCandidates row)) (dependencyResolutions evidence)
       <> list (\node -> encodeListLen 6 <> text' (dependencyModuleUnit node)
           <> text' (dependencyModuleName node) <> encodeBool (dependencyModuleBoot node)
           <> text' (dependencyModuleSource node)
-          <> list (\edge -> encodeListLen 4 <> text' (dependencyImportQualifier edge)
+          <> list (\edge -> encodeListLen 4 <> text' (renderDependencyQualifier (dependencyImportQualifier edge))
               <> text' (dependencyImportName edge) <> encodeBool (dependencyImportBoot edge)
               <> optional' text' (dependencyImportSelected edge)) (dependencyModuleImports node)
           <> text' (productKind (dependencyModuleProduct node))) (dependencyModules evidence)
@@ -189,7 +189,7 @@ data ExecutionSourceFailure
   | ExecutionSourceChanged (String, String)
   | ExecutionSourceResolutionChanged (String, String)
   | ExecutionSourceImportResolutionChanged (String, String)
-      [(String,String,Bool,Maybe FilePath)] [(String,String,Bool,Maybe FilePath)]
+      [(DependencyQualifier,String,Bool,Maybe FilePath)] [(DependencyQualifier,String,Bool,Maybe FilePath)]
   | ExecutionSourceSearchChanged (String, String) [FilePath]
   | ExecutionSourcePackageChanged (String, String)
   | ExecutionSourceLinkableMissing (String, String)
@@ -512,20 +512,23 @@ bounded limit item = do
   when (count > limit) (fail "original execution inventory exceeds bound")
   replicateM count item
 
-unique :: Eq a => String -> [a] -> Decoder s ()
-unique label values = unless (length (nub values) == length values) (fail ("duplicate " ++ label))
+unique :: Ord a => String -> [a] -> Decoder s ()
+unique label values = unless (Set.size (Set.fromList values) == length values) (fail ("duplicate " ++ label))
 
 text :: Decoder s String
-text = do
+text = T.unpack <$> decodedText
+
+decodedText :: Decoder s T.Text
+decodedText = do
   value <- decodeString
   when (T.length value > 4 * 1024 * 1024) (fail "original execution text exceeds bound")
-  pure (T.unpack value)
+  pure value
 
 nonempty :: Decoder s String
 nonempty = do
-  value <- text
-  unless (not (null value) && length value <= 65536) (fail "invalid original execution owner")
-  pure value
+  value <- decodedText
+  unless (not (T.null value) && T.length value <= 65536) (fail "invalid original execution owner")
+  pure (T.unpack value)
 
 absolute :: Decoder s FilePath
 absolute = do
@@ -539,13 +542,10 @@ sourcePath = do
   unless (isAbsolute value || value == "@generated-source") (fail "relative original execution source")
   pure value
 
-qualifier :: Decoder s String
+qualifier :: Decoder s DependencyQualifier
 qualifier = do
   value <- nonempty
-  unless (value == "none" || any (\prefix -> take (length prefix) value == prefix
-      && length value > length prefix) ["this:","other:"])
-    (fail "invalid original execution import qualifier")
-  pure value
+  maybe (fail "invalid original execution import qualifier") pure (parseDependencyQualifier value)
 
 digestField :: Decoder s String
 digestField = do

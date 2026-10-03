@@ -33,7 +33,8 @@ import Tidepool.Effects
 here :: Text -> NameQuery
 here = NameQuery CurrentScope AnyName
 
--- | Query a name through an explicit module's public exports.
+-- | Query a name through an explicit module's public exports. Generated session
+-- modules are private; query admitted declarations and values with 'here'.
 inModule :: Text -> Text -> NameQuery
 inModule moduleName = NameQuery (PublicModule moduleName) AnyName
 

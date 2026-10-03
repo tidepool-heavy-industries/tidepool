@@ -8,7 +8,7 @@ import qualified Data.Map.Strict as Map
 import Control.Exception (SomeException, bracket, finally, fromException, throwIO, try)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef)
-import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, tails)
+import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, sort, tails)
 import Data.Char (isDigit)
 import Data.Data (Data, Typeable, cast, gmapQ)
 import qualified Data.ByteString as BS
@@ -49,6 +49,11 @@ import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..), SessionScope(..)
   , mkThinSessionIface, writeSessionIface, injectSessionIface, renderSessionModule )
 import Tidepool.PreparedStg (PreparedModule(..))
+import HarnessSourceTest (harnessSourceChecks)
+import InspectionRunnerTest (inspectionRunnerChecks)
+import WorkerDiagnosticsTest (runWorkerDiagnosticsTests)
+import QuasiQuoteOccurrencesTest (quasiQuoteOccurrenceChecks, quasiQuoteOccurrenceChecksWith)
+import QuasiQuoteOccurrencesBenchmark (quasiQuoteOccurrenceBenchmark)
 import CheckedAdmissionTest (checkedAdmissionChecks)
 import CellProgramStateTest (cellProgramStateChecks)
 import UnreachableCompileTimeTest (unreachableCompileTimeCompilation)
@@ -65,6 +70,9 @@ import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 
 main :: IO ()
 main = getArgs >>= \case
+  "--quasiquote-benchmark" : iterations : files -> quasiQuoteOccurrenceBenchmark iterations files
+  ["--quasiquote-occurrences"] -> quasiQuoteOccurrenceChecks
+  ["--untracked-compile-time"] -> untrackedCompileTimeCompilation >> putStrLn "untracked compile-time: origin and cold/warm checks passed"
   ["--compiler-boundaries"] -> compilerBoundaryChecks
   ["--checked-admission"] -> checkedAdmissionChecks
   ["--cell-accumulation"] -> cellProgramStateChecks
@@ -75,6 +83,7 @@ main = getArgs >>= \case
   ["--function-value-iface"] -> functionValueInterfaceCompilation >> putStrLn "function value interface: 1 passed"
   ["--session-fixities"] -> sessionFixitiesCompilation >> putStrLn "session fixities: 1 passed"
   ["--unreachable-compile-time"] -> unreachableCompileTimeCompilation >> putStrLn "unreachable compile-time: 1 passed"
+  ["--metadata-inspection"] -> mixedInspectionCompilation >> putStrLn "metadata inspection: mixed query order and probe ordinals passed"
   ["--checked-load-boundary"] -> checkedLoadBoundaryCompilation >> putStrLn "checked load boundary: 4 passed"
   ["--structural-display", effectsRoot] -> structuralDisplayCompilation OrdinaryDisplayTest effectsRoot >> putStrLn "structural display: 1 passed"
   ["--structural-display-exact", effectsRoot] -> structuralDisplayCompilation ExactDisplayTest effectsRoot >> putStrLn "exact structural display: 1 passed"
@@ -83,8 +92,12 @@ main = getArgs >>= \case
 compilerBoundaryChecks :: IO ()
 compilerBoundaryChecks = do
   requestValidationChecks
+  dependencyQualifierChecks
   cellProgramStateChecks
   checkedAdmissionChecks
+  harnessSourceChecks
+  inspectionRunnerChecks
+  runWorkerDiagnosticsTests
 
 runAllTests :: IO ()
 runAllTests = do
@@ -98,6 +111,7 @@ runAllTests = do
           "<cell-test>"
     (lexicalFlags, _, _) <- parseDynamicFilePragma flags lexicalOptions
     liftIO $ do
+      quasiQuoteOccurrenceChecksWith flags
       lexicalIslands lexicalFlags
       commentsPragmasAndLayout lexicalFlags
       declarationsBecomeOneCellItem flags
@@ -131,6 +145,39 @@ requestValidationChecks = do
   requestShapeValidation
   requestFieldOrdering
   putStrLn "request validation: 4 groups passed (certification, source-check round-trip, mode shapes, field ordering)"
+
+dependencyQualifierChecks :: IO ()
+dependencyQualifierChecks = do
+  let spellings =
+        [ (DependencyUnqualified, "none")
+        , (DependencyOtherUnit "package-owner", "other:package-owner")
+        , (DependencyThisUnit "main", "this:main")
+        , (DependencyThisUnit "other:main", "this:other:main")
+        ]
+  forM_ spellings $ \(qualifier, wire) -> do
+    assertEqual "dependency qualifier wire spelling" wire (renderDependencyQualifier qualifier)
+    assertEqual "dependency qualifier admission" (Just qualifier) (parseDependencyQualifier wire)
+  assertEqual "dependency qualifier order preserves canonical wire rows"
+    (sort (map snd spellings))
+    (map renderDependencyQualifier (sort (map fst spellings)))
+  forM_ ["", "none:", "this:", "other:", "main", "OTHER:main"] $ \wire ->
+    assertEqual "invalid dependency qualifier rejected" Nothing (parseDependencyQualifier wire)
+  let evidence = DependencyEvidence True True []
+        [DependencyResolution qualifier "Owner" False Nothing [] | (qualifier, _) <- spellings]
+        [] [DependencyModule "main" "Consumer" False "/Consumer.hs"
+          [DependencyImport qualifier "Owner" False Nothing | (qualifier, _) <- spellings]
+          ProductReady]
+      resolution wire = "{\"qualifier\":\"" ++ wire
+        ++ "\",\"module\":\"Owner\",\"boot\":false,\"selected\":null,\"candidates\":[]}"
+      imported wire = "{\"qualifier\":\"" ++ wire
+        ++ "\",\"module\":\"Owner\",\"boot\":false,\"selected\":null}"
+      expected = "{\"version\":4,\"cache_safe\":true,\"selection_complete\":true,\"sources\":[],\"resolutions\":["
+        ++ intercalate "," (map (resolution . snd) spellings)
+        ++ "],\"packages\":[],\"modules\":[{\"unit\":\"main\",\"module\":\"Consumer\""
+        ++ ",\"boot\":false,\"source\":\"/Consumer.hs\",\"imports\":["
+        ++ intercalate "," (map (imported . snd) spellings) ++ "],\"product\":\"ready\"}]}"
+  assertEqual "dependency evidence retains version 4 qualifier bytes" expected (renderDependencyEvidence evidence)
+  putStrLn "dependency qualifiers: admission and unchanged evidence encoding passed"
 
 requestOwnedParserDefaults :: IO ()
 requestOwnedParserDefaults = do
@@ -944,9 +991,10 @@ dependencyEvidenceCompilation = bracket temporary removeDirectoryRecursive $ \ro
   unless ("Data.Text" `elem` dependencyPackages evidence) $
     fail "package import was not recorded in dependency evidence"
   unless (case qualifiedWitnesses of
-      [resolution] -> "other:" `isPrefixOf` dependencyResolutionQualifier resolution
-        && dependencyResolutionSelected resolution == Nothing
-        && null (dependencyResolutionCandidates resolution)
+      [resolution] -> case dependencyResolutionQualifier resolution of
+        DependencyOtherUnit _ -> dependencyResolutionSelected resolution == Nothing
+          && null (dependencyResolutionCandidates resolution)
+        _ -> False
       _ -> False) $
     fail "qualified package import was not distinguished from home lookup"
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
@@ -1252,6 +1300,36 @@ checkedLoadBoundaryCompilation = bracket temporary removeDirectoryRecursive $ \r
     temporary = do
       parent <- getTemporaryDirectory
       (path, handle) <- openTempFile parent "tidepool-checked-load-boundary"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+-- Only type-of queries consume numbered probes; other results retain query order.
+mixedInspectionCompilation :: IO ()
+mixedInspectionCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let target = root </> "MixedInspection.hs"
+  writeFile target $ unlines
+    [ "module MixedInspection where"
+    , "__tidepool_inspect_0 = (7 :: Int)"
+    , "__tidepool_inspect_1 = True"
+    ]
+  withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
+    checked <- runRequest $ \compiler ->
+      compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+    inspected <- runInspection
+      (crHscEnv checked) (crTargetTcGblEnv checked)
+      (crTargetRdrEnv checked) (crInspectionProbes checked)
+      [InspectTypeOf "7", InspectNameInfo "missingInspectionName", InspectTypeOf "True"]
+    case inspected of
+      [InspectionType "7" first _, InspectionNotFound "missingInspectionName", InspectionType "True" second _] -> do
+        assertContains "first query uses probe zero" "Int" first
+        assertContains "non-type query leaves the second probe ordinal unchanged" "Bool" second
+      other -> fail ("mixed inspection returned an unexpected result: " ++ show other)
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-mixed-inspection"
       hClose handle
       removeFile path
       createDirectory path

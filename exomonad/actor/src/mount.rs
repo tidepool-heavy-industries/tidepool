@@ -418,6 +418,10 @@ impl ActorCompileView {
         self.session.session_root()
     }
 
+    pub(crate) fn session_view(&self) -> &SessionCompileView {
+        &self.session
+    }
+
     pub(crate) fn exact_declaration_context(
         &self,
     ) -> Option<&std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>
