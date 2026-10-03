@@ -11991,21 +11991,21 @@ mod request_tests {
     #[tokio::test]
     async fn admitted_cell_preserves_shadowing_polykinds_and_prologue_only_items() {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None);
-        let installed = workbench
-            .begin_fragment_split(
-                context.clone(),
-                source,
-                ParsedBlock {
-                    ordinal: 1,
-                    total: 1,
-                    source: "sh args = length (args :: [Int])".into(),
-                },
-                None,
-            )
+        let initial =
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
+        let (initial, private_context) = initial
+            .admit_private_cell_for_test(context.clone())
             .await
             .unwrap();
-        assert!(matches!(installed, ResidentWorkbenchStep::Committed { .. }));
+        initial
+            .execute_cell_for_test(private_context.clone(), "sh args = length (args :: [Int])")
+            .await
+            .unwrap();
+        initial
+            .publish_completed_cell_for_test(private_context)
+            .await
+            .unwrap();
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None);
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -12056,6 +12056,84 @@ mod request_tests {
     }
 
     impl ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput> {
+        async fn execute_cell_for_test(
+            &self,
+            context: crate::ActorSessionContext,
+            source: &str,
+        ) -> Result<(), ResidentActorWorkbenchError> {
+            let (checked, prepared) = self.prepare_cell(context.clone(), source.into()).await?;
+            let PreparedCell {
+                items,
+                dependencies,
+            } = prepared;
+            assert!(!items.is_empty(), "fixture must execute a checked item");
+            assert_eq!(checked.items.len(), items.len());
+            for (index, (observed, item)) in checked.items.iter().zip(items).enumerate() {
+                assert!(item.ready.prefix.cell_program().is_some());
+                let step = self
+                    .begin_prepared_cell_item(
+                        context.clone(),
+                        ParsedBlock {
+                            ordinal: index + 1,
+                            total: checked.items.len(),
+                            source: observed.source.clone(),
+                        },
+                        item,
+                    )
+                    .await?;
+                let settled = match step {
+                    ResidentWorkbenchStep::Running { fragment, outcome } => {
+                        self.settle_item(context.clone(), *fragment, *outcome)
+                            .await?
+                    }
+                    other => other,
+                };
+                assert!(matches!(settled, ResidentWorkbenchStep::Committed { .. }));
+            }
+            drop(dependencies);
+            Ok(())
+        }
+
+        async fn publish_completed_cell_for_test(
+            &self,
+            context: crate::ActorSessionContext,
+        ) -> Result<(), ResidentActorWorkbenchError> {
+            let execution = self
+                .private_execution
+                .as_ref()
+                .expect("admitted private cell");
+            let published = workbench_runner_for_test(self)
+                .publish_private_execution(
+                    context.clone(),
+                    Arc::clone(execution),
+                    tidepool_runtime::session::ExecutionPublicationIntent::CompletedCell,
+                )
+                .await?;
+            assert!(matches!(
+                published,
+                PrivateExecutionPublication::Manifest(
+                    tidepool_runtime::session::PublicManifestCommit::Ephemeral
+                )
+            ));
+            let public_scope = execution.public_scope;
+            self.access
+                .with_machine(context, move |session, context, _| {
+                    let private_scope = context.placement.lexical_scope;
+                    session.retire_scope(private_scope);
+                    assert!(session.compile_view_in(private_scope).is_none());
+                    let public_view = session
+                        .compile_view_in(public_scope)
+                        .expect("paired publication survives private retirement");
+                    session
+                        .capture_inspection_inputs(&public_view)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })?;
+                    Ok(())
+                })
+                .await
+        }
+
         async fn admit_private_cell_for_test(
             self,
             mut context: crate::ActorSessionContext,
@@ -12129,30 +12207,22 @@ mod request_tests {
     async fn planned_cell_refuses_changed_own_scope_but_ignores_sibling_and_child_commits() {
         for mutate_own in [false, true] {
             let (machines, context, source, _root) = actor_registry_fixture();
-            let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None);
-            let first = workbench
-                .begin_fragment_split(
-                    context.clone(),
-                    source,
-                    ParsedBlock {
-                        ordinal: 1,
-                        total: 1,
-                        source: "ownValue <- pure (41 :: Int)".into(),
-                    },
-                    None,
-                )
+            let initial =
+                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
+            let (initial, private_context) = initial
+                .admit_private_cell_for_test(context.clone())
                 .await
                 .unwrap();
-            match first {
-                ResidentWorkbenchStep::Running { fragment, outcome } => {
-                    workbench
-                        .settle_item(context.clone(), *fragment, *outcome)
-                        .await
-                        .unwrap();
-                }
-                ResidentWorkbenchStep::Committed { .. } => {}
-                _ => panic!("fixture must execute its source binding"),
-            }
+            initial
+                .execute_cell_for_test(private_context.clone(), "ownValue <- pure (41 :: Int)")
+                .await
+                .unwrap();
+            initial
+                .publish_completed_cell_for_test(private_context)
+                .await
+                .unwrap();
+            let workbench =
+                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
             let (workbench, context) = workbench
                 .admit_private_cell_for_test(context)
                 .await
@@ -12177,35 +12247,48 @@ mod request_tests {
                 probe.clone(),
                 workbench.prepare_cell(context.clone(), "derived <- pure (ownValue + 1)".into()),
             );
-            let mutate = async {
-                probe.install_reached.notified().await;
-                let mut changing = context.clone();
-                let changing_source = workbench.access.source.clone();
+            tokio::pin!(prepare);
+            tokio::select! {
+                result = &mut prepare => match result {
+                    Err(error) => panic!("checked preparation refused before the race barrier: {error}"),
+                    Ok(_) => panic!("checked preparation skipped the race barrier"),
+                },
+                _ = probe.install_reached.notified() => {}
+            }
+            if mutate_own {
                 workbench
-                    .access
-                    .with_machine(context.clone(), move |session, _, _| {
-                        for scope in if mutate_own {
-                            vec![changing.placement.lexical_scope]
-                        } else {
-                            vec![sibling, child]
-                        } {
-                            changing.placement.lexical_scope = scope;
-                            mount_text_binding(
-                                session,
-                                &changing,
-                                &changing_source,
-                                "laterValue",
-                                "a genuine native scope change",
-                                None,
-                            )?;
-                        }
-                        Ok(())
-                    })
+                    .execute_cell_for_test(context.clone(), "laterValue <- pure (42 :: Int)")
                     .await
-                    .unwrap();
-                probe.resume_install.notify_one();
-            };
-            let (result, ()) = tokio::join!(prepare, mutate);
+                    .expect("checked execution changes the admitted scope");
+            } else {
+                for scope in [sibling, child] {
+                    let mut changing = context.clone();
+                    changing.placement.lexical_scope = scope;
+                    let changing_workbench = ResidentActorWorkbench::new(
+                        Arc::clone(&machines),
+                        source.clone(),
+                        None,
+                        None,
+                    );
+                    let (changing_workbench, private_context) = changing_workbench
+                        .admit_private_cell_for_test(changing)
+                        .await
+                        .unwrap();
+                    changing_workbench
+                        .execute_cell_for_test(
+                            private_context.clone(),
+                            "laterValue <- pure (42 :: Int)",
+                        )
+                        .await
+                        .unwrap();
+                    changing_workbench
+                        .publish_completed_cell_for_test(private_context)
+                        .await
+                        .expect("checked publication changes only its sibling or child scope");
+                }
+            }
+            probe.resume_install.notify_one();
+            let result = prepare.await;
             if mutate_own {
                 assert!(matches!(
                     result,
@@ -12266,40 +12349,17 @@ mod request_tests {
             .await
             .expect("private sibling scope");
         sibling_context.actor = crate::ActorRef::first(crate::ActorId(2));
-        let runner = workbench_runner_for_test(&workbench);
         let mut checked_workbenches = Vec::new();
-        for mut public_context in [context, sibling_context] {
-            let descriptor =
-                crate::ActorDescriptor::new("checked inspection", public_context.placement);
-            let owner = crate::resident_actor::WorkbenchPublicOwner::issue(
-                &public_context,
-                &descriptor,
-                None,
-            )
-            .expect("ephemeral public owner");
-            let authority = crate::resident_actor::WorkbenchCompilationAuthority::for_test(
-                public_context.clone(),
-            );
-            let private = Arc::new(
-                runner
-                    .begin_private_execution(
-                        public_context.clone(),
-                        owner,
-                        tidepool_runtime::session::PublicationDecision::new(),
-                    )
-                    .await
-                    .expect("private execution admission"),
-            );
-            assert_ne!(
-                private.private_scope,
-                public_context.placement.lexical_scope
-            );
-            public_context.placement.lexical_scope = private.private_scope;
+        for public_context in [context, sibling_context] {
+            let public_scope = public_context.placement.lexical_scope;
             let checked_workbench =
-                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None)
-                    .with_compilation_authority(authority)
-                    .with_private_execution(private);
-            checked_workbenches.push((public_context, checked_workbench));
+                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
+            let (checked_workbench, private_context) = checked_workbench
+                .admit_private_cell_for_test(public_context)
+                .await
+                .expect("private execution admission");
+            assert_ne!(private_context.placement.lexical_scope, public_scope);
+            checked_workbenches.push((private_context, checked_workbench));
         }
         let context = checked_workbenches[0].0.clone();
         let sibling_context = checked_workbenches[1].0.clone();
@@ -12312,36 +12372,10 @@ mod request_tests {
             (1, "privateSiblingValue <- pure (43 :: Int)".to_owned()),
         ] {
             let (binding_context, checked_workbench) = &checked_workbenches[index];
-            let (_, prepared) = checked_workbench
-                .prepare_cell((*binding_context).clone(), cell.clone())
+            checked_workbench
+                .execute_cell_for_test((*binding_context).clone(), &cell)
                 .await
-                .expect("checked binding compiles");
-            let PreparedCell { mut items, .. } = prepared;
-            assert_eq!(items.len(), 1);
-            assert!(
-                items[0].ready.prefix.cell_program().is_some(),
-                "regression must install certified checked native output"
-            );
-            let step = checked_workbench
-                .begin_prepared_cell_item(
-                    (*binding_context).clone(),
-                    ParsedBlock {
-                        ordinal: 1,
-                        total: 1,
-                        source: cell,
-                    },
-                    items.remove(0),
-                )
-                .await
-                .expect("checked binding starts");
-            let settled = match step {
-                ResidentWorkbenchStep::Running { fragment, outcome } => checked_workbench
-                    .settle_item((*binding_context).clone(), *fragment, *outcome)
-                    .await
-                    .expect("checked binding settles"),
-                other => other,
-            };
-            assert!(matches!(settled, ResidentWorkbenchStep::Committed { .. }));
+                .expect("checked binding settles");
             checked_workbench
                 .access
                 .with_machine((*binding_context).clone(), |session, context, _| {
