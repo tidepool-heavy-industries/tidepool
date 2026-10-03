@@ -37,6 +37,7 @@ main = do
   nestedInfiniteStringsAreProductive
   collapsedSequenceTailRemainsLazy
   shortGroupBudgetDoesNotForceFields
+  exactBudgetRetainsUnknownSuffixes
 
 applicationsParenthesizeOnlyAboveApplicationPrecedence :: IO ()
 applicationsParenthesizeOnlyAboveApplicationPrecedence = do
@@ -69,8 +70,7 @@ textUsesEscapedStringLiterals =
 
 topLevelTextKeepsLineBreaks :: IO ()
 topLevelTextKeepsLineBreaks = do
-  -- Top-level String shares this same unquoted rendering: the 'WorkbenchDisplay'
-  -- and 'FullDisplay' [Char] instances convert to Text and call 'rawText'.
+  -- Top-level String shares this unquoted rendering through 'rawString'.
   assertEqual "standalone text is raw" ("first\nsecond", False)
     (rawText 64 "first\nsecond")
   assertEqual "standalone text remains bounded" ("first", True)
@@ -236,3 +236,15 @@ shortGroupBudgetDoesNotForceFields = do
   rendered <- evaluate $ case renderTree 1 (treeParts "(" ")" [undefined]) of
     (value, _, _) -> value
   assertEqual "layout lookahead stays within the page allowance" "(" rendered
+
+exactBudgetRetainsUnknownSuffixes :: IO ()
+exactBudgetRetainsUnknownSuffixes = do
+  let stringState = newDisplayState 2 (StringLeaf ('o' : 'k' : undefined))
+      concatState = newDisplayState 2 (Concat (TextLeaf "ok" : undefined))
+      fieldsState = newDisplayState 9 (Constructor "T" (("x", TextLeaf "") : undefined))
+  assertEqual "exact String page does not inspect the next character" "ok" (displayStateText stringState)
+  assertEqual "exact String page keeps the unseen suffix" 1 (length (displayStateKeys stringState))
+  assertEqual "exact Concat page does not inspect the next child spine" "ok" (displayStateText concatState)
+  assertEqual "exact Concat page keeps the unseen children" 1 (length (displayStateKeys concatState))
+  assertEqual "constructor cap does not inspect the collapsed field spine" "T {x = …}" (displayStateText fieldsState)
+  assertEqual "constructor cap retains the collapsed field spine" 2 (length (displayStateKeys fieldsState))

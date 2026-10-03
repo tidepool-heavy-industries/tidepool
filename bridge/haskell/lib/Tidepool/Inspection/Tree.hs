@@ -71,32 +71,50 @@ rawText budget value =
   let (rendered, remaining, unavailable) = renderTree budget (TextLeaf value)
   in (rendered, maybe False (const True) remaining || unavailable)
 
+-- The cursor distinguishes a known end from a lazy child spine. Budget
+-- exhaustion can retain unknown children without probing whether they are empty.
+data TreeCursor
+  = TreeEnd
+  | TreeNode DisplayTree TreeCursor
+  | TreeChildren [DisplayTree] TreeCursor
+
+cursorTree :: TreeCursor -> DisplayTree
+cursorTree = Concat . cursorNodes
+  where
+    cursorNodes TreeEnd = []
+    cursorNodes (TreeNode node rest) = node : cursorNodes rest
+    cursorNodes (TreeChildren children rest) = children ++ cursorNodes rest
+
 -- | Render at most the requested characters, retaining the actual remaining
 -- tree. The last flag reports detail omitted by a legacy custom renderer.
 renderTree :: Int -> DisplayTree -> (Text, Maybe DisplayTree, Bool)
-renderTree allowance tree = go (max 0 allowance) [] False [tree]
+renderTree allowance tree = go (max 0 allowance) [] False (TreeNode tree TreeEnd)
   where
-    go _ pieces unavailable [] = (T.concat (reverse pieces), Nothing, unavailable)
+    go _ pieces unavailable TreeEnd = (T.concat (reverse pieces), Nothing, unavailable)
     go left pieces unavailable pending | left <= 0 =
-      (T.concat (reverse pieces), Just (Concat pending), unavailable)
-    go left pieces unavailable (node : rest) = case node of
-      Constructor name fields -> go left pieces unavailable (constructorTree name fields : rest)
-      Sequence opening closing children -> go left pieces unavailable (treeParts opening closing children : rest)
-      Concat children -> go left pieces unavailable (children ++ rest)
+      (T.concat (reverse pieces), Just (cursorTree pending), unavailable)
+    go left pieces unavailable (TreeChildren children rest) = case children of
+      [] -> go left pieces unavailable rest
+      node : following -> go left pieces unavailable (TreeNode node (TreeChildren following rest))
+    go left pieces unavailable (TreeNode node rest) = case node of
+      Constructor name fields -> go left pieces unavailable (TreeNode (constructorTree name fields) rest)
+      Sequence opening closing children -> go left pieces unavailable (TreeNode (treeParts opening closing children) rest)
+      Concat children -> go left pieces unavailable (TreeChildren children rest)
       Group children ->
         let layout = if flatLength (min left (maxLineWidth + 1)) children <= maxLineWidth
               then flatten children
               else children
-        in go left pieces unavailable (layout ++ rest)
+        in go left pieces unavailable (TreeChildren layout rest)
       LineBreak -> go (left - 1) ("\n" : pieces) unavailable rest
       TextLeaf value ->
         let (prefix, suffix) = T.splitAt left value
-            remaining = if T.null suffix then rest else TextLeaf suffix : rest
+            remaining = if T.null suffix then rest else TreeNode (TextLeaf suffix) rest
         in go (left - T.length prefix) (prefix : pieces) unavailable remaining
       StringLeaf value ->
         let (prefix, suffix) = splitAt left value
-            remaining = case suffix of [] -> rest; _ -> StringLeaf suffix : rest
-        in go (left - length prefix) (T.pack prefix : pieces) unavailable remaining
+            used = length prefix
+            remaining = if used < left then rest else TreeNode (StringLeaf suffix) rest
+        in go (left - used) (T.pack prefix : pieces) unavailable remaining
       LegacyLeaf render ->
         let (value, omitted) = render left
             (prefix, excess) = T.splitAt left value
@@ -210,11 +228,13 @@ preview budget depth next label tree
   where
     children opening closing fields = walk opening [] next False fields
       where
-        walk value keys key unavailable [] = (bounded value closing, keys, key, unavailable)
-        walk value keys key unavailable pending@((field, child) : rest)
+        walk value keys key unavailable pending
           | room value <= 0 =
               (bounded value closing, keys ++ [(ExpansionKey key, label <> ".fields", Constructor "" pending)], key + 1, unavailable)
-          | otherwise =
+          | otherwise = case pending of
+              [] -> (bounded value closing, keys, key, unavailable)
+              (field, child) : rest -> renderChild value keys key unavailable field child rest
+        renderChild value keys key unavailable field child rest =
               let prefix = (if value == opening then "" else ", ") <> field <> " = "
                   allowance = max 0 (min 128 (room (value <> prefix)))
                   (shown, omitted, following, childUnavailable) = preview allowance (depth + 1) key (label <> "." <> field) child
