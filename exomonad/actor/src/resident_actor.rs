@@ -2364,32 +2364,32 @@ fn workbench_failure_after_unit(
         return failure;
     }
     let layer = resident_actor_failure_layer(&failure.source);
-    let Some(receipt) = failure
+    let receipt_index = match failure
         .receipts
-        .iter_mut()
-        .rev()
-        .find(|receipt| receipt.index == failed_index)
-    else {
-        failure.receipts.push(WorkbenchItemReceipt {
-            diagnostics: Vec::new(),
-            index: failed_index,
-            kind: None,
-            span: None,
-            source_items: Vec::new(),
-            status: WorkbenchItemStatus::Stopped,
-            output: failure_layer_output_hint(layer),
-            value: None,
-            warnings: Vec::new(),
-            installed_bindings: Vec::new(),
-            operations: Vec::new(),
-            terminal_transfer: None,
-            failure_layer: layer,
-        });
-        failure
-            .receipts
-            .last_mut()
-            .expect("recovery receipt was appended")
+        .iter()
+        .rposition(|receipt| receipt.index == failed_index)
+    {
+        Some(index) => index,
+        None => {
+            failure.receipts.push(WorkbenchItemReceipt {
+                diagnostics: Vec::new(),
+                index: failed_index,
+                kind: None,
+                span: None,
+                source_items: Vec::new(),
+                status: WorkbenchItemStatus::Stopped,
+                output: failure_layer_output_hint(layer),
+                value: None,
+                warnings: Vec::new(),
+                installed_bindings: Vec::new(),
+                operations: Vec::new(),
+                terminal_transfer: None,
+                failure_layer: layer,
+            });
+            failure.receipts.len() - 1
+        }
     };
+    let receipt = &mut failure.receipts[receipt_index];
     for binding in unit_bindings {
         if !receipt.installed_bindings.contains(binding) {
             receipt.installed_bindings.push(binding.clone());
