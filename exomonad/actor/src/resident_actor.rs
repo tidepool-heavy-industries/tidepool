@@ -2587,6 +2587,7 @@ struct WorkbenchUnitExecution<'a> {
     effect_ordinal: &'a mut usize,
     display_remaining: &'a mut usize,
     command_output: &'a mut Vec<String>,
+    recovered_bindings: &'a mut Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -9700,6 +9701,7 @@ where
                                     next_fragment,
                                     unit.display_remaining,
                                     unit.command_output,
+                                    unit.recovered_bindings,
                                 )?;
                             }
                             let (resolved, command_disposition) = match boundary {
@@ -10026,6 +10028,7 @@ where
         let mut effect_ordinal = 0;
         let mut display_remaining = 16usize * 1024;
         let mut command_output = Vec::new();
+        let mut recovered_bindings = Vec::new();
         let step = workbench
             .begin_after_tool(context.clone(), dispatch, tool, payload)
             .await?;
@@ -10048,6 +10051,7 @@ where
                             effect_ordinal: &mut effect_ordinal,
                             display_remaining: &mut display_remaining,
                             command_output: &mut command_output,
+                            recovered_bindings: &mut recovered_bindings,
                         },
                     )
                     .await?
@@ -10420,6 +10424,7 @@ where
                                     effect_ordinal: &mut cursor.unit.effect_ordinal,
                                     display_remaining: &mut cursor.unit.display_remaining,
                                     command_output: &mut cursor.unit.command_output,
+                                    recovered_bindings: &mut cursor.unit.recovered_bindings,
                                 },
                             )
                             .await
@@ -10609,6 +10614,7 @@ where
                                     effect_ordinal: &mut cursor.unit.effect_ordinal,
                                     display_remaining: &mut cursor.unit.display_remaining,
                                     command_output: &mut cursor.unit.command_output,
+                                    recovered_bindings: &mut cursor.unit.recovered_bindings,
                                 },
                             )
                             .await
@@ -15474,7 +15480,8 @@ mod tests {
     use super::{
         checkpoint_capture_delivered, disposition_for_non_command_failure,
         failed_checkpoint_cleanup_response, lookup_response, settlement_refusal,
-        workbench_failure_after_operations, workbench_response, ChildExitObservations,
+        workbench_failure_after_operations, workbench_failure_after_unit, workbench_response,
+        ChildExitObservations,
     };
 
     #[test]
@@ -15489,12 +15496,12 @@ mod tests {
         assert!(!checkpoint_capture_delivered(&before_delivery));
     }
     use crate::resident_workbench::{AgentStopProjection, CleanupStepProjection};
-    use crate::{ActorId, ActorRef, Incarnation};
+    use crate::{ActorId, ActorRef, Incarnation, ResidentActorWorkbenchError};
     use tidepool_runtime::session::{
         CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, InfoEntry,
         InspectionAvailability, InspectionResult, ResidentError, TurnClassification, TurnKind,
         TypeMatch, TypeMatchQuality, WorkbenchCellItemKind, WorkbenchExecutionId,
-        WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
+        WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
         WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
         WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
     };
