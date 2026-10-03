@@ -46,6 +46,8 @@ TEST_ONLY_SOURCES = {
         'exomonad/actor/src/resident_actor/capture_workspace_tests.rs',
         'exomonad/actor/src/resident_actor/capture_partial_startup_failure.hs',
         'exomonad/actor/src/resident_actor/owned_workbench/model_tests.rs',
+        'exomonad/actor/src/resident_workbench/display_callback_tests.rs',
+        'exomonad/actor/src/resident_workbench/display_callback_immediate.hs',
     }),
     'tidepool-runtime': frozenset({
         'tidepool/runtime/src/session/fixtures/unrelated-home-value.hs',

@@ -10493,7 +10493,6 @@ where
                                 owned_workbench::WorkbenchUnitStartRequest::Prepared {
                                     block,
                                     item: prepared,
-                                    display_remaining: cursor.cell_display_remaining,
                                 }
                             };
                             let start = owned_workbench::WorkbenchUnitStart {

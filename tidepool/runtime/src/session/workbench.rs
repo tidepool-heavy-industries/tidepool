@@ -13,8 +13,8 @@ use serde::Serialize;
 
 use super::turn::CellSourceSpan;
 use super::{
-    assemble_bind_module, assemble_display_expression_module, assemble_opaque_expression_module,
-    insert_preamble_imports, ExpressionLift, TemplateSelector, TurnTemplate, DECL_TEMPLATE_SOURCE,
+    assemble_bind_module, assemble_opaque_expression_module, insert_preamble_imports,
+    ExpressionLift, TemplateSelector, TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
 
 /// Normalize the one extra JSON-string layer some MCP clients apply to a
@@ -1264,10 +1264,9 @@ fn is_haskell_keyword(token: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Build the canonical templates for a resident actor workbench. GHC selects
-/// declaration, bind, or expression. Expressions first try the two
-/// single-evaluation Haskell-display lifts, then opaque-display counterparts
-/// for values without a rendering instance. Frontends may choose how to label
-/// those typed outcomes, but should not grow another source assembly path.
+/// declaration, bind, or expression. Pure and effectful expressions run once
+/// without requiring a rendering instance. Authored display effects own output;
+/// frontends should not grow another source assembly path.
 #[must_use]
 pub fn resident_workbench_templates(
     preamble: &str,
@@ -1302,26 +1301,6 @@ pub fn resident_workbench_templates(
                 "{{TURN_STMT}}",
                 "()",
                 false,
-            ),
-        },
-        TurnTemplate {
-            kind: TemplateSelector::Expr,
-            source: assemble_display_expression_module(
-                &preamble,
-                "__result",
-                effect_stack,
-                "{{TURN}}",
-                ExpressionLift::Effectful,
-            ),
-        },
-        TurnTemplate {
-            kind: TemplateSelector::Expr,
-            source: assemble_display_expression_module(
-                &preamble,
-                "__result",
-                effect_stack,
-                "{{TURN}}",
-                ExpressionLift::Pure,
             ),
         },
         TurnTemplate {
@@ -1368,10 +1347,6 @@ pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports:
         &insert_preamble_imports(preamble, imports),
         "qualified GHC.TypeError as TidepoolWorkbenchTypeError",
     );
-    let preamble = insert_preamble_imports(
-        &preamble,
-        "qualified Tidepool.Inspection as TidepoolInspection",
-    );
     let preamble = insert_preamble_imports(&preamble, "{{CELL_IMPORTS}}")
         .replace("import {{CELL_IMPORTS}}", "{{CELL_IMPORTS}}")
         .replacen(
@@ -1396,8 +1371,6 @@ pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports:
            __tidepoolCellExpression action = action >> pure () }}\n\
          instance {{-# OVERLAPPABLE #-}} TidepoolCellPure value => TidepoolCellExpression value where {{ \
            __tidepoolCellExpression _ = pure () }}\n\
-         __tidepoolCellDisplayConstraint :: TidepoolInspection.PageDisplay {effect_stack} value => value -> ()\n\
-         __tidepoolCellDisplayConstraint _ = ()\n\
          {{{{CELL_DECLS}}}}\n\
          __tidepool_cell_check :: Eff {effect_stack} ()\n\
          __tidepool_cell_check = do {{\n\

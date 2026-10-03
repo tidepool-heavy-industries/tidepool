@@ -294,7 +294,6 @@ pub(super) enum WorkbenchUnitStartRequest {
     Prepared {
         block: ParsedBlock,
         item: crate::resident_workbench::PreparedCellItem,
-        display_remaining: usize,
     },
 }
 
@@ -318,13 +317,9 @@ where
                     .begin_tool(context, dispatch, name, arguments)
                     .await
             }
-            WorkbenchUnitStartRequest::Prepared {
-                block,
-                item,
-                display_remaining,
-            } => {
+            WorkbenchUnitStartRequest::Prepared { block, item } => {
                 workbench
-                    .begin_prepared_cell_item(context, block, item, display_remaining)
+                    .begin_prepared_cell_item(context, block, item)
                     .await
             }
         }
