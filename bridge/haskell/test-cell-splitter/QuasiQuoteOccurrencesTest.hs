@@ -37,7 +37,7 @@ quasiQuoteOccurrenceChecksWith initial = do
   quoted <- readFile "test-cell-splitter/fixtures/quasiquote-occurrences/contexts.hs"
   literal <- readFile "test-cell-splitter/fixtures/quasiquote-occurrences/literals.hs"
   let disabled = xopt_unset initial QuasiQuotes
-      enabled = xopt_set (xopt_set initial QuasiQuotes) TemplateHaskell
+      enabled = foldl xopt_set initial [QuasiQuotes, TemplateHaskell, TemplateHaskellQuotes]
       cases =
         [ ("quote contexts", enabled, quoted,
             ["firstQ", "againQ", "againQ", "Q.qualifiedQ", "patternQ",

@@ -56,7 +56,7 @@ quasiQuoteOccurrenceBenchmark size files = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     initial <- getSessionDynFlags
-    let syntax = xopt_set (xopt_set initial QuasiQuotes) TemplateHaskell
+    let syntax = foldl xopt_set initial [QuasiQuotes, TemplateHaskell, TemplateHaskellQuotes]
     forM_ inputs $ \(label, source) -> do
       let (_, options) = getOptions (initParserOpts syntax)
             (stringToStringBuffer source) label
