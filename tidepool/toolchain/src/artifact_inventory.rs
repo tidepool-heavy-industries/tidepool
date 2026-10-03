@@ -629,18 +629,36 @@ impl ArtifactInventory {
         if entries.is_empty() {
             return Ok(parent.clone());
         }
-        let mut expanded = Vec::with_capacity(entries.len() * 2);
-        for entry in entries {
+        let supplied = entries
+            .iter()
+            .filter(|entry| matches!(entry.payload, ArtifactPayload::Canonical(_)))
+            .map(|entry| (entry.descriptor.owner.clone(), entry))
+            .collect::<BTreeMap<_, _>>();
+        let mut implicit = Vec::new();
+        for entry in &entries {
             if let ArtifactPayload::Original(product) = &entry.payload {
-                expanded.push(Arc::new(ArtifactEntry::canonical(
+                let canonical = ArtifactEntry::canonical(
                     product
                         .module_interface()
                         .ok_or_else(|| failure("native canonical carrier missing"))?
                         .clone(),
-                )));
+                );
+                if let Some(existing) = supplied.get(&canonical.descriptor.owner) {
+                    if existing.as_ref() != &canonical {
+                        return Err(admission_failure(
+                            ArtifactInventoryFailure::MetadataConflict {
+                                artifact: canonical.descriptor.id,
+                            },
+                        ));
+                    }
+                } else {
+                    implicit.push(Arc::new(canonical));
+                }
             }
-            expanded.push(entry);
         }
+        drop(supplied);
+        let mut expanded = entries;
+        expanded.extend(implicit);
         let mut state = self.0.lock().expect("inventory lock");
         let mut additions = BTreeMap::new();
         let mut roots = BTreeSet::new();
@@ -1179,7 +1197,7 @@ impl ArtifactView {
             .collect::<Vec<_>>();
         state
             .entry_handle_copies
-            .fetch_add((entries.len() + artifacts.len()) as u64, Ordering::Relaxed);
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
         entries.sort_by(|a, b| a.descriptor.owner.cmp(&b.descriptor.owner));
         entries
     }
@@ -1194,7 +1212,7 @@ impl ArtifactView {
             .collect::<Vec<_>>();
         state
             .entry_handle_copies
-            .fetch_add((entries.len() + artifacts.len()) as u64, Ordering::Relaxed);
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
         entries
     }
     pub(crate) fn entries_for_owners(
@@ -1217,7 +1235,7 @@ impl ArtifactView {
             .collect::<BTreeMap<_, _>>();
         state
             .entry_handle_copies
-            .fetch_add((entries.len() + artifacts.len()) as u64, Ordering::Relaxed);
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
         entries
     }
 

@@ -1776,10 +1776,10 @@ fn scope_interface_evidence(
         (ArtifactKind::OriginalModule, ArtifactPayload::Original(product)) => product
             .module_interface()
             .ok_or_else(|| failure("native interface evidence is missing"))?,
-        (ArtifactKind::LexicalJoin, ArtifactPayload::Interface(_)) => {
+        (ArtifactKind::LexicalJoin, ArtifactPayload::Interface(_, _)) => {
             return Ok(Value::Array(vec![text("join")]))
         }
-        (ArtifactKind::ValueInterface, ArtifactPayload::Interface(_)) => {
+        (ArtifactKind::ValueInterface, ArtifactPayload::Interface(_, _)) => {
             return Ok(Value::Array(vec![text("value")]))
         }
         _ => return Err(failure("interface evidence kind differs from payload")),

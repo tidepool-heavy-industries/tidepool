@@ -2007,12 +2007,26 @@ pub(crate) fn validate_original_module_interface(
     product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
     interface: &CertifiedModuleInterface,
 ) -> CertResult<()> {
-    let witness = decode_home_witness(product.certification_bytes())?;
-    if witness.owner != *product.owner()
-        || product
-            .source_sha256()
-            .is_some_and(|source| source != interface.source_sha256())
-    {
+    validate_canonical_native_bytes(
+        product.owner(),
+        product.certification_bytes(),
+        product.interface_bytes(),
+        product.package_imports_bytes(),
+        product.source_sha256(),
+        interface,
+    )
+}
+
+pub(crate) fn validate_canonical_native_bytes(
+    owner: &CachedHomeOwner,
+    certification: &[u8],
+    actual_interface: &[u8],
+    actual_packages: &[u8],
+    source_sha256: Option<[u8; 32]>,
+    interface: &CertifiedModuleInterface,
+) -> CertResult<()> {
+    let witness = decode_home_witness(certification)?;
+    if witness.owner != *owner {
         return Err(CertificationError::Mismatch(
             "native canonical source owner",
         ));
@@ -2020,9 +2034,9 @@ pub(crate) fn validate_original_module_interface(
     validate_module_binding(
         &witness,
         interface,
-        product.interface_bytes(),
-        product.package_imports_bytes(),
-        product.source_sha256(),
+        actual_interface,
+        actual_packages,
+        source_sha256,
     )
     .map(|_| ())
 }
@@ -2155,6 +2169,7 @@ fn verify_home_witness_with_validation(
     Ok(witness)
 }
 
+#[cfg(test)]
 pub(crate) fn bind_home_execution_source(
     bytes: &[u8],
     owner: &CachedHomeOwner,
@@ -5705,6 +5720,7 @@ pub(crate) mod tests {
             ),
             [1; 32],
         );
+        let seal = finalized.certification_bytes().to_vec();
         std::fs::write(
             interface.with_extension("hi.owners"),
             finalized.certification_bytes(),

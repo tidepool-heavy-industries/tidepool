@@ -259,7 +259,8 @@ fn source_lexical_surface_inner(
                         .map(|generation| {
                             SessionModule::lib(tidepool_repr::Generation(generation))
                         }),
-                    None => None,
+                    Some(crate::artifact_inventory::ArtifactKind::CanonicalModuleInterface)
+                    | None => None,
                 };
                 if owner.unit == "main"
                     && module.is_some_and(|module| module.module_name() == owner.module)

@@ -1618,15 +1618,15 @@ fn select_records_inner(
             .ok()?,
             (None, None) => continue,
         };
-        let original = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
-            computed_owner(&record),
-            record.interface.clone(),
-            record.products.clone(),
-            record.package_imports.clone(),
-            record.original_certification.clone(),
-        );
-        crate::certified_products::validate_original_module_interface(&original, &canonical)
-            .ok()?;
+        crate::certified_products::validate_canonical_native_bytes(
+            &computed_owner(&record),
+            &record.original_certification,
+            &record.interface,
+            &record.package_imports,
+            Some(parse_sha(&record.source_sha256)?),
+            &canonical,
+        )
+        .ok()?;
         record.module_interface_proof = Some(canonical);
         let product = matching.into_iter().next()?;
         if generation_dependent(&product) {

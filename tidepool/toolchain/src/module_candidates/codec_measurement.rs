@@ -46,6 +46,8 @@ impl LegacyRecord {
                 product_sha256: [0; 32],
             },
             original_certification: Vec::new(),
+            module_interface: None,
+            module_interface_proof: None,
             execution_source_sha256: None,
             execution_source: None,
         };
