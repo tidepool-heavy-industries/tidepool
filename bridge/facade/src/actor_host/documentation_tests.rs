@@ -1997,7 +1997,7 @@ async fn work_actor_consumes_later_progress_without_rearming() {
     for (questions, expected, effects) in [
         ("[first]", "[[\"question-a\"]]", "1"),
         ("[first]", "[[\"question-a\"]]", "1"),
-        ("[first,second]", "[[\"question-a\", \"question-b\"]]", "2"),
+        ("[first,second]", "[[\"question-a\",\"question-b\"]]", "2"),
     ] {
         committed(
             producer.policy.as_ref(),
