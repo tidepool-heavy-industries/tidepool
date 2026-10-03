@@ -2004,7 +2004,7 @@ async fn work_actor_consumes_later_progress_without_rearming() {
             &format!("import Tidepool.Agent.Reply (pollReply)\nreportProgress (WorkProgress [] {questions})\npollReply sessionReply"),
         )
         .await;
-        let observed = displayed(&mut campaign, root.as_ref(), "view <- readWork forwarding\n_ <- display (show (map (map questionKey . workQuestions . sourceProgress) (collectedWork view)))\n_ <- Actor.call wakes (RoutingCount 0 id) >>= display").await;
+        let observed = displayed(&mut campaign, root.as_ref(), "import qualified Prelude as Haskell\nview <- readWork forwarding\n_ <- display (Haskell.show (map (map questionKey . workQuestions . sourceProgress) (collectedWork view)))\n_ <- Actor.call wakes (RoutingCount 0 id) >>= display").await;
         assert_eq!(
             explicit_display_texts(&observed),
             [expected, effects],
@@ -2421,12 +2421,14 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         .commit_empty("workspace program")
         .unwrap();
     let root = campaign.root_installation.policy.clone();
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         &format!("let sourceHead = GitOid \"{}\"", source.as_str()),
     )
     .await;
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         include_str!("../../../../.exomonad/workspace/checks/project_delivery_setup.hs"),
     )
@@ -2459,7 +2461,8 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     )
     .await;
     assert_eq!(replied["status"], "replied", "{replied}");
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         include_str!("../../../../.exomonad/workspace/checks/project_review_start.hs"),
     )
@@ -2491,32 +2494,21 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     );
     assert!(launched.starts_with(review_instructions));
     assert!(launched.contains("Runtime policy ("));
-    let evidence = committed(reviewer.policy.as_ref(), "inspectFull (reviewInput sessionInput)\nlet RetainedImplementer repairTarget = repairOwner sessionInput\ninspectFull (agentIdentity repairTarget)").await;
+    let evidence = displayed(&mut campaign, reviewer.policy.as_ref(), "_ <- display . show $ (reviewInput sessionInput)\nlet RetainedImplementer repairTarget = repairOwner sessionInput\n_ <- display . show $ (agentIdentity repairTarget)").await;
     assert!(
-        evidence["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("focused candidate check"),
+        explicit_item_display_text(&evidence, 0).contains("focused candidate check"),
         "{evidence}"
     );
     assert!(
-        evidence["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("reportedChecks"),
+        explicit_item_display_text(&evidence, 0).contains("reportedChecks"),
         "authored check summaries remain claims: {evidence}"
     );
     assert!(
-        evidence["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("open product gate"),
+        explicit_item_display_text(&evidence, 0).contains("open product gate"),
         "{evidence}"
     );
     assert_eq!(
-        evidence["items"][2]["output"]
-            .as_str()
-            .unwrap()
+        explicit_item_display_text(&evidence, 2)
             .split_whitespace()
             .collect::<String>(),
         format!(
@@ -2525,17 +2517,23 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             implementer.actor.identity().incarnation.0
         )
     );
-    committed(
+    displayed(
+        &mut campaign,
         reviewer.policy.as_ref(),
         include_str!("../../../../.exomonad/workspace/checks/project_review_repair.hs"),
     )
     .await;
-    let pending = committed(
+    let pending = displayed(
+        &mut campaign,
         reviewer.policy.as_ref(),
-        "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply",
+        "import Tidepool.Agent.Reply (pollReply)\n_ <- pollReply sessionReply >>= display . show",
     )
     .await;
-    assert_eq!(pending["items"][1]["output"], "ReplyOpen", "{pending}");
+    assert_eq!(
+        explicit_item_display_text(&pending, 1),
+        "ReplyOpen",
+        "{pending}"
+    );
     let implementer_actor = implementer.actor.identity();
     campaign
         .next_deployment(
@@ -2551,9 +2549,9 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             },
         )
         .await;
-    let repair_packet = committed(
+    let repair_packet = displayed(&mut campaign,
         implementer.policy.as_ref(),
-        "inspectFull (taskSource (repairAssignment sessionInput), repairInput sessionInput, repairFindings sessionInput)",
+        "_ <- display . show $ (taskSource (repairAssignment sessionInput), repairInput sessionInput, repairFindings sessionInput)",
     ).await;
     for expected in [
         source.as_str(),
@@ -2566,12 +2564,14 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             "missing {expected} from typed repair packet: {repair_packet}"
         );
     }
-    let repair = committed(implementer.policy.as_ref(), "inspectFull sessionInput").await;
+    let repair = displayed(
+        &mut campaign,
+        implementer.policy.as_ref(),
+        "_ <- display (show sessionInput)",
+    )
+    .await;
     assert!(
-        repair["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("preserve the product gate"),
+        explicit_item_display_text(&repair, 0).contains("preserve the product gate"),
         "{repair}"
     );
     let revised = campaign
@@ -2588,9 +2588,14 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     )
     .await;
     assert_eq!(replied["status"], "replied", "{replied}");
-    let result = committed(reviewer.policy.as_ref(), "state <- pollWatch repaired\ninspectFull (fmap (either (const False) (const True) . settledValue) state)").await;
-    assert_eq!(result["items"][1]["output"], "WatchReady True", "{result}");
-    committed(
+    let result = displayed(&mut campaign, reviewer.policy.as_ref(), "state <- pollWatch repaired\n_ <- display . show $ (fmap (either (const False) (const True) . settledValue) state)").await;
+    assert_eq!(
+        explicit_item_display_text(&result, 1),
+        "WatchReady True",
+        "{result}"
+    );
+    displayed(
+        &mut campaign,
         reviewer.policy.as_ref(),
         include_str!("../../../../.exomonad/workspace/checks/project_design_question.hs"),
     )
@@ -2600,7 +2605,12 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert_eq!(expert.fork_effort, Some(exomonad_actor::ForkEffort::Medium));
     assert_eq!(expert.supervisor_parent, Some(reviewer.actor.identity()));
     assert_eq!(expert.context_parent, None);
-    let question = committed(expert.policy.as_ref(), "inspectFull sessionInput").await;
+    let question = displayed(
+        &mut campaign,
+        expert.policy.as_ref(),
+        "_ <- display (show sessionInput)",
+    )
+    .await;
     for expected in [
         revised.as_str(),
         "focused repair check",
@@ -2633,16 +2643,18 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         &format!("respond (AmendPlan (PlanAmendment (GitOid \"{}\") (GitOid \"{}\") [\"plans/feature.md\"] \"retain the preparation gate\" [\"feature review\"] [\"boundary evidence\"]))", revised.as_str(), amendment.as_str()),
     ).await;
     assert_eq!(answered["status"], "replied", "{answered}");
-    let decision = committed(reviewer.policy.as_ref(), "design <- pollWatch designReady\ninspectFull (fmap settledValue design)\npollReply sessionReply").await;
+    let decision = displayed(&mut campaign, reviewer.policy.as_ref(), "design <- pollWatch designReady\n_ <- display . show $ (fmap settledValue design)\n_ <- pollReply sessionReply >>= display . show").await;
     assert!(
-        decision["items"][1]["output"]
-            .as_str()
-            .unwrap()
-            .contains("retain the preparation gate"),
+        explicit_item_display_text(&decision, 1).contains("retain the preparation gate"),
         "{decision}"
     );
-    assert_eq!(decision["items"][2]["output"], "ReplyOpen", "{decision}");
-    committed(
+    assert_eq!(
+        explicit_item_display_text(&decision, 2),
+        "ReplyOpen",
+        "{decision}"
+    );
+    displayed(
+        &mut campaign,
         reviewer.policy.as_ref(),
         include_str!("../../../../.exomonad/workspace/checks/project_plan_incorporation.hs"),
     )
@@ -2662,9 +2674,10 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             },
         )
         .await;
-    let offered = committed(
+    let offered = displayed(
+        &mut campaign,
         implementer.policy.as_ref(),
-        "inspectFull (incorporationAmendment sessionInput)",
+        "_ <- display . show $ (incorporationAmendment sessionInput)",
     )
     .await;
     assert!(
@@ -2682,32 +2695,44 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     let incorporated = dispatch_haskell_script(implementer.policy.as_ref(),
         &format!("respond (Incorporated (incorporationAmendment sessionInput) (GitOid \"{}\") [\"read exact plan at resulting head\"])", incorporated_head.trimmed())).await;
     assert_eq!(incorporated["status"], "replied", "{incorporated}");
-    let checked = committed(reviewer.policy.as_ref(), "incorporation <- pollWatch planReady\ninspectFull (fmap settledValue incorporation)\npollReply sessionReply").await;
+    let checked = displayed(&mut campaign, reviewer.policy.as_ref(), "incorporation <- pollWatch planReady\n_ <- display . show $ (fmap settledValue incorporation)\n_ <- pollReply sessionReply >>= display . show").await;
     for expected in [
         "Incorporated",
         incorporated_head.trimmed(),
         "read exact plan at resulting head",
     ] {
         assert!(
-            checked["items"][1]["output"]
-                .as_str()
-                .unwrap()
-                .contains(expected),
+            explicit_item_display_text(&checked, 1).contains(expected),
             "{checked}"
         );
     }
-    assert_eq!(checked["items"][2]["output"], "ReplyOpen", "{checked}");
-    let questions = committed(
+    assert_eq!(
+        explicit_item_display_text(&checked, 2),
+        "ReplyOpen",
+        "{checked}"
+    );
+    let questions = displayed(
+        &mut campaign,
         reviewer.policy.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/project_review_questions.hs"),
+        &include_str!("../../../../.exomonad/workspace/checks/project_review_questions.hs")
+            .replace("inspectFull ", "_ <- display . show $ ")
+            .replace(
+                "pollReply sessionReply",
+                "_ <- pollReply sessionReply >>= display . show",
+            )
+            .replace(
+                "pollResponse reviewer",
+                "_ <- pollResponse reviewer >>= display . show",
+            ),
     )
     .await;
     assert_eq!(
-        questions["items"].as_array().unwrap().last().unwrap()["output"],
+        explicit_display_texts(&questions).last().copied().unwrap(),
         "ReplyOpen",
         "{questions}"
     );
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         &format!(
             "let incorporatedHead = GitOid \"{}\"",
@@ -2715,15 +2740,28 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         ),
     )
     .await;
-    let pending = committed(
+    let pending = displayed(
+        &mut campaign,
         root.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/project_decision_return.hs"),
+        &include_str!("../../../../.exomonad/workspace/checks/project_decision_return.hs")
+            .replace("inspectFull ", "_ <- display . show $ ")
+            .replace(
+                "pollReply sessionReply",
+                "_ <- pollReply sessionReply >>= display . show",
+            )
+            .replace(
+                "pollResponse reviewer",
+                "_ <- pollResponse reviewer >>= display . show",
+            ),
     )
     .await;
     assert!(pending.to_string().contains("ResponsePending"), "{pending}");
     // Carries the producing actor's own progress, so this poll answers "is
     // it moving" without a second round trip.
-    assert!(pending.to_string().contains("state="), "{pending}");
+    assert!(
+        pending.to_string().contains("pendingActorState"),
+        "{pending}"
+    );
     let delivery = campaign
         .next_deployment(
             "decision request update",
@@ -2743,9 +2781,15 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         .contains("Preparation retains the boundary"));
     assert!(presentation.message().contains(incorporated_head.trimmed()));
     presentation.presented();
-    let status = committed(root.as_ref(), "pollRequestUpdate clarification").await;
+    let status = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "_ <- pollRequestUpdate clarification >>= display . show",
+    )
+    .await;
     assert_eq!(
-        status["items"][0]["output"], "Right UpdatePresented",
+        explicit_item_display_text(&status, 0),
+        "Right UpdatePresented",
         "{status}"
     );
     // Source incorporation remains distinct from presenting the accepted decision.
@@ -2765,9 +2809,19 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         std::fs::read_to_string(review_tree.cwd().join("plans/feature.md")).unwrap(),
         "Preparation retains the open product gate.\n"
     );
-    let propagated = committed(
+    let propagated = displayed(
+        &mut campaign,
         reviewer.policy.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/project_decision_consumer.hs"),
+        &include_str!("../../../../.exomonad/workspace/checks/project_decision_consumer.hs")
+            .replace("inspectFull ", "_ <- display . show $ ")
+            .replace(
+                "pollReply sessionReply",
+                "_ <- pollReply sessionReply >>= display . show",
+            )
+            .replace(
+                "pollResponse reviewer",
+                "_ <- pollResponse reviewer >>= display . show",
+            ),
     )
     .await;
     assert!(
@@ -2775,7 +2829,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         "{propagated}"
     );
     assert_eq!(
-        propagated["items"].as_array().unwrap().last().unwrap()["output"],
+        explicit_display_texts(&propagated).last().copied().unwrap(),
         "ReplyOpen",
         "{propagated}"
     );
@@ -2794,9 +2848,10 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             "missing {expected} from fresh context: {selected}"
         );
     }
-    let consumer_context = committed(
+    let consumer_context = displayed(
+        &mut campaign,
         consumer.policy.as_ref(),
-        "inspectFull (taskContext sessionInput)",
+        "_ <- display . show $ (taskContext sessionInput)",
     )
     .await;
     assert!(
@@ -2818,9 +2873,10 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             .trimmed(),
         incorporated_head.trimmed()
     );
-    let attention = committed(
+    let attention = displayed(
+        &mut campaign,
         root.as_ref(),
-        "remaining <- pollProgress reviewQuestions\ninspectFull remaining",
+        "remaining <- pollProgress reviewQuestions\n_ <- display (show remaining)",
     )
     .await;
     assert!(
@@ -2828,29 +2884,21 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         "{attention}"
     );
     assert!(
-        !attention["items"][1]["output"]
-            .as_str()
-            .unwrap()
-            .contains("questionKey = \"semantics\""),
+        !explicit_item_display_text(&attention, 1).contains("questionKey = \"semantics\""),
         "answered question survived: {attention}"
     );
-    let original = committed(
+    let original = displayed(
+        &mut campaign,
         root.as_ref(),
-        "original <- pollResponse worker\ninspectFull original",
+        "original <- pollResponse worker\n_ <- display (show original)",
     )
     .await;
     assert!(
-        original["items"][1]["output"]
-            .as_str()
-            .unwrap()
-            .contains(candidate.as_str()),
+        explicit_item_display_text(&original, 1).contains(candidate.as_str()),
         "{original}"
     );
     assert!(
-        !original["items"][1]["output"]
-            .as_str()
-            .unwrap()
-            .contains(revised.as_str()),
+        !explicit_item_display_text(&original, 1).contains(revised.as_str()),
         "repair changed the original response: {original}"
     );
     campaign.forest.shutdown().await;
@@ -3354,6 +3402,17 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     committed(root.as_ref(), "finishWork collector").await;
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
+}
+
+fn explicit_item_display_text(reply: &serde_json::Value, item: usize) -> &str {
+    reply["items"][item]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|operation| operation.get("display"))
+        .unwrap_or_else(|| panic!("structured display missing from item {item}: {reply}"))["text"]
+        .as_str()
+        .unwrap()
 }
 
 fn explicit_display_texts(reply: &serde_json::Value) -> Vec<&str> {
