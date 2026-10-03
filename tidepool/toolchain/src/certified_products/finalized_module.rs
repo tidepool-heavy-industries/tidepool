@@ -36,6 +36,71 @@ pub struct FinalizationEnvelope {
 }
 
 impl FinalizationEnvelope {
+    fn validate_structure(&self) -> CertResult<()> {
+        if self.profile != FINALIZATION_PROFILE
+            || self.home_units.is_empty()
+            || self.home_units.len() > MODULE_LIMIT
+            || self.home_units.iter().any(String::is_empty)
+            || self.modules.len() > MODULE_LIMIT
+        {
+            return Err(CertificationError::Receipt(
+                "finalization inventory bounds/profile",
+            ));
+        }
+        let mut paths = BTreeSet::new();
+        let mut total = 0u64;
+        for (key, module) in &self.modules {
+            if key != &(module.unit.clone(), module.module.clone())
+                || !self.home_units.contains(&module.unit)
+                || module.module.is_empty()
+                || module.source_sha256 == [0; 32]
+                || module.interface_requirements.len() > MODULE_LIMIT
+                || module
+                    .interface_requirements
+                    .iter()
+                    .any(|(required, seal)| {
+                        required == key
+                            || !self.home_units.contains(&required.0)
+                            || required.1.is_empty()
+                            || *seal == [0; 32]
+                    })
+            {
+                return Err(CertificationError::Receipt(
+                    "finalized original/requirement identity",
+                ));
+            }
+            for (artifact, limit) in [
+                (&module.interface, PACKAGE_INTERFACE_LIMIT),
+                (&module.package_imports, RECEIPT_LIMIT as u64),
+            ]
+            .into_iter()
+            .chain(module.core.iter().map(|core| (core, CORE_LIMIT)))
+            {
+                if artifact.bytes == 0
+                    || artifact.bytes > limit
+                    || artifact.sha256 == [0; 32]
+                    || artifact.relative_path.as_os_str().is_empty()
+                    || !artifact
+                        .relative_path
+                        .components()
+                        .all(|part| matches!(part, Component::Normal(_)))
+                    || !paths.insert(artifact.relative_path.clone())
+                {
+                    return Err(CertificationError::Receipt(
+                        "captured artifact seal/path/bounds",
+                    ));
+                }
+                total = total
+                    .checked_add(artifact.bytes)
+                    .ok_or(CertificationError::Receipt("finalization payload budget"))?;
+                if total > FINALIZATION_PAYLOAD_LIMIT as u64 {
+                    return Err(CertificationError::Receipt("finalization payload budget"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn validate_owners(
         &self,
         native: &[CertifiedModuleReceipt],
@@ -193,11 +258,13 @@ pub(super) fn decode_envelope(value: &Value) -> CertResult<FinalizationEnvelope>
             },
         );
     }
-    Ok(FinalizationEnvelope {
+    let envelope = FinalizationEnvelope {
         profile,
         home_units,
         modules,
-    })
+    };
+    envelope.validate_structure()?;
+    Ok(envelope)
 }
 
 /// Private construction binds immutable payloads and all canonical certificate
@@ -330,6 +397,7 @@ pub(super) fn issue_interfaces(
     inherited: &BTreeMap<(String, String), [u8; 32]>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<CertifiedModuleInterface>> {
+    envelope.validate_structure()?;
     if producer == [0; 32] || envelope.profile != FINALIZATION_PROFILE {
         return Err(CertificationError::Mismatch(
             "finalization producer/profile",
@@ -657,5 +725,39 @@ mod tests {
             },
         )]);
         assert!(envelope.validate_owners(&[], &packages).is_err());
+    }
+    #[test]
+    fn typed_finalization_refuses_durable_bound_and_home_inventory_drift() {
+        let module = interface(Some(b"tidy-core".to_vec()));
+        let key = (module.unit().to_owned(), module.module().to_owned());
+        let envelope = FinalizationEnvelope {
+            profile: FINALIZATION_PROFILE.into(),
+            home_units: module.home_units().clone(),
+            modules: BTreeMap::from([(key.clone(), module.receipt.clone())]),
+        };
+        envelope.validate_structure().unwrap();
+        let mut changed = envelope.clone();
+        changed
+            .modules
+            .get_mut(&key)
+            .unwrap()
+            .core
+            .as_mut()
+            .unwrap()
+            .bytes = 0;
+        assert!(changed.validate_structure().is_err());
+        let mut changed = envelope.clone();
+        changed
+            .modules
+            .get_mut(&key)
+            .unwrap()
+            .core
+            .as_mut()
+            .unwrap()
+            .relative_path = module.receipt.interface.relative_path.clone();
+        assert!(changed.validate_structure().is_err());
+        let mut changed = envelope;
+        changed.home_units.remove(module.unit());
+        assert!(changed.validate_structure().is_err());
     }
 }

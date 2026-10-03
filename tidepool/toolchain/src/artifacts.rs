@@ -611,7 +611,20 @@ fn immutable_candidates_in_context(
         );
     }
     let exclusions = module_candidates::ExactCandidateContext::new(protected, reserved)
-        .with_originals(context.recovery_products());
+        .with_originals(context.recovery_products())
+        .with_interface_seals(
+            context
+                .artifact_view()
+                .descriptors()
+                .into_iter()
+                .map(|descriptor| {
+                    (
+                        (descriptor.owner.unit, descriptor.owner.module),
+                        descriptor.interface_sha256,
+                    )
+                })
+                .collect(),
+        );
     Ok(
         module_candidates::select_configured_in_context(producer, include, scratch, &exclusions)?
             .map(Arc::new),

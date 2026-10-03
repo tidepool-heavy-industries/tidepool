@@ -3438,6 +3438,9 @@ pub(crate) fn certify_products(
     include: &[PathBuf],
     exact: Option<&crate::declaration_context::ExactProductAdmission<'_>>,
 ) -> CertResult<CertifiedProducts> {
+    receipt
+        .finalization
+        .validate_owners(&receipt.modules, &receipt.packages)?;
     let evidence_start = std::time::Instant::now();
     let mut validation = PackageInterfaceValidation::default();
     let normalized = match exact {
@@ -6708,7 +6711,7 @@ pub(crate) mod tests {
         else {
             panic!("manifest");
         };
-        assert_eq!(fields[1].as_text(), Some("8"));
+        assert_eq!(fields[1].as_text(), Some("10"));
         let execution = fields[5].as_array().unwrap();
         assert_eq!(execution[0].as_array().unwrap().len(), 1);
         assert_eq!(execution[1].as_array().unwrap().len(), 1);
