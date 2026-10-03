@@ -226,9 +226,28 @@ impl Drop for RuntimeLexicalScopeLease {
 /// session include tree when the compiler offer runs off checkout.
 #[derive(Clone, Debug)]
 pub struct AdmittedValueInterface {
+    snapshot: ValueInterfaceSnapshot,
+    checked_artifact: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+}
+
+/// Byte identity used by the immutable interface sequence. It carries no authority.
+#[derive(Clone, Debug)]
+struct ValueInterfaceSnapshot {
     module: tidepool_repr::SessionModule,
     bytes: Arc<[u8]>,
-    checked_artifact: Option<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>>,
+}
+
+impl AsRef<ValueInterfaceSnapshot> for AdmittedValueInterface {
+    fn as_ref(&self) -> &ValueInterfaceSnapshot {
+        &self.snapshot
+    }
+}
+
+#[cfg(test)]
+impl AsRef<ValueInterfaceSnapshot> for ValueInterfaceSnapshot {
+    fn as_ref(&self) -> &Self {
+        self
+    }
 }
 
 /// The original native import ledger remains fixed for the whole cell.
@@ -430,19 +449,19 @@ fn frame_native_identity(hash: &mut blake3::Hasher, identity: &SymbolIdentity) {
 /// one immutable delta; its commitment binds ordered exact module membership
 /// without copying or rehashing the preceding interfaces.
 #[derive(Clone, Debug)]
-struct CheckedInterfaces {
-    base: Arc<[AdmittedValueInterface]>,
-    tail: Option<Arc<CheckedInterfaceDelta>>,
+struct CheckedInterfaces<I = AdmittedValueInterface> {
+    base: Arc<[I]>,
+    tail: Option<Arc<CheckedInterfaceDelta<I>>>,
     commitment: [u8; 32],
     #[cfg(test)]
     bytes_hashed: Arc<std::sync::atomic::AtomicUsize>,
 }
 #[derive(Debug)]
-struct CheckedInterfaceDelta {
-    previous: Option<Arc<CheckedInterfaceDelta>>,
-    interface: AdmittedValueInterface,
+struct CheckedInterfaceDelta<I = AdmittedValueInterface> {
+    previous: Option<Arc<CheckedInterfaceDelta<I>>>,
+    interface: I,
 }
-impl Drop for CheckedInterfaceDelta {
+impl<I> Drop for CheckedInterfaceDelta<I> {
     fn drop(&mut self) {
         let mut previous = self.previous.take();
         while let Some(parent) = previous {
@@ -453,13 +472,12 @@ impl Drop for CheckedInterfaceDelta {
         }
     }
 }
-impl CheckedInterfaces {
-    fn base(
-        interfaces: &[AdmittedValueInterface],
-    ) -> (Self, std::collections::BTreeMap<u64, [u8; 32]>) {
+impl<I: Clone + AsRef<ValueInterfaceSnapshot>> CheckedInterfaces<I> {
+    fn base(interfaces: &[I]) -> (Self, std::collections::BTreeMap<u64, [u8; 32]>) {
         let mut index = std::collections::BTreeMap::new();
         let mut commitment = *blake3::hash(b"TidepoolCheckedInterfaces1").as_bytes();
         for interface in interfaces {
+            let interface = interface.as_ref();
             let digest = *blake3::hash(&interface.bytes).as_bytes();
             index.insert(interface.module.gen.0, digest);
             commitment = Self::extend_commitment(commitment, interface.module, digest);
@@ -473,7 +491,7 @@ impl CheckedInterfaces {
                 bytes_hashed: Arc::new(std::sync::atomic::AtomicUsize::new(
                     interfaces
                         .iter()
-                        .map(|interface| interface.bytes.len())
+                        .map(|interface| interface.as_ref().bytes.len())
                         .sum(),
                 )),
             },
@@ -498,10 +516,10 @@ impl CheckedInterfaces {
         hash.update(&digest);
         *hash.finalize().as_bytes()
     }
-    fn append(&self, interface: AdmittedValueInterface, digest: [u8; 32]) -> Self {
+    fn append(&self, interface: I, digest: [u8; 32]) -> Self {
         Self {
             base: self.base.clone(),
-            commitment: Self::extend_commitment(self.commitment, interface.module, digest),
+            commitment: Self::extend_commitment(self.commitment, interface.as_ref().module, digest),
             #[cfg(test)]
             bytes_hashed: self.bytes_hashed.clone(),
             tail: Some(Arc::new(CheckedInterfaceDelta {
@@ -510,7 +528,7 @@ impl CheckedInterfaces {
             })),
         }
     }
-    fn iter(&self) -> impl Iterator<Item = &AdmittedValueInterface> {
+    fn iter(&self) -> impl Iterator<Item = &I> {
         let mut suffix = Vec::new();
         let mut node = self.tail.as_deref();
         while let Some(delta) = node {
@@ -866,11 +884,7 @@ fn settle_checked_snapshot(
             Some(_) => {}
             None => {
                 interfaces = interfaces.append(
-                    AdmittedValueInterface {
-                        module,
-                        bytes: bytes.clone(),
-                        checked_artifact: Some(interface.clone()),
-                    },
+                    AdmittedValueInterface::from_checked(interface.clone()),
                     digest,
                 );
                 added_interface = Some((module.gen.0, digest));
@@ -977,29 +991,39 @@ fn checked_snapshot(
 }
 
 impl AdmittedValueInterface {
-    pub fn checked_artifact(
-        &self,
-    ) -> Option<&Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
-        self.checked_artifact.as_ref()
+    fn from_checked(
+        checked_artifact: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+    ) -> Self {
+        Self {
+            snapshot: ValueInterfaceSnapshot {
+                module: checked_artifact.owner(),
+                bytes: checked_artifact.bytes_owned().clone(),
+            },
+            checked_artifact,
+        }
+    }
+    pub fn checked_artifact(&self) -> &Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact> {
+        &self.checked_artifact
     }
     pub fn module(&self) -> tidepool_repr::SessionModule {
-        self.module
+        self.snapshot.module
     }
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+        &self.snapshot.bytes
     }
     pub fn bytes_owned(&self) -> &Arc<[u8]> {
-        &self.bytes
+        &self.snapshot.bytes
     }
 }
 
-fn initial_interfaces_match<'a>(
-    admitted: &[AdmittedValueInterface],
+fn initial_interfaces_match<'a, I: AsRef<ValueInterfaceSnapshot>>(
+    admitted: &[I],
     consumed: impl IntoIterator<Item = (&'a tidepool_repr::SessionModule, &'a Arc<[u8]>)>,
 ) -> bool {
     let mut inventory = consumed.into_iter();
     let mut seen = std::collections::BTreeSet::new();
     for interface in admitted {
+        let interface = interface.as_ref();
         let Some((module, bytes)) = inventory.next() else {
             return false;
         };
@@ -1101,31 +1125,14 @@ impl PersistentSession {
     pub(super) fn capture_value_interfaces(
         &self,
         view: &super::SessionCompileView,
-        require_checked: bool,
     ) -> Result<Vec<AdmittedValueInterface>, SessionError> {
         view.reachable_values()
             .iter()
             .map(|module| {
-                let checked_artifact = self.retained_checked_value_artifact(*module).cloned();
-                if require_checked
-                    && checked_artifact
-                        .as_ref()
-                        .is_none_or(|artifact| !artifact.is_checked_output())
-                {
-                    return Err(SessionError::MissingRetainedValueInterface(*module));
-                }
-                let bytes = match self.retained_value_interface(*module) {
-                    Some(bytes) => bytes.clone(),
-                    None if !require_checked && self.uses_legacy_value_interface(*module) => {
-                        std::fs::read(view.session_root().join(module.relative_hi_path()))?.into()
-                    }
-                    None => return Err(SessionError::MissingRetainedValueInterface(*module)),
-                };
-                Ok(AdmittedValueInterface {
-                    module: *module,
-                    bytes,
-                    checked_artifact,
-                })
+                let artifact = self
+                    .retained_checked_value_artifact(*module)
+                    .ok_or(SessionError::MissingRetainedValueInterface(*module))?;
+                Ok(AdmittedValueInterface::from_checked(artifact.clone()))
             })
             .collect()
     }
@@ -2001,7 +2008,7 @@ impl PersistentSession {
             .into_iter()
             .collect::<Vec<_>>();
         let native_imports = Arc::new(self.capture_admitted_native_imports(scope)?);
-        let interfaces = self.capture_value_interfaces(&view, false)?;
+        let interfaces = self.capture_value_interfaces(&view)?;
         let native_count = match &plan {
             Some(plan) => plan.items().iter().try_fold(0u64, |count, item| {
                 use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
@@ -2198,8 +2205,8 @@ impl PersistentSession {
             }
         }
         for interface in &interfaces {
-            frame(interface.module.module_name().as_bytes());
-            frame(&interface.bytes);
+            frame(interface.module().module_name().as_bytes());
+            frame(interface.bytes());
         }
         for key in &native_shares {
             frame(&key.instance.raw().to_le_bytes());
@@ -2540,13 +2547,11 @@ mod tests {
 
     #[test]
     fn initial_interface_inventory_refuses_missing_extra_duplicate_and_changed_bytes() {
-        let first = AdmittedValueInterface {
-            checked_artifact: None,
+        let first = ValueInterfaceSnapshot {
             module: tidepool_repr::SessionModule::val(Generation(1)),
             bytes: Arc::from([1, 2, 3]),
         };
-        let second = AdmittedValueInterface {
-            checked_artifact: None,
+        let second = ValueInterfaceSnapshot {
             module: tidepool_repr::SessionModule::val(Generation(2)),
             bytes: Arc::from([4, 5, 6]),
         };
@@ -2600,8 +2605,8 @@ mod tests {
             &[first.clone(), first],
             [(&second.module, &second.bytes)],
         ));
-        assert!(initial_interfaces_match(&[], []));
-        assert!(!initial_interfaces_match(
+        assert!(initial_interfaces_match::<ValueInterfaceSnapshot>(&[], []));
+        assert!(!initial_interfaces_match::<ValueInterfaceSnapshot>(
             &[],
             [(&second.module, &second.bytes)],
         ));
@@ -2640,32 +2645,12 @@ mod tests {
         foreign.value.identity.occurrence = "foreign".into();
         let foreign_identity = foreign.value.identity.clone();
         session.bind_in(sibling, foreign).unwrap();
-        let private = Arc::new(session.begin_private_execution(public).unwrap());
-
-        // These sentinel bytes exercise runtime retention, not compiler interface
-        // authority. The compiler must independently certify their input receipt.
-        for module in private.view().reachable_values() {
-            session.retain_fixture_value_interface(*module, Arc::from([1, 2, 3]));
-        }
-        let admitted = session
-            .admit_cell_for_execution(
-                private.clone(),
-                0,
-                Arc::new(()),
-                [7; 32],
-                [8; 32],
-                Vec::new(),
-            )
-            .unwrap();
-        let ledger = admitted.native_imports.clone();
-        assert!(admitted
-            .admitted_retained_imports()
-            .contains(&(original_identity, 910)));
-        assert!(admitted
-            .admitted_retained_imports()
-            .contains(&(historical_identity, 911)));
-        assert!(!admitted
-            .admitted_retained_imports()
+        let retained = session.retain_lexical_scope(public).unwrap();
+        let ledger = Arc::new(session.capture_admitted_native_imports(public).unwrap());
+        assert!(ledger.entries.contains(&(original_identity.clone(), 910)));
+        assert!(ledger.entries.contains(&(historical_identity, 911)));
+        assert!(!ledger
+            .entries
             .iter()
             .any(|(identity, _)| identity == &foreign_identity));
 
@@ -2679,15 +2664,12 @@ mod tests {
             .unwrap()
             .entries
             .contains(&(replacement_identity.clone(), 913)));
-        assert!(!admitted
-            .admitted_retained_imports()
-            .contains(&(replacement_identity, 913)));
-        assert!(Arc::ptr_eq(&ledger, &admitted.native_imports));
+        assert!(!ledger.entries.contains(&(replacement_identity, 913)));
+        assert!(ledger.entries.contains(&(original_identity.clone(), 910)));
         session.retire_scope(public);
         assert!(session.bindings().get(original_id).is_some());
-        drop(admitted);
         drop(ledger);
-        drop(private);
+        drop(retained);
         session.reap_admission_leases();
         assert!(session.bindings().get(original_id).is_none());
         assert!(session
@@ -2697,7 +2679,7 @@ mod tests {
     }
 
     #[test]
-    fn next_cell_interface_owner_outlives_scratch_and_tracks_hidden_binding_leases() {
+    fn raw_interface_owner_tracks_hidden_binding_leases_without_checked_admission() {
         let root = tempfile::tempdir().unwrap();
         let lib =
             SessionLib::open(SessionId(988), root.path(), ModuleEnv::standalone_default()).unwrap();
@@ -2738,29 +2720,12 @@ mod tests {
         drop(scratch);
         assert!(!root.path().join(module.relative_hi_path()).exists());
         let private = Arc::new(session.begin_private_execution(public).unwrap());
-        let admitted = session
-            .admit_cell_for_execution(
-                private.clone(),
-                0,
-                Arc::new(()),
-                [7; 32],
-                [8; 32],
-                Vec::new(),
-            )
-            .unwrap();
-        let captured = admitted
-            .interfaces()
-            .iter()
-            .find(|interface| interface.module() == module)
-            .unwrap();
-        assert!(Arc::ptr_eq(
-            captured.bytes_owned(),
-            &weak.upgrade().unwrap()
-        ));
+        assert!(matches!(session.admit_cell_for_execution(
+            private.clone(), 0, Arc::new(()), [7; 32], [8; 32], Vec::new(),
+        ), Err(SessionError::MissingRetainedValueInterface(owner)) if owner == module));
         session.retire_scope(public);
         assert!(session.bindings().get(id).is_some());
         assert!(session.retained_value_interface(module).is_some());
-        drop(admitted);
         drop(private);
         session.reap_admission_leases();
         // The captured alias keeps the hidden original and its type evidence.
@@ -2821,15 +2786,15 @@ mod tests {
         session.bind(value).unwrap();
         session.retain_fixture_value_interface(module, Arc::from([1, 2, 3]));
         let view = session.compile_view_in(ScopeId::ROOT).unwrap();
-        assert!(matches!(session.capture_value_interfaces(&view, true),
+        assert!(matches!(session.capture_value_interfaces(&view),
             Err(SessionError::MissingRetainedValueInterface(owner)) if owner == module));
         session.mark_legacy_value_interface(module);
-        assert!(matches!(session.capture_value_interfaces(&view, true),
+        assert!(matches!(session.capture_value_interfaces(&view),
             Err(SessionError::MissingRetainedValueInterface(owner)) if owner == module));
     }
 
     #[test]
-    fn ordinary_fragment_interface_disk_route_requires_explicit_live_origin() {
+    fn checked_admission_refuses_explicit_legacy_disk_origin() {
         let root = tempfile::tempdir().unwrap();
         let lib =
             SessionLib::open(SessionId(986), root.path(), ModuleEnv::standalone_default()).unwrap();
@@ -2847,11 +2812,10 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, [9, 8, 7]).unwrap();
         let private = Arc::new(session.begin_private_execution(ScopeId::ROOT).unwrap());
-        let admitted = session
-            .admit_cell_for_execution(private, 0, Arc::new(()), [7; 32], [8; 32], Vec::new())
-            .unwrap();
-        assert_eq!(admitted.interfaces().len(), 1);
-        assert_eq!(admitted.interfaces()[0].bytes(), &[9, 8, 7]);
+        assert!(session.retained_checked_value_artifact(module).is_none());
+        assert!(matches!(session.admit_cell_for_execution(
+            private, 0, Arc::new(()), [7; 32], [8; 32], Vec::new(),
+        ), Err(SessionError::MissingRetainedValueInterface(owner)) if owner == module));
     }
 
     #[test]
@@ -2872,8 +2836,7 @@ mod tests {
                     }));
                     interfaces = Some(Arc::new(CheckedInterfaceDelta {
                         previous: interfaces,
-                        interface: AdmittedValueInterface {
-                            checked_artifact: None,
+                        interface: ValueInterfaceSnapshot {
                             module: tidepool_repr::SessionModule::val(Generation(generation)),
                             bytes: bytes.clone(),
                         },
@@ -2917,8 +2880,7 @@ mod tests {
             }));
             interfaces = Some(Arc::new(CheckedInterfaceDelta {
                 previous: interfaces,
-                interface: AdmittedValueInterface {
-                    checked_artifact: None,
+                interface: ValueInterfaceSnapshot {
                     module: tidepool_repr::SessionModule::val(Generation(generation)),
                     bytes: bytes.clone(),
                 },
@@ -3192,20 +3154,9 @@ mod tests {
         for module in protected.reachable_values() {
             session.retain_fixture_value_interface(*module, Arc::from([1, 2, 3]));
         }
-        let admitted = session
-            .admit_cell_for_execution(
-                execution.clone(),
-                0,
-                Arc::new(()),
-                [7; 32],
-                [8; 32],
-                Vec::new(),
-            )
-            .unwrap();
-        assert_eq!(
-            admitted.view().injected_values(),
-            protected.injected_values()
-        );
+        assert!(matches!(session.admit_cell_for_execution(
+            execution.clone(), 0, Arc::new(()), [7; 32], [8; 32], Vec::new(),
+        ), Err(SessionError::MissingRetainedValueInterface(owner)) if owner == setup_module));
         let foreign_session = PersistentSession::new(None, 1024 * 1024);
         assert!(matches!(
             foreign_session.compile_view_for_execution(&execution),
@@ -3388,8 +3339,7 @@ mod tests {
         for baseline_count in [0, 100] {
             for count in [1, 10, 100] {
                 let baseline = (0..baseline_count)
-                    .map(|index| AdmittedValueInterface {
-                        checked_artifact: None,
+                    .map(|index| ValueInterfaceSnapshot {
                         module: tidepool_repr::SessionModule::val(Generation(index + 1)),
                         bytes: Arc::from(vec![index as u8; BYTES]),
                     })
@@ -3404,8 +3354,7 @@ mod tests {
                     let digest = snapshot.interface_digest(&bytes);
                     assert!(index.insert(module.gen.0, digest).is_none());
                     snapshot = snapshot.append(
-                        AdmittedValueInterface {
-                            checked_artifact: None,
+                        ValueInterfaceSnapshot {
                             module,
                             bytes: bytes.clone(),
                         },

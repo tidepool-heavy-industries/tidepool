@@ -358,8 +358,7 @@ impl PersistentSession {
         &mut self,
         interface: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
     ) -> Result<(), SessionError> {
-        if !interface.is_checked_output()
-            || interface.owner() != SessionModule::val(interface.owner().gen())
+        if interface.owner() != SessionModule::val(interface.owner().gen())
             || !self.binding_index.accepts_value_interface(&interface)
         {
             return Err(SessionError::StaleStagedDeclaration);
@@ -413,10 +412,6 @@ impl PersistentSession {
 
     pub(super) fn mark_legacy_value_interface(&mut self, module: SessionModule) {
         self.binding_index.mark_legacy_interface(module);
-    }
-
-    pub(super) fn uses_legacy_value_interface(&self, module: SessionModule) -> bool {
-        self.binding_index.uses_legacy_interface(module)
     }
 
     #[cfg(test)]

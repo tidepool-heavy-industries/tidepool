@@ -172,13 +172,6 @@ impl BindingIndex {
         }
     }
 
-    pub(super) fn uses_legacy_interface(&self, module: SessionModule) -> bool {
-        matches!(
-            self.value_interfaces.get(&module.module_name()),
-            Some(RetainedValueInterface::LegacyDisk)
-        )
-    }
-
     #[cfg(test)]
     pub(super) fn retain_fixture_interface(&mut self, module: SessionModule, bytes: Arc<[u8]>) {
         assert!(self.is_module_live(&module.module_name()));

@@ -573,13 +573,8 @@ fn run_inspections_with_policy(
         Some(values) => {
             let certificates = values
                 .iter()
-                .map(|value| {
-                    value
-                        .checked_artifact()
-                        .cloned()
-                        .ok_or_else(|| invalid("inspection value lacks its checked certificate"))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+                .map(|value| value.checked_artifact().clone())
+                .collect::<Vec<_>>();
             let modules = values
                 .iter()
                 .map(|value| value.module().module_name())
@@ -1305,7 +1300,7 @@ mod tests {
             .unwrap();
         assert!(view.exact_declaration_context().is_none());
         assert!(view.reachable_values().is_empty());
-        let values = session.capture_value_interfaces(&view, true).unwrap();
+        let values = session.capture_value_interfaces(&view).unwrap();
         assert!(values.is_empty());
         let inputs = AdmittedInspectionInputs::capture(view.clone(), values);
         let queries = [InspectionQuery::TypeSearch("Int -> Int".into())];

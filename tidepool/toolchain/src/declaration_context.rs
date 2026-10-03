@@ -2158,11 +2158,9 @@ impl ExactDeclarationContext {
             .map(|node| (node.owner.clone(), node.imports.clone()))
             .collect::<BTreeMap<_, _>>();
         for value in values {
-            let interface = value
-                .certified_interface()
-                .ok_or_else(|| failure("retained value lacks same-compiler certification"))?;
+            let interface = value.certified_interface();
             self.admit_producer(interface.interface().toolchain_identity_sha256())?;
-            self.inventory = self.inventory.merge(value.artifact_view()?)?;
+            self.inventory = self.inventory.merge(value.artifact_view())?;
             for node in value.source_lexical() {
                 if lexical
                     .insert(node.owner.clone(), node.imports.clone())
@@ -2241,41 +2239,6 @@ impl ExactDeclarationContext {
                 .collect(),
         )?;
         Ok((view, lexical))
-    }
-
-    /// Reuse only the initial value interfaces selected by the sealed checked
-    /// cell. Their dependency closure supplies hydration, never lexical names.
-    pub(crate) fn extend_checked_value_input_context<'a>(
-        mut self,
-        initial: &Self,
-        values: impl Iterator<Item = (tidepool_repr::SessionModule, &'a [u8])>,
-    ) -> Result<Self, CompileError> {
-        let values = values
-            .map(|(owner, bytes)| (identity("main", &owner.module_name()), bytes))
-            .collect::<BTreeMap<_, _>>();
-        let entries = initial
-            .inventory
-            .entries_for_owners(values.keys().cloned())?;
-        let mut roots = Vec::new();
-        for (owner, entry) in entries {
-            let ArtifactPayload::Interface(interface, ArtifactKind::ValueInterface) =
-                &entry.payload
-            else {
-                return Err(failure("checked input has another artifact kind"));
-            };
-            if interface.interface_bytes() != values[&owner] {
-                return Err(failure("checked input differs from its sealed interface"));
-            }
-            self.admit_producer(interface.toolchain_identity_sha256())?;
-            roots.push(entry.descriptor.id);
-        }
-        if !roots.is_empty() {
-            self.inventory = self
-                .inventory
-                .merge(&initial.inventory.select_roots(roots)?)?;
-            self.normalize()?;
-        }
-        Ok(self)
     }
 
     pub(crate) fn extend_program_value_interface(
@@ -4315,7 +4278,7 @@ mod tests {
                 .unwrap(),
         );
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(7));
-        let inputs = crate::checked_cell::CheckedValueInputs::capture(vec![(
+        let inputs = crate::checked_cell::CheckedValueInputs::capture_raw(vec![(
             owner,
             Arc::from(b"original thin interface".as_slice()),
         )])
@@ -4804,72 +4767,6 @@ mod tests {
             .modules
             .push(admission.evidence.modules[0].clone());
         assert!(admission.home_imports().is_err());
-    }
-
-    #[test]
-    fn checked_input_context_retains_only_selected_value_closure_without_lexical_names() {
-        let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(7));
-        let evidence = support_product_in_unit("main", &owner.module_name());
-        let value = Arc::new(
-            CertifiedValueInterface::from_checked_compilation(
-                [2; 32],
-                identity("main", &owner.module_name()),
-                evidence.interface_bytes().to_vec(),
-                evidence.package_imports_bytes().to_vec(),
-                vec![identity("fixture", "Hidden")],
-            )
-            .unwrap(),
-        );
-        let initial = ExactDeclarationContext::new(&[], &[], vec![])
-            .unwrap()
-            .extend_checked_original_products(
-                [2; 32],
-                &[support_product("Hidden"), support_product("Unrelated")],
-                &BTreeMap::new(),
-            )
-            .unwrap()
-            .extend_with_value_interfaces(&[value], vec![])
-            .unwrap();
-        let current = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
-        let enriched = current
-            .clone()
-            .extend_checked_value_input_context(
-                &initial,
-                std::iter::once((owner, evidence.interface_bytes())),
-            )
-            .unwrap();
-        assert!(enriched.lexical_graph().is_empty());
-        assert_eq!(
-            enriched
-                .interface_owners()
-                .into_iter()
-                .map(|entry| entry.owner)
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from([
-                identity("main", &owner.module_name()),
-                identity("fixture", "Hidden"),
-            ])
-        );
-        assert!(current
-            .clone()
-            .extend_checked_value_input_context(
-                &initial,
-                std::iter::once((owner, b"wrong".as_slice()))
-            )
-            .is_err());
-        let foreign = current
-            .extend_checked_original_products(
-                [3; 32],
-                &[support_product("Foreign")],
-                &BTreeMap::new(),
-            )
-            .unwrap();
-        assert!(foreign
-            .extend_checked_value_input_context(
-                &initial,
-                std::iter::once((owner, evidence.interface_bytes())),
-            )
-            .is_err());
     }
 
     #[test]

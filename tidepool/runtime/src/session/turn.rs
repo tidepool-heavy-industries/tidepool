@@ -2625,7 +2625,7 @@ pub fn compile_cell_program_admitted(
         &admission
             .interfaces()
             .iter()
-            .filter_map(|interface| interface.checked_artifact().cloned())
+            .map(|interface| interface.checked_artifact().clone())
             .collect::<Vec<_>>(),
     )?;
     if let Some(root) = offer.checked_value_root() {
@@ -2734,7 +2734,7 @@ fn check_cell_impl(
             &admission
                 .interfaces()
                 .iter()
-                .filter_map(|interface| interface.checked_artifact().cloned())
+                .map(|interface| interface.checked_artifact().clone())
                 .collect::<Vec<_>>(),
         )?
     } else {
@@ -5081,10 +5081,35 @@ mod tests {
             .unwrap();
         assert!(artifact
             .certified_interface()
-            .unwrap()
             .requirements()
             .iter()
             .any(|owner| owner.unit == "main" && owner.module == "CheckedHomeValue"));
+        let rejection_scratch = tempfile::tempdir().unwrap();
+        let rejection_endpoint = extract_cmd().unwrap().bind().unwrap();
+        let initial_value_specification = CheckedCellSpecification {
+            admission_digest: [6; 32],
+            cell_source: "let alias = home".into(),
+            template_source: template.clone(),
+            turn_templates: vec![],
+            injected_modules: vec![artifact.owner().module_name()],
+            reserved_declaration_modules: vec![],
+        };
+        for retained in [Vec::new(), vec![artifact.clone(), artifact.clone()]] {
+            assert!(
+                ModuleCandidateOffer::select_checked_cell(
+                    rejection_endpoint.identity().producer_bytes(),
+                    admission.include_paths(),
+                    rejection_scratch.path(),
+                    None,
+                    initial_value_specification.clone(),
+                    tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
+                    vec![(artifact.owner(), artifact.bytes_owned().clone())],
+                    &retained,
+                )
+                .is_err(),
+                "checked bytes require exactly one original certificate"
+            );
+        }
         let check_original_source = |source: &str,
                                      template: &str,
                                      include_paths: &[PathBuf]|

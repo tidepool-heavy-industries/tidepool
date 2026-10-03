@@ -679,8 +679,8 @@ impl CellProgramItem {
 /// only the original inventory and its sealed completed deltas.
 #[derive(Debug)]
 pub(crate) struct CheckedValueInputs {
-    directory: tempfile::TempDir,
-    baseline: Vec<Arc<CheckedValueArtifact>>,
+    directory: Arc<ValueInterfaceDirectory>,
+    baseline: Vec<CapturedValueInterface>,
     initial_bytes: u64,
     output_files_hashed: AtomicU64,
     output_bytes_hashed: AtomicU64,
@@ -696,19 +696,56 @@ pub struct CheckedInputWork {
     pub output_bytes_hashed: u64,
 }
 
-/// Immutable thin-interface bytes retained by the checked compiler owner.
-/// Only sealed native item/display getters expose stamped output artifacts.
+/// Exact interface bytes are distinct from compiler-certified output authority.
 #[derive(Debug, PartialEq, Eq)]
-pub struct CheckedValueArtifact {
+struct ValueInterfaceBytes {
     owner: tidepool_repr::SessionModule,
     module: String,
     bytes: Arc<[u8]>,
     path: std::path::PathBuf,
     digest: String,
-    authority: Option<([u8; 32], [u8; 32])>,
-    certified_interface: Option<Arc<crate::recovery_artifacts::CertifiedValueInterface>>,
-    artifact_view: Option<crate::artifact_inventory::ArtifactView>,
+}
+
+#[derive(Debug)]
+struct ValueInterfaceDirectory(tempfile::TempDir);
+
+impl PartialEq for ValueInterfaceDirectory {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.path() == other.0.path()
+    }
+}
+impl Eq for ValueInterfaceDirectory {}
+
+#[derive(Debug)]
+enum CapturedValueInterface {
+    #[cfg(test)]
+    Raw(ValueInterfaceBytes),
+    Certified {
+        input: ValueInterfaceBytes,
+        original: Arc<CheckedValueArtifact>,
+    },
+}
+
+impl CapturedValueInterface {
+    fn input(&self) -> &ValueInterfaceBytes {
+        match self {
+            #[cfg(test)]
+            Self::Raw(input) => input,
+            Self::Certified { input, .. } => input,
+        }
+    }
+}
+
+/// An original checked output always owns its certification and selected closure.
+/// The directory lease preserves its immutable compiler input path after the cell drops.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CheckedValueArtifact {
+    interface: ValueInterfaceBytes,
+    authority: ([u8; 32], [u8; 32]),
+    certified_interface: Arc<crate::recovery_artifacts::CertifiedValueInterface>,
+    artifact_view: crate::artifact_inventory::ArtifactView,
     source_lexical: Vec<crate::declaration_join::ExactLexicalNode>,
+    directory: Arc<ValueInterfaceDirectory>,
 }
 
 /// The exact checked interface bytes named by one compiler authorization.
@@ -719,7 +756,7 @@ pub(crate) struct CheckedValueImportAuthority {
 }
 
 impl CheckedValueImportAuthority {
-    fn capture<'a>(values: impl Iterator<Item = &'a CheckedValueArtifact>) -> Self {
+    fn capture<'a>(values: impl Iterator<Item = &'a ValueInterfaceBytes>) -> Self {
         Self {
             values: Arc::new(
                 values
@@ -754,30 +791,43 @@ impl CheckedValueImportAuthority {
 }
 
 impl CheckedValueInputs {
-    pub(crate) fn capture(
+    pub(crate) fn capture_checked(
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
+        retained: &[Arc<CheckedValueArtifact>],
     ) -> Result<Arc<Self>, CompileError> {
-        let directory = tempfile::Builder::new()
-            .prefix("tidepool-checked-values-")
-            .tempdir()?;
+        let mut originals = BTreeMap::new();
+        for artifact in retained {
+            if originals
+                .insert(artifact.owner().module_name(), artifact.clone())
+                .is_some()
+            {
+                return Err(failure("duplicate retained value certificate"));
+            }
+        }
+        let directory = Arc::new(ValueInterfaceDirectory(
+            tempfile::Builder::new()
+                .prefix("tidepool-checked-values-")
+                .tempdir()?,
+        ));
         let mut baseline = Vec::with_capacity(values.len());
         let mut initial_bytes = 0;
         for (owner, bytes) in values {
-            let path = directory.path().join(owner.relative_hi_path());
-            std::fs::create_dir_all(path.parent().expect("generated interface parent"))?;
-            std::fs::write(&path, &bytes)?;
-            initial_bytes += bytes.len() as u64;
-            baseline.push(Arc::new(CheckedValueArtifact {
-                owner,
-                module: owner.module_name(),
-                digest: hash(&bytes),
-                bytes,
-                path,
-                authority: None,
-                certified_interface: None,
-                artifact_view: None,
-                source_lexical: Vec::new(),
-            }));
+            let original = originals
+                .remove(&owner.module_name())
+                .ok_or_else(|| failure("checked input lacks its original value certificate"))?;
+            if bytes.as_ref() != original.bytes_owned().as_ref() {
+                return Err(failure(
+                    "retained value certificate differs from selected interface bytes",
+                ));
+            }
+            let input = Self::write_input(&directory, owner, original.bytes_owned().clone())?;
+            initial_bytes += input.bytes.len() as u64;
+            baseline.push(CapturedValueInterface::Certified { input, original });
+        }
+        if !originals.is_empty() {
+            return Err(failure(
+                "retained value certificates exceed selected input inventory",
+            ));
         }
         Ok(Arc::new(Self {
             directory,
@@ -786,6 +836,59 @@ impl CheckedValueInputs {
             output_files_hashed: AtomicU64::new(0),
             output_bytes_hashed: AtomicU64::new(0),
         }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capture_raw(
+        values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
+    ) -> Result<Arc<Self>, CompileError> {
+        let directory = Arc::new(ValueInterfaceDirectory(
+            tempfile::Builder::new()
+                .prefix("tidepool-checked-values-")
+                .tempdir()?,
+        ));
+        let mut baseline = Vec::with_capacity(values.len());
+        let mut initial_bytes = 0;
+        for (owner, bytes) in values {
+            let input = Self::write_input(&directory, owner, bytes)?;
+            initial_bytes += input.bytes.len() as u64;
+            baseline.push(CapturedValueInterface::Raw(input));
+        }
+        Ok(Arc::new(Self {
+            directory,
+            baseline,
+            initial_bytes,
+            output_files_hashed: AtomicU64::new(0),
+            output_bytes_hashed: AtomicU64::new(0),
+        }))
+    }
+
+    fn write_input(
+        directory: &ValueInterfaceDirectory,
+        owner: tidepool_repr::SessionModule,
+        bytes: Arc<[u8]>,
+    ) -> Result<ValueInterfaceBytes, CompileError> {
+        let path = directory.0.path().join(owner.relative_hi_path());
+        std::fs::create_dir_all(path.parent().expect("generated interface parent"))?;
+        std::fs::write(&path, &bytes)?;
+        Ok(ValueInterfaceBytes {
+            owner,
+            module: owner.module_name(),
+            digest: hash(&bytes),
+            bytes,
+            path,
+        })
+    }
+
+    pub(crate) fn certified_artifacts(&self) -> Vec<Arc<CheckedValueArtifact>> {
+        self.baseline
+            .iter()
+            .filter_map(|value| match value {
+                CapturedValueInterface::Certified { original, .. } => Some(original.clone()),
+                #[cfg(test)]
+                CapturedValueInterface::Raw(_) => None,
+            })
+            .collect()
     }
 
     fn work(&self) -> CheckedInputWork {
@@ -798,20 +901,22 @@ impl CheckedValueInputs {
     }
 
     pub(crate) fn root(&self) -> &Path {
-        self.directory.path()
+        self.directory.0.path()
     }
 
     pub(crate) fn baseline_authorization(&self) -> Value {
         Value::Array(
             self.baseline
                 .iter()
-                .map(|artifact| artifact.authorization())
+                .map(|artifact| artifact.input().authorization())
                 .collect(),
         )
     }
 
     pub(crate) fn import_authority(&self) -> CheckedValueImportAuthority {
-        CheckedValueImportAuthority::capture(self.baseline.iter().map(AsRef::as_ref))
+        CheckedValueImportAuthority::capture(
+            self.baseline.iter().map(CapturedValueInterface::input),
+        )
     }
 
     pub(crate) fn retain_diagnostics(
@@ -824,7 +929,7 @@ impl CheckedValueInputs {
             None => self
                 .baseline
                 .iter()
-                .map(|artifact| (artifact.module.as_str(), artifact.as_ref()))
+                .map(|artifact| (artifact.input().module.as_str(), artifact.input()))
                 .collect(),
         };
         let destination = destination.join("checked-value-inputs");
@@ -887,48 +992,41 @@ impl CheckedValueInputs {
         self.output_bytes_hashed
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
         Ok(Arc::new(CheckedValueArtifact {
-            owner,
-            module: owner.module_name(),
-            digest,
-            bytes,
-            path,
-            authority: Some((cell.producer, cell.receipt_digest)),
-            certified_interface: Some(certificate),
-            artifact_view: Some(artifact_view),
+            interface: ValueInterfaceBytes {
+                owner,
+                module: owner.module_name(),
+                digest,
+                bytes,
+                path,
+            },
+            authority: (cell.producer, cell.receipt_digest),
+            certified_interface: certificate,
+            artifact_view,
             source_lexical,
+            directory: self.directory.clone(),
         }))
     }
 }
 
 impl CheckedValueArtifact {
     pub fn owner(&self) -> tidepool_repr::SessionModule {
-        self.owner
+        self.interface.owner
     }
     pub fn bytes_owned(&self) -> &Arc<[u8]> {
-        &self.bytes
+        &self.interface.bytes
     }
-    pub fn is_checked_output(&self) -> bool {
-        self.authority.is_some()
+    pub fn certified_interface(&self) -> &Arc<crate::recovery_artifacts::CertifiedValueInterface> {
+        &self.certified_interface
     }
-
-    pub fn certified_interface(
-        &self,
-    ) -> Option<&Arc<crate::recovery_artifacts::CertifiedValueInterface>> {
-        self.certified_interface.as_ref()
+    pub(crate) fn artifact_view(&self) -> &crate::artifact_inventory::ArtifactView {
+        &self.artifact_view
     }
-
-    pub(crate) fn artifact_view(
-        &self,
-    ) -> Result<&crate::artifact_inventory::ArtifactView, CompileError> {
-        self.artifact_view
-            .as_ref()
-            .ok_or_else(|| failure("value interface has no original artifact closure"))
-    }
-
     pub(crate) fn source_lexical(&self) -> &[crate::declaration_join::ExactLexicalNode] {
         &self.source_lexical
     }
+}
 
+impl ValueInterfaceBytes {
     fn authorization(&self) -> Value {
         array([
             text("main"),
@@ -1424,7 +1522,10 @@ impl ExactCompiledDisplay {
         Ok(())
     }
     pub fn value_interface_owned(&self) -> (&str, &Arc<[u8]>) {
-        (&self.value_interface.module, &self.value_interface.bytes)
+        (
+            &self.value_interface.interface.module,
+            &self.value_interface.interface.bytes,
+        )
     }
     pub fn value_interface_certificate(&self) -> Arc<CheckedValueArtifact> {
         self.value_interface.clone()
@@ -1707,14 +1808,20 @@ impl ExactCompiledItem {
         std::ptr::eq(self.target.as_ref(), target) || self.target.as_ref() == target
     }
     pub fn value_interface(&self) -> Option<(&str, &[u8])> {
-        self.value_interface
-            .as_ref()
-            .map(|artifact| (artifact.module.as_str(), artifact.bytes.as_ref()))
+        self.value_interface.as_ref().map(|artifact| {
+            (
+                artifact.interface.module.as_str(),
+                artifact.interface.bytes.as_ref(),
+            )
+        })
     }
     pub fn value_interface_owned(&self) -> Option<(&str, &Arc<[u8]>)> {
-        self.value_interface
-            .as_ref()
-            .map(|artifact| (artifact.module.as_str(), &artifact.bytes))
+        self.value_interface.as_ref().map(|artifact| {
+            (
+                artifact.interface.module.as_str(),
+                &artifact.interface.bytes,
+            )
+        })
     }
     pub fn value_interface_certificate(&self) -> Option<Arc<CheckedValueArtifact>> {
         self.value_interface.clone()
@@ -1727,14 +1834,9 @@ impl ExactCompiledPrefix {
         current: Arc<crate::declaration_context::ExactDeclarationContext>,
     ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
         Ok(Arc::new(
-            (*current).clone().extend_checked_value_input_context(
-                &self.cell.declaration_context,
-                self.cell
-                    .value_inputs
-                    .baseline
-                    .iter()
-                    .map(|artifact| (artifact.owner, artifact.bytes.as_ref())),
-            )?,
+            (*current)
+                .clone()
+                .extend_retained_value_artifacts(&self.cell.value_inputs.certified_artifacts())?,
         ))
     }
 
@@ -1882,13 +1984,13 @@ impl ExactCompiledPrefix {
                         completed
                             .value_interface
                             .as_ref()
-                            .map(|artifact| artifact.module.clone())
+                            .map(|artifact| artifact.interface.module.clone())
                     }),
             )
             .chain(
                 self.displays
                     .iter()
-                    .map(|display| display.value_interface.module.clone()),
+                    .map(|display| display.value_interface.interface.module.clone()),
             )
             .collect()
     }
@@ -1899,18 +2001,18 @@ impl ExactCompiledPrefix {
             .filter_map(|completed| completed.value_interface())
             .chain(self.displays.iter().map(|display| {
                 (
-                    display.value_interface.module.as_str(),
-                    display.value_interface.bytes.as_ref(),
+                    display.value_interface.interface.module.as_str(),
+                    display.value_interface.interface.bytes.as_ref(),
                 )
             }))
     }
-    fn value_artifacts(&self) -> Result<BTreeMap<&str, &CheckedValueArtifact>, CompileError> {
+    fn value_artifacts(&self) -> Result<BTreeMap<&str, &ValueInterfaceBytes>, CompileError> {
         let mut inputs = self
             .cell
             .value_inputs
             .baseline
             .iter()
-            .map(|artifact| (artifact.module.as_str(), artifact.as_ref()))
+            .map(|artifact| (artifact.input().module.as_str(), artifact.input()))
             .collect::<BTreeMap<_, _>>();
         for item in self
             .completed
@@ -1918,14 +2020,20 @@ impl ExactCompiledPrefix {
             .filter_map(CompletedCheckedItem::native)
         {
             if let Some(artifact) = &item.value_interface {
-                if inputs.insert(&artifact.module, artifact).is_some() {
+                if inputs
+                    .insert(&artifact.interface.module, &artifact.interface)
+                    .is_some()
+                {
                     return Err(failure("duplicate checked value interface"));
                 }
             }
         }
         for display in &self.displays {
             let artifact = &display.value_interface;
-            if inputs.insert(&artifact.module, artifact).is_some() {
+            if inputs
+                .insert(&artifact.interface.module, &artifact.interface)
+                .is_some()
+            {
                 return Err(failure("duplicate checked display interface"));
             }
         }
@@ -1935,7 +2043,7 @@ impl ExactCompiledPrefix {
         Ok(Value::Array(
             self.value_artifacts()?
                 .into_values()
-                .map(CheckedValueArtifact::authorization)
+                .map(ValueInterfaceBytes::authorization)
                 .collect(),
         ))
     }
@@ -2052,7 +2160,10 @@ impl ExactCompiledPrefix {
                     _ => return Err(failure("sealed binder identity is not an integer")),
                 };
                 if sealed
-                    .insert((artifact.module.as_str(), name), (generation, id, artifact))
+                    .insert(
+                        (artifact.interface.module.as_str(), name),
+                        (generation, id, artifact),
+                    )
                     .is_some()
                 {
                     return Err(failure("duplicate sealed completed native binding"));
@@ -2085,7 +2196,7 @@ impl ExactCompiledPrefix {
         let mut by_module = BTreeMap::<&str, (&CheckedValueArtifact, Vec<(&str, u64)>)>::new();
         for (name, (artifact, id)) in winners {
             by_module
-                .entry(&artifact.module)
+                .entry(&artifact.interface.module)
                 .or_insert_with(|| (artifact, Vec::new()))
                 .1
                 .push((name, id));
@@ -2105,8 +2216,8 @@ impl ExactCompiledPrefix {
                 array([
                     text("main"),
                     text(module),
-                    text(artifact.path.to_string_lossy()),
-                    text(&artifact.digest),
+                    text(artifact.interface.path.to_string_lossy()),
+                    text(&artifact.interface.digest),
                     Value::Array(
                         names
                             .into_iter()
@@ -2166,7 +2277,7 @@ impl ExactCheckedItem {
             .value_inputs
             .baseline
             .iter()
-            .map(|artifact| (&artifact.owner, &artifact.bytes))
+            .map(|artifact| (&artifact.input().owner, &artifact.input().bytes))
     }
     pub fn cell_observations(&self) -> &[u8] {
         &self.cell.observations
@@ -3445,7 +3556,7 @@ mod tests {
                 receipt_digest: [10; 32],
             }),
             planned_declarations: Default::default(),
-            value_inputs: CheckedValueInputs::capture(Vec::new()).unwrap(),
+            value_inputs: CheckedValueInputs::capture_raw(Vec::new()).unwrap(),
         });
         let item = ExactCheckedItem {
             cell: Arc::clone(&cell),
@@ -3678,7 +3789,7 @@ mod tests {
             include: Vec::new(),
             planned_declaration: None,
             planned_declarations: Default::default(),
-            value_inputs: CheckedValueInputs::capture(Vec::new()).unwrap(),
+            value_inputs: CheckedValueInputs::capture_raw(Vec::new()).unwrap(),
         });
         let item = cell.item(0).unwrap();
         CheckedItemOffer {
@@ -3745,9 +3856,23 @@ mod tests {
     }
 
     #[test]
+    fn checked_value_capture_refuses_raw_bytes_without_original_certificate() {
+        let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(3));
+        let bytes: Arc<[u8]> = Arc::from(&b"raw interface"[..]);
+        let raw = CheckedValueInputs::capture_raw(vec![(owner, bytes.clone())]).unwrap();
+        assert!(raw.certified_artifacts().is_empty());
+        assert!(matches!(
+            raw.baseline[0],
+            super::CapturedValueInterface::Raw(_)
+        ));
+        assert!(CheckedValueInputs::capture_checked(vec![(owner, bytes)], &[]).is_err());
+        assert!(CheckedValueInputs::capture_checked(Vec::new(), &[]).is_ok());
+    }
+
+    #[test]
     fn failed_checked_inputs_retain_sealed_and_observed_bytes_after_owner_drop() {
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(3));
-        let inputs = CheckedValueInputs::capture(vec![(owner, Arc::from(&b"sealed"[..]))])
+        let inputs = CheckedValueInputs::capture_raw(vec![(owner, Arc::from(&b"sealed"[..]))])
             .expect("capture exact input");
         std::fs::write(inputs.root().join(owner.relative_hi_path()), b"edited")
             .expect("alter observed file");

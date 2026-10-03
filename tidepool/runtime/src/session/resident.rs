@@ -3116,7 +3116,7 @@ where
         if current.session() != view.session() || !current.is_current_for(view) {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        let values = self.state.capture_value_interfaces(view, true)?;
+        let values = self.state.capture_value_interfaces(view)?;
         Ok(super::AdmittedInspectionInputs::capture(
             view.clone(),
             values,
@@ -3853,7 +3853,7 @@ where
             .proof
             .value_interface_certificate()
             .ok_or_else(invalid)?;
-        if !interface.is_checked_output() || interface.owner() != SessionModule::val(generation) {
+        if interface.owner() != SessionModule::val(generation) {
             return Err(invalid());
         }
         let binding = SessionVarId::from_extract(compiled.binder.var_id);

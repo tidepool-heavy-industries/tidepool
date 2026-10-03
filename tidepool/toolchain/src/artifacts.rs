@@ -537,44 +537,13 @@ fn checked_offer_context(
 
 fn checked_value_context(
     context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
-    values: &[(tidepool_repr::SessionModule, Arc<[u8]>)],
-    retained: &[Arc<crate::checked_cell::CheckedValueArtifact>],
+    inputs: &crate::checked_cell::CheckedValueInputs,
 ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
-    let selected = values
-        .iter()
-        .map(|(owner, bytes)| (owner.module_name(), bytes))
-        .collect::<BTreeMap<_, _>>();
-    let mut seen = BTreeSet::new();
-    for artifact in retained {
-        let owner = artifact.owner();
-        let module = owner.module_name();
-        if !artifact.is_checked_output()
-            || !seen.insert(module.clone())
-            || selected
-                .get(&module)
-                .is_none_or(|bytes| bytes.as_ref() != artifact.bytes_owned().as_ref())
-        {
-            return Err(CompileError::ExtractFailed(
-                "retained value certificate differs from selected interface bytes".into(),
-            ));
-        }
-        let certificate = artifact.certified_interface().ok_or_else(|| {
-            CompileError::ExtractFailed("retained value certificate is absent".into())
-        })?;
-        if certificate.interface().unit() != "main"
-            || certificate.interface().module() != owner.module_name()
-            || certificate.interface().interface_bytes() != artifact.bytes_owned().as_ref()
-        {
-            return Err(CompileError::ExtractFailed(
-                "retained value certificate has another original owner".into(),
-            ));
-        }
-    }
     let context = checked_offer_context(context)?;
     Ok(Arc::new(
         (*context)
             .clone()
-            .extend_retained_value_artifacts(retained)?,
+            .extend_retained_value_artifacts(&inputs.certified_artifacts())?,
     ))
 }
 
@@ -849,8 +818,8 @@ impl ModuleCandidateOffer {
                 "inspection value inventory lacks exact checked certificates".into(),
             ));
         }
-        let context = checked_value_context(context, &values, retained)?;
-        let inputs = crate::checked_cell::CheckedValueInputs::capture(values)?;
+        let inputs = crate::checked_cell::CheckedValueInputs::capture_checked(values, retained)?;
+        let context = checked_value_context(context, &inputs)?;
         let authorization = checked_search_authorization(
             CheckedPurpose::Inspection,
             Value::Array(vec![
@@ -915,12 +884,11 @@ impl ModuleCandidateOffer {
                 .as_ref()
                 .map(|context| context.declarations().clone()),
         )?;
-        let context = checked_value_context(
-            Some(publication_context.clone()),
-            &checked_values,
+        let checked_values = crate::checked_cell::CheckedValueInputs::capture_checked(
+            checked_values,
             retained_interfaces,
         )?;
-        let checked_values = crate::checked_cell::CheckedValueInputs::capture(checked_values)?;
+        let context = checked_value_context(Some(publication_context.clone()), &checked_values)?;
         let authorization =
             checked_cell_authorization(purpose, &specification, &checked_values, include)?;
         Ok(Self {
@@ -994,12 +962,9 @@ impl ModuleCandidateOffer {
                 .as_ref()
                 .map(|context| context.declarations().clone()),
         )?;
-        let context = checked_value_context(
-            Some(publication_context.clone()),
-            &values,
-            retained_interfaces,
-        )?;
-        let inputs = crate::checked_cell::CheckedValueInputs::capture(values)?;
+        let inputs =
+            crate::checked_cell::CheckedValueInputs::capture_checked(values, retained_interfaces)?;
+        let context = checked_value_context(Some(publication_context.clone()), &inputs)?;
         let Value::Array(fields) = &mut authorization else {
             unreachable!("closed authorization")
         };
@@ -4116,7 +4081,7 @@ mod typed_site_tests {
             injected_modules: Vec::new(),
             reserved_declaration_modules: Vec::new(),
         };
-        let values = crate::checked_cell::CheckedValueInputs::capture(Vec::new()).unwrap();
+        let values = crate::checked_cell::CheckedValueInputs::capture_raw(Vec::new()).unwrap();
         let include = [PathBuf::from("/source/original")];
         let authorization = checked_cell_authorization(
             CheckedCellPurpose::HostActivationInput(&witness),
