@@ -144,10 +144,8 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             assert!(item.native().is_some());
             assert!(item.native_products().is_some());
         }
-        let products = &program.items()[0]
-            .native_products()
-            .unwrap()
-            .recovery_products;
+        let sealed = program.items()[0].native_products().unwrap();
+        let products = &sealed.recovery_products;
         let original = products
             .iter()
             .find(|product| product.owner().module == "Tidepool.QQ.Bash")
@@ -159,6 +157,16 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             products,
         )
         .unwrap();
+        let module_interfaces = tidepool_toolchain::declaration_join::ExactDeclarationContext::new(
+            &[],
+            &[],
+            Vec::new(),
+        )
+        .unwrap()
+        .extend_interface_artifacts(&sealed.artifact_view)
+        .unwrap()
+        .materialize_module_interfaces(durable.path())
+        .unwrap();
         let reference = references
             .iter()
             .find(|reference| reference.module == "Tidepool.QQ.Bash")
@@ -168,7 +176,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             tidepool_toolchain::declaration_join::ExactDeclarationContext::capture_recovery(
                 durable.path(),
                 &references,
-                &[],
+                &module_interfaces,
                 &[],
                 Vec::new(),
             )
