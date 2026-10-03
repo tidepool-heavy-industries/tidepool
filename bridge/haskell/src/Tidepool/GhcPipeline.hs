@@ -25,7 +25,7 @@ module Tidepool.GhcPipeline
   ) where
 
 import GHC hiding (typeKind)
-import GHC.Driver.Main (hscDesugar, hscDesugar', hscSimplify, hscMaybeWriteIface, batchMsg, hscTidy, hscCompileCoreExpr')
+import GHC.Driver.Main (hscDesugar, hscDesugar', hscSimplify, hscMaybeWriteIface, batchMsg, hscTidy)
 import GHC.Driver.Pipeline (compileOne')
 import GHC.Driver.Pipeline.Execute (runPhase)
 import GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..))
@@ -49,7 +49,7 @@ import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
 import GHC.Iface.Make (mkIfaceTc, mkPartialIface, mkFullIface)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Unit.Finder (initFinderCache)
-import GHC.Unit.Module.ModIface (set_mi_extra_decls, mi_iface_hash)
+import GHC.Unit.Module.ModIface (set_mi_extra_decls)
 import GHC.Unit.Module.Deps (imp_mods, Usage(..))
 import GHC.Unit.Finder (FindResult(Found), findImportedModule)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
@@ -97,7 +97,7 @@ import GHC.Core.Type
   , splitAppTy_maybe
   , splitTyConApp_maybe
   , splitFunTy_maybe, splitFunTys
-  , isLiftedTypeKind, mkTyVarTy, typeKind, isTauTy, tyCoVarsOfType
+  , mkTyVarTy, typeKind, tyCoVarsOfType
   )
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCo.FVs (scopedSort, tyConsOfType)
@@ -127,7 +127,7 @@ import GHC.Types.Name.Ppr (mkNamePprCtx)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, mkInternalName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (OccName, mkOccName, mkTyVarOcc, occNameSpace, occNameString, isTcOcc)
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
-import GHC.Types.Var (mkTyVar, mkTyVarBinder, setVarName, tyVarKind, varName)
+import GHC.Types.Var (mkTyVar, mkTyVarBinder, setVarName)
 import GHC.Types.Var.Set (isEmptyVarSet)
 import Language.Haskell.Syntax.Specificity (Specificity (SpecifiedSpec))
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
@@ -2510,7 +2510,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                             requestIdentity
                             (memoDiagnosticWitnesses modSum))))
                       Nothing -> pure ()
-                  compileReachable interfaceUse observation moduleFacts = do
+                  compileReachable _interfaceUse observation moduleFacts = do
                     let modSum = observationSummary observation
                     loaded <- case observation of
                       LoadedObservation captured -> pure captured
@@ -2743,14 +2743,14 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                       parsed <- parseModule summary
                       origins <- liftIO (classifyQuasiQuoteOrigins current parsed)
                       transformed <- liftIO (pvTransformParsed variant current summary parsed)
-                      ((environment, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName current summary parsed
+                      ((checkedEnvironment, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName current summary parsed
                         (typecheckNativeModuleWithDiagnostics current transformed)
                       let flags = ms_hspp_opts summary
                       liftIO (printOrThrowDiagnostics (hsc_logger current)
                         (initPrintConfig flags) (initDiagOpts flags) warnings)
                       familyEnvironment <- getSession
-                      liftIO (validateCompilationFamilies familyEnvironment environment)
-                      pure (environment, origins)
+                      liftIO (validateCompilationFamilies familyEnvironment checkedEnvironment)
+                      pure (checkedEnvironment, origins)
                   let inspectionProbes = capturedInspectionProbes tcg
                       retainInterface reason = do
                         -- A later source module's normal home import resolves via
@@ -3196,13 +3196,13 @@ certifyModuleCandidates expectedProducer exactScope sourceFreeOwners manifest gr
                           setSession hydrated { hsc_mod_graph = hsc_mod_graph env }
                           forM_ (Map.toAscList admitted) $ \(name,(_,summary,_,_)) ->
                             when (backendGeneratesCode (backend (ms_hspp_opts summary))) $ do
-                              current <- getSession
+                              executableEnvironment <- getSession
                               let originalFlags = ms_hspp_opts summary
                                   executableSummary = summary {ms_hspp_opts =
                                     (canonicalizeDFlags originalFlags)
                                       {backend = backend originalFlags, ghcLink = ghcLink originalFlags}}
-                              home <- liftIO $ hydrateCandidateExecutable current (proofs Map.! name) executableSummary
-                              setSession (hscUpdateHPT (\hpt -> addToHpt hpt name home) current)
+                              home <- liftIO $ hydrateCandidateExecutable executableEnvironment (proofs Map.! name) executableSummary
+                              setSession (hscUpdateHPT (\hpt -> addToHpt hpt name home) executableEnvironment)
                               liftIO $ emitCount timing "candidate_finalized_core_bytecode" 1
                           recordAdmitted CandidateAccepted Nothing
                           pure (Map.mapWithKey (\name (candidate, summary, _, roots) -> AdmittedSourceCandidate
