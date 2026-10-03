@@ -3366,6 +3366,18 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
     assert_eq!(first["status"], "committed", "{first}");
     let display = explicit_display_output(&first);
     let identity = explicit_display_identity(display);
+    let origin = harness::store::actor_output::ActorOutputOrigin {
+        run: super::runtime_namespace(campaign.session_root.path()),
+        native_actor: identity.0 as u64,
+        incarnation: identity.1 as u64,
+    };
+    let initial_history = store.actor_output_page(&origin, 0, 10).unwrap();
+    assert_eq!(initial_history.outputs.len(), 1);
+    assert!(initial_history.outputs[0].emission().conversation.is_none());
+    assert_eq!(
+        display["output"]["sequence"],
+        initial_history.outputs[0].reference().sequence
+    );
     let keys = display["expansions"].as_array().unwrap();
     assert_eq!(
         keys.len(),
@@ -3405,10 +3417,32 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
         "native expansion must not invoke the source compiler"
     );
     assert_eq!(backend.executions(), 1, "authored effects execute once");
+    let history = store.actor_output_page(&origin, 0, 10).unwrap();
+    assert_eq!(
+        history.outputs.len(),
+        3,
+        "one durable row per displayed page"
+    );
+    assert_eq!(
+        history
+            .outputs
+            .iter()
+            .map(|output| output.emission().id.page_ordinal)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
     assert!(policy.expand_display_boxed(identity, right).await.is_err());
+    assert_eq!(
+        store
+            .actor_output_page(&origin, 0, 10)
+            .unwrap()
+            .outputs
+            .len(),
+        3
+    );
     assert!(
         explicit_display_output(&first)["text"]
             .as_str()
@@ -3439,6 +3473,19 @@ async fn explicit_display_rejects_callback_effect_before_authority_input() {
     assert_eq!(
         explicit_display_output(&published)["text"],
         "forged preview"
+    );
+    let origin = harness::store::actor_output::ActorOutputOrigin {
+        run: super::runtime_namespace(campaign.session_root.path()),
+        native_actor: identity.0 as u64,
+        incarnation: identity.1 as u64,
+    };
+    assert_eq!(
+        store
+            .actor_output_page(&origin, 0, 10)
+            .unwrap()
+            .outputs
+            .len(),
+        1
     );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
