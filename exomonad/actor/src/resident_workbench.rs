@@ -3680,7 +3680,17 @@ where
             compile_context.haskell_effects_alias = dispatcher_effects.clone();
             let installation_scope = self
                 .access
-                .with_machine(context.clone(), |session, context, _| {
+                .with_machine(context.clone(), move |session, context, _| {
+                    if let Some(captured) = context.source_imports.inherited_scope()? {
+                        if install == 1 {
+                            session.validate_initial_lexical_scope(
+                                &captured,
+                                context.placement.lexical_scope,
+                            )?;
+                        } else {
+                            session.validate_lexical_scope_lease(captured.scope(), &captured)?;
+                        }
+                    }
                     session
                         .retain_lexical_scope(context.placement.lexical_scope)
                         .map_err(Into::into)
@@ -6801,34 +6811,6 @@ where
                     session.retire_scope(scope);
                 }
                 Ok(())
-            })
-            .await
-    }
-
-    pub(crate) async fn finalize_fork_scopes(
-        &self,
-        context: crate::ActorSessionContext,
-        previous: Vec<(tidepool_codegen::scope::ScopeId, crate::ForkContext)>,
-    ) -> Result<Vec<tidepool_codegen::scope::ScopeId>, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, context, _| {
-                let mut scopes = Vec::with_capacity(previous.len());
-                for (old, ancestry) in previous {
-                    if ancestry == crate::ForkContext::SelectedContext {
-                        scopes.push(old);
-                        continue;
-                    }
-                    let scope = session
-                        .mint_scope(context.placement.lexical_scope)
-                        .ok_or_else(|| {
-                            ResidentActorWorkbenchError::ActorProtocol(
-                                "fork parent scope was retired".into(),
-                            )
-                        })?;
-                    session.retire_scope(old);
-                    scopes.push(scope);
-                }
-                Ok(scopes)
             })
             .await
     }

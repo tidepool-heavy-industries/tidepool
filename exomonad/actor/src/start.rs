@@ -404,7 +404,22 @@ impl ResidentActorStart {
         let entry = session
             .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)?
             .ok_or(ActorStartCaptureError::MissingEntry)?;
-        let facade = materialize_entry_facade(session, entry.provenance())?;
+        // Capture independently of the invoking private scope's retirement.
+        // The original compiler context and binding shares stay with this lease.
+        let inherited_scope = if context_fork && checkpoint.is_none() {
+            Some(session.retain_lexical_scope(session.run_context().lexical_scope)?)
+        } else {
+            None
+        };
+        let facade = if inherited_scope.is_some() {
+            None
+        } else {
+            materialize_entry_facade(session, entry.provenance())?
+        };
+        let source_imports = match &inherited_scope {
+            Some(scope) => crate::ActorSourceImports::from_inherited_scope(scope.clone()),
+            None => crate::ActorSourceImports::from_exact_facades(facade.iter()),
+        };
         let effective_role = role.effective_role(!launch_worktrees.is_empty());
         let effective_role = match effect_keys {
             Some(keys) => {
@@ -472,9 +487,12 @@ impl ResidentActorStart {
         } else if context_fork {
             (
                 session_id,
-                session
-                    .mint_scope(session.run_context().lexical_scope)
-                    .ok_or(ActorStartCaptureError::ParentScopeRetired)?,
+                match &inherited_scope {
+                    Some(scope) => session.mint_scope_from_lease(scope)?,
+                    None => session
+                        .mint_scope(session.run_context().lexical_scope)
+                        .ok_or(ActorStartCaptureError::ParentScopeRetired)?,
+                },
             )
         } else {
             (session_id, session.mint_isolated_scope())
@@ -495,7 +513,7 @@ impl ResidentActorStart {
         .with_fork_budget(fork_budget)
         .with_creator(parent_actor)
         .with_checkpoint_token(checkpoint)
-        .with_source_imports(crate::ActorSourceImports::from_exact_facades(facade.iter()));
+        .with_source_imports(source_imports);
         if lifetime != WorkerLifetime::SwarmOwned {
             descriptor = descriptor.with_supervisor_parent(parent_actor);
         }

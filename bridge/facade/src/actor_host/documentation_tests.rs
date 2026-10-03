@@ -16,6 +16,156 @@ fn examples(document: &str) -> impl Iterator<Item = &str> {
         .map(|block| block.split_once("```").unwrap().0)
 }
 
+#[tokio::test]
+async fn deferred_inherited_child_preserves_original_owner_after_parent_shadowing() {
+    let mut campaign = TestCampaign::start().await;
+    let root = Arc::clone(&campaign.root_installation.policy);
+    let call_id = "deferred-original-owner".to_owned();
+    committed(root.as_ref(), "data DeferredInput = DeferredInput Int deriving Show\ndata DeferredReply = DeferredReply Int deriving Show").await;
+    let result = root
+        .dispatch_boxed(ToolInvocation {
+            context: Some(ToolInvocationContext::external(
+                "original-owner-test".into(),
+                call_id.clone(),
+                call_id.clone(),
+                Some(call_id.clone()),
+                Some("haskell".into()),
+            )),
+            name: exomonad_actor::HASKELL_TOOL.into(),
+            arguments: ToolArguments::Raw(
+                include_str!("../actor_host_fixtures/generic_actor/deferred_original_owner.hs")
+                    .into(),
+            ),
+        })
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "committed", "{result}");
+    campaign.assert_no_deployment("deferred child booted before completion", |event| {
+        matches!(
+            event,
+            LocalResidentDeployment::PolicyInstalled(_)
+                | LocalResidentDeployment::SessionReady { .. }
+        )
+    });
+    committed(root.as_ref(), "data DeferredInput = LaterInput Bool deriving Show\ndata DeferredReply = LaterReply Bool deriving Show").await;
+    root.complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
+        "original-owner-test".into(),
+        call_id.clone(),
+        call_id,
+    ))
+    .await
+    .unwrap();
+    let child = campaign
+        .next_deployment(
+            "original child tool installation",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                LocalResidentDeployment::Retired { actor, terminal } => {
+                    panic!("captured child {actor:?} retired before installation: {terminal:?}")
+                }
+                other => Err(other),
+            },
+        )
+        .await;
+    let child_id = child.actor.identity();
+    campaign
+        .next_deployment(
+            "original typed child input",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == child_id =>
+                {
+                    Ok(activation)
+                }
+                LocalResidentDeployment::Retired { actor, terminal } => {
+                    panic!("captured child {actor:?} retired before activation: {terminal:?}")
+                }
+                other => Err(other),
+            },
+        )
+        .await;
+    let parent_failure = dispatch_haskell_script(
+        root.as_ref(),
+        "error \"parent-failure-after-deferred-release\" >> pure ()",
+    )
+    .await;
+    assert_ne!(parent_failure["status"], "committed", "{parent_failure}");
+    assert!(
+        parent_failure
+            .to_string()
+            .contains("parent-failure-after-deferred-release"),
+        "{parent_failure}"
+    );
+    let reply = dispatch_haskell_script(
+        child.policy.as_ref(),
+        "case sessionInput of DeferredInput n -> respond (DeferredReply (n + 1))",
+    )
+    .await;
+    assert_eq!(reply["status"], "replied", "{reply}");
+    let observed = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "originalOwnerReply <- pollResponse originalOwnerWorker\ndisplay (show originalOwnerReply)",
+    )
+    .await;
+    let text = explicit_display_output(&observed)["text"].as_str().unwrap();
+    assert!(text.contains("DeferredReply 42"), "{observed}");
+    assert!(!text.contains("LaterReply"), "{observed}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_deferred_capture_does_not_release_child_tools() {
+    let mut campaign = TestCampaign::start().await;
+    let root = Arc::clone(&campaign.root_installation.policy);
+    let call_id = "deferred-original-owner-failure".to_owned();
+    committed(root.as_ref(), "data DeferredInput = DeferredInput Int deriving Show\ndata DeferredReply = DeferredReply Int deriving Show").await;
+    let source = format!(
+        "{}\nerror \"deferred-before-commit-failure\" >> pure ()",
+        include_str!("../actor_host_fixtures/generic_actor/deferred_original_owner.hs")
+    );
+    let result = root
+        .dispatch_boxed(ToolInvocation {
+            context: Some(ToolInvocationContext::external(
+                "original-owner-test".into(),
+                call_id.clone(),
+                call_id.clone(),
+                Some(call_id.clone()),
+                Some("haskell".into()),
+            )),
+            name: exomonad_actor::HASKELL_TOOL.into(),
+            arguments: ToolArguments::Raw(source),
+        })
+        .await
+        .unwrap();
+    assert_ne!(result["status"], "committed", "{result}");
+    assert!(
+        result
+            .to_string()
+            .contains("deferred-before-commit-failure"),
+        "{result}"
+    );
+    root.complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
+        "original-owner-test".into(),
+        call_id.clone(),
+        call_id,
+    ))
+    .await
+    .unwrap();
+    campaign.assert_no_deployment("failed deferred group released a child", |event| {
+        matches!(
+            event,
+            LocalResidentDeployment::PolicyInstalled(_)
+                | LocalResidentDeployment::SessionReady { .. }
+        )
+    });
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
 async fn committed(
     policy: &dyn exomonad_actor::ResidentToolEndpoint,
     source: &str,

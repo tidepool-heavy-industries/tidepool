@@ -2953,6 +2953,14 @@ where
         Ok(self.state.validate_lexical_scope_lease(scope, lease)?)
     }
 
+    pub fn validate_initial_lexical_scope(
+        &self,
+        lease: &super::RuntimeLexicalScopeLease,
+        target: ScopeId,
+    ) -> Result<(), ResidentError> {
+        Ok(self.state.validate_initial_lexical_scope(lease, target)?)
+    }
+
     /// The materialized bindings visible while a compiled cell waits to run.
     /// A later item in that same cell may still import one of these identities
     /// after an earlier item shadows its public name, so preparation retains

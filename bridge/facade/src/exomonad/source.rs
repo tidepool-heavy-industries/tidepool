@@ -2055,6 +2055,11 @@ mod tests {
             .unwrap_err();
         assert!(refusal.contains("source revisions differ"));
         assert!(captured.include_paths()[0].exists());
+        assert_eq!(
+            reload.admit_retained_layer(&captured).unwrap(),
+            captured.include_paths(),
+            "an already admitted original capsule survives later run publication"
+        );
         let checkpoint_actor = PrincipalId::new(1, 1);
         reload
             .bind_checkpoint_for(checkpoint_actor, "run", &captured)
@@ -2106,6 +2111,7 @@ mod tests {
         assert_ne!(foreign.semantic_digest(), digest);
         assert!(!foreign.same_revision(&captured));
         assert!(reload.validate_source_authority(&foreign).is_err());
+        assert!(reload.admit_retained_layer(&foreign).is_err());
         assert!(
             reload
                 .admit_checkpoint_layer(&foreign, PrincipalId::SYSTEM, "run", &[])

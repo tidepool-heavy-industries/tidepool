@@ -1467,11 +1467,36 @@ impl PersistentSession {
         lease: &RuntimeLexicalScopeLease,
     ) -> Result<ScopeId, SessionError> {
         self.reap_admission_leases();
-        if !Arc::ptr_eq(&lease.owner, self.admission_owner()) {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
+        self.validate_lexical_scope_lease(lease.scope, lease)?;
         self.mint_detached_scope(lease.scope)
             .ok_or(SessionError::DeadScope(lease.scope))
+    }
+
+    /// Check the first child bootstrap before that child can advance its own
+    /// declarations. The opaque capture authenticates its owner; the exact
+    /// tip authenticates the full inherited declaration selection, including
+    /// instances, family declarations and retractions.
+    pub fn validate_initial_lexical_scope(
+        &self,
+        lease: &RuntimeLexicalScopeLease,
+        target: ScopeId,
+    ) -> Result<(), SessionError> {
+        self.validate_lexical_scope_lease(lease.scope, lease)?;
+        if !self.scope_tree().is_live(target) {
+            return Err(SessionError::DeadScope(target));
+        }
+        let captured = self
+            .compile_view_in(lease.scope)
+            .ok_or(SessionError::DeadScope(lease.scope))?;
+        let derived = self
+            .compile_view_in(target)
+            .ok_or(SessionError::DeadScope(target))?;
+        if captured.library() != derived.library()
+            || captured.exact_declaration_context() != derived.exact_declaration_context()
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        Ok(())
     }
     pub fn begin_checked_prefix(
         &self,
@@ -3529,6 +3554,12 @@ mod tests {
             first.validate_lexical_scope_lease(lease.scope(), &lease),
             Err(SessionError::StaleStagedDeclaration)
         ));
+        let scopes_before = first.scope_tree().len();
+        assert!(matches!(
+            first.mint_scope_from_lease(&lease),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        assert_eq!(first.scope_tree().len(), scopes_before);
         // Custody survives invalidation; only the unconsumed placement grant
         // is stale. A newly captured exact lease can authorize this owner.
         assert!(first.scope_tree().is_live(lease.scope()));

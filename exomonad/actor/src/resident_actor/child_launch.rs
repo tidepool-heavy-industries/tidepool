@@ -21,6 +21,7 @@ pub(super) struct ChildLaunchAdmission {
     pub child: crate::start::CapturedChildLaunch,
     pub checkpoint_admission: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
     pub inherited_host_attachment: Option<HostedCheckpointAttachment>,
+    pub inherited_source: Option<crate::CheckpointSourceLayer>,
     pub retained_checkpoint_scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
     pub child_session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
     pub invocation_work: Option<Arc<InvocationWork>>,
@@ -37,6 +38,7 @@ struct LaunchedChild {
     admitted_worktree: Option<tidepool_bridge_effects::WtWorktreeHandle>,
     checkpoint_descriptor: Option<ActorDescriptor>,
     checkpoint_admission: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
+    inherited_source: Option<crate::CheckpointSourceLayer>,
     source_layers: Option<crate::ActorSourceLayerResolver>,
     helper_branch: Option<String>,
     bound_worktrees: Vec<String>,
@@ -78,6 +80,7 @@ where
             child,
             checkpoint_admission,
             inherited_host_attachment,
+            inherited_source,
             retained_checkpoint_scope,
             child_session_startup,
             invocation_work,
@@ -155,12 +158,12 @@ where
                             &launch_worktrees,
                         )
                         .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
-                    None => layers
-                        .layer_include_for(
-                            helper_branch.as_deref().unwrap_or_default(),
-                            &launch_worktrees,
-                        )
-                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+                    None => match &inherited_source {
+                        Some(source) => layers.admit_retained_layer(source),
+                        None => layers.layer_include_for(
+                            helper_branch.as_deref().unwrap_or_default(), &launch_worktrees,
+                        ),
+                    }.map_err(ResidentActorWorkbenchError::ActorProtocol)?,
                 };
                 descriptor = descriptor.with_source_layer(layer);
             }
@@ -292,7 +295,7 @@ where
             };
             Ok(LaunchedChild {
                 actor: child, allocated_label, admitted_worktree, checkpoint_descriptor,
-                checkpoint_admission, source_layers, helper_branch, bound_worktrees,
+                checkpoint_admission, inherited_source, source_layers, helper_branch, bound_worktrees,
             })
     }).await;
     CompletedChildLaunch {
@@ -354,6 +357,7 @@ where
             admitted_worktree,
             checkpoint_descriptor,
             checkpoint_admission,
+            inherited_source,
             source_layers,
             helper_branch,
             bound_worktrees,
@@ -402,6 +406,14 @@ where
                         child.identity().into(),
                         helper_branch.as_deref().unwrap_or_default(),
                         &lease.issuer_source_layer,
+                    )
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+            } else if let Some(source) = &inherited_source {
+                layers
+                    .bind_checkpoint_for(
+                        child.identity().into(),
+                        helper_branch.as_deref().unwrap_or_default(),
+                        source,
                     )
                     .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
             } else {

@@ -24,14 +24,33 @@ pub struct ActorPlacement {
 
 /// Exact model-visible declaration imports for one actor incarnation.
 ///
-/// The only public constructor accepts materialized exact-export facades, so
-/// actor startup cannot smuggle an ambient parent module or arbitrary import
-/// string across the fresh-scope boundary. Standard Tidepool imports remain
-/// part of the shared turn template rather than this actor-local membrane.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Selected context accepts only materialized exact-export facades. Inherited
+/// context retains its original runtime-issued lexical lease instead of adding
+/// a new import of the invoking private declaration module.
+#[derive(Debug, Clone, Default)]
 pub struct ActorSourceImports {
     imports: SourceImports,
+    inherited_scope: Option<std::sync::Arc<InheritedScopeCapture>>,
 }
+
+#[derive(Debug)]
+struct InheritedScopeCapture {
+    lease: parking_lot::Mutex<
+        Option<std::sync::Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
+    >,
+}
+
+impl PartialEq for ActorSourceImports {
+    fn eq(&self, other: &Self) -> bool {
+        self.imports == other.imports
+            && match (&self.inherited_scope, &other.inherited_scope) {
+                (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+impl Eq for ActorSourceImports {}
 
 /// A source graph retained by the configured host source owner.
 ///
@@ -186,6 +205,44 @@ impl ActorSourceImports {
         let facades: Vec<_> = facades.into_iter().collect();
         Self {
             imports: SourceImports::from_specs(facades.iter().map(|facade| facade.module_name())),
+            inherited_scope: None,
+        }
+    }
+
+    pub(crate) fn from_inherited_scope(
+        scope: std::sync::Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    ) -> Self {
+        Self {
+            imports: SourceImports::default(),
+            inherited_scope: Some(std::sync::Arc::new(InheritedScopeCapture {
+                lease: parking_lot::Mutex::new(Some(scope)),
+            })),
+        }
+    }
+
+    pub(crate) fn inherited_scope(
+        &self,
+    ) -> Result<
+        Option<std::sync::Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
+        ActorCompileViewError,
+    > {
+        self.inherited_scope
+            .as_ref()
+            .map(|capture| {
+                capture
+                    .lease
+                    .lock()
+                    .clone()
+                    .ok_or(ActorCompileViewError::ReleasedInheritedScope)
+            })
+            .transpose()
+    }
+
+    /// Descriptor and directory observations share this slot, so retained
+    /// terminal metadata cannot keep the actor's capture alive.
+    pub(crate) fn release_inherited_scope(&self) {
+        if let Some(capture) = &self.inherited_scope {
+            capture.lease.lock().take();
         }
     }
 }
@@ -229,6 +286,14 @@ pub trait ActorSourceLayers: Send + Sync {
         } else {
             Err("host cannot admit checkpoint source without owned immutable revisions".into())
         }
+    }
+
+    /// Reuse an already admitted source capsule after the creator advances.
+    /// Authentication belongs to the issuing host; current draft equality is
+    /// not admission authority for this retained immutable graph.
+    fn admit_retained_layer(&self, source: &CheckpointSourceLayer) -> Result<Vec<PathBuf>, String> {
+        self.validate_source_authority(source)?;
+        Ok(source.include_paths().to_vec())
     }
 
     fn bind_checkpoint_for(
@@ -569,6 +634,8 @@ impl ActorCompileView {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ActorCompileViewError {
+    #[error("actor inherited declaration capture has been released")]
+    ReleasedInheritedScope,
     #[error("nonempty actor helper source requires an owned source capsule")]
     UnownedSourceLayer,
     #[error("actor source view belongs to session {actual:?}, expected {expected:?}")]

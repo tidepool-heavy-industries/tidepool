@@ -478,6 +478,7 @@ fn retain_retired_metadata<H, O>(
     }
     environment.fork_groups.retire_actor(actor);
     if let Some(record) = environment.actors.lock().get_mut(&actor) {
+        record.descriptor.source_imports().release_inherited_scope();
         record.terminal = Some(terminal.clone());
         record.displays.lock().retire();
     }
@@ -4589,6 +4590,7 @@ where
     /// returns and nothing else calls a method on a stopped behavior
     /// first, so nothing reads any of these fields again afterwards.
     fn release_session_state(&mut self) {
+        self.descriptor.source_imports().release_inherited_scope();
         self.shutdown_hook.take();
         self.checkpoint.take();
         self.admitted_checkpoint.take();
@@ -4919,6 +4921,20 @@ where
             let inherited_host_attachment = effect_owner
                 .publication()
                 .capture_inherited_child(&descriptor)?;
+            let inherited_source = if descriptor.source_imports().inherited_scope()?.is_some() {
+                let source = match effect_owner.admitted_source() {
+                    Some(source) => source.clone(),
+                    None => self.freeze_installed_source(context.actor)?,
+                };
+                if let Some(layers) = &self.environment.source_layers {
+                    layers
+                        .validate_source_authority(&source)
+                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+                }
+                Some(source)
+            } else {
+                None
+            };
             Ok(child_launch::ChildLaunchAdmission {
                 child: crate::start::CapturedChildLaunch {
                     lifetime,
@@ -4930,6 +4946,7 @@ where
                 },
                 checkpoint_admission,
                 inherited_host_attachment,
+                inherited_source,
                 retained_checkpoint_scope,
                 child_session_startup,
                 invocation_work: invocation_work.clone(),
@@ -12073,39 +12090,14 @@ where
                     })
                     .collect()
             };
-            let previous = {
-                let actors = self.environment.actors.lock();
-                children
-                    .iter()
-                    .map(|child| {
-                        (
-                            actors[child].descriptor.placement().lexical_scope,
-                            if actors[child].descriptor.context_parent().is_some()
-                                && actors[child].descriptor.checkpoint_token().is_none()
-                            {
-                                crate::ForkContext::InheritedContext
-                            } else {
-                                crate::ForkContext::SelectedContext
-                            },
-                        )
-                    })
-                    .collect()
-            };
-            let scopes = self
-                .environment
-                .runner
-                .finalize_fork_scopes(context.clone(), previous)
-                .await
-                .map_err(Self::failure)?;
             let releases = {
                 let actors = self.environment.actors.lock();
                 children
                     .into_iter()
-                    .zip(scopes)
-                    .map(|(child, scope)| PendingForkChildRelease {
+                    .map(|child| PendingForkChildRelease {
                         child,
                         session: actors[&child].descriptor.placement().session,
-                        scope,
+                        scope: actors[&child].descriptor.placement().lexical_scope,
                         lexical: Arc::new(OnceLock::new()),
                     })
                     .collect()

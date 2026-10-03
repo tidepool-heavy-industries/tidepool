@@ -3,6 +3,57 @@ use tidepool_runtime::session::{ModuleEnv, SessionLib};
 
 type Forest = ResidentForest<frunk::HNil, tidepool_mcp::CapturedOutput>;
 
+#[tokio::test]
+async fn retirement_releases_inherited_capture_while_metadata_remains() {
+    let (forest, _root) = forest();
+    let actor = path_workbench(&forest, crate::ActorPersistencePolicy::Ephemeral).await;
+    let mut session = tidepool_runtime::session::PersistentSession::new(None, 1024);
+    let source = session.mint_isolated_scope();
+    let capture = session.retain_lexical_scope(source).unwrap();
+    let captured_scope = capture.scope();
+    let child = session.mint_scope_from_lease(&capture).unwrap();
+    let child_lease = session.retain_lexical_scope(child).unwrap();
+    let imports = crate::ActorSourceImports::from_inherited_scope(capture);
+    let active_reader = imports.inherited_scope().unwrap().unwrap();
+    let mut context_observation = forest.directory.session_context(actor.identity()).unwrap();
+    context_observation.source_imports = imports.clone();
+    let descriptor_observation = {
+        let mut records = forest.environment.actors.lock();
+        let record = records.get_mut(&actor.identity()).unwrap();
+        record.descriptor = record.descriptor.clone().with_source_imports(imports);
+        record.descriptor.clone()
+    };
+    let terminal = ActorTerminal {
+        kind: crate::ActorExitKind::Completed,
+        summary: "capture retirement".into(),
+    };
+    retain_retired_metadata(&forest.environment, actor.identity(), &terminal);
+    assert!(matches!(
+        descriptor_observation.source_imports().inherited_scope(),
+        Err(crate::ActorCompileViewError::ReleasedInheritedScope)
+    ));
+    assert!(matches!(
+        context_observation.source_imports.inherited_scope(),
+        Err(crate::ActorCompileViewError::ReleasedInheritedScope)
+    ));
+    assert!(session.scope_tree().is_live(captured_scope));
+    drop(active_reader);
+    let next_child = session.mint_scope_from_lease(&child_lease).unwrap();
+    assert!(!session.scope_tree().is_live(captured_scope));
+    assert!(session.scope_tree().is_live(next_child));
+    assert_eq!(
+        forest.environment.actors.lock()[&actor.identity()].terminal,
+        Some(terminal)
+    );
+    session.retire_scope(child_lease.scope());
+    drop(child_lease);
+    session.retire_scope(source);
+    session.retire_scope(child);
+    session.retire_scope(next_child);
+    assert_eq!(session.scope_tree().len(), 1);
+    forest.shutdown().await;
+}
+
 fn forest() -> (Forest, tempfile::TempDir) {
     let root = tempfile::tempdir().expect("session root");
     let session = tidepool_runtime::session::fresh_session_id();
