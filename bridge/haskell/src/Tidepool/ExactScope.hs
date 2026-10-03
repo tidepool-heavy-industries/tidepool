@@ -36,7 +36,7 @@ import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell
-  ( CheckedSignature(..), RequestTypeSignatures, decodeCheckedSignature, decodeRequestTypeSignatures )
+  ( CheckedSignature(..), RequestTypeSignatures, RequestHelperRecipe(..), decodeCheckedSignature, decodeRequestTypeSignatures )
 import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), ProjectedGroup(..), ProjectedGroupBody(..), GlobalDecl(..) )
 import Tidepool.ModuleCandidates (CandidateGroup(..), CandidateGlobal(..))
@@ -67,7 +67,7 @@ data ExactScope = ExactScope
   , scopeCheckedDisplay :: Maybe CheckedDisplayAdmission
   , scopeCheckedInspection :: Maybe [ExactIfaceArtifact]
   , scopeIncludePaths :: Maybe [FilePath]
-  , scopeRequestTypes :: Maybe RequestTypeSignatures
+  , scopeRequestTypes :: Maybe (RequestHelperRecipe, RequestTypeSignatures)
   -- Request-local source proof roots are revalidated by subsequent stages;
   -- they are never serialized as baseline lexical authority.
   , scopeSourceSelectedOwners :: Set.Set (String,String)
@@ -557,14 +557,25 @@ decodeScope = do
     else do
     outerCount <- decodeListLen
     outerPurpose <- string
-    (authCount, purpose, requestTypes) <- if outerPurpose == "request-types1" then do
-      unless (outerCount == 3) (fail "invalid native request type admission")
+    (requestTypes, purpose) <- if outerPurpose == "request-types2" then do
+      unless (outerCount == 4) (fail "invalid native request type admission")
       native <- decodeRequestTypeSignatures
-      count <- decodeListLen
-      purpose <- string
-      pure (count, purpose, Just native)
-      else pure (outerCount, outerPurpose, Nothing)
-    admission <- case purpose of
+      recipe <- string >>= \tag -> case tag of
+        "none" -> pure NoRequestHelpers
+        "actor-reply" -> pure ActorReplyHelpers
+        _ -> fail "unsupported request helper recipe"
+      token <- peekTokenType
+      inner <- if token == TypeNull then decodeNull >> pure Nothing
+        else Just <$> ((,) <$> decodeListLen <*> string)
+      pure (Just (recipe, native), inner)
+      else pure (Nothing, Just (outerCount, outerPurpose))
+    admission <- maybe (pure (Nothing,Nothing,Nothing,Nothing,Nothing))
+      (uncurry decodePurpose) purpose
+    pure (requestTypes, admission)
+  pure (ExactScope "" "" producer semantic interfaces lexical products [] executionOwners
+    checked checkedItem checkedDisplay inspectionValues includes requestTypes Set.empty, descriptors)
+  where
+    decodePurpose authCount purpose = case purpose of
       "inspection1" -> do
         unless (authCount == 4) (fail "invalid inspection admission")
         injected <- bounded 4096 nonempty
@@ -683,10 +694,6 @@ decodeScope = do
         paths <- includePaths
         pure (Nothing,Nothing,Just admission,Nothing,Just paths)
       _ -> fail "unsupported exact compile purpose"
-    pure (requestTypes, admission)
-  pure (ExactScope "" "" producer semantic interfaces lexical products [] executionOwners
-    checked checkedItem checkedDisplay inspectionValues includes requestTypes Set.empty, descriptors)
-  where
     includePaths = bounded 4096 $ do
       path <- absolute
       when (T.length (T.pack path) > 65536) (fail "checked search path exceeds bound")

@@ -51,7 +51,9 @@ import GHC.Unit.Module.Deps (imp_mods, Usage(..))
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
 import GHC.Types.SourceFile (HscSource(..))
 import Control.Monad.IO.Class (liftIO)
-import GHC.Driver.Session (targetProfile)
+import GHC.Driver.Session (targetProfile, wopt_set, WarningFlag(Opt_WarnMissingSignatures))
+import GHC.Types.Error (isEmptyMessages)
+import GHC.Types.Name.Set (nameSetElemsStable)
 import GHC.Driver.Hooks (hscCompileCoreExprHook)
 import GHC.Iface.Make (mkIfaceTc)
 import GHC.Iface.Tidy (mkBootModDetailsTc)
@@ -124,8 +126,8 @@ import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule)
 import Tidepool.Session (sessionHiPath)
 import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
-import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), captureCheckedSignature, encodeCheckedSignature
-  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, NativeParsedModule, typecheckNativeModule)
+import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, encodeRequestTypeSignatures
+  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
 import Tidepool.Binders (BoundBinder(..))
 import Tidepool.ExecutionSource
@@ -1818,11 +1820,18 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
       let parseSlot body = do
             liftIO (writeFile target ("module CheckedNativeSignatures where\n" ++ body))
             parseModule (summary { ms_hspp_buf = Nothing, ms_hspp_file = target })
-      slot <- parseSlot "__result :: TidepoolActivationInput\n__result = undefined\n"
+      slot <- parseSlot "__result :: TidepoolActivationInput\n__result = undefined\nwarningProbe = ()\n"
       native <- liftIO (rewriteHostInputType (crHscEnv checked) 1 signature slot)
-      result <- typecheckNativeModule native
-      let (nativeEnvironment, _) = tm_internals_ result
-          actualInput = [idType identifier | identifier <- typeEnvIds (tcg_type_env nativeEnvironment)
+      let warningSource = nativeParsedModule native
+          warningSummary = pm_mod_summary warningSource
+          warningNative = native { nativeParsedModule = warningSource
+            { pm_mod_summary = warningSummary { ms_hspp_opts = wopt_set
+                (ms_hspp_opts warningSummary) Opt_WarnMissingSignatures } } }
+      ((nativeEnvironment, _), nativeDiagnostics) <- liftIO
+        (typecheckNativeModuleWithDiagnostics (crHscEnv checked) warningNative)
+      liftIO $ unless (not (isEmptyMessages nativeDiagnostics))
+        (fail "native typecheck hook dropped missing-signature diagnostics")
+      let actualInput = [idType identifier | identifier <- typeEnvIds (tcg_type_env nativeEnvironment)
             , getOccString identifier == "__result"]
       liftIO $ unless (case actualInput of [ty] -> eqType expected ty; _ -> False)
         (fail "native host slot lost its nominal owner without a source import")
@@ -1862,7 +1871,7 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
         let contract = RequestTypeSignatures (presentationOnly reply) (presentationOnly <$> maybeProgress)
             progressSlot = "TidepoolRequestProgress" <$ maybeProgress
         requestParsed <- parseSlot (requestBody "TidepoolRequestReply" progressSlot)
-        requestNative <- liftIO (rewriteRequestTypes (crHscEnv checked) contract requestParsed)
+        requestNative <- liftIO (rewriteRequestTypes (crHscEnv checked) ActorReplyHelpers contract requestParsed)
         requestChecked <- typecheckNativeModule requestNative
         let (requestEnvironment, _) = tm_internals_ requestChecked
             replyTypes = [idType identifier | identifier <- typeEnvIds (tcg_type_env requestEnvironment)
@@ -1870,7 +1879,29 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
         liftIO $ unless (case replyTypes of [ty] -> eqType expected ty; _ -> False)
           (fail "request annotation reconstructed a type from presentation")
       let plainContract = RequestTypeSignatures reply Nothing
-          rejectedBodies =
+      forM_ [plainContract, RequestTypeSignatures reply (Just progress)] $ \contract -> do
+        noHelpers <- parseSlot "__result :: Int\n__result = 0\n"
+        rewritten <- liftIO (rewriteRequestTypes (crHscEnv checked) NoRequestHelpers contract noHelpers)
+        _ <- typecheckNativeModule rewritten
+        composed <- liftIO (thenNativeModule native
+          (rewriteRequestTypes (crHscEnv checked) NoRequestHelpers contract))
+        liftIO $ unless (nameSetElemsStable (nativeTypeUses composed)
+            == nameSetElemsStable (nativeTypeUses native))
+          (fail "helper-free request transform dropped native input dependency uses")
+        composedChecked <- typecheckNativeModule composed
+        let (composedEnvironment, _) = tm_internals_ composedChecked
+            composedTypes = [idType identifier | identifier <- typeEnvIds (tcg_type_env composedEnvironment)
+              , getOccString identifier == "__result"]
+        liftIO $ unless (case composedTypes of [ty] -> eqType expected ty; _ -> False)
+          (fail "helper-free request transform lost the prior native input type")
+        forM_ [requestBody "TidepoolRequestReply" Nothing
+              ,"__result :: TidepoolRequestProgress\n__result = undefined\n"] $ \body -> do
+          malformed <- parseSlot body
+          refused <- liftIO (try (rewriteRequestTypes (crHscEnv checked) NoRequestHelpers contract malformed)
+            :: IO (Either SomeException NativeParsedModule))
+          liftIO $ unless (case refused of Left _ -> True; Right _ -> False)
+            (fail "helper-free source recipe admitted a reserved request slot")
+      let rejectedBodies =
             [ requestBody "Int" Nothing
             , requestBody "Missing.TidepoolRequestReply" Nothing
             , requestBody "(TidepoolRequestReply, TidepoolRequestReply)" Nothing
@@ -1878,7 +1909,7 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
             ]
       forM_ rejectedBodies $ \body -> do
         malformed <- parseSlot body
-        refusedRequest <- liftIO (try (rewriteRequestTypes (crHscEnv checked) plainContract malformed)
+        refusedRequest <- liftIO (try (rewriteRequestTypes (crHscEnv checked) ActorReplyHelpers plainContract malformed)
           :: IO (Either SomeException NativeParsedModule))
         liftIO $ unless (case refusedRequest of Left _ -> True; Right _ -> False)
           (fail "request recipe admitted missing, qualified, duplicated or unauthorized native slots")
@@ -1904,7 +1935,8 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
       hostManifest auth = TList [text "TPEXACTSCOPE",text "6",sha,sha,empty,empty,empty
         ,TList [empty,empty],TList auth]
       path = work </> "host-scope.cbor"
-      decode auth = BS.writeFile path (toStrictByteString (encodeTerm (hostManifest auth))) >> readExactScope path
+      decodeManifest manifest = BS.writeFile path (toStrictByteString (encodeTerm manifest)) >> readExactScope path
+      decode = decodeManifest . hostManifest
       replace index value fields = [if ordinal == index then value else field | (ordinal,field) <- zip [0::Int ..] fields]
   admitted <- decode authorization >>= either fail pure
   unless (fmap itemPurpose (scopeCheckedItem admitted) == Just HostActivationInput) $
@@ -1926,6 +1958,35 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   original <- runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile Nothing sourcePath [work] Nothing
   inputType <- maybe (fail "host input fixture has no inferred type") pure (crResultType original)
   capturedSignature <- captureCheckedSignature (crHscEnv original) "__tidepool_cell_pin_0_sessionInput" inputType
+  replySignature <- captureCheckedSignature (crHscEnv original) "request-reply" inputType
+  requestTerm <- either (fail . show) (pure . snd)
+    (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString
+      (encodeRequestTypeSignatures (RequestTypeSignatures replySignature Nothing)))))
+  let nativeAuthorization recipe inner = [text "request-types2", requestTerm, text recipe, inner]
+  forM_ [("none",NoRequestHelpers),("actor-reply",ActorReplyHelpers)] $ \(tag,recipe) -> do
+    requestScope <- decode (nativeAuthorization tag TNull) >>= either fail pure
+    unless (scopeRequestTypes requestScope == Just (recipe,RequestTypeSignatures replySignature Nothing)
+        && isNothing (scopeCheckedCell requestScope) && isNothing (scopeCheckedItem requestScope)
+        && isNothing (scopeCheckedDisplay requestScope) && isNothing (scopeCheckedInspection requestScope)
+        && isNothing (scopeIncludePaths requestScope))
+      (fail "native request wrapper lost recipe or granted an inner purpose")
+    graphFree <- decodeManifest (TList [text "TPEXACTSCOPE",text "4",sha,sha,empty,empty,empty
+      ,TList (nativeAuthorization tag TNull)]) >>= either fail pure
+    unless (scopeRequestTypes graphFree == scopeRequestTypes requestScope
+        && isNothing (scopeCheckedItem graphFree))
+      (fail "graph-free request wrapper changed native recipe authority")
+    wrappedHost <- decode (nativeAuthorization tag (TList authorization)) >>= either fail pure
+    unless (fmap itemPurpose (scopeCheckedItem wrappedHost) == Just HostActivationInput
+        && fmap fst (scopeRequestTypes wrappedHost) == Just recipe)
+      (fail "native request wrapper lost its protected inner purpose")
+  forM_ [[text "request-types1",requestTerm,TNull]
+        ,nativeAuthorization "unknown" TNull
+        ,nativeAuthorization "none" (TList [text "request-types2",requestTerm,text "none",TNull])
+        ,nativeAuthorization "actor-reply" (TList (replace 3 (TInt 1) authorization))
+        ,nativeAuthorization "none" TNull ++ [TNull]] $ \invalid -> do
+    refused <- decode invalid
+    unless (case refused of Left _ -> True; Right _ -> False)
+      (fail "native request wrapper admitted legacy, malformed or invalid inner authority")
   let checkedSignature = capturedSignature { signaturePresentation = "presentation is not Haskell syntax !" }
   encodedSignature <- either (fail . show) (pure . snd)
     (deserialiseFromBytes decodeTerm (BSL.fromStrict (toStrictByteString (encodeCheckedSignature checkedSignature))))

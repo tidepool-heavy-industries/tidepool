@@ -3,11 +3,12 @@
 module Tidepool.CheckedCell
   ( CheckedSignature(..), CheckedSignatureName(..)
   , captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature
-  , RequestTypeSignatures(..), captureRequestTypeSignatures
+  , RequestTypeSignatures(..), RequestHelperRecipe(..), captureRequestTypeSignatures
   , encodeRequestTypeSignatures, decodeRequestTypeSignatures, renderRequestTypeSignatures
   , CheckedTypeWitness, captureCheckedTypeWitness, sealCheckedTypeWitness
   , encodeCheckedTypeWitness, renderCheckedTypeWitness
   , NativeParsedModule(..), unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModule
+  , typecheckNativeModuleWithDiagnostics
   , rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
   ) where
 
@@ -41,7 +42,12 @@ import GHC.Data.FastString (unpackFS)
 import GHC.Types.Var (VarBndr(..), ForAllTyFlag(..), Specificity(..), FunTyFlag(..), isTyVar, varType)
 import Tidepool.TypePolicy (stabilizeEffectRows)
 import GHC.Core.TyCon (tyConName)
-import GHC.Driver.Env (lookupType, hsc_home_unit, hsc_NC)
+import GHC.Driver.Env (lookupType, hsc_home_unit, hsc_NC, hscSetFlags)
+import GHC.Driver.Main (hscTypecheckRenameWithDiagnostics)
+import GHC.Driver.Errors.Types (GhcMessage)
+import GHC.Types.Error (Messages)
+import GHC.Tc.Types (TcGblEnv)
+import GHC.Tc.Module (RenamedStuff)
 import GHC.Iface.Env (lookupOrig)
 import GHC.Iface.Load (importDecl)
 import GHC.Tc.Utils.Monad (initIfaceLoad, initIfaceLcl)
@@ -79,6 +85,11 @@ data RequestTypeSignatures = RequestTypeSignatures
   { requestReplySignature :: CheckedSignature
   , requestProgressSignature :: Maybe CheckedSignature
   } deriving (Eq, Show)
+
+-- The protected source recipe selects helper presence independently of the
+-- original request bundle's custody. Progress presence remains bundle-owned.
+data RequestHelperRecipe = NoRequestHelpers | ActorReplyHelpers
+  deriving (Eq, Show)
 
 captureRequestTypeSignatures :: HscEnv -> Type -> Maybe Type -> IO RequestTypeSignatures
 captureRequestTypeSignatures env reply progress = do
@@ -219,9 +230,28 @@ typecheckNativeModule :: NativeParsedModule -> Ghc TypecheckedModule
 typecheckNativeModule annotated = do
   typed <- typecheckModule (nativeParsedModule annotated)
   let (environment, details) = tm_internals_ typed
-      names = nativeTypeUses annotated
-  pure $ if isEmptyNameSet names then typed else typed
-    { tm_internals_ = (addTcgDUs environment (usesOnly names), details) }
+  pure typed { tm_internals_ = (addNativeTypeUses annotated environment, details) }
+
+-- Compiler phase hooks retain GHC's diagnostics instead of using the facade's
+-- printing typecheck operation. Both entry points register the same native uses.
+typecheckNativeModuleWithDiagnostics
+  :: HscEnv -> NativeParsedModule
+  -> IO ((TcGblEnv, RenamedStuff), Messages GhcMessage)
+typecheckNativeModuleWithDiagnostics env annotated = do
+  let parsed = nativeParsedModule annotated
+      summary = pm_mod_summary parsed
+      local = hscSetFlags (ms_hspp_opts summary) env
+      source = HsParsedModule
+        { hpm_module = pm_parsed_source parsed
+        , hpm_src_files = pm_extra_src_files parsed
+        }
+  ((environment, renamed), diagnostics) <- hscTypecheckRenameWithDiagnostics local summary source
+  pure ((addNativeTypeUses annotated environment, renamed), diagnostics)
+
+addNativeTypeUses :: NativeParsedModule -> TcGblEnv -> TcGblEnv
+addNativeTypeUses annotated environment
+  | isEmptyNameSet (nativeTypeUses annotated) = environment
+  | otherwise = addTcgDUs environment (usesOnly (nativeTypeUses annotated))
 
 -- Generic source rewrites stop at native types. Their semantic graphs are
 -- compiler-owned data, not syntax to traverse again on a subsequent rewrite.
@@ -323,12 +353,18 @@ rewriteHostInputType env expected signature =
 
 -- Reply occurs in both sessionReply and respond; progress occurs only in
 -- reportProgress. No presentation string participates in these annotations.
-rewriteRequestTypes :: HscEnv -> RequestTypeSignatures -> ParsedModule -> IO NativeParsedModule
-rewriteRequestTypes env signatures = rewriteNativeSlots env
-  [ (RequestReplySlot, 2, Just (requestReplySignature signatures))
-  , (RequestProgressSlot, maybe 0 (const 1) (requestProgressSignature signatures),
-      requestProgressSignature signatures)
-  ]
+rewriteRequestTypes
+  :: HscEnv -> RequestHelperRecipe -> RequestTypeSignatures -> ParsedModule -> IO NativeParsedModule
+rewriteRequestTypes env recipe signatures = rewriteNativeSlots env $ case recipe of
+  NoRequestHelpers ->
+    [ (RequestReplySlot, 0, Nothing)
+    , (RequestProgressSlot, 0, Nothing)
+    ]
+  ActorReplyHelpers ->
+    [ (RequestReplySlot, 2, Just (requestReplySignature signatures))
+    , (RequestProgressSlot, maybe 0 (const 1) (requestProgressSignature signatures),
+        requestProgressSignature signatures)
+    ]
 
 -- Only compiler-generated signature binders acquire exact Types. Authored
 -- source continues through ordinary GHC renaming and lexical lookup.
