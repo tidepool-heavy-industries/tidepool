@@ -43,8 +43,8 @@ import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transformProgramDeclarationImports)
 import Tidepool.GhcPipeline
 import Tidepool.ExtractRequest
-  ( InspectionRequest(..), RequestField(..), WorkerRequest(..)
-  , workerArgv, workerRequestFromArgv )
+  ( InspectionRequest(..), RequestField(..), RequestShapeError(..), WorkerRequest(..)
+  , validateRequestShape, workerArgv, workerRequestFromArgv )
 import Tidepool.Introspection (InfoEntry(..), InspectionResult(..), runInspection)
 import Tidepool.DependencyEvidence
 import Tidepool.Session
@@ -65,6 +65,7 @@ import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 
 main :: IO ()
 main = getArgs >>= \case
+  ["--request-validation"] -> requestValidationChecks
   ["--check-source-request"] -> checkingSourceRequestRoundTrip >> putStrLn "checking source request: 1 passed"
   ["--ordered-segments"] -> orderedInferenceSegments >> putStrLn "ordered inference segments: 1 passed"
   ["--program-originals"] -> programOriginalImportsCompilation >> putStrLn "program original imports: 1 passed"
@@ -78,10 +79,7 @@ main = getArgs >>= \case
 
 runAllTests :: IO ()
 runAllTests = do
-  certificationRequestValidation
-  requestShapeValidation
-  requestFieldOrdering
-  checkingSourceRequestRoundTrip
+  requestValidationChecks
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     flags <- getSessionDynFlags
@@ -116,6 +114,14 @@ runAllTests = do
     ["--path-insensitive-witness"] -> pathInsensitiveWitnessCompilation
     ["--memo-lifecycle"] -> memoLifecycleCompilation
     _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --pin-imports, --path-insensitive-witness, --memo-lifecycle, or --structural-display EFFECTS_INCLUDE"
+
+requestValidationChecks :: IO ()
+requestValidationChecks = do
+  certificationRequestValidation
+  checkingSourceRequestRoundTrip
+  requestShapeValidation
+  requestFieldOrdering
+  putStrLn "request validation: 4 groups passed (certification, source-check round-trip, mode shapes, field ordering)"
 
 requestOwnedParserDefaults :: IO ()
 requestOwnedParserDefaults = do
@@ -410,17 +416,50 @@ requestShapeValidation = do
         Right (Just decoded) -> pure decoded
         other -> fail ("request shape fixture failed to decode: " ++ show other)
       cases =
-        [ ("source check accepts its narrow form", [Input "Probe.hs", CheckSource], Right ())
-        , ("source check rejects product output", [Input "Probe.hs", CheckSource, OutputDir "out"], Left InvalidSourceCheckShape)
-        , ("source check rejects notebook mode", [Input "Probe.hs", CheckSource, Cell], Left InvalidSourceCheckShape)
-        , ("cell plan accepts its narrow form", [Input "Cell.hs", CellPlan], Right ())
-        , ("cell plan rejects multiple files", [Input "A.hs", Input "B.hs", CellPlan], Left InvalidCellPlanShape)
-        , ("cell plan rejects candidate authority", [Input "Cell.hs", CellPlan, ModuleCandidates "scope"], Left InvalidCellPlanShape)
-        , ("source-check precedence is retained", [Input "Cell.hs", CheckSource, CellPlan], Left InvalidSourceCheckShape)
+        [ ("source check accepts explicit compiler inputs"
+          , [Input "Probe.hs", CheckSource, Include "lib", ModuleCandidates "scope", BuildProductsDir "products"]
+          , Right ())
+        , ("cell plan accepts common compile context"
+          , [Input "Cell.hs", CellPlan, Include "lib", OutputDir "out", Target "Main", Targets ["A"], SessionRoot "session"]
+          , Right ())
         ]
+        ++ [("source check rejects " ++ label, [Input "Probe.hs", CheckSource, field], Left InvalidSourceCheckShape)
+           | (label, field) <- sourceCheckExcludedFields]
+        ++ [("cell plan rejects " ++ label, [Input "Cell.hs", CellPlan, field], Left InvalidCellPlanShape)
+           | (label, field) <- cellPlanExcludedFields]
+        ++ [ ("source check rejects multiple inputs", [Input "A.hs", Input "B.hs", CheckSource], Left InvalidSourceCheckShape)
+           , ("cell plan rejects multiple inputs", [Input "A.hs", Input "B.hs", CellPlan], Left InvalidCellPlanShape)
+           , ("source-check error precedence is retained", [Input "Cell.hs", CheckSource, CellPlan], Left InvalidSourceCheckShape)
+           ]
   forM_ cases $ \(label, fields, expected) -> do
     decoded <- request fields
     assertEqual label expected (validateRequestShape decoded)
+  where
+    sourceCheckExcludedFields =
+      [ ("output directory", OutputDir "out"), ("target", Target "Main"), ("target group", Targets ["Main"])
+      , ("module-only target", TargetModuleOnly), ("binding generation", BindGen 1)
+      , ("session injection", InjectVal "Val1"), ("session root", SessionRoot "session")
+      , ("session incarnation", SessionIncarnation "1"), ("session artifacts", SessionArtifacts "scope")
+      , ("turn mode", Turn), ("turn template", TurnTemplate "kind" "template")
+      , ("turn output", TurnOut "turn"), ("turn verdict", TurnVerdict "ok"), ("turn pin", TurnPin "pin")
+      , ("classification mode", Classify), ("classification output", ClassifyOut "classify")
+      , ("cell mode", Cell), ("cell plan mode", CellPlan), ("cell template", CellTemplate "template")
+      , ("cell output", CellOut "cell"), ("harness profile", HarnessProfile)
+      , ("declaration join", DeclarationJoin "join"), ("declaration join output", DeclarationJoinOut "join-out")
+      , ("certification", CertifyHomeProducts), ("activation preview", ActivationPreview)
+      , ("cell fold turn", CellFoldTurn), ("inspection strictness", InspectionStrict)
+      , ("inspection output", InspectOut "inspect"), ("type batch", InspectTypeBatch "batch")
+      , ("inspection query", InspectType "Int")
+      , ("retained generation", RetainedGeneration (SymbolIdentity "main" "M" "value" "x" Nothing) 1)
+      ]
+    cellPlanExcludedFields =
+      [ ("cell mode", Cell), ("turn mode", Turn), ("classification mode", Classify)
+      , ("inspection query", InspectType "Int"), ("session artifacts", SessionArtifacts "scope")
+      , ("declaration join", DeclarationJoin "join"), ("candidate authority", ModuleCandidates "scope")
+      , ("certification", CertifyHomeProducts), ("activation preview", ActivationPreview)
+      , ("cell fold turn", CellFoldTurn), ("binding generation", BindGen 1)
+      , ("retained generation", RetainedGeneration (SymbolIdentity "main" "M" "value" "x" Nothing) 1)
+      ]
 
 requestFieldOrdering :: IO ()
 requestFieldOrdering = do
