@@ -380,7 +380,7 @@ cellInferenceSegments plan = map makeSegment (runs (cellPlanItems plan))
           ownTargets = filter ((`elem` ownTypes) . displayTargetName)
             (cellPlanDisplayTargets plan)
           generatedSource = concatMap genericDeclarationSource ownGeneric
-          opaqueDisplays = concatMap (opaqueDisplayInstance (cellPlanDisplayAlias plan)) ownTargets
+          opaqueDisplays = concatMap (structuralDisplayInstance (cellPlanDisplayAlias plan)) ownTargets
           segmentedItems = if declarations
             then map (\item -> item { cellAnalysisSource = ownSource ++ generatedSource ++ opaqueDisplays }) items
             else items
@@ -394,21 +394,27 @@ cellInferenceSegments plan = map makeSegment (runs (cellPlanItems plan))
 
 omitCellGenericDeclarations :: [String] -> CellSourcePlan -> CellSourcePlan
 omitCellGenericDeclarations targets plan =
-  installCellDisplayDeclarations (cellPlanDisplayDeclarations plan) plan
-    { cellPlanGenericDeclarations = filter ((`notElem` targets) . genericDeclarationTarget)
-        (cellPlanGenericDeclarations plan) }
+  let retained = plan
+        { cellPlanGenericDeclarations = filter ((`notElem` targets) . genericDeclarationTarget)
+            (cellPlanGenericDeclarations plan)
+        , cellPlanDisplayTargets = filter ((`notElem` targets) . displayTargetName)
+            (cellPlanDisplayTargets plan) }
+  in installCellDisplayDeclarations
+       (concatMap (structuralDisplayInstance (cellPlanDisplayAlias retained)) (cellPlanDisplayTargets retained)) retained
 
 omitCellDisplayDeclarations :: [String] -> CellSourcePlan -> CellSourcePlan
 omitCellDisplayDeclarations targets plan =
   let retained = plan { cellPlanDisplayTargets = filter ((`notElem` targets) . displayTargetName)
                          (cellPlanDisplayTargets plan) }
    in installCellDisplayDeclarations
-        (concatMap (opaqueDisplayInstance (cellPlanDisplayAlias retained)) (cellPlanDisplayTargets retained)) retained
+        (concatMap (structuralDisplayInstance (cellPlanDisplayAlias retained)) (cellPlanDisplayTargets retained)) retained
 
-opaqueDisplayInstance :: String -> CellDisplayTarget -> String
-opaqueDisplayInstance qualifier target = "\ninstance {-# OVERLAPPABLE #-} " ++ qualifier ++ ".Display "
-  ++ displayTargetApplication target ++ " where\n  displayTree _ = "
-  ++ qualifier ++ ".TextLeaf (" ++ qualifier ++ "Text.pack \"<opaque>\")\n"
+structuralDisplayInstance :: String -> CellDisplayTarget -> String
+structuralDisplayInstance qualifier target =
+  let applied = displayTargetApplication target
+  in "\ninstance {-# OVERLAPPABLE #-} " ++ qualifier ++ ".GDisplay (" ++ qualifier ++ ".Rep "
+    ++ applied ++ ") => " ++ qualifier ++ ".Display " ++ applied
+    ++ " where\n  displayTree = " ++ qualifier ++ ".genericDisplayTree\n"
 
 emptyPrologue :: SourcePrologue
 emptyPrologue = SourcePrologue [] []
@@ -600,13 +606,12 @@ analyzeCellWithGrouping ordered dflags template source = do
         displayAlias = freshAlias "TidepoolCompilerDisplay" source
         generated = automaticGenericDeclarations effective genericAlias classified
         grouped = groupDeclarations headerItems classified ""
-        targets = automaticDisplayTargets effective classified
+        targets = filter ((`elem` map genericDeclarationTarget generated) . displayTargetName)
+          (automaticDisplayTargets effective classified)
         generatedImports =
           [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified GHC.Generics as " ++ genericAlias)
           | not (null generated) ] ++
           [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified Tidepool.Inspection as " ++ displayAlias)
-          | not (null targets) ] ++
-          [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified Data.Text as " ++ displayAlias ++ "Text")
           | not (null targets) ]
         plan = CellSourcePlan
           { cellPlanPrologue = prologue { prologueImports = prologueImports prologue ++ generatedImports }
@@ -619,7 +624,7 @@ analyzeCellWithGrouping ordered dflags template source = do
           , cellPlanDisplayDeclarations = ""
           }
     pure (if ordered then plan
-      else installCellDisplayDeclarations (concatMap (opaqueDisplayInstance displayAlias) targets) plan)
+      else installCellDisplayDeclarations (concatMap (structuralDisplayInstance displayAlias) targets) plan)
   where
     freshAlias candidate authoredSource
       | candidate `isInfixOf` authoredSource = freshAlias (candidate ++ "X") authoredSource
@@ -720,31 +725,28 @@ automaticGenericDeclarations flags qualifier declarations =
     renderTarget target = CellGenericDeclaration (targetName target)
       ("deriving instance " ++ qualifier ++ ".Generic " ++ targetApplication target ++ "\n")
 
--- | A type whose cell authors its own 'Show' instance keeps that presentation:
--- the generated structural 'Display' would outrank the 'Show'-backed one and
--- never call the authored 'show', so no instance is generated for it.
+-- | An authored Display instance owns its presentation. Generated structural
+-- renderers are companions of automatic Generic, without speculative probing.
 automaticDisplayTargets :: DynFlags -> [CellAnalysisItem] -> [CellDisplayTarget]
 automaticDisplayTargets flags declarations = case unP GHC.Parser.parseModule parserState of
   PFailed _ -> []
   POk _ parsed ->
     let decls = hsmodDecls (unLoc parsed)
-        authoredShow = mapMaybe authoredShowTarget decls
+        authoredDisplay = mapMaybe authoredDisplayTarget decls
      in [ CellDisplayTarget (targetName target) (targetApplication target)
         | target <- mapMaybe genericTarget decls
-        , targetName target `notElem` authoredShow ]
+        , targetName target `notElem` authoredDisplay ]
   where
     source = concatMap cellAnalysisSource (filter ((== KDecl) . sbKind . cellAnalysisVerdict) declarations)
     parserState = initParserState (initParserOpts flags)
       (stringToStringBuffer source) (mkRealSrcLoc (mkFastString "<cell>") 1 1)
 
--- | The type constructor an authored @instance Show T@ names, qualified or not.
--- A @deriving@ clause or standalone @deriving instance@ is not authored: its
--- 'show' is the structure the generated 'Display' renders anyway.
-authoredShowTarget :: LHsDecl GhcPs -> Maybe String
-authoredShowTarget declaration = case unLoc declaration of
+-- | The type constructor an authored Display instance names, qualified or not.
+authoredDisplayTarget :: LHsDecl GhcPs -> Maybe String
+authoredDisplayTarget declaration = case unLoc declaration of
   InstD _ ClsInstD { cid_inst = ClsInstDecl { cid_poly_ty = instanceType } }
     | Just cls <- getLHsInstDeclClass_maybe instanceType
-    , occStr (unLoc cls) == "Show"
+    , occStr (unLoc cls) == "Display"
     , HsAppTy _ _ argument <- unLoc (getLHsInstDeclHead instanceType)
     , Just constructor <- hsTyGetAppHead_maybe argument ->
         Just (occStr (unLoc constructor))

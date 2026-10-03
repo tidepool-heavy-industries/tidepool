@@ -1,10 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 module Main where
 
 import Control.Exception (evaluate)
 import Control.Monad (unless)
 import Data.Text (Text)
+import Tidepool.Inspection.Display
+import GHC.Generics (Generic)
 import Tidepool.Inspection.Tree
 
 main :: IO ()
@@ -21,6 +25,11 @@ main = do
   topLevelTextKeepsLineBreaks
   nonAsciiTextIsNotNumericallyEscaped
   controlCharactersAreEscaped
+  independentSiblingsKeepTheirKeys
+  collapsedFieldsRemainLazy
+  infiniteSequencesHaveBoundedFrontiers
+  unsupportedFieldsRemainOpaque
+  structuralGenericUsesFieldNames
 
 applicationsParenthesizeOnlyAboveApplicationPrecedence :: IO ()
 applicationsParenthesizeOnlyAboveApplicationPrecedence = do
@@ -142,3 +151,49 @@ assertEqual label expected actual =
 
 assertTrue :: String -> Bool -> IO ()
 assertTrue label condition = unless condition (fail label)
+
+independentSiblingsKeepTheirKeys :: IO ()
+independentSiblingsKeepTheirKeys = do
+  let state = newDisplayState 1024 (Constructor "Pair" [("left", StringLeaf (replicate 300 'l')), ("right", StringLeaf (replicate 300 'r'))])
+  case displayStateKeys state of
+    [(left, _), (right, _)] -> case expandDisplayState 1024 left state of
+      Just detail -> do
+        assertEqual "only selected suffix is rendered" (mconcat (replicate 172 "l")) (displayStateText detail)
+        assertEqual "right keeps its independent key" [right] (map fst (displayStateKeys detail))
+        assertEqual "consumed key cannot be expanded again" Nothing
+          (fmap displayStateText (expandDisplayState 1024 left detail))
+      Nothing -> fail "left key was not retained"
+    _ -> fail "large sibling fields did not receive independent keys"
+
+collapsedFieldsRemainLazy :: IO ()
+collapsedFieldsRemainLazy = do
+  value <- evaluate (displayStateText (newDisplayState 1024
+    (Constructor "Outer" [("inner", Constructor "Inner" [("hidden", undefined)])])))
+  assertEqual "collapsed depth does not force hidden field" "Outer {inner = Inner {hidden = …}…}" value
+
+infiniteSequencesHaveBoundedFrontiers :: IO ()
+infiniteSequencesHaveBoundedFrontiers = do
+  let state = newDisplayState 1024 (Sequence "[" "]" (repeat (TextLeaf "1")))
+  assertEqual "bounded sequence preview" "[1, 1, 1, 1, 1, 1, 1, 1…]" (displayStateText state)
+  assertEqual "one retained sequence remainder" 1 (length (displayStateKeys state))
+
+newtype Unsupported = Unsupported Int
+
+data GenericRecord = GenericRecord { supported :: Int, unsupported :: Unsupported, callback :: Int -> Int }
+  deriving Generic
+
+instance Display GenericRecord where
+  displayTree = genericDisplayTree
+
+unsupportedFieldsRemainOpaque :: IO ()
+unsupportedFieldsRemainOpaque = do
+  assertEqual "opaque fallback never evaluates its value" "<opaque>"
+    (renderAll 64 (displayTree (undefined :: Unsupported)))
+  assertEqual "function rendering never evaluates its closure" "<function>"
+    (renderAll 64 (displayTree (undefined :: Int -> Int)))
+
+structuralGenericUsesFieldNames :: IO ()
+structuralGenericUsesFieldNames =
+  assertEqual "Generic selects primitives and opaque unsupported fields"
+    "GenericRecord {supported = 7, unsupported = <opaque>, callback = <function>}"
+    (displayStateText (newDisplayState 1024 (displayTree (GenericRecord 7 undefined undefined))))

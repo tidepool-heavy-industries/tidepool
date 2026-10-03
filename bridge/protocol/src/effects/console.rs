@@ -1,4 +1,4 @@
-//! The `Console` suspension — decode-only.
+//! Console output and actor-owned structured display suspensions — decode-only.
 //!
 //! Only `Print` suspends through `classify_hole` (the authored outer loop's
 //! `say`). Recognition only: `classify_hole` tags the constructor and moves
@@ -32,19 +32,47 @@ pub fn console() -> Effect {
         type_defs: Vec::new(),
         foreign_types: &[],
         errors: None,
-        verbs: vec![Verb {
-            ctor: "Print",
-            method: "print",
-            args: vec![Arg {
-                name: "msg",
-                ty: HsType::Text,
-                rust: RustBinding::Derived,
-            }],
-            ret: HsType::Unit,
-            errors: None,
-            handling: HandlingClass::OuterDispatch(OuterEffect::Console),
-            extract: None,
-        }],
+        verbs: vec![
+            Verb {
+                ctor: "Print",
+                method: "print",
+                args: vec![Arg { name: "msg", ty: HsType::Text, rust: RustBinding::Derived }],
+                ret: HsType::Unit,
+                errors: None,
+                handling: HandlingClass::OuterDispatch(OuterEffect::Console),
+                extract: None,
+            },
+            Verb {
+                ctor: "DisplayWith",
+                method: "display_with",
+                args: vec![
+                    Arg { name: "view", ty: HsType::Tuple(vec![display_id(), HsType::Text, expansion_keys()]), rust: RustBinding::Derived },
+                    Arg { name: "continuation", ty: HsType::Var("payload"), rust: RustBinding::HaskellValue },
+                ],
+                ret: display_id(),
+                errors: None,
+                handling: HandlingClass::OuterDispatch(OuterEffect::Console),
+                extract: None,
+            },
+            Verb {
+                ctor: "DisplayExpandWith",
+                method: "display_expand_with",
+                args: vec![Arg { name: "selection", ty: HsType::Tuple(vec![display_id(), HsType::Int]), rust: RustBinding::Derived }],
+                ret: expansion_keys(),
+                errors: None,
+                handling: HandlingClass::OuterDispatch(OuterEffect::Console),
+                extract: None,
+            },
+            Verb {
+                ctor: "DisplayExpansionInputWith",
+                method: "display_expansion_input_with",
+                args: vec![],
+                ret: HsType::Tuple(vec![display_id(), HsType::Int]),
+                errors: None,
+                handling: HandlingClass::OuterDispatch(OuterEffect::Console),
+                extract: None,
+            },
+        ],
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
         // Console has a REAL `tidepool-handlers::ConsoleHandler` — the hand
@@ -59,4 +87,12 @@ pub fn console() -> Effect {
         handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: false,
     }
+}
+
+fn display_id() -> HsType {
+    HsType::Tuple(vec![HsType::Int, HsType::Int, HsType::Int])
+}
+
+fn expansion_keys() -> HsType {
+    HsType::list(HsType::Tuple(vec![HsType::Int, HsType::Text]))
 }

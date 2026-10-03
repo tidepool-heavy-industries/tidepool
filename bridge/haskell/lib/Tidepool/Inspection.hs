@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -11,8 +12,16 @@
 module Tidepool.Inspection
   ( Display (..),
     rawText,
-    print,
+    display,
+    expand,
+    DisplayHandle,
+    DisplayRoot,
+    ExpansionKey,
+    expansions,
     WorkbenchDisplay (..),
+    GDisplay,
+    Rep,
+    genericDisplayTree,
     application,
     displayRecord,
     opaqueHandle,
@@ -43,16 +52,58 @@ import Tidepool.Agent.Watch.Internal
 import Tidepool.Inspection.Display
 import Tidepool.Inspection.Tree
 import Tidepool.Effects.Core
-  ( Console (Print), DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
+  ( Console (Print, DisplayWith, DisplayExpandWith, DisplayExpansionInputWith), DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
 import Tidepool.Worktree (HeadState (..), renderGitOid, renderWorktreeError)
-import Prelude hiding (print)
+import Prelude
 
--- | Bounded Display-based output in execution order; unlike Prelude.print,
--- Text and nested displayable values use the workbench's literal rendering.
-print :: (Display a, Member Console effects) => a -> Eff effects ()
-print value =
-  let (text, shortened) = displayWith 8192 value
-  in send (Print (text <> if shortened then "\n[display shortened]" else ""))
+-- | A value's actor-owned display identity and currently available detail.
+-- The constructor is private: runtime authority is checked on every expansion.
+data DisplayHandle value = DisplayHandle (Int, Int, Int) [(ExpansionKey, Text)]
+
+expansions :: DisplayHandle value -> [(ExpansionKey, Text)]
+expansions (DisplayHandle _ keys) = keys
+
+instance Display (DisplayHandle value) where
+  displayTree _ = opaqueHandle "display"
+
+-- | One explicit structured output. The host retains the callback in the
+-- actor's ordinary resource scope; the returned handle does not contain it.
+display :: (DisplayRoot value, Member Console effects) => value -> Eff effects (DisplayHandle value)
+display value = do
+  let state = newDisplayState 8192 (displayRoot value)
+  identity <- publishDisplay (0, 0, 0) state
+  pure (DisplayHandle identity (displayStateKeys state))
+
+-- | The key must come from this handle's current expansion description.
+-- The host applies the retained callback directly, without compiling a cell.
+expand :: Member Console effects => DisplayHandle value -> ExpansionKey -> Eff effects (DisplayHandle value)
+expand (DisplayHandle identity _) key = do
+  keys <- send (DisplayExpandWith (identity, expansionKeyNumber key))
+  pure (DisplayHandle identity [(expansionKeyFromNumber number, label) | (number, label) <- keys])
+
+class DisplayRoot value where
+  displayRoot :: value -> DisplayTree
+
+instance {-# OVERLAPPABLE #-} Display value => DisplayRoot value where
+  displayRoot = displayTree
+
+instance DisplayRoot Text where
+  displayRoot = TextLeaf
+
+instance DisplayRoot [Char] where
+  displayRoot = StringLeaf
+
+publishDisplay :: forall effects. Member Console effects => (Int, Int, Int) -> DisplayState -> Eff effects (Int, Int, Int)
+publishDisplay identity state =
+  send (DisplayWith (identity, displayStateText state,
+    [(expansionKeyNumber key, label) | (key, label) <- displayStateKeys state])
+    ((\(_ :: Int) -> do
+      (issued, selected) <- send DisplayExpansionInputWith
+      case expandDisplayState 8192 (expansionKeyFromNumber selected) state of
+        Nothing -> error "display expansion key is unavailable"
+        Just detail -> do
+          _ <- publishDisplay issued detail
+          pure ()) :: Int -> Eff effects ()))
 
 instance Display ReplyError where
   displayTree ReplyUnauthorized =
