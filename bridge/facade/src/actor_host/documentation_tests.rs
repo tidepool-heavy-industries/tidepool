@@ -1856,21 +1856,15 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
         "_ <- pollRoute forwarding >>= display . show\n_ <- pollRoute broken >>= display . show",
     )
     .await;
-    assert_eq!(state["items"][0]["output"], "RouteCompleted");
+    assert_eq!(explicit_display_texts(&state)[0], "RouteCompleted");
     assert!(
-        state["items"][1]["output"]
-            .as_str()
-            .unwrap()
-            .contains("deliberate route failure"),
+        explicit_display_texts(&state)[1].contains("deliberate route failure"),
         "{state}"
     );
     let recovered = displayed(&mut campaign, root.as_ref(), "recovered <- listRoutes\n_ <- display $ inspectFull (length recovered)\nstates <- traverse pollRoute recovered\n_ <- display (show states)").await;
-    assert_eq!(recovered["items"][1]["output"], "3", "{recovered}");
+    assert_eq!(explicit_display_texts(&recovered)[0], "3", "{recovered}");
     assert!(
-        recovered["items"][3]["output"]
-            .as_str()
-            .unwrap()
-            .contains("deliberate route failure"),
+        explicit_display_texts(&recovered)[1].contains("deliberate route failure"),
         "{recovered}"
     );
     let foreign = displayed(
@@ -1879,7 +1873,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
         "owned <- listRoutes\n_ <- display $ inspectFull (length owned)",
     )
     .await;
-    assert_eq!(foreign["items"][1]["output"], "0", "{foreign}");
+    assert_eq!(explicit_display_texts(&foreign)[0], "0", "{foreign}");
     let reply = dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
     displayed(
@@ -1894,9 +1888,21 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
         "_ <- pollRoute handled >>= display . show\n_ <- forgetRoute forwarding >>= display . show\n_ <- forgetRoute broken >>= display . show",
     )
     .await;
-    assert_eq!(handled["items"][0]["output"], "RouteCompleted", "{handled}");
-    assert_eq!(handled["items"][1]["output"], "WatchForgotten", "{handled}");
-    assert_eq!(handled["items"][2]["output"], "WatchForgotten", "{handled}");
+    assert_eq!(
+        explicit_display_texts(&handled)[0],
+        "RouteCompleted",
+        "{handled}"
+    );
+    assert_eq!(
+        explicit_display_texts(&handled)[1],
+        "WatchForgotten",
+        "{handled}"
+    );
+    assert_eq!(
+        explicit_display_texts(&handled)[2],
+        "WatchForgotten",
+        "{handled}"
+    );
     let forgotten = displayed(
         &mut campaign,
         root.as_ref(),
@@ -1904,7 +1910,8 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     )
     .await;
     assert_eq!(
-        forgotten["items"][0]["output"], "RouteRejected ReplyStale",
+        explicit_display_texts(&forgotten)[0],
+        "RouteRejected ReplyStale",
         "{forgotten}"
     );
     let retained = displayed(
@@ -1913,7 +1920,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
         "retained <- listRoutes\n_ <- display $ inspectFull (length retained)",
     )
     .await;
-    assert_eq!(retained["items"][1]["output"], "2", "{retained}");
+    assert_eq!(explicit_display_texts(&retained)[0], "2", "{retained}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
