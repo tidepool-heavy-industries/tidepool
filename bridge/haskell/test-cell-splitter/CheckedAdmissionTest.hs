@@ -13,6 +13,7 @@ import Numeric (readHex)
 import System.Directory (getTemporaryDirectory, removeDirectoryRecursive, createDirectory, removeFile)
 import System.FilePath ((</>))
 import System.IO (openTempFile, hClose)
+import System.IO.Error (isDoesNotExistError)
 import Tidepool.Binders (StmtBinders(..), TurnKind(..))
 import Tidepool.CheckedAdmission
 import Tidepool.CheckedCell (CheckedSignature(..))
@@ -82,8 +83,8 @@ checkedAdmissionChecks = withScratch $ \root -> do
     (validateCheckedDisplayAdmission (displayArgs { requestRetainedGenerations = Map.singleton observation 5 }) display "" displayVerdict)
   expectFailure "missing observation" "display lacks its exact retained observation generation"
     (validateCheckedDisplayAdmission args display "" displayVerdict)
-  missing <- try (validateCheckedCellAdmission (args { requestTurnTemplates = [("bind", root </> "absent")] }) cell source wrapper) :: IO (Either IOException ())
-  unless (either (const True) (const False) missing) (fail "missing recipe unexpectedly admitted")
+  missing <- try (validateCheckedCellAdmission (args { requestTurnTemplates = [("bind", root </> "absent")] }) cell "changed body" wrapper) :: IO (Either IOException ())
+  unless (either isDoesNotExistError (const False) missing) (fail "missing recipe did not retain file-read error precedence")
   -- Literal placement must never rescan authored text for protected markers.
   let template = "__result = do {\n{{TURN_STMT}}\npure ({{BINDERS}})\n}"
       authored = "let café = \"{{BINDERS}}\""
