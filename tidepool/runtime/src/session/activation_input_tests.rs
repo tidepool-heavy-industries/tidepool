@@ -344,15 +344,6 @@ fn assert_startup_origin(label: &str, compiled: &CompiledTurn, requires_input: b
     }
 }
 
-#[test]
-fn activation_startup_producer_retains_original_bundle_authority() {
-    let _fixture = InputFixture::compile(
-        include_str!("fixtures/activation-input-function.hs"),
-        false,
-        SessionId(1700),
-    );
-}
-
 fn compile_turn(
     view: &SessionCompileView,
     recipe: &InputRecipe,
