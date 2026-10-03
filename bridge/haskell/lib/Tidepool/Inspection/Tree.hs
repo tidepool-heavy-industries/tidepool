@@ -201,7 +201,7 @@ preview budget depth next label tree
   | otherwise = case tree of
       Constructor name [] -> (T.take budget name, [], next, False)
       Constructor name fields -> children (name <> " {") "}" fields
-      Sequence opening closing items -> sequenceChildren opening closing 0 items
+      Sequence opening closing items -> sequenceChildren opening closing (0 :: Int) items
       _ ->
         let (value, remaining, unavailable) = renderTree budget tree
         in case remaining of
