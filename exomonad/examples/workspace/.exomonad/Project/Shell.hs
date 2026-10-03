@@ -141,7 +141,7 @@ prepare ::
   Cmd.PresentedObservation ->
   Eff effects Command.CommandToolResult
 prepare introduceSession focus job observed = case Cmd.presentedOutput observed of
-  Left issue -> pure (reply 0 False (statusHeading introduceSession observed <> "\nOutput unavailable: " <> Cmd.renderCommandError issue <> recovery observed))
+  Left issue -> pure (reply 0 False (boundedFailure (Cmd.presentedByteBudget observed) (statusHeading introduceSession observed <> "\nOutput unavailable: ") (Cmd.renderCommandError issue) (recovery observed)))
   Right output -> do
     let frozen =
           OutputSnapshot
@@ -155,7 +155,7 @@ prepare introduceSession focus job observed = case Cmd.presentedOutput observed 
       Just focusText -> do
         loaded <- loadStreams frozen (Just output)
         case loaded of
-          Left issue -> pure (reply 0 False (statusHeading introduceSession observed <> "\n" <> renderIssue issue <> recoveryFor frozen))
+          Left issue -> pure (reply 0 False (boundedFailure (Cmd.presentedByteBudget observed) (statusHeading introduceSession observed <> "\n") (renderIssue issue) ("\n" <> recoveryFor frozen)))
           Right (stdoutText, stderrText) -> do
             let heading = statusHeading introduceSession observed
                 budget = Cmd.presentedByteBudget observed
@@ -177,12 +177,12 @@ prepare introduceSession focus job observed = case Cmd.presentedOutput observed 
 prepareUnfocused :: Member Commands effects => Bool -> Cmd.PresentedObservation -> OutputSnapshot -> CommandOutput -> Eff effects (Text, Int, Bool)
 prepareUnfocused introduceSession observed frozen output =
   case initialIssue of
-    Just issue -> pure (prefix <> renderIssue issue <> recovery, 0, False)
+    Just issue -> pure (failure issue, 0, False)
     Nothing
       | totalBytes <= fullBudget -> do
           loaded <- loadStreams frozen (Just output)
           pure $ case loaded of
-            Left issue -> (prefix <> renderIssue issue <> recovery, 0, False)
+            Left issue -> (failure issue, 0, False)
             Right (stdoutText, stderrText) -> (prefix <> labelStream Cmd.Stdout stdoutText <> labelStream Cmd.Stderr stderrText, lineCount stdoutText + lineCount stderrText, True)
       | otherwise -> do
           let markerReserve = sum (map (reservedMarker . fst) nonemptyStreams)
@@ -192,8 +192,8 @@ prepareUnfocused introduceSession observed frozen output =
           stdout <- readStreamWindow frozen Cmd.Stdout (stdoutEndpoint frozen) (share (stdoutEndpoint frozen))
           stderr <- readStreamWindow frozen Cmd.Stderr (stderrEndpoint frozen) (share (stderrEndpoint frozen))
           pure $ case (stdout, stderr) of
-            (Left issue, _) -> (prefix <> renderIssue issue <> recovery, 0, False)
-            (_, Left issue) -> (prefix <> renderIssue issue <> recovery, 0, False)
+            (Left issue, _) -> (failure issue, 0, False)
+            (_, Left issue) -> (failure issue, 0, False)
             (Right stdoutText, Right stderrText) ->
               ( prefix <> renderWindow Cmd.Stdout stdoutText <> renderWindow Cmd.Stderr stderrText <> recovery,
                 windowPayloadLines stdoutText + windowPayloadLines stderrText,
@@ -203,6 +203,7 @@ prepareUnfocused introduceSession observed frozen output =
     prefix = statusHeading introduceSession observed <> "\n"
     budget = max 0 (Cmd.presentedByteBudget observed)
     recovery = "\n" <> recoveryFor frozen
+    failure issue = boundedFailure budget prefix (renderIssue issue) recovery
     totalBytes = stdoutEndpoint frozen + stderrEndpoint frozen
     fullBudget = max 0 (budget - utf8Bytes prefix - sum (map (labelBytes . fst) nonemptyStreams))
     truncatedBudget = max 0 (budget - utf8Bytes prefix - utf8Bytes recovery)
@@ -416,7 +417,12 @@ readFrozen frozen stream endpoint initial = case initial of
                             else collect (min endpoint (Cmd.outputEnd details)) (Cmd.outputText details : chunks)
 
 recovery :: Cmd.PresentedObservation -> Text
-recovery observed = maybe "" recoveryFor (snapshotFromObservation observed)
+recovery observed = case Cmd.presentedOutput observed of
+  Left _ ->
+    "\nRecover retained output with read_output(session_id=\""
+      <> jobText (Cmd.presentedJob observed)
+      <> "\", stream=\"Stdout\" or \"Stderr\", offset=0). Do not rerun the command."
+  Right _ -> maybe "" recoveryFor (snapshotFromObservation observed)
 
 recoveryFor :: OutputSnapshot -> Text
 recoveryFor frozen =
@@ -437,6 +443,16 @@ renderIssue issue = case issue of
   SnapshotDecodingLoss stream offset -> streamName stream <> " has decoding loss at byte " <> number offset <> "."
   SnapshotUnavailable stream failure -> streamName stream <> " unavailable: " <> Cmd.renderCommandError failure
   UnknownSection ident -> "No section " <> sectionKey ident <> " belongs to this snapshot."
+
+boundedFailure :: Int -> Text -> Text -> Text -> Text
+boundedFailure budget context detail recovery =
+  let detailBudget = max 0 (budget - utf8Bytes (context <> recovery))
+   in if utf8Bytes detail <= detailBudget
+        then context <> detail <> recovery
+        else
+          let marker = "\n[error detail shortened]"
+              shown = takeUtf8 (max 0 (detailBudget - utf8Bytes marker)) detail <> marker
+           in context <> shown <> recovery
 
 section :: Member Commands effects => OutputSnapshot -> SectionId -> Eff effects (Either OutputSnapshotIssue Text)
 section frozen ident = do
