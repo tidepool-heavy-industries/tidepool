@@ -356,6 +356,7 @@ pub(crate) enum RecoveryArtifactComponent {
     Certificate,
     Core,
     ExecutionSource,
+    ExternalPackageInterface,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1745,10 +1746,12 @@ fn artifact_component(
     {
         (component, relative.to_path_buf())
     } else {
-        let (interface, _) = artifact.paths();
+        // Owned payload errors name their relative descriptor under the root.
+        // Remaining path-bearing errors come from package interfaces selected
+        // by the authenticated package witness, which may live outside it.
         (
-            RecoveryArtifactComponent::Interface,
-            interface.to_path_buf(),
+            RecoveryArtifactComponent::ExternalPackageInterface,
+            path.to_path_buf(),
         )
     }
 }
@@ -3865,6 +3868,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(recovered.artifact_losses.len(), 3);
+        for loss in recovered.artifact_losses.values().flatten() {
+            assert_eq!(
+                loss.component,
+                RecoveryArtifactComponent::ExternalPackageInterface
+            );
+            assert_eq!(loss.path, package);
+            assert_eq!(loss.kind, RecoveryArtifactLossKind::DigestMismatch);
+        }
         fs::write(&package, b"interface").unwrap();
         fs::write(&certification_path, b"corrupt").unwrap();
         let losses = graph.validate_artifact_files(dir.path()).unwrap();
