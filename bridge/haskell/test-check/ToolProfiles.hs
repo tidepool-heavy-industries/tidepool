@@ -3,7 +3,7 @@ module Main where
 
 import Control.Monad (unless)
 import Control.Monad.Freer (Eff, interpret, reinterpret, run, send)
-import Control.Monad.Freer.State (State, modify, runState)
+import Control.Monad.Freer.State (State, get, modify, runState)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import Tidepool.Agent.Contract
@@ -22,6 +22,25 @@ data Tools mode = Tools
 data Narrow mode = Narrow { narrow :: mode :- HaskellCell '[] } deriving (Generic)
 
 data Unpresented mode = Unpresented { unpresented :: mode :- Call Text Text } deriving (Generic)
+data UnpresentedRaw mode = UnpresentedRaw { unpresentedRaw :: mode :- RawCall Text } deriving (Generic)
+data UnpresentedSync mode = UnpresentedSync { unpresentedSync :: mode :- Sync (Call Text Text) } deriving (Generic)
+data UnpresentedSyncRaw mode = UnpresentedSyncRaw { unpresentedSyncRaw :: mode :- Sync (RawCall Text) } deriving (Generic)
+
+data ActorTools mode = ActorTools
+  { actorCall :: mode :- Call Text Value
+  , actorFinish :: mode :- Finish Text Text
+  } deriving (Generic)
+
+data ActorHarness = ActorHarness
+  { actorInputs :: [(Text, Value)]
+  , actorReplies :: [Value]
+  }
+
+actorTools :: ActorTools (AsActorT (Eff '[AgentTools, State ActorHarness]) () Text)
+actorTools = ActorTools
+  { actorCall = tool "Structured semantic output" (\_ -> pure (object ["meaning" .= ("payload" :: Text)]))
+  , actorFinish = finishTool "Finish" (\value -> pure (value, value))
+  }
 
 data ContextNotebook mode = ContextNotebook
   { contextNotebook :: mode :- Sync (HaskellCell (SyncEffects '[]))
@@ -53,12 +72,34 @@ installation :: AgentTools a -> Eff '[State Value, ContextReadWrite] a
 installation (AgentToolsInstallWith value _) = modify (const value)
 installation _ = error "installation executed the retained handler"
 
+actorRuntime :: AgentTools a -> Eff '[State ActorHarness] a
+actorRuntime (AgentToolsAwaitWith _ _ _) = pure ("await", Null)
+actorRuntime AgentToolsInputWith = do
+  harness <- get
+  case actorInputs harness of
+    input : remaining -> modify (\current -> current {actorInputs = remaining}) >> pure input
+    [] -> error "actor requested an unexpected tool input"
+actorRuntime (AgentToolsReplyWith value) = modify (\harness -> harness {actorReplies = actorReplies harness <> [value]})
+
 main :: IO ()
 main = do
   let missing = compileInstalledTools
         (Unpresented (tool "Echo" pure) :: Unpresented (AsServerT (Eff '[])))
+      missingRaw = compileInstalledTools
+        (UnpresentedRaw (rawTool "Echo" pure) :: UnpresentedRaw (AsServerT (Eff '[])))
+      missingSync = compileInstalledTools
+        (UnpresentedSync (syncTool "Echo" pure) :: UnpresentedSync (AsServerT (Eff '[])))
+      missingSyncRaw = compileInstalledTools
+        (UnpresentedSyncRaw (syncRawTool "Echo" pure) :: UnpresentedSyncRaw (AsServerT (Eff '[])))
+      rejected result = case result of Left MissingToolPresentation {} -> True; _ -> False
   require "installed named handlers require explicit presentation"
-    (case missing of Left MissingToolPresentation {} -> True; _ -> False)
+    (rejected missing)
+  require "installed raw handlers require explicit presentation before dispatch"
+    (rejected missingRaw)
+  require "installed sync handlers require explicit presentation before dispatch"
+    (rejected missingSync)
+  require "installed sync raw handlers require explicit presentation before dispatch"
+    (rejected missingSyncRaw)
   compiled <- either (error . show) pure (compileInstalledTools tools)
   let declared = declarations compiled
       runTool name = run $ runState [] $ reinterpret context $ dispatch compiled name (toJSON ("executor" :: Text))
@@ -79,6 +120,15 @@ main = do
   require "dispatch reply keeps semantic output separate from selected presentation"
     (toolDispatchReply (Right (ToolDispatchSuccess (toJSON ("payload" :: Text)) "model text"))
       == object ["status" .= ("success" :: Text), "output" .= ("payload" :: Text), "presentation" .= ("model text" :: Text)])
+  let actorInitial = ActorHarness
+        [("actor_call", toJSON ("call" :: Text)), ("actor_finish", toJSON ("done" :: Text))]
+        []
+      (actorExit, actorFinal) = run $ runState actorInitial $ interpret actorRuntime (serveTools actorTools)
+  require "programmatic actor tools need no presenter and return structured semantic output"
+    (actorExit == "done" && actorReplies actorFinal ==
+      [ object ["status" .= ("success" :: Text), "output" .= object ["meaning" .= ("payload" :: Text)]]
+      , object ["status" .= ("success" :: Text), "output" .= ("done" :: Text)]
+      ])
   require "sync compiled handler emits context effect in shared dispatcher"
     (runTool "curate" == (Right (ToolDispatchSuccess (toJSON ("executor" :: Text)) "executor"), ["executor"]))
   require "sync raw handler reuses compiled function"
