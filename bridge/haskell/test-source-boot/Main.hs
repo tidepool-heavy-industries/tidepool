@@ -2,6 +2,8 @@ module Main (main) where
 
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots)
 import ExactScopeV8Test (exactScopeV8Checks, candidateCanonicalChecks)
+import GenuineCandidateFixture
+  ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope, writeGenuineEmptyMetadataScope )
 
 import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
@@ -121,7 +123,8 @@ import Tidepool.GhcPipeline
   , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected
   , withResidentPipelineSelectedRequests )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
-  , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity)
+  , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
+  , candidateCoreDescriptor)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports)
 import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
 import Tidepool.FatIface (readExactInterface)
@@ -1787,9 +1790,25 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
       scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath }
       restore = copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" (work </> "MetadataQuoteSupport.hs")
       changed = copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" (work </> "MetadataQuoteSupport.hs")
-  writeExactMetadataScope scopePath []
+  writeGenuineEmptyMetadataScope scopePath
   original <- runPipelineSelected (PreparedProducts Nothing) (work </> "MetadataQuoter.hs") [work]
-  writeManifestFor ["MetadataQuoteSupport"] work original
+  writeGenuineCandidateManifestFor ["MetadataQuoteSupport"] work
+    (work </> "MetadataQuoter.hs") [work] original
+  bracket (lookupEnv "TIDEPOOL_COMPILER_PRODUCER")
+    (maybe (unsetEnv "TIDEPOOL_COMPILER_PRODUCER") (setEnv "TIDEPOOL_COMPILER_PRODUCER")) $ \configured -> do
+      producer <- maybe (fail "genuine producer configuration disappeared") pure configured
+      let altered = case producer of
+            first : remaining -> (if first == 'f' then 'e' else 'f') : remaining
+            [] -> error "genuine producer was validated before packet issuance"
+      forM_ [(Nothing, "CompilerProducerUnavailable"), (Just altered, "CompilerProducerScopeMismatch")] $
+        \(replacement, expected) -> do
+          maybe (unsetEnv "TIDEPOOL_COMPILER_PRODUCER") (setEnv "TIDEPOOL_COMPILER_PRODUCER") replacement
+          refused <- try (runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile
+            (Just scope) (work </> "MetadataQuotedTarget.hs") [work] Nothing)
+            :: IO (Either SomeException CheckedEnvironmentResult)
+          case refused of
+            Left failure | expected `isInfixOf` show failure -> pure ()
+            _ -> fail ("exact fixture trusted its scope without independent producer: " ++ expected)
   withResidentPipelineSelected [work] $ \compile ->
     forM_ [(42, restore), (43, changed), (42, restore)] $ \(expected, install) -> do
       install
@@ -1802,7 +1821,7 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
           result = pprPipelineResult reused
       unless (accepted == (if expected == 42 then ["MetadataQuoteSupport"] else [])
           && ("MetadataQuoteSupport" `elem` fresh) == (expected /= 42)
-          && counterValues "candidate_source_load_required" diagnostics == [fromIntegral required]
+          && counterValues "candidate_executable_required" diagnostics == [fromIntegral required]
           && hasIntResultLiteral expected (prBinds result)) $
         fail ("native candidate reuse skipped GHC execution or retained an old quoted helper body: "
           ++ show (expected, accepted, fresh) ++ "\n" ++ diagnostics ++ "\n"
@@ -2751,7 +2770,7 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
   forM_ ["MetadataOwner.hs", "MetadataTarget.hs", "MetadataExtensionOnlyTarget.hs", "MetadataLoadedFamily.hs"
     , "MetadataFamilyTarget.hs", "MetadataHiddenFamily.hs", "MetadataUntracked.hs"
     , "MetadataUntrackedTarget.hs", "MetadataQuoter.hs", "MetadataQuotedTarget.hs", "MetadataQuoteSupport.hs"] install
-  writeExactMetadataScope scopePath []
+  writeGenuineEmptyMetadataScope scopePath
   withResidentPipelineSelected [work] $ \compile -> do
     let checked name = compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
           (work </> name) [work] Nothing
@@ -2798,32 +2817,24 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       (work </> "MetadataQuoter.hs") [work] Nothing
     -- The helper has no TH extension or quotation itself. GHC's graph still
     -- requires its bytecode when the quoter executes in the target.
-    writeManifestFor ["MetadataQuoteSupport"] work quoterProducer
+    writeGenuineCandidateManifestFor ["MetadataQuoteSupport"] work
+      (work </> "MetadataQuoter.hs") [work] quoterProducer
     (quotedCandidate, candidateQuoteDiagnostics) <- captureDiagnostics $
       compile (CheckedEnvironmentProducts (manifest work)) Set.empty GeneralCompile (Just scope)
         (work </> "MetadataQuotedTarget.hs") [work] Nothing
     unless (resultType quotedCandidate == Just "Int"
         && frontendCount "MetadataQuoter" candidateQuoteDiagnostics == 1
         && "tidepool-checked-dependency-executable module=MetadataQuoteSupport bytecode=True object=False" `elem` lines candidateQuoteDiagnostics
-        && counterValues "candidate_source_load_required" candidateQuoteDiagnostics == [1]) $
+        && counterValues "candidate_executable_required" candidateQuoteDiagnostics == [1]) $
       fail "source candidate discarded a GHC-required quoter executable"
     hidden <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
       (work </> "MetadataHiddenFamily.hs") [work] Nothing
-    iface <- maybe (fail "hidden family owner omitted its interface") pure
-      (Map.lookup (mkModuleName "MetadataHiddenFamily") (pprProductInterfaces hidden))
-    let hi = work </> "hidden-family.hi"
-        packagesPath = hi ++ ".packages"
-    writeBinIface (targetProfile (hsc_dflags (prHscEnv (pprPipelineResult hidden))))
-      QuietBinIFace NormalCompression hi iface
-    bytes <- BS.readFile hi
-    let artifact = ExactIfaceArtifact "main" "MetadataHiddenFamily" hi (digest bytes) []
-        packages = encodePackageImports artifact
-          (Map.findWithDefault emptyPackageImports (mkModuleName "MetadataHiddenFamily") (pprPackageImports hidden))
-    BS.writeFile packagesPath packages
-    writeExactMetadataScope scopePath [(artifact, packagesPath, digest packages)]
+    writeGenuineMetadataScope scopePath work (work </> "MetadataHiddenFamily.hs") [work]
+      ["MetadataHiddenFamily"] hidden
     ordinaryProducts <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
       (work </> "MetadataTarget.hs") [work] Nothing
-    writeManifestFor ["MetadataOwner"] work ordinaryProducts
+    writeGenuineCandidateManifestFor ["MetadataOwner"] work
+      (work </> "MetadataTarget.hs") [work] ordinaryProducts
     disjoint <- compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile (Just scope)
       (work </> "MetadataTarget.hs") [work] Nothing
     unless (map candidateModule (pprAcceptedCandidates disjoint) == ["MetadataOwner"]
@@ -2832,11 +2843,30 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
           [moduleNameString (ms_mod_name summary)
           | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph (prHscEnv (pprPipelineResult disjoint)))]) $
       fail "disjoint source candidate lost exact hidden-owner graph isolation"
+    -- Metadata-only admission consumes the certified interface without asking
+    -- for its companion Core. Exercise the real final checked receipt path.
+    delivered <- readModuleCandidates (manifest work) >>= either fail pure
+    owner <- case [candidate | candidate <- delivered, candidateModule candidate == "MetadataOwner"] of
+      [candidate] -> pure candidate
+      _ -> fail "genuine metadata fixture lost its native owner"
+    let corePath = fst (candidateCoreDescriptor (candidateModuleInterface owner))
+    originalCore <- BS.readFile corePath
+    (do
+      removeFile corePath
+      (metadataOnly, metadataDiagnostics) <- captureDiagnostics $
+        compile (CheckedEnvironmentProducts (manifest work)) Set.empty GeneralCompile (Just scope)
+          (work </> "MetadataTarget.hs") [work] Nothing
+      restoredCore <- doesFileExist corePath
+      unless (resultType metadataOnly == Just "Int" && not restoredCore
+          && counterValues "candidate_admission.CandidateAccepted" metadataDiagnostics == [1]
+          && counterValues "candidate_executable_required" metadataDiagnostics == [0]) $
+        fail "metadata-only candidate required or restored executable Core"
+      ) `finally` BS.writeFile corePath originalCore
     family <- try (checked "MetadataFamilyTarget.hs") :: IO (Either SomeException CheckedEnvironmentResult)
     case family of
       Left failure | "retained family consistency" `isInfixOf` show failure -> pure ()
       _ -> fail "loaded metadata lost the hidden original family conflict"
-    writeExactMetadataScope scopePath []
+    writeGenuineEmptyMetadataScope scopePath
     (_, untrackedDiagnostics) <- captureDiagnostics (checked "MetadataUntrackedTarget.hs")
     unless (frontendCount "MetadataUntracked" untrackedDiagnostics == 1
         && "tidepool-checked-loaded-source module=MetadataUntracked" `elem` lines untrackedDiagnostics) $

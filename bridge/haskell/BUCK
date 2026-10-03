@@ -229,6 +229,7 @@ haskell_binary(
     name = "source_boot_product_reuse_test",
     srcs = {
         "Main.hs": "test-source-boot/Main.hs",
+        "GenuineCandidateFixture.hs": "test-source-boot/GenuineCandidateFixture.hs",
         "ExecutionSourceDecodeTest.hs": "test-source-boot/ExecutionSourceDecodeTest.hs",
         "ProgressBoundaryTest.hs": "test-source-boot/ProgressBoundaryTest.hs",
         "ExactScopeV8Test.hs": "test-source-boot/ExactScopeV8Test.hs",

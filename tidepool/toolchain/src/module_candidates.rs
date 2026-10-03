@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 mod candidate_diagnostics;
 #[cfg(test)]
 mod codec_measurement;
+#[cfg(test)]
+mod fixture_packets;
 pub(crate) mod dependencies;
 pub(crate) mod deployment;
 mod inventory;

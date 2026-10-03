@@ -337,6 +337,7 @@ test-suite source-boot-product-reuse-test
   main-is:          Main.hs
   hs-source-dirs:   test-source-boot
   other-modules:    ExecutionSourceDecodeTest
+                    GenuineCandidateFixture
                     ProgressBoundaryTest
                     FinalizedCoreTest
                     ExactScopeV8Test

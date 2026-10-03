@@ -1,0 +1,143 @@
+//! Source-boot fixture delivery through the existing certification owners.
+//! This adapter is compiled only into the owning crate's test executable.
+
+use super::*;
+use crate::certified_products::{certify_products, decode_receipt, ParsedModuleProducts};
+use crate::declaration_context::{certified_product_artifact_view, ExactDeclarationContext};
+use crate::declaration_join::ExactModuleIdentity;
+
+fn text_field(value: &Value) -> &str {
+    value.as_text().expect("fixture text field")
+}
+
+fn names(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .expect("fixture list")
+        .iter()
+        .map(|value| text_field(value).to_owned())
+        .collect()
+}
+
+#[test]
+#[ignore = "requires a live matched source-boot finalization packet"]
+fn source_boot_candidate_packet_producer() {
+    let packet = PathBuf::from(
+        std::env::var_os("TIDEPOOL_CANDIDATE_FIXTURE_PACKET").expect("source-boot packet"),
+    );
+    assert!(packet.is_absolute());
+    let request = fs::read(packet.join("request.cbor")).unwrap();
+    assert!(request.len() <= MANIFEST_LIMIT);
+    let request: Value = ciborium::de::from_reader(request.as_slice()).unwrap();
+    let fields = request.as_array().expect("fixture request tuple");
+    assert_eq!(fields.len(), 7);
+    assert_eq!(text_field(&fields[0]), "TPSOURCEBOOTFIXTURE1");
+    let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
+    let producer = endpoint.identity().producer_bytes();
+    assert_eq!(text_field(&fields[6]), endpoint.identity().producer_hex());
+    let producer_sha =
+        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
+            .sha256();
+    let include = names(&fields[2])
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    let requested = names(&fields[3]).into_iter().collect::<BTreeSet<_>>();
+    let exact_owners = names(&fields[4])
+        .into_iter()
+        .map(|module| ExactModuleIdentity {
+            unit: "main".into(),
+            module,
+        })
+        .collect::<Vec<_>>();
+    let delivery = packet.join("delivery");
+    fs::create_dir(&delivery).unwrap();
+    let mut context = ExactDeclarationContext::new(&[], &[], vec![])
+        .unwrap()
+        .extend_checked_original_products(producer_sha, &[], &BTreeMap::new())
+        .unwrap();
+
+    if !matches!(fields[1], Value::Null) {
+        let source_path = PathBuf::from(text_field(&fields[1]));
+        assert!(source_path.is_absolute());
+        let source = fs::read_to_string(&source_path).unwrap();
+        let evidence_bytes = fs::read(packet.join("dependencies.json")).unwrap();
+        let evidence = DependencyEvidence::from_worker(&evidence_bytes, &source_path, &source)
+            .expect("actual consumed source and resolution evidence");
+        let receipt_bytes = fs::read(packet.join("certified-products.cbor")).unwrap();
+        let receipt = decode_receipt(&receipt_bytes).unwrap();
+        let product_bytes = fs::read(packet.join("module-products.cbor")).unwrap();
+        let package_bytes = fs::read(packet.join("module-package-imports.cbor")).unwrap();
+        let parsed = ParsedModuleProducts::decode(&product_bytes, &package_bytes).unwrap();
+        let certified = certify_products(
+            None,
+            &receipt,
+            &parsed,
+            &evidence_bytes,
+            &source_path,
+            &evidence,
+            &source,
+            producer,
+            &include,
+            None,
+        )
+        .unwrap();
+        // Admit the complete interface closure before selecting any native
+        // owner. Type-only dependencies cannot be inferred as packages.
+        let view = certified_product_artifact_view(
+            producer_sha,
+            &certified.recovery_products,
+            &certified.module_interfaces,
+            None,
+        )
+        .unwrap();
+        if !exact_owners.is_empty() {
+            context = context
+                .extend_interface_artifacts(&view.interface_projection(&exact_owners).unwrap())
+                .unwrap();
+        }
+        if !requested.is_empty() {
+            let (_, publication) = prepare_publication(
+                producer,
+                &include,
+                &evidence,
+                parsed,
+                &source,
+                CandidateVersionOrigin::Ordinary,
+                &certified.recovery_products,
+            );
+            let records = publication
+                .records
+                .into_iter()
+                .filter(|record| requested.contains(&record.module))
+                .map(|record| (record, CandidateOrigin::Ordinary))
+                .collect();
+            let selected = select_records_inner(producer, &include, &delivery, records, None)
+                .expect("production candidate delivery");
+            assert_eq!(
+                selected
+                    .by_owner
+                    .keys()
+                    .map(|(_, module)| module.clone())
+                    .collect::<BTreeSet<_>>(),
+                requested,
+                "fixture must not silently decline a requested native owner or its interface closure"
+            );
+            let destination = packet.parent().unwrap().join("module-candidates.cbor");
+            fs::copy(&selected.manifest_path, destination).unwrap();
+        }
+    } else {
+        assert!(requested.is_empty() && exact_owners.is_empty() && include.is_empty());
+    }
+    if !matches!(fields[5], Value::Null) {
+        let destination = PathBuf::from(text_field(&fields[5]));
+        assert!(destination.is_absolute());
+        let scope = Arc::new(context)
+            .prepare_compilation(&delivery.join("scope"), producer)
+            .unwrap();
+        fs::copy(scope.manifest, destination).unwrap();
+    }
+    println!(
+        "genuine fixture: Rust certification, full ArtifactView admission and production delivery passed"
+    );
+}
