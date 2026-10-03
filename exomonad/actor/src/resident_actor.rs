@@ -16911,7 +16911,10 @@ mod tests {
             .expect("display receipt failure retains its completed effect evidence");
 
         assert_eq!(receipt.status, WorkbenchItemStatus::Diagnostic);
-        assert_eq!(receipt.failure_layer, Some(WorkbenchFailureLayer::Observation));
+        assert_eq!(
+            receipt.failure_layer,
+            Some(WorkbenchFailureLayer::Observation)
+        );
         assert_eq!(receipt.installed_bindings, recovered);
         assert!(receipt.output.contains("effects committed"));
         assert!(receipt.output.contains("retained bindings: commandJob"));

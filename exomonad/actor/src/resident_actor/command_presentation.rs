@@ -37,12 +37,12 @@ impl PreparedCommandPresentation {
         }
         if let Some(pages) = self.displayed_pages {
             jobs.mark_displayed(actor, &self.job, &pages)
-                .map_err(|error| {
-                    ResidentActorWorkbenchError::CompletedResultObservation {
+                .map_err(
+                    |error| ResidentActorWorkbenchError::CompletedResultObservation {
                         detail: format!("command observation receipt: {error:?}"),
                         recovered_bindings: recovered_bindings.clone(),
-                    }
-                })?;
+                    },
+                )?;
         }
         Ok(())
     }
