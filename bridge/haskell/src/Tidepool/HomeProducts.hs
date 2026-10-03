@@ -24,11 +24,23 @@ import GHC
 import GHC.Driver.Env
   ( HscEnv(..), hsc_HPT, hscUpdateHPT )
 import GHC.Driver.Backend (backendGeneratesCode)
+import GHC.Core.Type (eqType)
+import GHC.Driver.Config.Diagnostic (initDiagOpts, initPrintConfig)
+import GHC.Driver.Errors (printOrThrowDiagnostics)
+import GHC.Driver.Errors.Types (GhcMessage(GhcTcRnMessage))
 import GHC.Driver.Monad (reflectGhc, reifyGhc)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
+import GHC.Iface.Tidy (mkBootModDetailsTc)
 import GHC.Driver.Session (GeneralFlag(Opt_Pp, Opt_BuildDynamicToo), backend, gopt, xopt, dynamicNow, targetProfile)
 import GHC.LanguageExtensions.Type qualified as LangExt
-import GHC.Tc.Types (tcg_dependent_files)
+import GHC.Rename.Names (gresFromAvails)
+import GHC.Tc.Module (checkHiBootIface')
+import GHC.Tc.Types (TcGblEnv, tcg_dependent_files, tcg_mod, tcg_rdr_env, tcg_top_loc)
+import GHC.Tc.Utils.Monad (initTcWithGbl)
+import GHC.Types.Name.Reader (mkGlobalRdrEnv)
+import GHC.Types.Id (idName, idType)
+import GHC.Types.TyThing (TyThing(..))
+import GHC.Types.TypeEnv (lookupTypeEnv)
 import GHC.Types.SourceFile (HscSource(..))
 import GHC.Unit.Home.ModInfo
   ( HomeModInfo(..), addToHpt, eltsHpt, lookupHpt )
@@ -38,7 +50,9 @@ import GHC.Unit.Module.Graph
 import GHC.Driver.Make (load')
 import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.Data.Graph.Directed (flattenSCCs)
-import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_usages, set_mi_extra_decls)
+import GHC.Unit.Module.ModDetails (md_exports, md_insts, md_types)
+import GHC.Unit.Module.ModIface
+  ( ModIface, mi_module, mi_usages, mi_iface_hash, mi_final_exts, set_mi_extra_decls )
 import GHC.Unit.Module.Location (ModLocation(..))
 import GHC.Iface.Binary (writeBinIface, CompressionIFace(..), TraceBinIFace(..))
 import GHC.Unit.Module.Deps (Usage(..))
@@ -258,9 +272,16 @@ hydrateCandidateHomeProductsWithOriginals initial loadGraph interfaces originals
             liftIO (ioError (userError "cached home boot input is not a boot summary"))
           parsed <- parseModule summary
           typed <- typecheckModule parsed
-          dependentFiles <- liftIO (readIORef (tcg_dependent_files (fst (tm_internals_ typed))))
+          let bootEnvironment = fst (tm_internals_ typed)
+          dependentFiles <- liftIO (readIORef (tcg_dependent_files bootEnvironment))
           unless (null dependentFiles) $
             liftIO (ioError (userError "cached home boot input read untracked dependent files"))
+          iface <- maybe
+            (liftIO (ioError (userError "cached boot implementation interface missing"))) pure
+            (Map.lookup (ms_mod summary) ordinaryByModule)
+          liftIO (validateBootImplementation current summary bootEnvironment iface)
+        liftIO $ emitCount timing "home_products_boot_compatibility_owners"
+          (toInteger (length boots))
         setSession current
         pure (current, validated)
       combined <- liftIO (hydrateExactScope validationBase (originals ++ interfaces))
@@ -283,6 +304,37 @@ hydrateCandidateHomeProductsWithOriginals initial loadGraph interfaces originals
       let restored = final {hsc_mod_graph = hsc_mod_graph initial}
       setSession restored
       pure restored
+
+-- A cached ordinary interface skips GHC's ordinary frontend self-boot check.
+-- Usage seals cover imported entities, while every current boot declaration
+-- must match its original implementation, including unused families.
+validateBootImplementation :: HscEnv -> ModSummary -> TcGblEnv -> ModIface -> IO ()
+validateBootImplementation environment summary bootEnvironment iface = do
+  home <- maybe (ioError (userError "cached boot implementation owner missing")) pure
+    (lookupHpt (hsc_HPT environment) (ms_mod_name summary))
+  unless (tcg_mod bootEnvironment == ms_mod summary
+      && mi_module iface == ms_mod summary
+      && mi_module (hm_iface home) == ms_mod summary
+      && mi_iface_hash (mi_final_exts (hm_iface home)) == mi_iface_hash (mi_final_exts iface)) $
+    ioError (userError "cached boot implementation differs from original interface")
+  bootDetails <- mkBootModDetailsTc (hsc_logger environment) bootEnvironment
+  let details = hm_details home
+      flags = ms_hspp_opts summary
+      checkingEnvironment = environment {hsc_dflags = flags}
+      checkingBoot = bootEnvironment
+        {tcg_rdr_env = mkGlobalRdrEnv (gresFromAvails checkingEnvironment Nothing (md_exports details))}
+  (messages, checked) <- initTcWithGbl checkingEnvironment checkingBoot (tcg_top_loc bootEnvironment)
+    (checkHiBootIface' (md_insts details) (md_types details) (md_exports details) bootDetails)
+  printOrThrowDiagnostics (hsc_logger environment) (initPrintConfig flags) (initDiagOpts flags)
+    (fmap GhcTcRnMessage messages)
+  case checked of
+    Just bridges -> forM_ bridges $ \(bootId, _) ->
+      -- Reuse cannot synthesize the bindings that ordinary typechecking would
+      -- add for boot DFuns or record selectors. They must already be native.
+      case lookupTypeEnv (md_types details) (idName bootId) of
+        Just (AnId originalId) | eqType (idType originalId) (idType bootId) -> pure ()
+        _ -> ioError (userError "cached ordinary interface lacks current boot impedance binding")
+    Nothing -> ioError (userError "cached ordinary interface does not implement current boot declarations")
 
 validateHomeInterface :: HscEnv -> ModSummary -> ModIface -> IO ()
 validateHomeInterface environment summary iface = do
