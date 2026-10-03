@@ -1112,12 +1112,17 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
         if label == "preview-oversized-text" {
             assert!(activation.message.len() < 33 * 1024);
             assert!(!activation.message.contains("RETAINED-ASSIGNMENT-TAIL"));
-            let retained = committed(
+            let retained = displayed(
+                &mut campaign,
                 child.as_ref().unwrap().policy.as_ref(),
-                "T.isSuffixOf \"RETAINED-ASSIGNMENT-TAIL\" sessionInput",
+                "display (T.isSuffixOf \"RETAINED-ASSIGNMENT-TAIL\" sessionInput)",
             )
             .await;
-            assert_eq!(retained["items"][0]["output"], "True", "{retained}");
+            assert_eq!(
+                explicit_display_output(&retained)["text"],
+                "True",
+                "{retained}"
+            );
         }
         let result = dispatch_haskell_script(child.as_ref().unwrap().policy.as_ref(), reply).await;
         assert_eq!(result["status"], "replied", "{result:?}");
@@ -1976,22 +1981,20 @@ async fn work_actor_consumes_later_progress_without_rearming() {
             &format!("import Tidepool.Agent.Reply (pollReply)\nreportProgress (WorkProgress [] {questions})\npollReply sessionReply"),
         )
         .await;
-        let observed = committed(root.as_ref(), "view <- readWork forwarding\ninspectFull (map (map questionKey . workQuestions . sourceProgress) (collectedWork view))\nActor.call wakes (RoutingCount 0 id)").await;
-        assert_eq!(observed["items"][1]["output"], expected, "{observed}");
-        assert_eq!(observed["items"][2]["output"], effects, "{observed}");
+        let observed = displayed(&mut campaign, root.as_ref(), "view <- readWork forwarding\n_ <- display (show (map (map questionKey . workQuestions . sourceProgress) (collectedWork view)))\n_ <- Actor.call wakes (RoutingCount 0 id) >>= display").await;
+        assert_eq!(
+            explicit_display_texts(&observed),
+            [expected, effects],
+            "{observed}"
+        );
     }
     let replied =
         dispatch_haskell_script(producer.policy.as_ref(), "respond (\"finished\" :: Text)").await;
     assert_eq!(replied["status"], "replied", "{replied}");
-    let closed = committed(root.as_ref(), "view <- readWork forwarding\ninspectFull (map Exomonad.Contrib.Routing.sourceStatus (collectedWork view))\nfinishWork forwarding").await;
-    assert_eq!(closed["items"][1]["output"], "[WorkClosed]", "{closed}");
-    assert!(
-        closed["items"][2]["output"]
-            .as_str()
-            .unwrap()
-            .starts_with("Completed"),
-        "{closed}"
-    );
+    let closed = displayed(&mut campaign, root.as_ref(), "view <- readWork forwarding\n_ <- display (show (map Exomonad.Contrib.Routing.sourceStatus (collectedWork view)))\n_ <- finishWork forwarding >>= display . show").await;
+    let pages = explicit_display_texts(&closed);
+    assert_eq!(pages[0], "[WorkClosed]", "{closed}");
+    assert!(pages[1].starts_with("Completed"), "{closed}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -2174,9 +2177,10 @@ async fn independent_admission_rejects_inheritance_and_supervised_escape() {
         .replace("withContext (selected id)", "withContext inherited")
         .replace("peer <- unfold", "peerAttempt <- attemptUnfold");
     committed(root.as_ref(), &inherited).await;
-    let result = committed(
+    let result = displayed(
+        &mut campaign,
         root.as_ref(),
-        "inspectFull (either show (const \"unexpected acceptance\") peerAttempt)",
+        "display (either show (const \"unexpected acceptance\") peerAttempt)",
     )
     .await;
     assert!(
@@ -2193,19 +2197,16 @@ async fn independent_admission_rejects_inheritance_and_supervised_escape() {
         .replace("projectHead", "currentCheckout")
         .replace("peer <- unfold", "standaloneAttempt <- attemptUnfold");
     committed(worker.policy.as_ref(), &attempted).await;
-    let result = committed(
-        worker.policy.as_ref(),
-        "inspectFull (either show (const \"unexpected acceptance\") standaloneAttempt)\npollReply sessionReply",
+    let result = displayed(
+        &mut campaign, worker.policy.as_ref(),
+        "_ <- display (either show (const \"unexpected acceptance\") standaloneAttempt)\n_ <- pollReply sessionReply >>= display . show",
     )
     .await;
     assert!(
-        result["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("only a top-level actor"),
+        explicit_display_texts(&result)[0].contains("only a top-level actor"),
         "{result}"
     );
-    assert_eq!(result["items"][1]["output"], "ReplyOpen", "{result}");
+    assert_eq!(explicit_display_texts(&result)[1], "ReplyOpen", "{result}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -2243,10 +2244,11 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
     let (observer, _observer_binding) = next_project_worker(&mut campaign).await;
     assert!(observer.supervisor_parent.is_none());
     assert_eq!(observer.creator, worker.creator);
-    let unshared = committed(observer.policy.as_ref(), "let retainedPeer = sessionInput\nvisibleBefore <- snapshot\ninspectFull (length (snapshotActors visibleBefore))\nshareObservation retainedPeer retainedPeer").await;
-    assert_eq!(unshared["items"][2]["output"], "1", "{unshared}");
+    let unshared = displayed(&mut campaign, observer.policy.as_ref(), "let retainedPeer = sessionInput\nvisibleBefore <- snapshot\n_ <- display (length (snapshotActors visibleBefore))\n_ <- shareObservation retainedPeer retainedPeer >>= display . show").await;
+    assert_eq!(explicit_display_texts(&unshared)[0], "1", "{unshared}");
     assert_eq!(
-        unshared["items"][3]["output"], "ObservationUnauthorized",
+        explicit_display_texts(&unshared)[1],
+        "ObservationUnauthorized",
         "{unshared}"
     );
     assert_eq!(
@@ -2265,19 +2267,21 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
             .contains(&worker.label),
         "{status}"
     );
-    let shared = committed(
-        root.as_ref(),
-        "shareObservation (responseActor peerObserver) (responseActor peer)",
+    let shared = displayed(
+        &mut campaign, root.as_ref(),
+        "_ <- shareObservation (responseActor peerObserver) (responseActor peer) >>= display . show",
     )
     .await;
     assert_eq!(
-        shared["items"][0]["output"], "ObservationShared",
+        explicit_display_output(&shared)["text"],
+        "ObservationShared",
         "{shared}"
     );
-    let observed = committed(observer.policy.as_ref(), "visibleAfter <- snapshot\ninspectFull (length (snapshotActors visibleAfter))\nstopAgent retainedPeer").await;
-    assert_eq!(observed["items"][1]["output"], "2", "{observed}");
+    let observed = displayed(&mut campaign, observer.policy.as_ref(), "visibleAfter <- snapshot\n_ <- display (length (snapshotActors visibleAfter))\n_ <- stopAgent retainedPeer >>= display . show").await;
+    assert_eq!(explicit_display_texts(&observed)[0], "2", "{observed}");
     assert_eq!(
-        observed["items"][2]["output"], "StopUnauthorized",
+        explicit_display_texts(&observed)[1],
+        "StopUnauthorized",
         "{observed}"
     );
     assert_eq!(
@@ -2332,13 +2336,14 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
     )
     .await;
     assert_eq!(result["status"], "replied", "{result}");
-    let result = committed(
+    let result = displayed(
+        &mut campaign,
         observer.policy.as_ref(),
-        "settled <- pollResponse followup\ninspectFull settled",
+        "settled <- pollResponse followup\ndisplay (show settled)",
     )
     .await;
     assert!(
-        result["items"][1]["output"]
+        explicit_display_output(&result)["text"]
             .as_str()
             .unwrap()
             .contains("after planner retirement accepted"),
@@ -2352,13 +2357,15 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         })
         .await
         .unwrap();
-    let stale = committed(
+    let stale = displayed(
+        &mut campaign,
         observer.policy.as_ref(),
-        "shareObservation retainedPeer retainedPeer",
+        "_ <- shareObservation retainedPeer retainedPeer >>= display . show",
     )
     .await;
     assert_eq!(
-        stale["items"][0]["output"], "ObservationRecipientUnavailable",
+        explicit_display_output(&stale)["text"],
+        "ObservationRecipientUnavailable",
         "{stale}"
     );
     campaign.forest.shutdown().await;
@@ -3316,10 +3323,25 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
         "_ <- readWork collector >>= display . length . workNotices",
     )
     .await;
-    assert_eq!(retained["items"][0]["output"], "1", "{retained}");
-    displayed(&mut campaign, root.as_ref(), "finishWork collector").await;
+    assert_eq!(
+        explicit_display_output(&retained)["text"],
+        "1",
+        "{retained}"
+    );
+    committed(root.as_ref(), "finishWork collector").await;
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
+}
+
+fn explicit_display_texts(reply: &serde_json::Value) -> Vec<&str> {
+    reply["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["operations"].as_array().unwrap())
+        .filter_map(|operation| operation.get("display"))
+        .map(|display| display["text"].as_str().unwrap())
+        .collect()
 }
 
 fn explicit_display_output(reply: &serde_json::Value) -> &serde_json::Value {
