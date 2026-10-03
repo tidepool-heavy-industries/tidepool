@@ -380,16 +380,16 @@ cellInferenceSegments plan = map makeSegment (runs (cellPlanItems plan))
           ownTargets = filter ((`elem` ownTypes) . displayTargetName)
             (cellPlanDisplayTargets plan)
           generatedSource = concatMap genericDeclarationSource ownGeneric
-          opaqueDisplays = concatMap (structuralDisplayInstance (cellPlanDisplayAlias plan)) ownTargets
+          structuralDisplays = concatMap (structuralDisplayInstance (cellPlanDisplayAlias plan)) ownTargets
           segmentedItems = if declarations
-            then map (\item -> item { cellAnalysisSource = ownSource ++ generatedSource ++ opaqueDisplays }) items
+            then map (\item -> item { cellAnalysisSource = ownSource ++ generatedSource ++ structuralDisplays }) items
             else items
        in plan
           { cellPlanItems = segmentedItems
           , cellPlanDisplayTargets = ownTargets
           , cellPlanGenericDeclarations = ownGeneric
           , cellPlanDeclarationBase = ownSource
-          , cellPlanDisplayDeclarations = opaqueDisplays
+          , cellPlanDisplayDeclarations = structuralDisplays
           }
 
 omitCellGenericDeclarations :: [String] -> CellSourcePlan -> CellSourcePlan
@@ -397,8 +397,7 @@ omitCellGenericDeclarations targets plan =
   let retained = plan
         { cellPlanGenericDeclarations = filter ((`notElem` targets) . genericDeclarationTarget)
             (cellPlanGenericDeclarations plan)
-        , cellPlanDisplayTargets = filter ((`notElem` targets) . displayTargetName)
-            (cellPlanDisplayTargets plan) }
+        }
   in installCellDisplayDeclarations
        (concatMap (structuralDisplayInstance (cellPlanDisplayAlias retained)) (cellPlanDisplayTargets retained)) retained
 
@@ -725,32 +724,19 @@ automaticGenericDeclarations flags qualifier declarations =
     renderTarget target = CellGenericDeclaration (targetName target)
       ("deriving instance " ++ qualifier ++ ".Generic " ++ targetApplication target ++ "\n")
 
--- | An authored Display instance owns its presentation. Generated structural
--- renderers are companions of automatic Generic, without speculative probing.
+-- | Structural companions are deterministic. GHC resolves class identities
+-- and rejects only generated duplicates, so qualified unrelated classes never
+-- suppress a companion merely because their occurrence names match.
 automaticDisplayTargets :: DynFlags -> [CellAnalysisItem] -> [CellDisplayTarget]
 automaticDisplayTargets flags declarations = case unP GHC.Parser.parseModule parserState of
   PFailed _ -> []
   POk _ parsed ->
-    let decls = hsmodDecls (unLoc parsed)
-        authoredDisplay = mapMaybe authoredDisplayTarget decls
-     in [ CellDisplayTarget (targetName target) (targetApplication target)
-        | target <- mapMaybe genericTarget decls
-        , targetName target `notElem` authoredDisplay ]
+    [ CellDisplayTarget (targetName target) (targetApplication target)
+    | target <- mapMaybe genericTarget (hsmodDecls (unLoc parsed)) ]
   where
     source = concatMap cellAnalysisSource (filter ((== KDecl) . sbKind . cellAnalysisVerdict) declarations)
     parserState = initParserState (initParserOpts flags)
       (stringToStringBuffer source) (mkRealSrcLoc (mkFastString "<cell>") 1 1)
-
--- | The type constructor an authored Display instance names, qualified or not.
-authoredDisplayTarget :: LHsDecl GhcPs -> Maybe String
-authoredDisplayTarget declaration = case unLoc declaration of
-  InstD _ ClsInstD { cid_inst = ClsInstDecl { cid_poly_ty = instanceType } }
-    | Just cls <- getLHsInstDeclClass_maybe instanceType
-    , occStr (unLoc cls) == "Display"
-    , HsAppTy _ _ argument <- unLoc (getLHsInstDeclHead instanceType)
-    , Just constructor <- hsTyGetAppHead_maybe argument ->
-        Just (occStr (unLoc constructor))
-  _ -> Nothing
 
 data GenericTarget = GenericTarget
   { targetName :: String

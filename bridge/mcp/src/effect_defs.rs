@@ -1811,11 +1811,19 @@ mod tests {
     }
 
     #[test]
-    fn generated_console_decl_matches_handwritten_baseline() {
+    fn generated_console_decl_contains_actor_display_protocol() {
         let d = crate::console_decl();
         assert_eq!(d.type_name, "Console");
         assert_eq!(d.description, "Print text output.");
-        assert_eq!(d.constructors, &["Print :: Text -> Console ()"]);
+        assert_eq!(
+            d.constructors,
+            &[
+                "Print :: Text -> Console ()",
+                "DisplayWith :: ((Int, Int, Int), Text, [(Int, Text)]) -> payload -> Console (Int, Int, Int)",
+                "DisplayExpandWith :: ((Int, Int, Int), Int) -> Console [(Int, Text)]",
+                "DisplayExpansionInputWith :: Console ((Int, Int, Int), Int)",
+            ]
+        );
         assert!(d.type_defs.is_empty());
         assert_eq!(
             d.helpers,

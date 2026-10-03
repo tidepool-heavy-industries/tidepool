@@ -19,9 +19,7 @@ import GHC hiding (Target)
 import GHC.Builtin.Types (intTy)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
-import GHC.Tc.Types (tcg_rn_decls, tcg_insts, tcg_used_gres, tcg_keep, tcg_safe_infer, tcg_safe_infer_reasons)
-import GHC.Core.TyCo.Compare (eqType)
-import GHC.Types.Name.Set (nameSetElemsStable)
+import GHC.Tc.Types (tcg_rn_decls)
 import GHC.Types.SourceText (il_value)
 import GHC.Types.Fixity (Fixity(..))
 import GHC.Driver.Session (parseDynamicFilePragma)
@@ -1432,7 +1430,7 @@ structuralDisplayCompilation selectedScope effectsRoot = bracket temporary remov
           let path = root </> "CellCheck.hs"
           writeFile path rendered
           compiler CheckedEnvironment mempty GeneralCompile scope path includes Nothing
-    (accepted, provisional) <- checkCellInstances compile plan
+    (accepted, _) <- checkCellInstances compile plan
     assertEqual "resolved authored Display instances retained" False
       (any (`elem` map displayTargetName (cellPlanDisplayTargets accepted)) ["Custom", "Reexported"])
     assertEqual "resolved authored Generic instances retained" False
@@ -1442,61 +1440,26 @@ structuralDisplayCompilation selectedScope effectsRoot = bracket temporary remov
         && "ForeignClass" `elem` map genericDeclarationTarget (cellPlanGenericDeclarations accepted))
     assertEqual "specialized custom instance preserves general structure" True
       ("Special" `elem` map displayTargetName (cellPlanDisplayTargets accepted))
-    assertEqual "authored Show keeps its presentation" False
+    assertEqual "authored Show remains an explicit text rendering choice" True
       ("Presented" `elem` map displayTargetName (cellPlanDisplayTargets accepted))
     assertEqual "authored Show keeps the automatic Generic" True
       ("Presented" `elem` map genericDeclarationTarget (cellPlanGenericDeclarations accepted))
     assertEqual "unsupported automatic Generic derivations omitted" False
       (any ((`elem` ["Poly", "HiddenPoly", "Unboxed"]) . genericDeclarationTarget) (cellPlanGenericDeclarations accepted))
-    let environment = crTargetTcGblEnv provisional
-        dictionaries = map (idType . instanceDFunId) (tcg_insts environment)
-        probeState = do
-          used <- readIORef (tcg_used_gres environment)
-          keep <- readIORef (tcg_keep environment)
-          safe <- readIORef (tcg_safe_infer environment)
-          reasons <- readIORef (tcg_safe_infer_reasons environment)
-          pure (length used, nameSetElemsStable keep, safe, showSDocUnsafe (ppr reasons))
-    stateBefore <- probeState
-    direct <- cellDisplayDeclarations provisional accepted
-    stateAfter <- probeState
-    assertEqual "Display probe leaves checked module references unchanged" True (stateBefore == stateAfter)
-    unless (and (zipWith eqType dictionaries (map (idType . instanceDFunId) (tcg_insts environment)))) $
-      fail "Display probe changed an authoritative dictionary type"
-    -- Recreate the retired contextual CHECK in the oracle, using the exact
-    -- generated heads but opaque methods. Only this test recompiles that view.
-    let qualifier = cellPlanDisplayAlias accepted
-        contextual = concat
-          [ "\n" ++ header ++ "\n  displayTree _ = " ++ qualifier ++ ".TextLeaf ("
-            ++ qualifier ++ "Text.pack \"<opaque>\")\n"
-          | header <- lines direct, "instance " `isPrefixOf` header ]
-    assertContains "parameter context" "Display a) =>" contextual
-    typed <- compile (installCellDisplayDeclarations contextual accepted)
-    finalized <- cellDisplayDeclarations typed accepted
-    assertEqual "disposable Display contexts match canonical contextual compilation" finalized direct
-    assertContains "unsupported imported field is not evaluated"
-      "displayTree (Fields __tidepoolDisplayField0 _ __tidepoolDisplayField2 __tidepoolDisplayField3)" finalized
-    assertContains "unsupported field remains named" "unknown = " finalized
-    assertContains "recursive field remains displayable" ".displayTree __tidepoolDisplayField0" finalized
-    assertContains "custom instance field remains displayable" ".displayTree __tidepoolDisplayField2" finalized
-    assertContains "function field uses its opaque Display instance"
-      "displayTree (Functions __tidepoolDisplayField0)" finalized
-    assertContains "positional field renders as an application argument"
-      ".displayTreePrec 11 __tidepoolDisplayField0" finalized
-    assertContains "applied constructor is parenthesized as an argument"
-      ".precedenceParens __tidepoolPrecedence" finalized
-    assertContains "infix constructor precedence pattern" "(:+:) {} -> " finalized
-    assertContains "higher-kinded unsupported field is not evaluated" "displayTree (Higher _)" finalized
-    assertContains "mutual recursion requires the other generated instance's context" "displayTree (Mutual _)" finalized
-    assertContains "mutual recursive supported fields remain displayable"
-      "displayTree (Partner __tidepoolDisplayField0 __tidepoolDisplayField1 __tidepoolDisplayField2)" finalized
-    assertContains "inferred non-lifted kind variables remain opaque" "displayTree (Kinded _)" finalized
-    assertContains "unresolved family field remains opaque" "displayTree (FamilyField _)" finalized
-    assertContains "reduced family field remains displayable" "displayTree (ClosedFamily __tidepoolDisplayField0)" finalized
-    assertContains "symbolic datatype instance head" ".Display ((:+:) a b)" finalized
-    assertContains "rank-n field remains opaque" "displayTree (Poly _)" finalized
-    assertContains "alias-hidden rank-n field remains opaque" "displayTree (HiddenPoly _)" finalized
-    assertContains "unlifted unsupported field remains opaque" "displayTree (Unboxed _)" finalized
-    _ <- compile (installCellDisplayDeclarations finalized accepted)
+    assertEqual "unsupported Generic has no structural companion" False
+      (any ((`elem` ["Poly", "HiddenPoly", "Unboxed"]) . displayTargetName) (cellPlanDisplayTargets accepted))
+    assertEqual "authored Generic retains its structural companion" True
+      (all (`elem` map displayTargetName (cellPlanDisplayTargets accepted)) ["Authored", "Standalone"])
+    let generated = cellPlanDisplayDeclarations accepted
+    assertContains "structural companion delegates once to Generic" ".genericDisplayTree" generated
+    assertContains "parameterized representation context" ".Rep (Parameter a)" generated
+    assertContains "symbolic datatype instance head" ".Display ((:+:) a b)" generated
+    assertContains "recursive datatype companion" ".Display (Fields a)" generated
+    assertContains "higher-kind field companion" ".Display (Higher f a)" generated
+    assertContains "family field companion" ".Display (FamilyField a)" generated
+    unless (not ("Text.pack" `isInfixOf` generated)) $
+      fail "structural companions must not generate eager text conversion"
+    _ <- compile accepted
     invalidSource <- readFile "test-cell-splitter/ExplicitInvalidGeneric.cell.hs"
     invalidPlan <- analyzeCell template invalidSource >>= either (fail . renderCellSplitError) pure
     invalid <- try (checkCellInstances compile invalidPlan)
