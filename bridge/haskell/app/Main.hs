@@ -117,7 +117,7 @@ import Tidepool.ExactScope
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CellProgramState
 import GHC.Core.Type (splitFunTy_maybe)
-import Tidepool.CheckedCell (CheckedSignature(..), encodeCheckedSignature
+import Tidepool.CheckedCell (encodeCheckedSignature
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness)
 import Tidepool.PlannedDeclaration
   ( PlannedDeclaration, PlannedDeclarationRejection(..), PlannedDeclarationInventory, plannedExports, plannedSource, plannedCheckPlan, replaceTemplateModuleHeader
@@ -1086,7 +1086,6 @@ runCellMode compiler caches args cellPath = do
 
 runLegacyCellMode :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
 runLegacyCellMode compiler caches args cellPath = do
-  timing <- readTimingEnabled
   provisionalOutput <- newIORef Nothing
   res <- trySynchronous $ do
     cellSource <- readFile cellPath
