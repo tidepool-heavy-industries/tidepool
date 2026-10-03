@@ -6,6 +6,7 @@ module Main where
 import Control.Monad (forM_, unless, void, when)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (AsyncException(ThreadKilled), SomeException, bracket, evaluate, finally, fromException, throwIO, try)
+import qualified Data.Map.Strict as Map
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, tails)
@@ -15,7 +16,7 @@ import qualified Data.ByteString as BS
 import qualified Data.Text as Text
 import Codec.CBOR.Encoding (encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
-import GHC
+import GHC hiding (Target)
 import GHC.Builtin.Types (intTy)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
@@ -43,14 +44,19 @@ import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transformProgramDeclarationImports)
 import Tidepool.GhcPipeline
 import Tidepool.ExtractRequest
-  ( InspectionRequest(..), RequestField(..), WorkerRequest(..)
-  , workerArgv, workerRequestFromArgv )
+  ( InspectionRequest(..), RequestField(..), RequestShapeError(..), WorkerRequest(..)
+  , validateRequestShape, workerArgv, workerRequestFromArgv )
 import Tidepool.Introspection (InfoEntry(..), InspectionResult(..), runInspection)
 import Tidepool.DependencyEvidence
 import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..), SessionScope(..)
   , mkThinSessionIface, writeSessionIface, injectSessionIface, renderSessionModule )
 import Tidepool.PreparedStg (PreparedModule(..))
+import HarnessSourceTest (harnessSourceChecks)
+import InspectionRunnerTest (inspectionRunnerChecks)
+import WorkerDiagnosticsTest (runWorkerDiagnosticsTests)
+import CheckedAdmissionTest (checkedAdmissionChecks)
+import CellProgramStateTest (cellProgramStateChecks)
 import UnreachableCompileTimeTest (unreachableCompileTimeCompilation)
 import Tidepool.Timing
   ( InterfaceStage(..), InterfaceReuse(..), measureModuleInterface )
@@ -69,21 +75,34 @@ main = getArgs >>= \case
   ["--memo-lifecycle"] -> memoLifecycleCompilation >> putStrLn "request memo lifecycle: 1 passed"
   ["--metadata"] -> metadataCompilation >> putStrLn "metadata compilation: 1 passed"
   ["--prepared-session"] -> preparedSessionLeafCompilation >> putStrLn "prepared session leaf: 1 passed"
+  ["--compiler-boundaries"] -> compilerBoundaryChecks
+  ["--checked-admission"] -> checkedAdmissionChecks
+  ["--cell-accumulation"] -> cellProgramStateChecks
+  ["--request-validation"] -> requestValidationChecks
   ["--check-source-request"] -> checkingSourceRequestRoundTrip >> putStrLn "checking source request: 1 passed"
   ["--ordered-segments"] -> orderedInferenceSegments >> putStrLn "ordered inference segments: 1 passed"
   ["--program-originals"] -> programOriginalImportsCompilation >> putStrLn "program original imports: 1 passed"
   ["--function-value-iface"] -> functionValueInterfaceCompilation >> putStrLn "function value interface: 1 passed"
   ["--session-fixities"] -> sessionFixitiesCompilation >> putStrLn "session fixities: 1 passed"
   ["--unreachable-compile-time"] -> unreachableCompileTimeCompilation >> putStrLn "unreachable compile-time: 1 passed"
+  ["--metadata-inspection"] -> mixedInspectionCompilation >> putStrLn "metadata inspection: mixed query order and probe ordinals passed"
   ["--checked-load-boundary"] -> checkedLoadBoundaryCompilation >> putStrLn "checked load boundary: 4 passed"
   ["--structural-display", effectsRoot] -> structuralDisplayCompilation OrdinaryDisplayTest effectsRoot >> putStrLn "structural display: 1 passed"
   ["--structural-display-exact", effectsRoot] -> structuralDisplayCompilation ExactDisplayTest effectsRoot >> putStrLn "exact structural display: 1 passed"
   _ -> runAllTests
 
+compilerBoundaryChecks :: IO ()
+compilerBoundaryChecks = do
+  requestValidationChecks
+  cellProgramStateChecks
+  checkedAdmissionChecks
+  harnessSourceChecks
+  inspectionRunnerChecks
+  runWorkerDiagnosticsTests
+
 runAllTests :: IO ()
 runAllTests = do
-  certificationRequestValidation
-  checkingSourceRequestRoundTrip
+  compilerBoundaryChecks
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     flags <- getSessionDynFlags
@@ -118,6 +137,14 @@ runAllTests = do
     ["--path-insensitive-witness"] -> pathInsensitiveWitnessCompilation
     ["--memo-lifecycle"] -> memoLifecycleCompilation
     _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, --pin-imports, --path-insensitive-witness, --memo-lifecycle, or --structural-display EFFECTS_INCLUDE"
+
+requestValidationChecks :: IO ()
+requestValidationChecks = do
+  certificationRequestValidation
+  checkingSourceRequestRoundTrip
+  requestShapeValidation
+  requestFieldOrdering
+  putStrLn "request validation: 4 groups passed (certification, source-check round-trip, mode shapes, field ordering)"
 
 requestOwnedParserDefaults :: IO ()
 requestOwnedParserDefaults = do
@@ -408,6 +435,82 @@ certificationRequestValidation = do
     case workerRequestFromArgv (workerArgv fields) of
       Left _ -> pure ()
       other -> fail ("home-product certification accepted ambiguous input: " ++ show other)
+
+requestShapeValidation :: IO ()
+requestShapeValidation = do
+  let request fields = case workerRequestFromArgv (workerArgv fields) of
+        Right (Just decoded) -> pure decoded
+        other -> fail ("request shape fixture failed to decode: " ++ show other)
+      cases =
+        [ ("source check accepts explicit compiler inputs"
+          , [Input "Probe.hs", CheckSource, Include "lib", ModuleCandidates "scope", BuildProductsDir "products"]
+          , Right ())
+        , ("cell plan accepts common compile context"
+          , [Input "Cell.hs", CellPlan, Include "lib", OutputDir "out", Target "Main", Targets ["A"], SessionRoot "session"]
+          , Right ())
+        ]
+        ++ [("source check rejects " ++ label, [Input "Probe.hs", CheckSource, field], Left InvalidSourceCheckShape)
+           | (label, field) <- sourceCheckExcludedFields]
+        ++ [("cell plan rejects " ++ label, [Input "Cell.hs", CellPlan, field], Left InvalidCellPlanShape)
+           | (label, field) <- cellPlanExcludedFields]
+        ++ [ ("source check rejects multiple inputs", [Input "A.hs", Input "B.hs", CheckSource], Left InvalidSourceCheckShape)
+           , ("cell plan rejects multiple inputs", [Input "A.hs", Input "B.hs", CellPlan], Left InvalidCellPlanShape)
+           , ("source-check error precedence is retained", [Input "Cell.hs", CheckSource, CellPlan], Left InvalidSourceCheckShape)
+           ]
+  forM_ cases $ \(label, fields, expected) -> do
+    decoded <- request fields
+    assertEqual label expected (validateRequestShape decoded)
+  where
+    sourceCheckExcludedFields =
+      [ ("output directory", OutputDir "out"), ("target", Target "Main"), ("target group", Targets ["Main"])
+      , ("module-only target", TargetModuleOnly), ("binding generation", BindGen 1)
+      , ("session injection", InjectVal "Val1"), ("session root", SessionRoot "session")
+      , ("session incarnation", SessionIncarnation "1"), ("session artifacts", SessionArtifacts "scope")
+      , ("turn mode", Turn), ("turn template", TurnTemplate "kind" "template")
+      , ("turn output", TurnOut "turn"), ("turn verdict", TurnVerdict "ok"), ("turn pin", TurnPin "pin")
+      , ("classification mode", Classify), ("classification output", ClassifyOut "classify")
+      , ("cell mode", Cell), ("cell plan mode", CellPlan), ("cell template", CellTemplate "template")
+      , ("cell output", CellOut "cell"), ("harness profile", HarnessProfile)
+      , ("declaration join", DeclarationJoin "join"), ("declaration join output", DeclarationJoinOut "join-out")
+      , ("activation preview", ActivationPreview)
+      , ("cell fold turn", CellFoldTurn), ("inspection strictness", InspectionStrict)
+      , ("inspection output", InspectOut "inspect"), ("type batch", InspectTypeBatch "batch")
+      , ("inspection query", InspectType "Int")
+      , ("retained generation", RetainedGeneration (SymbolIdentity "main" "M" "value" "x" Nothing) 1)
+      ]
+    cellPlanExcludedFields =
+      [ ("cell mode", Cell), ("turn mode", Turn), ("classification mode", Classify)
+      , ("inspection query", InspectType "Int"), ("session artifacts", SessionArtifacts "scope")
+      , ("declaration join", DeclarationJoin "join"), ("candidate authority", ModuleCandidates "scope")
+      , ("activation preview", ActivationPreview)
+      , ("cell fold turn", CellFoldTurn), ("binding generation", BindGen 1)
+      , ("retained generation", RetainedGeneration (SymbolIdentity "main" "M" "value" "x" Nothing) 1)
+      ]
+
+requestFieldOrdering :: IO ()
+requestFieldOrdering = do
+  let identity = SymbolIdentity "main" "Producer" "value" "value" Nothing
+      fields =
+        [ Input "first.hs", Targets ["a", "b"], Include "one", InjectVal "Val1"
+        , TurnTemplate "first" "one.tpl", InspectType "Int", RetainedGeneration identity 1
+        , TurnVerdict "old"
+        , Input "second.hs", Targets ["c", "d"], Include "two", InjectVal "Val2"
+        , TurnTemplate "second" "two.tpl", InspectInfo "answer"
+        , RetainedGeneration identity 2, TurnVerdict "new"
+        ]
+  case workerRequestFromArgv (workerArgv fields) of
+    Right (Just request) -> do
+      assertEqual "input order" ["first.hs", "second.hs"] (requestFiles request)
+      assertEqual "target groups retain order" ["a", "b", "c", "d"] (requestTargets request)
+      assertEqual "include order" ["one", "two"] (requestIncludes request)
+      assertEqual "injected value order" ["Val1", "Val2"] (requestInjectVals request)
+      assertEqual "template order" [("first", "one.tpl"), ("second", "two.tpl")] (requestTurnTemplates request)
+      assertEqual "inspection order" [InspectTypeOf "Int", InspectNameInfo "answer"] (requestInspections request)
+      assertEqual "duplicate map key remains last-write-wins" (Just 2)
+        (Map.lookup identity (requestRetainedGenerations request))
+      assertEqual "duplicate scalar remains last-write-wins" (Just "new")
+        (requestTurnVerdict request)
+    other -> fail ("ordered request failed to decode: " ++ show other)
 
 multilineLetPlacement :: DynFlags -> IO ()
 multilineLetPlacement flags = do
@@ -1166,6 +1269,36 @@ checkedLoadBoundaryCompilation = bracket temporary removeDirectoryRecursive $ \r
     temporary = do
       parent <- getTemporaryDirectory
       (path, handle) <- openTempFile parent "tidepool-checked-load-boundary"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+-- Only type-of queries consume numbered probes; other results retain query order.
+mixedInspectionCompilation :: IO ()
+mixedInspectionCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let target = root </> "MixedInspection.hs"
+  writeFile target $ unlines
+    [ "module MixedInspection where"
+    , "__tidepool_inspect_0 = (7 :: Int)"
+    , "__tidepool_inspect_1 = True"
+    ]
+  withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
+    checked <- runRequest $ \compiler ->
+      compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+    inspected <- runInspection
+      (crHscEnv checked) (crTargetTcGblEnv checked)
+      (crTargetRdrEnv checked) (crInspectionProbes checked)
+      [InspectTypeOf "7", InspectNameInfo "missingInspectionName", InspectTypeOf "True"]
+    case inspected of
+      [InspectionType "7" first _, InspectionNotFound "missingInspectionName", InspectionType "True" second _] -> do
+        assertContains "first query uses probe zero" "Int" first
+        assertContains "non-type query leaves the second probe ordinal unchanged" "Bool" second
+      other -> fail ("mixed inspection returned an unexpected result: " ++ show other)
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-mixed-inspection"
       hClose handle
       removeFile path
       createDirectory path

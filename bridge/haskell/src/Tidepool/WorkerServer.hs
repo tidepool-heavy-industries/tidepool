@@ -1,9 +1,12 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+
 -- | Framed stdin/stdout loop for the resident Haskell compiler worker.
 -- Process supervision, sockets, timeouts, and rotation belong to the Rust
 -- frontend. This module only preserves one GHC session across requests.
 module Tidepool.WorkerServer (RequestHandler, runWorkerLoop) where
 
-import Control.Exception (IOException, catch, finally, throwIO)
+import Control.Exception
+  ( SomeException, mask, throwIO, try )
 import Control.Monad (replicateM)
 import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
@@ -100,21 +103,48 @@ decodeText :: BS.ByteString -> String
 decodeText = T.unpack . TE.decodeUtf8With TEE.lenientDecode
 
 captureOutput :: IO ExitCode -> IO (Int, BS.ByteString, BS.ByteString)
-captureOutput action = do
+captureOutput action = mask $ \restore -> do
   tmpDir <- getTemporaryDirectory
   (outPath, outHandle) <- openTempFile tmpDir "tidepool-worker-stdout.txt"
-  (errPath, errHandle) <- openTempFile tmpDir "tidepool-worker-stderr.txt"
-  let removeTemps = do
-        removeFile outPath `catch` \(_ :: IOException) -> pure ()
-        removeFile errPath `catch` \(_ :: IOException) -> pure ()
-  (do
-      exitCode <- runRedirected outHandle errHandle action
-      captured <- readCapturedResponse outPath errPath
-      pure $ case captured of
-        Right (out, err) -> (exitCodeToInt exitCode, out, err)
-        Left message -> (1, TE.encodeUtf8 (T.pack
-          (renderDiagsJson ReportWorkerFailure [Diag Nothing DiagError message])), BS.empty)
-    ) `finally` removeTemps
+  errTemp <- try (openTempFile tmpDir "tidepool-worker-stderr.txt")
+  (errPath, errHandle) <- case errTemp of
+    Right pair -> pure pair
+    Left (failure :: SomeException) -> do
+      ignoreFailures [hClose outHandle, removeFile outPath]
+      throwIO failure
+  result <- try $ restore $ do
+    exitCode <- runRedirected outHandle errHandle action
+    closeFailures <- attemptAll [hClose outHandle, hClose errHandle]
+    throwFirst closeFailures
+    captured <- readCapturedResponse outPath errPath
+    pure $ case captured of
+      Right (out, err) -> (exitCodeToInt exitCode, out, err)
+      Left message -> (1, TE.encodeUtf8 (T.pack
+        (renderDiagsJson ReportWorkerFailure [Diag Nothing DiagError message])), BS.empty)
+  ignoreFailures [hClose outHandle, hClose errHandle]
+  cleanupFailures <- attemptAll [removeFile outPath, removeFile errPath]
+  case result of
+    Left (failure :: SomeException) -> throwIO failure
+    Right value -> throwFirst cleanupFailures >> pure value
+
+-- Attempt every release even if an earlier one fails. The operation's
+-- exception takes precedence; otherwise the first cleanup failure is visible.
+attemptAll :: [IO ()] -> IO [SomeException]
+attemptAll = go []
+  where
+    go failures [] = pure (reverse failures)
+    go failures (operation : rest) = do
+      result <- try operation
+      case result of
+        Left (failure :: SomeException) -> go (failure : failures) rest
+        Right () -> go failures rest
+
+ignoreFailures :: [IO ()] -> IO ()
+ignoreFailures operations = attemptAll operations >> pure ()
+
+throwFirst :: [SomeException] -> IO ()
+throwFirst [] = pure ()
+throwFirst (failure : _) = throwIO failure
 
 -- Shared with the Rust response decoder. Prepared/native products remain files;
 -- exceeding this diagnostic budget is infrastructure failure, never truncation.
@@ -147,20 +177,26 @@ readCapturedResponse outPath errPath =
           else pure (Right (out, err))
 
 runRedirected :: Handle -> Handle -> IO ExitCode -> IO ExitCode
-runRedirected outHandle errHandle action = do
+runRedirected outHandle errHandle action = mask $ \restore -> do
   savedOut <- hDuplicate stdout
-  savedErr <- hDuplicate stderr
-  hDuplicateTo outHandle stdout
-  hDuplicateTo errHandle stderr
-  action `finally` do
-    hFlush stdout
-    hFlush stderr
-    hDuplicateTo savedOut stdout
-    hDuplicateTo savedErr stderr
-    hClose savedOut
-    hClose savedErr
-    hClose outHandle
-    hClose errHandle
+  savedErrResult <- try (hDuplicate stderr)
+  savedErr <- case savedErrResult of
+    Right handle -> pure handle
+    Left (failure :: SomeException) -> do
+      ignoreFailures [hClose savedOut]
+      throwIO failure
+  result <- try $ restore $ do
+    hDuplicateTo outHandle stdout
+    hDuplicateTo errHandle stderr
+    action
+  cleanupFailures <- attemptAll
+    [ hFlush stdout, hFlush stderr
+    , hDuplicateTo savedOut stdout, hDuplicateTo savedErr stderr
+    , hClose savedOut, hClose savedErr
+    ]
+  case result of
+    Left (failure :: SomeException) -> throwIO failure
+    Right value -> throwFirst cleanupFailures >> pure value
 
 exitCodeToInt :: ExitCode -> Int
 exitCodeToInt ExitSuccess = 0

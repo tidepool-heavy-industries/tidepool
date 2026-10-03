@@ -48,7 +48,7 @@ ENCODER_TEST_PACKAGES = [
     "text",
 ]
 
-WORKER_RESPONSE_TEST_PACKAGES = ["bytestring", "directory", "process"]
+WORKER_RESPONSE_TEST_PACKAGES = ["bytestring", "directory", "process", "unix"]
 
 def _package_flags(packages):
     flags = []

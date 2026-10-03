@@ -18,7 +18,7 @@
 //!     `NoImplicitPrelude` (the standalone lens-free surface relies on the
 //!     implicit Prelude import instead of `Tidepool.Prelude`).
 //!   - The Haskell-side harness compilation profile
-//!     (`bridge/haskell/app/Main.hs`'s `harnessProfilePragmaLine`) — a Haskell string
+//!     (`bridge/haskell/src/Tidepool/HarnessSource.hs`'s `harnessProfilePragmaLine`) — a Haskell string
 //!     literal can't import a Rust constant across the language boundary, so
 //!     it's checked here by
 //!     reading the source file and parsing its extension set directly. It is
@@ -153,7 +153,7 @@ fn standalone_default_tracks_decl_pragmas_modulo_no_implicit_prelude() {
 }
 
 /// The Haskell-side harness compilation profile
-/// (`bridge/haskell/app/Main.hs`'s `harnessProfilePragmaLine`) must carry EXACTLY
+/// (`bridge/haskell/src/Tidepool/HarnessSource.hs`'s `harnessProfilePragmaLine`) must carry EXACTLY
 /// `EVAL_PRAGMAS`'s extension set — an author importing
 /// `Tidepool.Harness.Prelude` under `--harness-profile` gets the identical
 /// dialect an ordinary eval author gets. Reads the Haskell SOURCE FILE and
@@ -164,26 +164,32 @@ fn standalone_default_tracks_decl_pragmas_modulo_no_implicit_prelude() {
 #[test]
 fn haskell_harness_profile_pragma_line_matches_eval_pragmas() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let main_hs = manifest_dir
+    let harness_source = manifest_dir
         .parent()
         .and_then(Path::parent)
         .expect("tidepool-mcp has a parent (repo root)")
-        .join("bridge/haskell/app/Main.hs");
-    let src = std::fs::read_to_string(&main_hs)
-        .unwrap_or_else(|e| panic!("read {}: {e}", main_hs.display()));
+        .join("bridge/haskell/src/Tidepool/HarnessSource.hs");
+    let src = std::fs::read_to_string(&harness_source)
+        .unwrap_or_else(|e| panic!("read {}: {e}", harness_source.display()));
 
     const MARKER: &str = "harnessProfilePragmaLine =";
     let after_marker = src
         .split_once(MARKER)
-        .unwrap_or_else(|| panic!("{MARKER} not found in {}", main_hs.display()))
+        .unwrap_or_else(|| panic!("{MARKER} not found in {}", harness_source.display()))
         .1;
-    let quote_start = after_marker
-        .find('"')
-        .unwrap_or_else(|| panic!("no opening quote after {MARKER} in {}", main_hs.display()));
+    let quote_start = after_marker.find('"').unwrap_or_else(|| {
+        panic!(
+            "no opening quote after {MARKER} in {}",
+            harness_source.display()
+        )
+    });
     let after_open = &after_marker[quote_start + 1..];
-    let quote_end = after_open
-        .find('"')
-        .unwrap_or_else(|| panic!("no closing quote after {MARKER} in {}", main_hs.display()));
+    let quote_end = after_open.find('"').unwrap_or_else(|| {
+        panic!(
+            "no closing quote after {MARKER} in {}",
+            harness_source.display()
+        )
+    });
     let pragma_line = &after_open[..quote_end];
 
     let eval = extension_set(EVAL_PRAGMAS);

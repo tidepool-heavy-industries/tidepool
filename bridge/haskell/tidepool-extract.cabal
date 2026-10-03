@@ -32,12 +32,18 @@ library tidepool-extract-internal
   exposed-modules:
     Tidepool.Binders
     Tidepool.CborEncode
+    Tidepool.CellProgramState
     Tidepool.CheckedCell
+    Tidepool.CheckedAdmission
+    Tidepool.CheckedRecipe
     Tidepool.CheckedPrefixImports
     Tidepool.CompileInputPolicy
     Tidepool.DependencyEvidence
     Tidepool.DeclarationJoin
     Tidepool.WorkerServer
+    Tidepool.HarnessSource
+    Tidepool.InspectionRunner
+    Tidepool.WorkerDiagnostics
     Tidepool.DiagJson
     Tidepool.EffectSchema
     Tidepool.ExtractUtil
@@ -126,6 +132,11 @@ test-suite cell-splitter-test
   main-is:          CellSplitterTest.hs
   hs-source-dirs:   test-cell-splitter
   other-modules:    UnreachableCompileTimeTest
+                    CellProgramStateTest
+                    CheckedAdmissionTest
+                    HarnessSourceTest
+                    InspectionRunnerTest
+                    WorkerDiagnosticsTest
   build-depends:
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,
@@ -136,7 +147,8 @@ test-suite cell-splitter-test
     filepath,
     text,
     assignment-internal,
-    tidepool-extract-internal
+    tidepool-extract-internal,
+    unix
   default-language: GHC2024
   ghc-options:      -Wall
 
@@ -467,7 +479,8 @@ test-suite worker-response-test
     bytestring,
     directory,
     process,
-    tidepool-extract-internal
+    tidepool-extract-internal,
+    unix
   default-language: GHC2024
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
