@@ -6019,12 +6019,13 @@ where
                             recovered_bindings: installed_bindings.clone(),
                         });
                     }
-                    let text = String::from_value(result.value(), result.table()).map_err(|error| {
-                        ResidentActorWorkbenchError::CompletedResultObservation {
-                            detail: error.to_string(),
-                            recovered_bindings: installed_bindings.clone(),
-                        }
-                    })?;
+                    let text =
+                        String::from_value(result.value(), result.table()).map_err(|error| {
+                            ResidentActorWorkbenchError::CompletedResultObservation {
+                                detail: error.to_string(),
+                                recovered_bindings: installed_bindings.clone(),
+                            }
+                        })?;
                     if matches!(&fragment.display, WorkbenchDisplay::ToolDispatch) {
                         let reply = decode_tool_dispatch_reply(&text).map_err(|error| {
                             ResidentActorWorkbenchError::CompletedResultObservation {

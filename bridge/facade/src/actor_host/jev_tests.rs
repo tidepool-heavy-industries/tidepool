@@ -2041,7 +2041,10 @@ display (Watchdog.trivialCall call (ToolResult "bash" "toolResult2" 2 (toJSON fa
     )
     .await
     .to_string();
-    assert!(gate.contains("True,True,True,True,True"), "semantic gate, round-trip, and schema checks: {gate}");
+    assert!(
+        gate.contains("True,True,True,True,True"),
+        "semantic gate, round-trip, and schema checks: {gate}"
+    );
 
     // An escalation carries the tool output whole within its budget, with no
     // excerpt notice; only a larger output is cut, and the cut names the budget.
