@@ -36,7 +36,11 @@ pub fn console() -> Effect {
             Verb {
                 ctor: "Print",
                 method: "print",
-                args: vec![Arg { name: "msg", ty: HsType::Text, rust: RustBinding::Derived }],
+                args: vec![Arg {
+                    name: "msg",
+                    ty: HsType::Text,
+                    rust: RustBinding::Derived,
+                }],
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::OuterDispatch(OuterEffect::Console),
@@ -46,8 +50,16 @@ pub fn console() -> Effect {
                 ctor: "DisplayWith",
                 method: "display_with",
                 args: vec![
-                    Arg { name: "view", ty: HsType::Tuple(vec![display_id(), HsType::Text, expansion_keys()]), rust: RustBinding::Derived },
-                    Arg { name: "continuation", ty: HsType::Var("payload"), rust: RustBinding::HaskellValue },
+                    Arg {
+                        name: "view",
+                        ty: HsType::Tuple(vec![display_id(), HsType::Text, expansion_keys()]),
+                        rust: RustBinding::Path("((i64, i64, i64), String, Vec<(i64, String)>)"),
+                    },
+                    Arg {
+                        name: "continuation",
+                        ty: HsType::Var("payload"),
+                        rust: RustBinding::HaskellValue,
+                    },
                 ],
                 ret: display_id(),
                 errors: None,
@@ -57,7 +69,11 @@ pub fn console() -> Effect {
             Verb {
                 ctor: "DisplayExpandWith",
                 method: "display_expand_with",
-                args: vec![Arg { name: "selection", ty: HsType::Tuple(vec![display_id(), HsType::Int]), rust: RustBinding::Derived }],
+                args: vec![Arg {
+                    name: "selection",
+                    ty: HsType::Tuple(vec![display_id(), HsType::Int]),
+                    rust: RustBinding::Path("((i64, i64, i64), i64)"),
+                }],
                 ret: expansion_keys(),
                 errors: None,
                 handling: HandlingClass::OuterDispatch(OuterEffect::Console),

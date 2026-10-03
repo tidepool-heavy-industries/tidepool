@@ -23,7 +23,9 @@ impl ConsoleHandler {
         _view: ((i64, i64, i64), String, Vec<(i64, String)>),
         _continuation: tidepool_bridge::HaskellValue,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        Err(EffectError::Handler("display requires an actor resource owner".into()))
+        Err(EffectError::Handler(
+            "display requires an actor resource owner".into(),
+        ))
     }
 
     fn display_expand_with(
@@ -31,14 +33,18 @@ impl ConsoleHandler {
         _cx: &EffectContext<'_, CapturedOutput>,
         _selection: ((i64, i64, i64), i64),
     ) -> Result<tidepool_effect::Response, EffectError> {
-        Err(EffectError::Handler("display expansion requires an actor resource owner".into()))
+        Err(EffectError::Handler(
+            "display expansion requires an actor resource owner".into(),
+        ))
     }
 
     fn display_expansion_input_with(
         &mut self,
         _cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        Err(EffectError::Handler("display input requires an active expansion".into()))
+        Err(EffectError::Handler(
+            "display input requires an active expansion".into(),
+        ))
     }
 
     fn print(
