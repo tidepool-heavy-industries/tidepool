@@ -33,7 +33,8 @@ import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Types.SourceError (SourceError)
 import Tidepool.Agent.Assignment.Internal (NameError (..), renderNameError)
 import Tidepool.Binders
-import Tidepool.TurnSource (spliceTemplate)
+import Tidepool.TurnSource
+  ( spliceTemplate, generatedScaffoldModuleName, renameScaffoldModuleHeader )
 import Tidepool.SessionArtifacts (mkBoundBinders)
 import Tidepool.DiagJson (Diag (..), DiagSeverity(..), DependencyLoadFailure(..), diagsFromSourceError)
 import Tidepool.ExtractUtil (getLibdir)
@@ -97,6 +98,7 @@ main = getArgs >>= \case
 
 compilerBoundaryChecks :: IO ()
 compilerBoundaryChecks = do
+  generatedScaffoldIdentityChecks
   requestValidationChecks
   dependencyQualifierChecks
   cellProgramStateChecks
@@ -150,6 +152,22 @@ requestValidationChecks = do
   requestShapeValidation
   requestFieldOrdering
   putStrLn "request validation: 4 groups passed (certification, source-check round-trip, mode shapes, field ordering)"
+
+generatedScaffoldIdentityChecks :: IO ()
+generatedScaffoldIdentityChecks = do
+  let fields = ["scope-semantic", "protected template", "rendered source", "retained:main:M:value:1", "item:digest"]
+      owner = generatedScaffoldModuleName fields
+      template = "{-# LANGUAGE OverloadedStrings #-}\nmodule Expr where\n__result = {{TURN}}\n"
+  assertEqual "generated owner is stable for equal semantic inputs"
+    owner (generatedScaffoldModuleName fields)
+  unless (owner /= generatedScaffoldModuleName (fields ++ ["different generation"]))
+    (fail "generated owner ignored a retained generation change")
+  renamed <- either fail pure (renameScaffoldModuleHeader owner template)
+  assertEqual "generated owner rename changes only the protected header"
+    ("{-# LANGUAGE OverloadedStrings #-}\nmodule " ++ owner ++ " where\n__result = {{TURN}}\n") renamed
+  case renameScaffoldModuleHeader owner (template ++ "-- module Expr where\n") of
+    Left _ -> pure ()
+    Right _ -> fail "generated owner rename accepted an ambiguous protected header"
 
 dependencyQualifierChecks :: IO ()
 dependencyQualifierChecks = do

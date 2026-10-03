@@ -10,6 +10,8 @@ module Tidepool.TurnSource
   , spliceTemplate
   , renderImportBinder
   , replaceTemplateMarker
+  , generatedScaffoldModuleName
+  , renameScaffoldModuleHeader
   ) where
 
 import GHC.Types.Name.Occurrence (isSymOcc, mkVarOcc)
@@ -17,6 +19,29 @@ import Data.Char (isAlphaNum, isSpace)
 import Data.List (isPrefixOf, isSuffixOf, stripPrefix)
 import Data.Maybe (listToMaybe)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import qualified Data.ByteString as BS
+import Tidepool.ExtractUtil (shaHex)
+
+-- | Give generated turn scaffolds a stable owner name. The length-prefixed
+-- UTF-8 fields make the identity independent of concatenation boundaries and
+-- keep the digest domain separate from other hashes in the worker.
+generatedScaffoldModuleName :: [String] -> String
+generatedScaffoldModuleName fields = "TidepoolScaffold_" ++ shaHex framed
+  where
+    framed = BS.concat (frame "tidepool-generated-scaffold-owner-v1" : map frame fields)
+    frame value =
+      let bytes = TE.encodeUtf8 (T.pack value)
+      in TE.encodeUtf8 (T.pack (show (BS.length bytes) ++ ":")) <> bytes
+
+-- | Rename only a generated template's module declaration, before authored
+-- turn text is inserted. The protected scaffold must have one conventional
+-- module header; malformed or ambiguous templates fail closed.
+renameScaffoldModuleHeader :: String -> String -> Either String String
+renameScaffoldModuleHeader replacement template = do
+  old <- maybe (Left "generated scaffold has no module header") Right (extractModuleName template)
+  replaceTemplateMarker ("module " ++ old ++ " where")
+    ("module " ++ replacement ++ " where") template
 
 -- | Replace one protected marker before authored text is inserted. Duplicate
 -- or missing markers cannot silently alter the selected compiler recipe.
