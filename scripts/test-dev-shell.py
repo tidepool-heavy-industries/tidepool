@@ -27,15 +27,9 @@ class DevShellTests(unittest.TestCase):
         nix = self.bin / "nix"
         nix.write_text("#!/usr/bin/env python3\nimport json,os,sys\nprint(json.dumps({'args':sys.argv[1:],'cwd':os.getcwd()}))\n")
         nix.chmod(0o755)
-        # exomonad's flake selection runs the real codex-source-preflight.sh;
-        # this test repo carries no vendor/codex, so stub it out. It is only
-        # ever invoked for --exomonad, never for the default-shell tests.
         (self.repo / "scripts").mkdir()
         cargo_target = self.repo / "scripts" / "cargo-target.py"
         cargo_target.write_bytes((SCRIPT.parent / "cargo-target.py").read_bytes())
-        preflight = self.repo / "scripts" / "codex-source-preflight.sh"
-        preflight.write_text("#!/usr/bin/env bash\nexit 0\n")
-        preflight.chmod(0o755)
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("TIDEPOOL_DEV_")}
         self.env.update(PATH=f"{self.bin}:{os.environ['PATH']}", IN_NIX_SHELL="impure")
 
@@ -71,7 +65,7 @@ class DevShellTests(unittest.TestCase):
         result = self.run_shell("--exomonad", "ghc", "--version")
         self.assertEqual(result.returncode, 0, result.stderr)
         selection = json.loads(result.stdout)
-        # exomonad forces the codex path input, which needs the real worktree, so it stays pinned to HEAD.
+        # Exomonad consumes the full project flake source, so it stays pinned to HEAD.
         self.assertEqual(selection["args"][:2], ["develop", f"git+file://{self.repo}?rev={self.git('rev-parse', 'HEAD')}#exomonad"])
         self.assertEqual(selection["cwd"], str(self.repo))
 

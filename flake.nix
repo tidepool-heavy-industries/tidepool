@@ -324,8 +324,7 @@
             '';
           };
 
-          # The private Codex is selected by absolute path, not added to PATH.
-          # Ordinary shells and the operator's CODEX_HOME remain untouched.
+          # Keep the resident development shell independent from provider clients.
           devShells.exomonad = pkgs.mkShell {
             inputsFrom = [ self.devShells.${system}.default ];
             packages = [
@@ -333,8 +332,6 @@
               pkgs.tmux
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd ];
-            EXOMONAD_INTERACTIVE_CODEX_BIN = "${interactiveCodex}/bin/codex";
-            EXOMONAD_CODEX_CLOSURE = "${interactiveCodex}";
             EXOMONAD_NIX_STORE_BIN = "${pkgs.nix}/bin/nix-store";
             EXOMONAD_EMBEDDED_ASSET_ROOT = "${embeddedWebAssets}/share/exomonad/web";
             # Fetches the project's flake inputs when `[haskell.flake_sources]`
@@ -343,7 +340,6 @@
             shellHook = ''
               export TIDEPOOL_GHC_LIBDIR="$(ghc --print-libdir)"
               echo "exomonad dev shell"
-              echo "  interactive agent: $EXOMONAD_INTERACTIVE_CODEX_BIN"
             '';
           };
 

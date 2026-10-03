@@ -64,12 +64,6 @@ export CARGO_TARGET_DIR="$resolved_cargo_target"
 if [[ ${#env_command[@]} -gt 0 ]]; then
   set -- "${env_command[@]}" "${env_assignments[@]}" "CARGO_TARGET_DIR=$resolved_cargo_target" "$@"
 fi
-if [[ $shell == exomonad ]]; then
-  # Only exomonad's flake forces the codex path input, so only it needs the
-  # vendor/codex source capture verified before Nix evaluates anything.
-  bash scripts/codex-source-preflight.sh
-fi
-
 if [[ -n ${TIDEPOOL_DEV_FLAKE:-} ]]; then
   flake=$TIDEPOOL_DEV_FLAKE
   case "$flake" in
@@ -96,8 +90,8 @@ else
       git update-ref "refs/tidepool/dev-shell/$revision" "$revision"
     fi
   else
-    # exomonad forces the codex path input, which resolves against the real
-    # worktree, so it stays pinned to HEAD rather than the reduced tree.
+    # The Exomonad shell consumes full project inputs, so keep it pinned to the
+    # checkout revision rather than a reduced toolchain-input tree.
     if ! git diff --quiet HEAD -- flake.nix flake.lock rust-toolchain.toml; then
       echo 'Commit changed toolchain inputs or select TIDEPOOL_DEV_FLAKE explicitly before entering the dev shell' >&2
       exit 2
