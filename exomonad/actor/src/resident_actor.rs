@@ -219,6 +219,7 @@ pub struct DisplayPublication {
     pub page_ordinal: u64,
     pub operation: Option<WorkbenchOperationId>,
     pub page: tidepool_runtime::session::WorkbenchDisplayPage,
+    host_context: OnceLock<DisplayPublicationHostContext>,
     outcome: Mutex<Option<DisplayPublicationOutcome>>,
     reply: Mutex<Option<tokio::sync::oneshot::Sender<DisplayPublicationOutcome>>>,
 }
@@ -232,13 +233,29 @@ pub enum DisplayPublicationOutcome {
     Unconfirmed(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayPublicationHostContext {
+    pub run: String,
+    pub conversation: Option<DisplayConversationIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayConversationIdentity {
+    pub run: String,
+    pub actor: String,
+    pub incarnation: String,
+}
+
 impl DisplayPublication {
     fn channel(
         actor: ActorRef,
         page_ordinal: u64,
         operation: Option<WorkbenchOperationId>,
         page: tidepool_runtime::session::WorkbenchDisplayPage,
-    ) -> (Arc<Self>, tokio::sync::oneshot::Receiver<DisplayPublicationOutcome>) {
+    ) -> (
+        Arc<Self>,
+        tokio::sync::oneshot::Receiver<DisplayPublicationOutcome>,
+    ) {
         let (reply, answer) = tokio::sync::oneshot::channel();
         (
             Arc::new(Self {
@@ -246,6 +263,7 @@ impl DisplayPublication {
                 page_ordinal,
                 operation,
                 page,
+                host_context: OnceLock::new(),
                 outcome: Mutex::new(None),
                 reply: Mutex::new(Some(reply)),
             }),
@@ -257,7 +275,9 @@ impl DisplayPublication {
     /// waiter cannot lose a committed page's callback authority.
     pub fn answer(&self, answer: DisplayPublicationOutcome) -> bool {
         let mut outcome = self.outcome.lock();
-        if outcome.is_some() {
+        if matches!(&*outcome, Some(DisplayPublicationOutcome::Published(_)
+            | DisplayPublicationOutcome::Refused(_)))
+            || matches!((&*outcome, &answer), (Some(DisplayPublicationOutcome::Unconfirmed(_)), DisplayPublicationOutcome::Unconfirmed(_))) {
             return false;
         }
         *outcome = Some(answer.clone());
@@ -269,6 +289,29 @@ impl DisplayPublication {
 
     pub fn outcome(&self) -> Option<DisplayPublicationOutcome> {
         self.outcome.lock().clone()
+    }
+
+    /// The first host admission freezes provenance for exact Store retries.
+    pub fn admit_host_context(
+        &self,
+        context: DisplayPublicationHostContext,
+    ) -> &DisplayPublicationHostContext {
+        self.host_context.get_or_init(|| context)
+    }
+
+    pub fn host_context(&self) -> Option<&DisplayPublicationHostContext> {
+        self.host_context.get()
+    }
+
+    fn retry_channel(&self) -> Option<tokio::sync::oneshot::Receiver<DisplayPublicationOutcome>> {
+        let mut outcome = self.outcome.lock();
+        if !matches!(&*outcome, Some(DisplayPublicationOutcome::Unconfirmed(_))) {
+            return None;
+        }
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        *self.reply.lock() = Some(reply);
+        *outcome = None;
+        Some(answer)
     }
 }
 
