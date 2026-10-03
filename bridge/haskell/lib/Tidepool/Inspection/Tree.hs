@@ -16,6 +16,8 @@ module Tidepool.Inspection.Tree
   , expandDisplayState
   , treeParts
   , literalText
+  , literalString
+  , rawString
   , rawText
   , precedenceParens
   ) where
@@ -41,7 +43,12 @@ data DisplayTree
 -- characters are escaped. Printable non-ASCII (e.g. \955) passes through
 -- unescaped, unlike GHC's 'show', which numerically escapes it.
 literalText :: Text -> DisplayTree
-literalText value = TextLeaf (T.concat ["\"", T.concatMap escapeChar value, "\""])
+literalText = literalString . T.unpack
+
+-- | Lazy quoted String rendering. Constructing a prefix never packs or walks
+-- the whole input, including an infinite String or an unevaluated suffix.
+literalString :: String -> DisplayTree
+literalString value = StringLeaf ('"' : concatMap escapeChar value ++ "\"")
   where
     escapeChar '"' = "\\\""
     escapeChar '\\' = "\\\\"
@@ -49,8 +56,13 @@ literalText value = TextLeaf (T.concat ["\"", T.concatMap escapeChar value, "\""
     escapeChar '\t' = "\\t"
     escapeChar '\r' = "\\r"
     escapeChar c
-      | c < ' ' || c == '\DEL' = T.pack ("\\x" <> showHex (fromEnum c) ";")
-      | otherwise = T.singleton c
+      | c < ' ' || c == '\DEL' = "\\x" <> showHex (fromEnum c) ";"
+      | otherwise = [c]
+
+rawString :: Int -> String -> (Text, Bool)
+rawString budget value =
+  let (rendered, remaining, unavailable) = renderTree budget (StringLeaf value)
+  in (rendered, maybe False (const True) remaining || unavailable)
 
 -- | A standalone text result is presented raw, bounded by the single tree
 -- renderer rather than a separate truncation algorithm.
@@ -72,7 +84,7 @@ renderTree allowance tree = go (max 0 allowance) [] False [tree]
       Sequence opening closing children -> go left pieces unavailable (treeParts opening closing children : rest)
       Concat children -> go left pieces unavailable (children ++ rest)
       Group children ->
-        let layout = if flatLength (maxLineWidth + 1) children <= maxLineWidth
+        let layout = if flatLength (min left (maxLineWidth + 1)) children <= maxLineWidth
               then flatten children
               else children
         in go left pieces unavailable (layout ++ rest)
@@ -100,7 +112,7 @@ flatLength limit = go 0
     go count _ | count >= limit = count
     go count [] = count
     go count (tree : rest) = case tree of
-      TextLeaf value -> go (count + min (limit - count) (T.length value)) rest
+      TextLeaf value -> go (count + min (limit - count) (T.length (T.take (limit - count) value))) rest
       StringLeaf value -> go (count + length (take (limit - count) value)) rest
       Constructor name fields -> go count (constructorTree name fields : rest)
       Sequence opening closing children -> go count (treeParts opening closing children : rest)
@@ -211,15 +223,15 @@ preview budget depth next label tree
               in walk piece (keys ++ omitted) following (unavailable || childUnavailable) rest
         room value = budget - T.length value - T.length closing - 1
         bounded value suffix = T.take budget (value <> suffix)
-    sequenceChildren opening closing count items
-      | count >= 8 = (opening <> "…" <> closing, [(ExpansionKey next, label <> ".remainder", Sequence opening closing items)], next + 1, False)
-      | otherwise = walk opening [] next False count items
+    sequenceChildren opening closing count items = walk opening [] next False count items
       where
-        walk value keys key unavailable _ [] = (T.take budget (value <> closing), keys, key, unavailable)
-        walk value keys key unavailable index pending@(child : rest)
+        walk value keys key unavailable index pending
           | index >= 8 || budget - T.length value - T.length closing <= 2 =
               (T.take budget (value <> "…" <> closing), keys ++ [(ExpansionKey key, label <> ".remainder", Sequence opening closing pending)], key + 1, unavailable)
-          | otherwise =
+          | otherwise = case pending of
+              [] -> (T.take budget (value <> closing), keys, key, unavailable)
+              child : rest -> renderChild value keys key unavailable index child rest
+        renderChild value keys key unavailable index child rest =
               let separator = if index == count then "" else ", "
                   allowance = max 0 (min 128 (budget - T.length value - T.length separator - T.length closing - 1))
                   (shown, omitted, following, childUnavailable) = preview allowance (depth + 1) key (label <> "[" <> T.pack (show index) <> "]") child

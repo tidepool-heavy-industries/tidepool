@@ -157,9 +157,9 @@ instance Display Text where
 -- instance answers for @[Char]@ and the result of 'show' displays as a list of
 -- characters, one to a line.
 instance {-# OVERLAPPING #-} Display [Char] where
-  displayTree = displayTree . Text.pack
-  displayTreePrec precedence = displayTreePrec precedence . Text.pack
-  displayWith budget = displayWith budget . Text.pack
+  displayTree = literalString
+  displayTreePrec _ = literalString
+  displayWith = rawString
 
 instance Display (a -> b) where
   displayTree _ = TextLeaf "<function>"
@@ -227,6 +227,6 @@ instance WorkbenchDisplay Text where
 -- | A top-level 'String' renders raw, mirroring 'Text'. Without this the
 -- 'Display'-derived {-# OVERLAPPABLE #-} instance answers instead and quotes it.
 instance WorkbenchDisplay [Char] where
-  workbenchDisplay = workbenchDisplay . Text.pack
-  workbenchActivationDisplay limit = workbenchActivationDisplay limit . Text.pack
-  workbenchReplyDisplay limit = workbenchReplyDisplay limit . Text.pack
+  workbenchDisplay = rawString 512
+  workbenchActivationDisplay = rawString
+  workbenchReplyDisplay = rawString

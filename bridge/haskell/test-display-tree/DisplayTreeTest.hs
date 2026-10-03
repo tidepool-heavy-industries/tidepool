@@ -1,13 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Main where
 
 import Control.Exception (evaluate)
 import Control.Monad (unless)
 import Data.Text (Text)
-import Tidepool.Inspection.Display
+import qualified Data.Text as Text
+import Tidepool.Inspection.Display (Display (displayTree), genericDisplayTree, GDisplay, Rep)
 import GHC.Generics (Generic)
 import Tidepool.Inspection.Tree
 
@@ -30,6 +33,10 @@ main = do
   infiniteSequencesHaveBoundedFrontiers
   unsupportedFieldsRemainOpaque
   structuralGenericUsesFieldNames
+  recursiveGenericDisplayIsProductive
+  nestedInfiniteStringsAreProductive
+  collapsedSequenceTailRemainsLazy
+  shortGroupBudgetDoesNotForceFields
 
 applicationsParenthesizeOnlyAboveApplicationPrecedence :: IO ()
 applicationsParenthesizeOnlyAboveApplicationPrecedence = do
@@ -197,3 +204,35 @@ structuralGenericUsesFieldNames =
   assertEqual "Generic selects primitives and opaque unsupported fields"
     "GenericRecord {supported = 7, unsupported = <opaque>, callback = <function>}"
     (displayStateText (newDisplayState 1024 (displayTree (GenericRecord 7 undefined undefined))))
+
+data Recursive = End | Link Int Recursive deriving Generic
+
+instance GDisplay (Rep Recursive) => Display Recursive where
+  displayTree = genericDisplayTree
+
+recursiveGenericDisplayIsProductive :: IO ()
+recursiveGenericDisplayIsProductive = do
+  let recursive = Link 1 recursive
+      state = newDisplayState 1024 (displayTree recursive)
+  assertEqual "recursive generic tree previews only bounded depth"
+    "Link {1 = 1, 2 = Link {1 = …, 2 = …}…}" (displayStateText state)
+
+nestedInfiniteStringsAreProductive :: IO ()
+nestedInfiniteStringsAreProductive = do
+  let state = newDisplayState 32 (displayTree (Just (repeat 'x')))
+  assertEqual "nested infinite String gives a bounded prefix" 32 (Text.length (displayStateText state))
+  assertEqual "nested infinite String retains its suffix" 1 (length (displayStateKeys state))
+  assertEqual "lazy String literals preserve escaping" "\"a\\\"b\\\\c\\nd\""
+    (renderAll 64 (literalString "a\"b\\c\nd"))
+
+collapsedSequenceTailRemainsLazy :: IO ()
+collapsedSequenceTailRemainsLazy = do
+  rendered <- evaluate (displayStateText (newDisplayState 1024
+    (Sequence "[" "]" (replicate 8 (TextLeaf "1") ++ undefined))))
+  assertEqual "sequence cap does not force the collapsed tail" "[1, 1, 1, 1, 1, 1, 1, 1…]" rendered
+
+shortGroupBudgetDoesNotForceFields :: IO ()
+shortGroupBudgetDoesNotForceFields = do
+  rendered <- evaluate $ case renderTree 1 (treeParts "(" ")" [undefined]) of
+    (value, _, _) -> value
+  assertEqual "layout lookahead stays within the page allowance" "(" rendered

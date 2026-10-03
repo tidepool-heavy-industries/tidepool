@@ -95,7 +95,7 @@ instance DisplayRoot [Char] where
 
 publishDisplay :: forall effects. Member Console effects => (Int, Int, Int) -> DisplayState -> Eff effects (Int, Int, Int)
 publishDisplay identity state =
-  send (DisplayWith (identity, displayStateText state,
+  send (DisplayWith (identity, displayPresentation state,
     [(expansionKeyNumber key, label) | (key, label) <- displayStateKeys state])
     ((\(_ :: Int) -> do
       (issued, selected) <- send DisplayExpansionInputWith
@@ -104,6 +104,15 @@ publishDisplay identity state =
         Just detail -> do
           _ <- publishDisplay issued detail
           pure ()) :: Int -> Eff effects ()))
+
+-- Legacy custom renderers can report omitted detail without a resumable tree.
+-- Preserve that fact inside the same bounded output as the visible prefix.
+displayPresentation :: DisplayState -> Text
+displayPresentation state
+  | displayStateUnavailable state =
+      let marker = "\n[display detail unavailable]"
+      in Text.take (8192 - Text.length marker) (displayStateText state) <> marker
+  | otherwise = displayStateText state
 
 instance Display ReplyError where
   displayTree ReplyUnauthorized =
@@ -145,7 +154,7 @@ instance FullDisplay Text where
   inspectFull value = FullInspection (\_ budget -> rawText budget value) (TextLeaf value)
 
 instance FullDisplay [Char] where
-  inspectFull = inspectFull . Text.pack
+  inspectFull value = FullInspection (\_ budget -> rawString budget value) (StringLeaf value)
 
 instance WorkbenchDisplay FullInspection where
   workbenchDisplay (FullInspection render _) = render [] 65536
@@ -296,7 +305,7 @@ instance PageDisplay effects Text where
   displayPage budget value = pageWithContinuation budget (TextLeaf value) Nothing
 
 instance PageDisplay effects [Char] where
-  displayPage budget value = displayPage budget (Text.pack value)
+  displayPage budget value = pageWithContinuation budget (StringLeaf value) Nothing
 
 instance PageDisplay effects (DisplayPage effects) where
   displayPage budget page =
