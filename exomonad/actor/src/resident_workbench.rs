@@ -4828,6 +4828,98 @@ where
         .await
     }
 
+    /// The carrier this workbench built for `kind`, from the cache if one is
+    /// already there and still current for the actor's full source graph,
+    /// otherwise built once, off checkout, and cached for every
+    /// later call of any kind for the life of this workbench's lineage (see
+    /// [`ResidentMachineAccess::sharing`]).
+    ///
+    /// Building takes one short checkout — to reserve a generation for the
+    /// throwaway compile below — releases it, then compiles off checkout
+    /// ([`compile_host_binding_off_checkout`]) with no re-checkout: the
+    /// compiled `(BoundBinder, CompiledTurn)` is generation-independent (see
+    /// [`HostCarrier::from_compiled`]), so there is nothing left to install
+    /// or revalidate against a later view.
+    async fn carrier_for(
+        &self,
+        context: &crate::ActorSessionContext,
+        kind: HostCarrierKind,
+    ) -> Result<Arc<HostCarrier>, ResidentActorWorkbenchError> {
+        let revision: Vec<Option<String>> = context
+            .source_layer
+            .iter()
+            .chain(self.access.source.base_include.iter())
+            .map(|root| crate::agent_spec::layer_revision(std::slice::from_ref(root)))
+            .collect();
+        if let Some(cached) = self
+            .access
+            .carriers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&kind)
+        {
+            if cached.revision == revision {
+                return Ok(Arc::clone(&cached.carrier));
+            }
+        }
+
+        let (view, generation, retained) = self
+            .access
+            .with_machine(context.clone(), move |session, context, source| {
+                let view = actor_compile_view(session, context, source, &[])?;
+                let generation = view.next_value_generation();
+                // Reserve the generation now, under this checkout, so no
+                // concurrent compile can ever mint the same one — the
+                // throwaway compile below discards this generation's own
+                // name and module, but a collision with a real mount would
+                // still corrupt that mount's source stub.
+                session.reserve_value_generations_through(generation);
+                let retained = session.prepared_retained();
+                Ok((view, generation, retained))
+            })
+            .await?;
+
+        // No checkout held here: the GHC compile runs concurrently with
+        // every other actor's turn against this session.
+        let effects = context.haskell_effects_alias.clone();
+        let source = self.access.source.clone();
+        let (binder, compiled) =
+            crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+                compile_host_binding_off_checkout(
+                    &view,
+                    &source,
+                    &effects,
+                    generation,
+                    kind.carrier_binding_name(),
+                    kind.type_name(),
+                    kind.anchor(),
+                    kind.imports(),
+                    kind.retain_text_constructor(),
+                    &retained,
+                )
+            }))
+            .await
+            .map_err(ResidentActorWorkbenchError::Join)??;
+
+        let carrier = Arc::new(HostCarrier::from_compiled(
+            &binder,
+            compiled.into_code(),
+            kind.host_binding_type(),
+        ));
+        self.access
+            .carriers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                kind,
+                CachedHostCarrier {
+                    revision,
+                    carrier: Arc::clone(&carrier),
+                },
+            );
+        Ok(carrier)
+    }
+
     pub(crate) async fn bind_command_job(
         &self,
         context: crate::ActorSessionContext,
@@ -10451,11 +10543,9 @@ enum SplitStaleView {
 /// with the machine released; only a second stale attempt runs under one
 /// checkout.
 ///
-/// The cell split and the fragment (tool-installer) split make one attempt.
-/// Their retry would repeat several GHC round trips, and an inherited-context
-/// fork whose parent commits every few seconds makes a second attempt of
-/// that length stale too; they fall straight through to their
-/// single-checkout path instead.
+/// The fragment (tool-installer) split makes one attempt before its
+/// single-checkout fallback. Planned cells refuse stale admission; their
+/// immutable program never recompiles through this retry policy.
 const CHEAP_RETRY_ATTEMPTS: usize = 2;
 
 /// One INFO line per stale split attempt, naming the path, the stage that
@@ -12941,8 +13031,12 @@ mod request_tests {
             .await
             .unwrap();
         assert!(matches!(installed, ResidentWorkbenchStep::Committed { .. }));
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
         let (checked, prepared) = workbench
-            .prepare_native_setup_cell_for_test(
+            .prepare_cell(
                 context.clone(),
                 "sh args = 2 * length (args :: [Int])\nrecentA <- pure (sh [1, 2, 3])".into(),
             )
@@ -12952,7 +13046,7 @@ mod request_tests {
         assert!(matches!(prepared, PreparedCell::Ready { .. }));
 
         let (expression, prepared) = workbench
-            .prepare_native_setup_cell_for_test(
+            .prepare_cell(
                 context.clone(),
                 "{-# LANGUAGE PolyKinds #-}\nimport Data.Proxy (Proxy(..))\npure Proxy".into(),
             )
@@ -12976,7 +13070,7 @@ mod request_tests {
         );
         for text in ["import Data.List\n", "{-# LANGUAGE NoLambdaCase #-}\n"] {
             let (checked, prepared) = workbench
-                .prepare_native_setup_cell_for_test(context.clone(), text.into())
+                .prepare_cell(context.clone(), text.into())
                 .await
                 .expect("a prologue-only item remains admitted declaration syntax");
             assert_eq!(checked.items.len(), 1);
@@ -12990,19 +13084,32 @@ mod request_tests {
         }
     }
 
-    // Tests use the source authority issuer and the explicit native setup
-    // entry; setup admission does not grant private actor execution.
     impl ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput> {
-        async fn prepare_native_setup_cell_for_test(
-            &self,
-            context: crate::ActorSessionContext,
-            source: String,
-        ) -> Result<(CellCheck, PreparedCell), ResidentActorWorkbenchError> {
+        async fn admit_private_cell_for_test(
+            self,
+            mut context: crate::ActorSessionContext,
+        ) -> Result<(Self, crate::ActorSessionContext), ResidentActorWorkbenchError> {
+            let descriptor = crate::ActorDescriptor::new("private-cell-test", context.placement);
+            let owner =
+                crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None)
+                    .expect("fixture has an ephemeral public owner");
             let authority =
                 crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone());
-            let input = self.lease_cell_input(&context).await?;
-            self.prepare_checked_cell(context, source, authority, None, input)
-                .await
+            let private = Arc::new(
+                workbench_runner_for_test(&self)
+                    .begin_private_execution(
+                        context.clone(),
+                        owner,
+                        Arc::new(tidepool_runtime::session::PublicationDecision::new()),
+                    )
+                    .await?,
+            );
+            context.placement.lexical_scope = private.private_scope;
+            Ok((
+                self.with_compilation_authority(authority)
+                    .with_private_execution(private),
+                context,
+            ))
         }
     }
 
@@ -13073,6 +13180,10 @@ mod request_tests {
                 ResidentWorkbenchStep::Committed { .. } => {}
                 _ => panic!("fixture must execute its source binding"),
             }
+            let (workbench, context) = workbench
+                .admit_private_cell_for_test(context)
+                .await
+                .unwrap();
             let (sibling, child) = workbench
                 .access
                 .with_machine(context.clone(), |session, context, _| {
@@ -13091,10 +13202,7 @@ mod request_tests {
             });
             let prepare = split_probe::PROBE.scope(
                 probe.clone(),
-                workbench.prepare_native_setup_cell_for_test(
-                    context.clone(),
-                    "derived <- pure (ownValue + 1)".into(),
-                ),
+                workbench.prepare_cell(context.clone(), "derived <- pure (ownValue + 1)".into()),
             );
             let mutate = async {
                 probe.install_reached.notified().await;
@@ -15044,9 +15152,14 @@ mod request_tests {
     async fn planned_cell_defers_declaration_until_its_admitted_item() {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
+        let public_context = context.clone();
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
         let cell = "plannedDecl args = length (args :: [Int])".to_owned();
         let (checked, prepared) = workbench
-            .prepare_native_setup_cell_for_test(context.clone(), cell.clone())
+            .prepare_cell(context.clone(), cell.clone())
             .await
             .expect("admitted declaration program");
         assert_eq!(checked.items.len(), 1);
@@ -15082,7 +15195,44 @@ mod request_tests {
         assert!(matches!(step, ResidentWorkbenchStep::Committed { .. }));
         workbench
             .access
-            .with_machine(context, |session, context, _| {
+            .with_machine(context.clone(), |session, context, _| {
+                assert!(session
+                    .current_decl_heads_in(context.placement.lexical_scope)
+                    .iter()
+                    .any(|(name, _)| name == "plannedDecl"));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        workbench
+            .access
+            .with_machine(public_context.clone(), |session, context, _| {
+                assert!(
+                    !session
+                        .current_decl_heads_in(context.placement.lexical_scope)
+                        .iter()
+                        .any(|(name, _)| name == "plannedDecl"),
+                    "native declaration execution remains private before publication"
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let published = workbench_runner_for_test(&workbench)
+            .publish_private_execution(
+                context,
+                workbench.private_execution.as_ref().unwrap().clone(),
+                tidepool_runtime::session::ExecutionPublicationIntent::CompletedCell,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            published,
+            PrivateExecutionPublication::Manifest(_)
+        ));
+        workbench
+            .access
+            .with_machine(public_context, |session, context, _| {
                 assert!(session
                     .current_decl_heads_in(context.placement.lexical_scope)
                     .iter()
@@ -15112,10 +15262,14 @@ mod request_tests {
             vec![],
         )
         .with_json_input(Some(serde_json::json!({"greeting": "hi"})));
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
         let cell = "seen <- pure input\nechoed <- pure seen".to_string();
 
         let (checked, prepared) = workbench
-            .prepare_native_setup_cell_for_test(context, cell)
+            .prepare_cell(context.clone(), cell)
             .await
             .expect("a two-item native program retains its request input");
         assert_eq!(
@@ -15130,7 +15284,11 @@ mod request_tests {
                 .all(|item| item.verdict.kind == TurnKind::Bind),
             "neither item is a declaration: {checked:?}"
         );
-        let PreparedCell::Ready { items, .. } = prepared else {
+        let PreparedCell::Ready {
+            items,
+            dependencies,
+        } = prepared
+        else {
             panic!("a two-item bind cell should prepare as Ready");
         };
         assert_eq!(items.len(), 2);
@@ -15139,6 +15297,63 @@ mod request_tests {
                 == tidepool_toolchain::checked_cell::CheckedItemKind::Bind),
             "both items retain their admitted program authority"
         );
+        let input_name = dependencies
+            ._input
+            .as_ref()
+            .unwrap()
+            .mounted_input()
+            .binder
+            .name
+            .clone();
+        for (index, (observed, item)) in checked.items.iter().zip(items).enumerate() {
+            let step = workbench
+                .begin_prepared_cell_item(
+                    context.clone(),
+                    ParsedBlock {
+                        ordinal: index + 1,
+                        total: checked.items.len(),
+                        source: observed.source.clone(),
+                    },
+                    item,
+                    4096,
+                )
+                .await
+                .expect("admitted JSON item executes");
+            match step {
+                ResidentWorkbenchStep::Running { fragment, outcome } => {
+                    workbench
+                        .settle_item(context.clone(), *fragment, *outcome)
+                        .await
+                        .expect("JSON bind settles");
+                }
+                ResidentWorkbenchStep::Committed { .. } => {}
+                _ => panic!("JSON item did not commit"),
+            }
+        }
+        drop(dependencies);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let retired = workbench
+                    .access
+                    .with_machine(context.clone(), {
+                        let input_name = input_name.clone();
+                        move |session, context, _| {
+                            let scope = context.placement.lexical_scope;
+                            assert!(session.current_binding_in(scope, "seen").is_some());
+                            assert!(session.current_binding_in(scope, "echoed").is_some());
+                            Ok(session.current_binding_in(scope, &input_name).is_none())
+                        }
+                    })
+                    .await
+                    .unwrap();
+                if retired {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the input owner retires while completed JSON values remain bound");
     }
 
     #[tokio::test]
@@ -15149,9 +15364,13 @@ mod request_tests {
             .workbench_imports
             .extend_text("qualified Tidepool.Agent.Reply as TidepoolReply");
         let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
         let cell = "scope <- (TidepoolReply.currentRequest :: Eff '[Exomonad.Replies] (TidepoolReply.RequestScope () ()))".to_owned();
         let (checked, prepared) = workbench
-            .prepare_native_setup_cell_for_test(context.clone(), cell.clone())
+            .prepare_cell(context.clone(), cell.clone())
             .await
             .expect("closed request scope compiles with site evidence");
         assert_eq!(checked.items.len(), 1);
@@ -15703,22 +15922,20 @@ mod request_tests {
         let binding = mount_request_scope_test_input(&workbench, context.clone())
             .await
             .unwrap();
-        let (private, before) = workbench
+        let before = workbench
             .access
-            .with_machine(context.clone(), move |session, _, _| {
-                Ok((
-                    session
-                        .mint_detached_scope(original_scope)
-                        .expect("capture activation"),
-                    session.value_handle_count(),
-                ))
+            .with_machine(context.clone(), |session, _, _| {
+                Ok(session.value_handle_count())
             })
             .await
             .unwrap();
-        context.placement.lexical_scope = private;
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
         let cell = "requestScope <- (TidepoolReply.currentRequest :: Eff '[Exomonad.Replies] (TidepoolReply.RequestScope () ()))".to_owned();
         let (_, prepared) = workbench
-            .prepare_native_setup_cell_for_test(context.clone(), cell.clone())
+            .prepare_cell(context.clone(), cell.clone())
             .await
             .unwrap();
         let PreparedCell::Ready { mut items, .. } = prepared else {
@@ -15821,9 +16038,13 @@ mod request_tests {
         let workbench =
             ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
         let runner = ResidentActorRunner::new(machines, source);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
         let cell = "scope <- (TidepoolReply.currentRequest :: Eff '[Exomonad.Replies] (TidepoolReply.RequestScope () ()))".to_owned();
         let (_, prepared) = workbench
-            .prepare_native_setup_cell_for_test(context.clone(), cell.clone())
+            .prepare_cell(context.clone(), cell.clone())
             .await
             .expect("request access compiles");
         let PreparedCell::Ready { mut items, .. } = prepared else {
@@ -16004,14 +16225,6 @@ mod request_tests {
     async fn planned_cell_second_actors_checkout_wait_excludes_first_actors_ghc_compile() {
         let (machines, mut context_a, mut context_b, source, _root) =
             actor_registry_fixture_two_scopes();
-        let workbench = Arc::new(ResidentActorWorkbench::new(
-            machines,
-            source,
-            None,
-            None,
-            vec![],
-        ));
-
         context_a.actor = crate::ActorRef::first(crate::ActorId(101));
         context_b.actor = crate::ActorRef::first(crate::ActorId(102));
         let actor_b_label = context_b.actor.to_string();
@@ -16024,8 +16237,15 @@ mod request_tests {
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
 
-        let wb_a = Arc::clone(&workbench);
-        let wb_b = Arc::clone(&workbench);
+        let (wb_a, context_a) =
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![])
+                .admit_private_cell_for_test(context_a)
+                .await
+                .unwrap();
+        let (wb_b, context_b) = ResidentActorWorkbench::new(machines, source, None, None, vec![])
+            .admit_private_cell_for_test(context_b)
+            .await
+            .unwrap();
         // Both cells compile outside the machine checkout. The larger cell
         // exercises ordered references while the sibling takes its own snapshot.
         let cell_a =
@@ -16034,8 +16254,8 @@ mod request_tests {
 
         let started = std::time::Instant::now();
         let (result_a, result_b) = tokio::join!(
-            wb_a.prepare_native_setup_cell_for_test(context_a, cell_a),
-            wb_b.prepare_native_setup_cell_for_test(context_b, cell_b)
+            wb_a.prepare_cell(context_a, cell_a),
+            wb_b.prepare_cell(context_b, cell_b)
         );
         let total = started.elapsed();
         let (checked_a, _) = result_a.expect("actor A's cell prepares");
