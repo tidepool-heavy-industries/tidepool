@@ -118,6 +118,9 @@ select another module. When neither exists, the default spec is empty. The obsol
 `[haskell] tools` key is rejected: install the typed record through `installSpec`
 and select that spec. Typed tools and actor-mailbox records are different DSLs;
 malformed tool arguments return typed dispatch errors before the body runs.
+Every installed function tool must select its model-facing text with
+`presentWith`: use `presentWith id` for `Text` and `presentWith presentJson` for
+structured output. The typed result remains separate from that text.
 
 ## Migrating an existing workspace lookup
 

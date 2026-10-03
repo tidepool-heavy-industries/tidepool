@@ -18,7 +18,7 @@ newtype BrowserTools mode = BrowserTools { probe :: mode :- Call Probe Int }
 agentSpec :: AgentSpec BrowserTools effects
 agentSpec = defaultSpec
   { specTools = BrowserTools
-      { probe = tool "Add two to the supplied number." answer }
+      { probe = presentWith presentJson $ tool "Add two to the supplied number." answer }
   }
 
 answer :: Probe -> Eff effects Int

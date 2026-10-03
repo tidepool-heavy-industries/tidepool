@@ -31,6 +31,14 @@ A notebook field uses `HaskellCell effects`, optionally wrapped in `Sync`;
 `ContextReadWrite`. The installer checks selected effects against this actor's
 grants and installed interpreters.
 
+Every named handler in an installed spec must choose how its semantic result
+becomes model-facing text. Write `presentWith id $ tool description handler`
+for `Text`, `presentWith presentJson $ tool description handler` for JSON
+output, or `presentWith presentDisplay` when the existing `Display` rendering
+is intended. Apply the same wrapper to `rawTool`, `syncTool`, `syncRawTool`, and
+notifications. If a named handler has no presenter, spec compilation refuses
+it before running a handler.
+
 When the tool needs to select or present its own result, use that tool's typed
 seam:
 
@@ -44,7 +52,9 @@ shared agent-spec API. Read their source before adapting them; a tool's effect
 constraints and record type must match the effects its body uses.
 
 An after-tool hook can observe a completed call; it does not present or rewrite
-that tool's result. The shipped spec does not install a blanket monitor.
+that tool's result. `toolResultValue` is the semantic JSON result, while
+`toolResultOutput` is the selected text. The shipped spec does not install a
+blanket monitor.
 For a specific workflow, prefer an explicit bounded policy over source-identified
 episodes using [`Project.WorkflowReminders`](../../Project/WorkflowReminders.hs).
 Keep experimental judgments in shadow mode until evaluated; no judgment is proof

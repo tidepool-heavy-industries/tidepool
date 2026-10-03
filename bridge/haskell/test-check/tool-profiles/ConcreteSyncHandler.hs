@@ -13,6 +13,6 @@ data Tools mode = Tools
   } deriving (Generic)
 
 tools :: Tools (AsServerT (Eff '[]))
-tools = Tools (tool "Invalid concrete sync handler" $ \model -> send (SetNextModelWith model) >> pure model)
+tools = Tools (presentWith id $ tool "Invalid concrete sync handler" $ \model -> send (SetNextModelWith model) >> pure model)
 
 invalid = compileInstalledTools tools

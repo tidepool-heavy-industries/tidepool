@@ -16,6 +16,9 @@ Build a reusable `textTurn` or `typedTurn`, then call `invokeModel turn input`.
 Tool records, argument/result schemas and optional after-tool hooks are the same
 `AgentSpec` surface. This initial adapter accepts JSON function tools with object
 inputs; raw custom tools and scalar inputs are refused before provider admission.
+Each function tool explicitly selects its text with `presentWith` (for example,
+`presentWith id` for `Text` or `presentWith presentJson` for JSON); hooks retain
+the semantic result separately from that text.
 Use small records for arguments. A typed result may contain nullable fields,
 numbers and disjoint tagged alternatives. Unsupported schemas fail preflight.
 
