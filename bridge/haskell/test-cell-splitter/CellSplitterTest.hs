@@ -55,6 +55,7 @@ import HarnessSourceTest (harnessSourceChecks)
 import InspectionRunnerTest (inspectionRunnerChecks)
 import WorkerDiagnosticsTest (runWorkerDiagnosticsTests)
 import QuasiQuoteOccurrencesTest (quasiQuoteOccurrenceChecks, quasiQuoteOccurrenceChecksWith)
+import QuasiQuoteOccurrencesBenchmark (quasiQuoteOccurrenceBenchmark)
 import CheckedAdmissionTest (checkedAdmissionChecks)
 import CellProgramStateTest (cellProgramStateChecks)
 import UnreachableCompileTimeTest (unreachableCompileTimeCompilation)
@@ -71,6 +72,7 @@ import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 
 main :: IO ()
 main = getArgs >>= \case
+  "--quasiquote-benchmark" : iterations : files -> quasiQuoteOccurrenceBenchmark iterations files
   ["--quasiquote-occurrences"] -> quasiQuoteOccurrenceChecks
   ["--compiler-boundaries"] -> compilerBoundaryChecks
   ["--checked-admission"] -> checkedAdmissionChecks

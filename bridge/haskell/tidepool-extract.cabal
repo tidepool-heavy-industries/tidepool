@@ -140,6 +140,7 @@ test-suite cell-splitter-test
                     InspectionRunnerTest
                     WorkerDiagnosticsTest
                     QuasiQuoteOccurrencesTest
+                    QuasiQuoteOccurrencesBenchmark
   build-depends:
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,
@@ -151,9 +152,10 @@ test-suite cell-splitter-test
     text,
     assignment-internal,
     tidepool-extract-internal,
-    unix
+    unix,
+    syb
   default-language: GHC2024
-  ghc-options:      -Wall
+  ghc-options:      -Wall -rtsopts
 
 test-suite declaration-join-test
   type:             exitcode-stdio-1.0
