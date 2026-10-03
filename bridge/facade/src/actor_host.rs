@@ -4982,6 +4982,7 @@ fn current_time_ms() -> i64 {
 }
 
 #[cfg(feature = "codex-compat")]
+/// Acquire exclusive path custody before the first fallible preparation step.
 fn prepare_socket_inbox(
     actor: ActorRef,
     socket_root: PathBuf,

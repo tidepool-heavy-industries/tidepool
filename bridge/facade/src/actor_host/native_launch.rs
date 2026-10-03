@@ -560,128 +560,36 @@ pub(super) async fn launch_prepared_interactive_application(
     };
 
     *pane_slot.lock() = Some(pane.clone());
-    let activation_slot = scope_slot.clone();
-    let activation_socket = supervisor_socket.clone();
-    let activation_launch = launch_id.clone();
-    let activation_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let activation_cancelled_worker = activation_cancelled.clone();
-    // Cancellation and release share one linearization point. If cancellation
-    // acquires it first, the worker cannot submit release; if release acquires
-    // it first, later cancellation is retirement of an already committed
-    // launch rather than a pre-release loss.
-    let release_gate = Arc::new(std::sync::Mutex::new(()));
-    let release_gate_worker = release_gate.clone();
-    let activation_workspace = prepared_workspace.clone();
-    let activation_worktrees = worktrees.clone();
-    let activation_provider = provider_attachment.clone();
-    let mut activation_task = tidepool_runtime::spawn_blocking_in_span(move || {
-        let deadline = std::time::Instant::now() + PROCESS_OPERATION_TIMEOUT;
-        while !activation_socket.exists() {
-            if std::time::Instant::now() >= deadline {
-                return Err(scoped_custody::ScopedProcessError::WrongPhase);
+    let active_workspace = match activate_process_supervisor(
+        actor_identity,
+        scope_slot.clone(),
+        supervisor_socket,
+        launch_id,
+        pairing_secret,
+        &mut cancelled,
+        prepared_workspace.clone(),
+        worktrees.clone(),
+        provider_attachment.clone(),
+    )
+    .await?
+    {
+        ProcessActivation::Activated(workspace) => workspace,
+        ProcessActivation::Cancelled(native_retirement) => {
+            let process = retire_scoped_process(Some(scope_slot.clone()), native_retirement).await;
+            if matches!(process, Some(CleanupComponentOutcome::Completed)) {
+                if let CleanupComponentOutcome::Failed { detail } =
+                    retire_pane_artifact(&tmux, &pane, native_retirement).await
+                {
+                    tracing::warn!(actor = ?actor_identity, %detail, "cannot retire actor pane after cancelled launch");
+                }
             }
-            #[allow(
-                clippy::disallowed_methods,
-                reason = "dedicated blocking-pool thread (spawn_blocking_in_span), not async context"
-            )]
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let remaining = deadline
-            .checked_duration_since(std::time::Instant::now())
-            .ok_or(scoped_custody::ScopedProcessError::WrongPhase)?;
-        let (client, observation) = ProcessSupervisorClient::pair(
-            activation_socket,
-            activation_launch,
-            pairing_secret,
-            remaining,
-        )?;
-        scoped_custody::install_supervisor(&activation_slot, client, observation)?;
-        if activation_cancelled_worker.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(scoped_custody::ScopedProcessError::WrongPhase);
-        }
-        if scoped_custody::prepare_supervisor_slot(&activation_slot, deadline)?
-            != scoped_custody::ScopedProcessObservation::Blocked
-        {
-            return Err(scoped_custody::ScopedProcessError::WrongPhase);
-        }
-        if activation_cancelled_worker.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(scoped_custody::ScopedProcessError::WrongPhase);
-        }
-        if scoped_custody::pin_supervisor_slot(&activation_slot, deadline)?
-            != scoped_custody::ScopedProcessObservation::Pinned
-        {
-            return Err(scoped_custody::ScopedProcessError::WrongPhase);
-        }
-        if activation_cancelled_worker.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(scoped_custody::ScopedProcessError::WrongPhase);
-        }
-        let _release = release_gate_worker
-            .lock()
-            .map_err(|_| scoped_custody::ScopedProcessError::WrongPhase)?;
-        if activation_cancelled_worker.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(scoped_custody::ScopedProcessError::WrongPhase);
-        }
-        activation_provider
-            .validate()
-            .map_err(|_| scoped_custody::ScopedProcessError::WrongPhase)?;
-        let view = scoped_custody::supervisor_workspace(&activation_slot, deadline)?;
-        let active = activation_workspace.activate(&activation_worktrees, view)?;
-        activation_provider
-            .validate()
-            .map_err(|_| scoped_custody::ScopedProcessError::WrongPhase)?;
-        match scoped_custody::release_supervisor_slot(&activation_slot, deadline)? {
-            scoped_custody::ScopedProcessObservation::Released => Ok(active),
-            // A committed but unconfirmed release is never retried. Retain the
-            // row for explicit recovery rather than publishing readiness.
-            scoped_custody::ScopedProcessObservation::ReleaseUnconfirmed => {
-                Err(scoped_custody::ScopedProcessError::WrongPhase)
-            }
-            _ => Err(scoped_custody::ScopedProcessError::WrongPhase),
-        }
-    });
-    let (activation, activation_retirement) = tokio::select! {
-        result = &mut activation_task => (result, None),
-        retirement = &mut cancelled => {
-            let _release = release_gate.lock().map_err(|_| {
-                application_error(
-                    actor_identity,
-                    InteractiveOperation::LaunchProcess,
-                    "process supervisor release gate poisoned",
-                )
-            })?;
-            activation_cancelled.store(true, std::sync::atomic::Ordering::Release);
-            let requested = retirement.unwrap_or(NativeRetirement::Preserve);
-            drop(_release);
-            let activation = activation_task.await;
-            (activation, Some(requested))
+            return Err(socket_launch_cancelled(
+                actor_identity,
+                "launch cancelled during exact process activation",
+                socket_directory,
+            ));
         }
     };
-    if let Some(native_retirement) = activation_retirement {
-        let process = retire_scoped_process(Some(scope_slot.clone()), native_retirement).await;
-        if matches!(process, Some(CleanupComponentOutcome::Completed)) {
-            if let CleanupComponentOutcome::Failed { detail } =
-                retire_pane_artifact(&tmux, &pane, native_retirement).await
-            {
-                tracing::warn!(actor = ?actor_identity, %detail, "cannot retire actor pane after cancelled launch");
-            }
-        }
-        return Err(socket_launch_cancelled(
-            actor_identity,
-            "launch cancelled during exact process activation",
-            socket_directory,
-        ));
-    }
-    let active_workspace = activation
-        .map_err(|error| {
-            application_error(
-                actor_identity,
-                InteractiveOperation::LaunchProcess,
-                format!("process supervisor activation task failed: {error}"),
-            )
-        })?
-        .map_err(|error| {
-            application_error(actor_identity, InteractiveOperation::LaunchProcess, error)
-        })?;
     if let Err(error) = tmux.retain_pane_on_exit(&pane).await {
         tracing::warn!(actor = ?actor_identity, %error, "cannot retain actor pane for exit diagnosis; application remains active");
     }
@@ -789,4 +697,118 @@ pub(super) async fn launch_prepared_interactive_application(
     launch_result
 }
 
-/// Acquire exclusive path custody before the first fallible preparation step.
+enum ProcessActivation {
+    Activated(ActiveWorkspace),
+    Cancelled(NativeRetirement),
+}
+
+/// Cross the process-supervisor phase boundary only after its exact identity,
+/// workspace, provider attachment, and release have all been verified.
+async fn activate_process_supervisor(
+    actor: ActorRef,
+    slot: Arc<Mutex<scoped_custody::ScopedProcessSlot>>,
+    socket: PathBuf,
+    launch_id: String,
+    pairing_secret: String,
+    cancelled: &mut oneshot::Receiver<NativeRetirement>,
+    workspace: PreparedWorkspace,
+    worktrees: exomonad_worktree::WorktreeRegistry,
+    provider: provider_attachment::ProviderAttachment,
+) -> Result<ProcessActivation, InteractiveApplicationError> {
+    let activation_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let activation_cancelled_worker = activation_cancelled.clone();
+    // Cancellation and release share one linearization point. If cancellation
+    // acquires it first, the worker cannot submit release; if release acquires
+    // it first, later cancellation retires an already committed launch.
+    let release_gate = Arc::new(std::sync::Mutex::new(()));
+    let release_gate_worker = release_gate.clone();
+    let activation_slot = slot;
+    let mut activation_task = tidepool_runtime::spawn_blocking_in_span(move || {
+        let deadline = std::time::Instant::now() + PROCESS_OPERATION_TIMEOUT;
+        while !socket.exists() {
+            if std::time::Instant::now() >= deadline {
+                return Err(scoped_custody::ScopedProcessError::WrongPhase);
+            }
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "dedicated blocking-pool thread (spawn_blocking_in_span), not async context"
+            )]
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or(scoped_custody::ScopedProcessError::WrongPhase)?;
+        let (client, observation) =
+            ProcessSupervisorClient::pair(socket, launch_id, pairing_secret, remaining)?;
+        scoped_custody::install_supervisor(&activation_slot, client, observation)?;
+        if activation_cancelled_worker.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(scoped_custody::ScopedProcessError::WrongPhase);
+        }
+        if scoped_custody::prepare_supervisor_slot(&activation_slot, deadline)?
+            != scoped_custody::ScopedProcessObservation::Blocked
+        {
+            return Err(scoped_custody::ScopedProcessError::WrongPhase);
+        }
+        if activation_cancelled_worker.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(scoped_custody::ScopedProcessError::WrongPhase);
+        }
+        if scoped_custody::pin_supervisor_slot(&activation_slot, deadline)?
+            != scoped_custody::ScopedProcessObservation::Pinned
+        {
+            return Err(scoped_custody::ScopedProcessError::WrongPhase);
+        }
+        if activation_cancelled_worker.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(scoped_custody::ScopedProcessError::WrongPhase);
+        }
+        let _release = release_gate_worker
+            .lock()
+            .map_err(|_| scoped_custody::ScopedProcessError::WrongPhase)?;
+        if activation_cancelled_worker.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(scoped_custody::ScopedProcessError::WrongPhase);
+        }
+        provider
+            .validate()
+            .map_err(|_| scoped_custody::ScopedProcessError::WrongPhase)?;
+        let view = scoped_custody::supervisor_workspace(&activation_slot, deadline)?;
+        let active = workspace.activate(&worktrees, view)?;
+        provider
+            .validate()
+            .map_err(|_| scoped_custody::ScopedProcessError::WrongPhase)?;
+        match scoped_custody::release_supervisor_slot(&activation_slot, deadline)? {
+            scoped_custody::ScopedProcessObservation::Released => Ok(active),
+            // A committed but unconfirmed release is never retried. Retain the
+            // row for explicit recovery rather than publishing readiness.
+            scoped_custody::ScopedProcessObservation::ReleaseUnconfirmed => {
+                Err(scoped_custody::ScopedProcessError::WrongPhase)
+            }
+            _ => Err(scoped_custody::ScopedProcessError::WrongPhase),
+        }
+    });
+    let activation = tokio::select! {
+        result = &mut activation_task => result,
+        retirement = &mut *cancelled => {
+            let _release = release_gate.lock().map_err(|_| {
+                application_error(
+                    actor,
+                    InteractiveOperation::LaunchProcess,
+                    "process supervisor release gate poisoned",
+                )
+            })?;
+            activation_cancelled.store(true, std::sync::atomic::Ordering::Release);
+            let requested = retirement.unwrap_or(NativeRetirement::Preserve);
+            drop(_release);
+            let _activation = activation_task.await;
+            return Ok(ProcessActivation::Cancelled(requested));
+        }
+    };
+    let workspace = activation
+        .map_err(|error| {
+            application_error(
+                actor,
+                InteractiveOperation::LaunchProcess,
+                format!("process supervisor activation task failed: {error}"),
+            )
+        })?
+        .map_err(|error| application_error(actor, InteractiveOperation::LaunchProcess, error))?;
+    Ok(ProcessActivation::Activated(workspace))
+}
