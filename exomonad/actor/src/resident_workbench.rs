@@ -15257,20 +15257,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     /// later items can refer to the exact binding produced by an earlier item.
     #[tokio::test]
     async fn planned_cell_keeps_request_json_input_owned_across_native_preparation() {
-        let (machines, mut context, source, _root) = actor_registry_fixture();
-        // A request workbench's preamble always declares `respond`, whether
-        // or not the cell calls it, and its signature needs `Replies` in
-        // the effect stack to typecheck. `Exomonad` (qualified) is already
-        // in scope everywhere this fixture compiles — `host_mount_fixture`
-        // bakes it into `source.preamble` — and re-exports `Replies`.
-        context.haskell_effects_alias = "'[Exomonad.Replies]".into();
-        let workbench = ResidentActorWorkbench::new(
-            machines,
-            source,
-            Some(ResponseExpectation::new("()")),
-            Some(crate::RequestId(1)),
-        )
-        .with_json_input(Some(serde_json::json!({"greeting": "hi"})));
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None)
+            .with_json_input(Some(serde_json::json!({"greeting": "hi"})));
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
