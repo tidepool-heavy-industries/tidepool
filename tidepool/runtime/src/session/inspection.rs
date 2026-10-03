@@ -341,6 +341,40 @@ fn render_query_error(error: &QueryError) -> String {
     }
 }
 
+/// Checked inspection authority captured by the resident scope owner.
+/// The input inventory cannot be assembled or changed by a caller.
+#[derive(Clone, Debug)]
+pub struct AdmittedInspectionInputs {
+    view: super::SessionCompileView,
+    values: Vec<super::admission::AdmittedValueInterface>,
+}
+
+impl AdmittedInspectionInputs {
+    pub(super) fn capture(
+        view: super::SessionCompileView,
+        values: Vec<super::admission::AdmittedValueInterface>,
+    ) -> Self {
+        Self { view, values }
+    }
+
+    pub fn view(&self) -> &super::SessionCompileView {
+        &self.view
+    }
+
+    fn matches_request(&self, request: &InspectionRequest<'_>) -> bool {
+        request.session_root == self.view.session_root()
+            && request
+                .exact_context
+                .as_ref()
+                .map(|context| context.semantic_sha256())
+                == self
+                    .view
+                    .exact_declaration_context()
+                    .map(|context| context.semantic_sha256())
+            && request.inject_modules == self.view.injected_module_names()
+    }
+}
+
 pub struct InspectionRequest<'a> {
     /// Protected original declarations shared by every query in this batch.
     pub exact_context:
@@ -364,7 +398,23 @@ pub struct InspectionRequest<'a> {
 pub fn run_inspections(
     request: InspectionRequest<'_>,
 ) -> Result<Vec<InspectionResult>, CompileError> {
-    run_inspections_with_policy(request, false)
+    run_inspections_with_policy(request, false, None)
+}
+
+/// Consume the immutable checked value snapshot captured with the caller's view.
+/// This grants only inspection inputs; successful answers still need exact receipts.
+pub fn run_admitted_inspections(
+    request: InspectionRequest<'_>,
+    view: &super::SessionCompileView,
+    inputs: &AdmittedInspectionInputs,
+) -> Result<Vec<InspectionResult>, CompileError> {
+    if view.session() != inputs.view.session()
+        || view.lexical_scope() != inputs.view.lexical_scope()
+        || !view.is_current_for(&inputs.view)
+    {
+        return Err(invalid("inspection inputs belong to another compile view"));
+    }
+    run_inspections_with_policy(request, false, Some(inputs))
 }
 
 /// Declaration staging variant: source rejection must remain a request-level
@@ -372,13 +422,20 @@ pub fn run_inspections(
 pub(super) fn run_inspections_strict(
     request: InspectionRequest<'_>,
 ) -> Result<Vec<InspectionResult>, CompileError> {
-    run_inspections_with_policy(request, true)
+    run_inspections_with_policy(request, true, None)
 }
 
 fn run_inspections_with_policy(
     request: InspectionRequest<'_>,
     strict: bool,
+    inputs: Option<&AdmittedInspectionInputs>,
 ) -> Result<Vec<InspectionResult>, CompileError> {
+    if inputs.is_some_and(|inputs| !inputs.matches_request(&request)) {
+        return Err(invalid(
+            "inspection request differs from its admitted scope snapshot",
+        ));
+    }
+    let values = inputs.map(|inputs| inputs.values.as_slice());
     if request.queries.is_empty() {
         return Ok(Vec::new());
     }
@@ -390,8 +447,10 @@ fn run_inspections_with_policy(
         .output_dir(temp.path())
         .inspect_out(&output_path)
         .includes(request.include)
-        .session_root(request.session_root)
-        .inject_vals(request.inject_modules);
+        .session_root(request.session_root);
+    if values.is_none() {
+        command.inject_vals(request.inject_modules);
+    }
     if strict {
         command.inspection_strict();
     }
@@ -510,12 +569,48 @@ fn run_inspections_with_policy(
         .iter()
         .map(|path| path.to_path_buf())
         .collect::<Vec<_>>();
-    let offer = super::turn::select_module_candidate_offer(
-        endpoint.identity().producer_bytes(),
-        &include,
-        temp.path(),
-        request.exact_context.clone(),
-    )?;
+    let offer = match values {
+        Some(values) => {
+            let certificates = values
+                .iter()
+                .map(|value| {
+                    value
+                        .checked_artifact()
+                        .cloned()
+                        .ok_or_else(|| invalid("inspection value lacks its checked certificate"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let modules = values
+                .iter()
+                .map(|value| value.module().module_name())
+                .collect::<Vec<_>>();
+            command.inject_vals(&modules);
+            tidepool_toolchain::artifacts::ModuleCandidateOffer::select_inspection(
+                endpoint.identity().producer_bytes(),
+                &include,
+                temp.path(),
+                inputs
+                    .expect("admitted value branch")
+                    .view
+                    .exact_declaration_context()
+                    .cloned(),
+                values
+                    .iter()
+                    .map(|value| (value.module(), value.bytes_owned().clone()))
+                    .collect(),
+                &certificates,
+            )?
+        }
+        None => super::turn::select_module_candidate_offer(
+            endpoint.identity().producer_bytes(),
+            &include,
+            temp.path(),
+            request.exact_context.clone(),
+        )?,
+    };
+    if let Some(root) = offer.checked_value_root() {
+        command.session_root(root);
+    }
     offer.apply_to(&mut command)?;
     crate::paths::apply_build_products_dir(&mut command, &endpoint);
     let run = endpoint.execute(&command).map_err(map_spawn)?;
@@ -527,13 +622,7 @@ fn run_inspections_with_policy(
         0,
     );
     crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
-        .map_err(|error| {
-            tidepool_toolchain::artifacts::retain_compiler_failure(
-                temp.path(),
-                &run.output.stderr,
-                error,
-            )
-        })?;
+        .map_err(|error| offer.retain_failure(temp.path(), &run.output.stderr, error))?;
     let bytes = std::fs::read(&output_path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             CompileError::MissingOutput(output_path.clone())
@@ -549,7 +638,7 @@ fn run_inspections_with_policy(
             request.queries.len()
         )));
     }
-    if request.exact_context.is_some()
+    if offer.exact_scope_path().is_some()
         && results
             .iter()
             .any(|result| !matches!(result, InspectionResult::Rejected { .. }))
@@ -592,13 +681,7 @@ fn run_inspections_with_policy(
             }
             Ok::<_, CompileError>(())
         })();
-        validated.map_err(|error| {
-            tidepool_toolchain::artifacts::retain_compiler_failure(
-                temp.path(),
-                &run.output.stderr,
-                error,
-            )
-        })?;
+        validated.map_err(|error| offer.retain_failure(temp.path(), &run.output.stderr, error))?;
     }
     Ok(request
         .queries
@@ -1089,6 +1172,43 @@ fn invalid(detail: impl Into<String>) -> CompileError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn admitted_inspection_refuses_sibling_pairing_with_shared_root_and_context() {
+        use crate::session::{ModuleEnv, PersistentSession, SessionId, SessionLib};
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(902), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let first_scope = session.mint_isolated_scope();
+        let second_scope = session.mint_isolated_scope();
+        let first = session.compile_view_in(first_scope).unwrap();
+        let second = session.compile_view_in(second_scope).unwrap();
+        assert_eq!(first.session_root(), second.session_root());
+        assert_eq!(
+            first.exact_declaration_context(),
+            second.exact_declaration_context()
+        );
+        assert_eq!(
+            first.injected_module_names(),
+            second.injected_module_names()
+        );
+        let inputs = AdmittedInspectionInputs::capture(first.clone(), Vec::new());
+        let injected = first.injected_module_names();
+        let request = || InspectionRequest {
+            exact_context: first.exact_declaration_context().cloned(),
+            preamble: "",
+            imports: "",
+            include: &[],
+            session_root: first.session_root(),
+            inject_modules: &injected,
+            queries: &[],
+            effects: None,
+        };
+        assert!(run_admitted_inspections(request(), &first, &inputs)
+            .unwrap()
+            .is_empty());
+        assert!(run_admitted_inspections(request(), &second, &inputs).is_err());
+    }
     use super::*;
     use tidepool_testing::eval_harness;
 

@@ -2,6 +2,10 @@
 
 module CheckedAdmissionTest (checkedAdmissionChecks) where
 
+import qualified Codec.CBOR.Encoding as Cbor
+import qualified Codec.CBOR.Write as Cbor
+import Data.Maybe (isJust, isNothing)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (unless, forM_)
 import qualified Data.ByteString as BS
@@ -20,7 +24,7 @@ import Tidepool.CheckedCell (CheckedSignature(..))
 import Tidepool.CheckedRecipe (writeCheckedItemReceipt, writeCheckedDisplayReceipt, checkedRecipeSource)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ExactScope
-import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), workerArgv, workerRequestFromArgv)
+import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), InspectionRequest(..), workerArgv, workerRequestFromArgv)
 import Tidepool.ExtractUtil (shaHex)
 
 checkedAdmissionChecks :: IO ()
@@ -90,6 +94,18 @@ checkedAdmissionChecks = withScratch $ \root -> do
       authored = "let café = \"{{BINDERS}}\""
   rendered <- checkedRecipeSource item template authored
   unless ("\"{{BINDERS}}\"" `T.isInfixOf` T.pack rendered) (fail "authored placeholder was rescanned")
+  let inspect = args { requestInspections = [InspectNameInfo "visible"], requestInspectOut = Just "inspection.cbor", requestBindGen = Nothing }
+  unless (matchesInspectionAdmission inspect ["Val7"]) (fail "inspection cap rejected matching inputs")
+  forM_ [ inspect { requestTurn = True }, inspect { requestCell = True }
+        , inspect { requestCheckSource = True }, inspect { requestCellPlan = True }
+        , inspect { requestClassify = True }, inspect { requestCertifyHomeProducts = True }
+        , inspect { requestActivationPreview = True }, inspect { requestDeclarationJoin = Just "join" }
+        , inspect { requestBindGen = Just 7 }, inspect { requestTarget = Just "run" }
+        , inspect { requestInjectVals = ["sibling"] }, inspect { requestInspectOut = Nothing }
+        , inspect { requestRetainedGenerations = Map.singleton observation 6 }
+        ] $ \wrong -> unless (not (matchesInspectionAdmission wrong ["Val7"]))
+          (fail "inspection authority admitted another operation or input inventory")
+  inspectionScopeChecks root
   receiptChecks root item display
   putStrLn "checked admission: mutation, ordering, authority, recipe and receipt checks passed"
   where
@@ -125,7 +141,7 @@ withScratch = bracket acquire removeDirectoryRecursive
 receiptChecks :: FilePath -> CheckedItemAdmission -> CheckedDisplayAdmission -> IO ()
 receiptChecks root item display = do
   let scope = ExactScope "manifest" "request" "producer" "semantic" [] [] [] [] []
-        Nothing Nothing Nothing Nothing Set.empty
+        Nothing Nothing Nothing Nothing Nothing Set.empty
       source = "recipe λ"
   writeCheckedItemReceipt root scope item source
   check "checked-item.cbor" itemGolden
@@ -146,3 +162,49 @@ receiptChecks root item display = do
     itemGolden = "886b545045584143544954454d613167726571756573746e6974656d2d61646d697373696f6e6c63656c6c2d7265636569707402784033323839613431343939636133623538653566653036353137386231343138373535303363323639663330356430323630336464383133616563313863656638781974696465706f6f6c2d636865636b65642d7265636970652d32"
     activationGolden = "89775450455841435441435449564154494f4e494e50555432613267726571756573746e6974656d2d61646d697373696f6e6c63656c6c2d7265636569707402784033323839613431343939636133623538653566653036353137386231343138373535303363323639663330356430323630336464383133616563313863656638782074696465706f6f6c2d686f73742d61637469766174696f6e2d696e7075742d32477769746e657373"
     displayGolden = "886e54504558414354444953504c4159613167726571756573746c63656c6c2d726563656970740266707265666978784033323839613431343939636133623538653566653036353137386231343138373535303363323639663330356430323630336464383133616563313863656638781974696465706f6f6c2d646973706c61792d7265636970652d31"
+
+inspectionScopeChecks :: FilePath -> IO ()
+inspectionScopeChecks root = do
+  let owner = "Tidepool.Session.Val.G2"
+      path = root </> "inspection-scope.cbor"
+      digest = replicate 64 '0'
+      strings values = Cbor.encodeListLen (fromIntegral (length values))
+        <> foldMap (Cbor.encodeString . T.pack) values
+      envelope injected modules paths = Cbor.toStrictByteString $
+        Cbor.encodeListLen 8 <> stringsHeader digest
+          <> Cbor.encodeListLen 0 <> Cbor.encodeListLen 0 <> Cbor.encodeListLen 0
+          <> Cbor.encodeListLen 4 <> Cbor.encodeString "inspection1"
+          <> strings injected
+          <> Cbor.encodeListLen (fromIntegral (length modules))
+          <> foldMap (\name -> Cbor.encodeListLen 4 <> Cbor.encodeString "main"
+            <> Cbor.encodeString (T.pack name) <> Cbor.encodeString (T.pack (root </> "value.hi"))
+            <> Cbor.encodeString (T.pack digest)) modules
+          <> strings paths
+      stringsHeader sha = Cbor.encodeString "TPEXACTSCOPE" <> Cbor.encodeString "4"
+        <> Cbor.encodeString (T.pack sha) <> Cbor.encodeString (T.pack sha)
+      readScope injected modules paths = do
+        BS.writeFile path (envelope injected modules paths)
+        readExactScope path
+  admitted <- readScope [owner] [owner] [root]
+  case admitted of
+    Right scope -> unless (isJust (scopeCheckedInspection scope)
+        && isNothing (scopeCheckedCell scope) && isNothing (scopeCheckedItem scope)
+        && isNothing (scopeCheckedDisplay scope) && scopeIncludePaths scope == Just [root]
+        && map exactModule (scopeValueInterfaces scope) == [owner])
+      (fail "inspection purpose gained publication authority or lost captured inputs")
+    Left failure -> fail failure
+  -- Authorization names may sort lexically while captured interfaces retain
+  -- numeric generation order. Both inventories still name exactly the cap.
+  let owner9 = "Tidepool.Session.Val.G9"
+      owner10 = "Tidepool.Session.Val.G10"
+  numeric <- readScope [owner10,owner9] [owner9,owner10] [root]
+  case numeric of
+    Right scope -> unless (map exactModule (scopeValueInterfaces scope) == [owner9,owner10])
+      (fail "inspection generation inventory reordered captured interface inputs")
+    Left failure -> fail failure
+  forM_ [([owner],[],[root]), ([owner,owner],[owner,owner],[root])
+        , (["Tidepool.Session.Lib.G2"],["Tidepool.Session.Lib.G2"],[root])
+        , ([owner],[owner],["relative-root"])] $ \(injected,modules,paths) -> do
+    rejected <- readScope injected modules paths
+    unless (either (const True) (const False) rejected)
+      (fail "inspection scope accepted mismatched, duplicate, non-value or relative inputs")

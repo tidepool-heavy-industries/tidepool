@@ -4273,7 +4273,7 @@ sessionVariant purpose scope path = do
                   hsc0 <- getSession
                   case selectedExact of
                     Just admitted | isJust (scopeCheckedCell admitted) || isJust (scopeCheckedItem admitted)
-                        || isJust (scopeCheckedDisplay admitted) -> do
+                        || isJust (scopeCheckedDisplay admitted) || isJust (scopeCheckedInspection admitted) -> do
                       let wanted = map (moduleNameString . renderSessionModule) needed
                           artifacts = [value | value <- scopeValueInterfaces admitted, exactModule value `elem` wanted]
                       when (length artifacts /= length needed) $ liftIO $ ioError $ userError

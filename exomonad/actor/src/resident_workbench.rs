@@ -34,15 +34,15 @@ use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
     check_cell, hide_preamble_exports, insert_preamble_imports, render_turn_compile_rejection,
-    resident_cell_check_template, resident_workbench_templates, run_inspections, run_turn,
-    run_turn_pinned, validate_declaration_candidate, BoundBinder, CellCheck, CellCheckRequest,
-    CheckedBinderPin, CheckedExpressionPlan, CompiledTurn, DeclarationCandidateRender,
-    DeclarationReceipt, ExpressionPresentation, HostBindingAuthority, HostBindingType, HostCarrier,
-    HostPayload, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock,
-    PendingPreparedInstall, PendingPreparedMode, ResidentContinuationEvent, ResidentError,
-    ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
-    SourceImports, StagedDeclaration, TurnClassification, TurnCode, TurnKind, TurnRequest,
-    TurnResult,
+    resident_cell_check_template, resident_workbench_templates, run_admitted_inspections,
+    run_inspections, run_turn, run_turn_pinned, validate_declaration_candidate, BoundBinder,
+    CellCheck, CellCheckRequest, CheckedBinderPin, CheckedExpressionPlan, CompiledTurn,
+    DeclarationCandidateRender, DeclarationReceipt, ExpressionPresentation, HostBindingAuthority,
+    HostBindingType, HostCarrier, HostPayload, InspectionQuery, InspectionRequest, OutputSink,
+    ParsedBlock, PendingPreparedInstall, PendingPreparedMode, ResidentContinuationEvent,
+    ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession,
+    RootCustody, SourceImports, StagedDeclaration, TurnClassification, TurnCode, TurnKind,
+    TurnRequest, TurnResult,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, spawn_blocking_in_span, CompileError, FailureClass,
@@ -5247,6 +5247,7 @@ where
                         |queries| {
                             inspect_lookup_queries(
                                 &view,
+                                None,
                                 &prepared.preamble,
                                 &prepared.imports,
                                 &prepared.include,
@@ -5269,7 +5270,7 @@ where
 
         let snapshot_source = source.clone();
         let snapshot_modules = Arc::clone(&type_modules);
-        let (view, provenance) = self
+        let (view, provenance, inspection_values) = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
                 let view =
@@ -5279,7 +5280,12 @@ where
                     &snapshot_source,
                     tidepool_runtime::session::NameScope::Current,
                 );
-                Ok((view, provenance))
+                let values = session
+                    .capture_inspection_inputs(view.session_view())
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                Ok((view, provenance, values))
             })
             .await?;
 
@@ -5325,6 +5331,7 @@ where
                                 |queries| {
                                     inspect_lookup_queries(
                                         &inspection_view,
+                                        Some(&inspection_values),
                                         &preamble,
                                         &imports,
                                         &include,
@@ -5373,6 +5380,7 @@ where
                 |queries| {
                     inspect_lookup_queries(
                         &view,
+                        Some(&inspection_values),
                         &prepared.preamble,
                         &prepared.imports,
                         &prepared.include,
@@ -12925,6 +12933,7 @@ fn structured_introspection_answer(
 
 fn inspect_lookup_queries(
     view: &crate::ActorCompileView,
+    values: Option<&tidepool_runtime::session::AdmittedInspectionInputs>,
     preamble: &str,
     imports: &str,
     include: &[PathBuf],
@@ -12939,7 +12948,7 @@ fn inspect_lookup_queries(
     }
     let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let inspect = || {
-        run_inspections(InspectionRequest {
+        let request = InspectionRequest {
             exact_context: view.exact_declaration_context().cloned(),
             preamble,
             imports,
@@ -12948,7 +12957,11 @@ fn inspect_lookup_queries(
             inject_modules: injected,
             queries,
             effects: Some(effects),
-        })
+        };
+        match values {
+            Some(inputs) => run_admitted_inspections(request, view.session_view(), inputs),
+            None => run_inspections(request),
+        }
         .map_err(crate::lookup::LookupInspectionError::Compiler)
     };
     let result = match timing {
@@ -15501,6 +15514,77 @@ mod request_tests {
         >::new());
         machines.insert_idle(session_id, Box::new(session));
         (machines, context, source, root)
+    }
+
+    #[tokio::test]
+    async fn lookup_inspects_checked_bound_value_on_repeated_requests() {
+        let (machines, context, source, _root) = actor_lookup_registry_fixture();
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        let cell = "checkedLookupValue <- pure (42 :: Int)".to_owned();
+        let (_, prepared) = workbench
+            .prepare_cell(context.clone(), cell.clone())
+            .await
+            .expect("checked binding compiles");
+        let PreparedCell::Ready { mut items, .. } = prepared else {
+            panic!("checked binding is executable")
+        };
+        assert_eq!(items.len(), 1);
+        let step = workbench
+            .begin_prepared_cell_item(
+                context.clone(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: cell,
+                },
+                items.remove(0),
+                4096,
+            )
+            .await
+            .expect("checked binding starts");
+        let settled = match step {
+            ResidentWorkbenchStep::Running { fragment, outcome } => workbench
+                .settle_item(context.clone(), *fragment, *outcome)
+                .await
+                .expect("checked binding settles"),
+            other => other,
+        };
+        assert!(matches!(settled, ResidentWorkbenchStep::Committed { .. }));
+        let inspection_source = source.clone();
+        let (view, inputs, prepared) = workbench
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let view = actor_compile_view(session, context, &inspection_source, &[])?;
+                let inputs = session
+                    .capture_inspection_inputs(view.session_view())
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                let prepared =
+                    inspection_source.prepare_effectful(&view, &context.haskell_effects_alias)?;
+                Ok((view, inputs, prepared))
+            })
+            .await
+            .expect("native input snapshot captures with view");
+        assert!(!inputs.view().reachable_values().is_empty());
+        for _ in 0..2 {
+            let inspected = inspect_lookup_queries(
+                &view,
+                Some(&inputs),
+                &prepared.preamble,
+                &prepared.imports,
+                &prepared.include,
+                &prepared.injected,
+                &context.haskell_effects_alias,
+                &[InspectionQuery::Info("checkedLookupValue".into())],
+                None,
+            )
+            .expect("native bound lookup succeeds");
+            assert!(
+                matches!(&inspected[..], [tidepool_runtime::session::InspectionResult::Info { entries, .. }]
+                if entries.iter().any(|entry| entry.name == "checkedLookupValue"))
+            );
+        }
     }
 
     #[tokio::test]

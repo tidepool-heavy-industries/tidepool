@@ -413,6 +413,7 @@ pub struct ModuleCandidateOffer {
 // as the source and interface recipe. Unsupported path encodings refuse before
 // the invocation builder can perform its ordinary lossy CLI conversion.
 enum CheckedPurpose {
+    Inspection,
     Cell,
     Item,
     HostActivationInput,
@@ -448,6 +449,7 @@ fn checked_search_authorization(
     };
     fields[0] = Value::Text(
         match purpose {
+            CheckedPurpose::Inspection => "inspection1",
             CheckedPurpose::Cell => "cell-check2",
             CheckedPurpose::Item => "checked-item2",
             CheckedPurpose::HostActivationInput => "host-activation-input1",
@@ -747,6 +749,60 @@ impl ModuleCandidateOffer {
             checked_cell: None,
             planned_cell: None,
             checked_values: None,
+            checked_publication_context: None,
+            checked_item: None,
+            checked_display: None,
+        })
+    }
+
+    /// Inspection may consume certified live values but cannot publish new ones.
+    pub fn select_inspection(
+        producer: &[u8],
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
+        retained: &[Arc<crate::checked_cell::CheckedValueArtifact>],
+    ) -> Result<Self, CompileError> {
+        let owners = values
+            .iter()
+            .map(|(owner, _)| owner.module_name())
+            .collect::<BTreeSet<_>>();
+        if owners.len() != values.len() || retained.len() != values.len() {
+            return Err(CompileError::ExtractFailed(
+                "inspection value inventory lacks exact checked certificates".into(),
+            ));
+        }
+        let context = checked_value_context(context, &values, retained)?;
+        let inputs = crate::checked_cell::CheckedValueInputs::capture(values)?;
+        let authorization = checked_search_authorization(
+            CheckedPurpose::Inspection,
+            Value::Array(vec![
+                Value::Text("inspection1".into()),
+                Value::Array(owners.iter().cloned().map(Value::Text).collect()),
+                inputs.baseline_authorization(),
+            ]),
+            include,
+        )?;
+        Ok(Self {
+            selected: immutable_candidates_in_context(
+                &context, producer, include, scratch, owners,
+            )?,
+            producer: producer.to_vec(),
+            include: include.to_vec(),
+            exact: Some(
+                context
+                    .prepare_compilation_with_authorization(
+                        &scratch.join("exact-scope"),
+                        producer,
+                        Some(authorization),
+                    )?
+                    .with_source_search_context(include)
+                    .with_checked_value_imports(inputs.import_authority()),
+            ),
+            checked_cell: None,
+            planned_cell: None,
+            checked_values: Some(inputs),
             checked_publication_context: None,
             checked_item: None,
             checked_display: None,

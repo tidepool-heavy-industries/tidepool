@@ -1900,7 +1900,7 @@ freshExecutionRecipeTest = withScratch $ \work -> do
   let original = ExactProduct "main" "Support" sha sha sha "" []
       scope = ExactScope "" sha sha sha
         [(ExactIfaceArtifact "main" "Support" "" sha [],"",sha)] [] [original]
-        [] [] Nothing Nothing Nothing Nothing Set.empty
+        [] [] Nothing Nothing Nothing Nothing Nothing Set.empty
       oversized = graph {executionGraphBytes=BS.replicate (executionSourceGraphBytesLimit+1) 0}
   bounded <- either (fail . show) pure
     (extendExactExecutionSourcesWithinBudget [oversized] [reference] scope)
