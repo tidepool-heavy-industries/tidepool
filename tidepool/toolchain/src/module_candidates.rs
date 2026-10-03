@@ -3187,8 +3187,54 @@ mod tests {
         let b = candidate_fixture(root.path(), "B");
         assert_ne!(a.interface, b.interface);
         assert_ne!(a.module_interface, b.module_interface);
+        // Reissue the defining product after its authored dependency changes.
+        // The canonical carrier and native seal must name the same exact B.
+        fs::write(&a.source, "module A where\nimport B\n").unwrap();
+        a.source_sha256 = sha(&fs::read(&a.source).unwrap());
+        for source in &mut a.evidence.make_mut().sources {
+            if source.path == a.source {
+                source.sha256 = a.source_sha256.clone();
+            }
+        }
         import_candidate(&mut a, &b);
         let owners = vec![computed_owner(&a), computed_owner(&b)];
+        a.original_owner = OriginalOwner::from_owner(&owners[0]);
+        let canonical_requirements = BTreeMap::from([(
+            (b.unit.clone(), b.module.clone()),
+            owners[1].skinny_iface_sha256,
+        )]);
+        let fresh_a = CertifiedRecoveryProduct::from_certification(
+            owners[0].clone(),
+            a.interface.clone(),
+            a.products.clone(),
+            a.package_imports.clone(),
+            crate::certified_products::encode_home_certification(&owners[0], &[], &BTreeMap::new())
+                .unwrap(),
+        )
+        .with_source_sha256(parse_sha(&a.source_sha256).unwrap());
+        let finalized_a = crate::certified_products::fixture_finalized_product_with_requirements(
+            fresh_a,
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&a.endpoint)
+                .sha256(),
+            Some(canonical_requirements.clone()),
+        );
+        let canonical_a = finalized_a.module_interface().unwrap().clone();
+        assert_eq!(canonical_a.requirements(), &canonical_requirements);
+        assert_eq!(
+            canonical_a.source_sha256(),
+            parse_sha(&a.source_sha256).unwrap()
+        );
+        a.module_interface = Some(
+            crate::recovery_artifacts::materialize_module_interface(
+                fixture_record_dir(root.path()).parent().unwrap(),
+                &canonical_a,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                crate::recovery_artifacts::MaterializationMode::Durable,
+            )
+            .unwrap(),
+        );
+        a.module_interface_proof = Some(canonical_a);
+        a.original_certification = finalized_a.certification_bytes().to_vec();
         let input = root.path().join("Input.hs");
         fs::write(&input, &a.target_source).unwrap();
         let ExecutionSourceAdmission::Available(graph) =
@@ -3218,12 +3264,7 @@ mod tests {
             panic!("fixture graph unavailable")
         };
         a.original_certification = crate::certified_products::bind_home_execution_source(
-            &crate::certified_products::encode_home_certification(
-                &owners[0],
-                &[],
-                &BTreeMap::new(),
-            )
-            .unwrap(),
+            &a.original_certification,
             &owners[0],
             graph.digest(),
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
@@ -3231,17 +3272,29 @@ mod tests {
         .unwrap();
         a.execution_source_sha256 = Some(graph.digest());
         a.execution_source = Some(graph);
+        crate::certified_products::validate_canonical_native_bytes(
+            &owners[0],
+            &a.original_certification,
+            &a.interface,
+            &a.package_imports,
+            Some(parse_sha(&a.source_sha256).unwrap()),
+            a.module_interface_proof.as_ref().unwrap(),
+        )
+        .unwrap();
         let original = CertifiedRecoveryProduct::from_certification(
             owners[1].clone(),
             b.interface.clone(),
             b.products.clone(),
             b.package_imports.clone(),
-            crate::certified_products::encode_home_certification(&owners[1], &[], &BTreeMap::new())
-                .unwrap(),
-        );
+            b.original_certification.clone(),
+        )
+        .with_source_sha256(parse_sha(&b.source_sha256).unwrap())
+        .with_module_interface(b.module_interface_proof.as_ref().unwrap().clone())
+        .unwrap();
         let context =
             ExactCandidateContext::new(BTreeSet::from([("u".into(), "B".into())]), BTreeSet::new())
-                .with_originals(vec![original]);
+                .with_originals(vec![original])
+                .with_interface_seals(canonical_requirements.clone());
         let selected = select_context_records(scratch.path(), vec![a.clone(), b.clone()], &context);
         assert_eq!(
             selected.by_owner.keys().cloned().collect::<Vec<_>>(),
@@ -3272,7 +3325,8 @@ mod tests {
         // Missing original proof retains the old conservative refusal. A
         // same-name candidate cannot replace the protected dependency.
         let without_original =
-            ExactCandidateContext::new(context.protected.clone(), BTreeSet::new());
+            ExactCandidateContext::new(context.protected.clone(), BTreeSet::new())
+                .with_interface_seals(canonical_requirements);
         assert!(select_context_records(
             scratch.path(),
             vec![a.clone(), b.clone()],

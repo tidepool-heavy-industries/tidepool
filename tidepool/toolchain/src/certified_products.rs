@@ -1881,7 +1881,19 @@ pub(crate) fn fixture_finalized_product(
     product: crate::recovery_artifacts::CertifiedRecoveryProduct,
     producer: [u8; 32],
 ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
+    fixture_finalized_product_with_requirements(product, producer, None)
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_finalized_product_with_requirements(
+    product: crate::recovery_artifacts::CertifiedRecoveryProduct,
+    producer: [u8; 32],
+    requirements: Option<BTreeMap<(String, String), [u8; 32]>>,
+) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
     let mut witness = decode_home_witness(product.certification_bytes()).unwrap();
+    if let Some(requirements) = requirements {
+        witness.interface_requirements = requirements;
+    }
     let package_bytes = if product.package_imports_bytes().is_empty() {
         let value = value_array([
             value_text("TPPKGROOTS"),
