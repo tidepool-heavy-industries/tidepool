@@ -15,6 +15,12 @@ TEST_ONLY_SOURCES = {
         'tidepool/codegen/src/prepared_program/machine/literal_manifest_tests.rs',
     }),
     'tidepool': frozenset({
+        'bridge/facade/src/actor_host/prepared_display_tests.rs',
+        'bridge/facade/src/actor_host/prepared_display_success.hs',
+        'bridge/facade/src/actor_host/prepared_display_failure.hs',
+        'bridge/facade/src/actor_host/notebook_explicit_display_siblings.hs',
+        'bridge/facade/src/actor_host/notebook_explicit_display_budget_failure.hs',
+        'bridge/facade/src/actor_host/notebook_explicit_display_untrusted_callback.hs',
         'bridge/facade/src/actor_host/cargo_report_contract.hs',
         'bridge/facade/src/actor_host/native_prefix_publication_tests.rs',
         'bridge/facade/src/actor_host/notebook_prefix_baseline.hs',
