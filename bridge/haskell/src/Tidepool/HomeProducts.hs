@@ -7,8 +7,8 @@ module Tidepool.HomeProducts
   , materializeCandidateCompilerView ) where
 
 import Control.Exception
-  ( Exception, SomeException, SomeAsyncException, displayException, fromException, throwIO, try )
-import Control.Monad (forM_, unless, when)
+  ( Exception, SomeException, SomeAsyncException, bracket, displayException, fromException, throwIO, try )
+import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -42,7 +42,7 @@ import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_usages, set_mi_extra_de
 import GHC.Unit.Module.Location (ModLocation(..))
 import GHC.Iface.Binary (writeBinIface, CompressionIFace(..), TraceBinIFace(..))
 import GHC.Unit.Module.Deps (Usage(..))
-import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
+import GHC.Unit.Module (Module, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString, unitIdString)
 import GHC.Utils.Outputable (ppr, renderWithContext, defaultSDocContext)
 import Tidepool.ExactHydration
@@ -55,8 +55,9 @@ import Tidepool.ExactScope
   ( CanonicalInterfaceProof, canonicalCoreArtifact, canonicalCorePath
   , canonicalCoreSha256, canonicalHomeUnits, canonicalRequirements )
 import Tidepool.FinalizedCore (FinalizedCoreFailure, attachFinalizedCore)
-import System.Directory (getModificationTime)
+import System.Directory (getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>))
+import System.Posix.Temp (mkdtemp)
 
 data CandidateCoreFailure
   = CandidateInterfaceRequirementsMismatch
@@ -109,7 +110,15 @@ materializeCandidateCompilerView directory index env proof summary = do
       bytes <- readCandidateCore proof
       attachFinalizedCore env home bytes >>= either (throwIO . CandidateCoreDecodeFailure) pure
     else pure (set_mi_extra_decls Nothing (hm_iface home))
-  let path = directory </> "candidate-" ++ show index ++ ".hi"
+  materializeInterfaceView directory index interface summary
+
+-- Both validation and executable make consume request-owned copies. Source
+-- paths and usage fingerprints stay on the original finalized interface.
+materializeInterfaceView :: FilePath -> Int -> ModIface -> ModSummary -> IO ModSummary
+materializeInterfaceView directory index interface summary = do
+  unless (mi_module interface == ms_mod summary) (throwIO CandidateCoreHomeMissing)
+  let flags = ms_hspp_opts summary
+      path = directory </> "candidate-" ++ show index ++ ".hi"
   writeBinIface (targetProfile flags) QuietBinIFace NormalCompression path interface
   modified <- getModificationTime path
   pure summary
@@ -169,6 +178,9 @@ hydrateCandidateHomeProductsWithOriginals initial loadGraph interfaces originals
           selectedGraph = mkModuleGraph
             [node | node@(ModuleNode _ summary) <- mgModSummaries' loadGraph
               , Map.member (ms_mod_name summary) selected]
+          nativeSelectedGraph = mkModuleGraph
+            [node | node@(ModuleNode _ summary) <- mgModSummaries' (hsc_mod_graph initial)
+              , Map.member (ms_mod_name summary) selected]
           ordered = [summary | ModuleNode _ summary <- flattenSCCs
             (topSortModuleGraph True (hsc_mod_graph initial) Nothing)
             , ms_hsc_src summary == HsSrcFile
@@ -182,6 +194,8 @@ hydrateCandidateHomeProductsWithOriginals initial loadGraph interfaces originals
             | ModuleNode _ summary <- mgModSummaries' selectedGraph
             , ms_hsc_src summary == HsBootFile]
       unless (Map.keysSet selected == Map.keysSet ordinaryByName
+          && (null boots || Set.fromList (map mkNodeKey (mgModSummaries' selectedGraph))
+            == Set.fromList (map mkNodeKey (mgModSummaries' nativeSelectedGraph)))
           && Map.keysSet ordinaryByModule == Set.fromList (map ms_mod summaries)
           && Map.keysSet selected == Map.keysSet ordinaryNames
           && length summaries == Map.size selected
@@ -204,7 +218,7 @@ hydrateCandidateHomeProductsWithOriginals initial loadGraph interfaces originals
         -- boot interfaces inside SOURCE loops. Its completed HPT has ordinary
         -- interfaces instead, so it cannot recheck those original usage seals.
         sourceGraph <- either (liftIO . ioError . userError) pure
-          (sourceValidationGraph selectedGraph boots)
+          (sourceValidationGraph nativeSelectedGraph boots)
         validatedRef <- liftIO (newIORef Set.empty)
         let expected = Set.fromList [ms_mod summary
               | ModuleNode _ summary <- mgModSummaries' sourceGraph
@@ -219,10 +233,14 @@ hydrateCandidateHomeProductsWithOriginals initial loadGraph interfaces originals
                   when duplicate $
                     ioError (userError "cached SOURCE interface checked twice")
             validateLoaded _ _ _ _ = pure ()
-        setSession initial {hsc_mod_graph = sourceGraph}
-        flag <- timeDetailPhase timing "ghc_setup" "home_products_source_load" $
-          load' Nothing LoadAllTargets mkUnknownDiagnostic (Just validateLoaded)
-            (scopeRetainedModuleGraph sourceGraph)
+        -- The native summaries use the producer's canonical checking profile.
+        -- Offer original interfaces to make so its no-code path cannot replace
+        -- a canonical dependency with a newly generated checking-only iface.
+        flag <- withSourceValidationViews sourceGraph ordinaryByModule $ \viewGraph -> do
+          setSession initial {hsc_mod_graph = viewGraph}
+          timeDetailPhase timing "ghc_setup" "home_products_source_load" $
+            load' Nothing LoadAllTargets mkUnknownDiagnostic (Just validateLoaded)
+              (scopeRetainedModuleGraph viewGraph)
         unless (case flag of Succeeded -> True; Failed -> False) $
           liftIO (ioError (userError "cached home SOURCE graph failed fresh load"))
         validated <- liftIO (readIORef validatedRef)
@@ -278,6 +296,23 @@ validateHomeInterface environment summary iface = do
       ("cached home product failed fresh interface validation: "
         ++ moduleNameString (ms_mod_name summary) ++ ": "
         ++ renderWithContext defaultSDocContext (ppr reason)))
+
+-- Make may delete its interface inputs. Only these request-owned copies enter
+-- its cleanup set; boot summaries still consume the current authored source.
+withSourceValidationViews
+  :: ModuleGraph -> Map.Map Module ModIface -> (ModuleGraph -> Ghc a) -> Ghc a
+withSourceValidationViews graph interfaces action = reifyGhc $ \session -> bracket
+  (getTemporaryDirectory >>= \directory -> mkdtemp (directory </> "tidepool-source-view.XXXXXX"))
+  removeDirectoryRecursive
+  (\directory -> do
+    nodes <- forM (zip [0..] (mgModSummaries' graph)) $ \(index,node) -> case node of
+      ModuleNode dependencies summary | ms_hsc_src summary == HsSrcFile -> do
+        interface <- maybe (ioError (userError "cached SOURCE interface view owner missing")) pure
+          (Map.lookup (ms_mod summary) interfaces)
+        view <- materializeInterfaceView directory index interface summary
+        pure (ModuleNode dependencies view)
+      _ -> pure node
+    reflectGhc (action (mkModuleGraph nodes)) session)
 
 -- GHC's cached reachability retains boot nodes and their real downsweep
 -- edges. Root both forms of every boot owner, keep the original node order,
