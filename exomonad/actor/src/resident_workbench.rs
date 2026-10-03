@@ -6678,8 +6678,13 @@ where
             // `Cmd.start` effect this item ran identifies the authored job
             // binding for retained named-tool output navigation. Tag only an
             // entry that remains live at settlement.
-            if let (WorkbenchDisplay::Binding { binders, .. }, [job]) =
-                (&fragment.display, fragment.started_jobs.as_slice())
+            if let (
+                WorkbenchDisplay::Binding {
+                    binders,
+                    captured: false,
+                },
+                [job],
+            ) = (&fragment.display, fragment.started_jobs.as_slice())
             {
                 if let [binder] = binders.as_slice() {
                     if binder.host_authority == Some(HostBindingAuthority::CommandJob) {

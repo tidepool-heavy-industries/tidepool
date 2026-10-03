@@ -69,8 +69,7 @@ struct PreparedCandidate {
 #[derive(Default)]
 pub(crate) struct BindingIndex {
     /// Live `Val.G<g>` module names -- `PersistentSession::live_val_modules`.
-    /// One generated interface can publish several bindings (for example a
-    /// display page and its `cellDisplay` alias), so this is a refcount rather
+    /// One generated interface can publish several bindings, so this is a refcount rather
     /// than a set. Removing one name must not make the shared interface vanish
     /// from later compiler injection while another name still imports it.
     live_modules: BTreeMap<String, usize>,
@@ -483,13 +482,13 @@ mod tests {
             id: SessionVarId::from_extract(1),
             module,
             root: fake_slot(&mut pointer_a),
-            identity: identity("__tidepoolPage20"),
+            identity: identity("retained"),
         };
         let alias = BindRecord {
             id: SessionVarId::from_extract(2),
             module,
             root: fake_slot(&mut pointer_b),
-            identity: identity("cellDisplay"),
+            identity: identity("alias"),
         };
         let mut index = BindingIndex::new();
         index.on_bind_record(&page);

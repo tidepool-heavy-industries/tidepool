@@ -1,10 +1,4 @@
-//! F0 probe (temporary; folded into `tidepool/runtime/tests/prepared_turn.rs`
-//! at F3): does the production cell-render module project under prepared STG?
-//!
-//! The real cell render (`render_cell_observation`) is a BIND of a
-//! `DisplayPage`-typed statement through the shared workbench templates, so
-//! the probe exercises exactly that shape, plus a dialect-sensitive
-//! expression (defaulting, `OverloadedStrings`) and the opaque fallback.
+//! Prepared projection of dialect-sensitive authored expressions.
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates, run_turn, TurnRequest, TurnResult,
 };
@@ -24,11 +18,7 @@ fn probe(label: &str, text: &str, gen: u64) {
         "qualified Tidepool.Actors.Exomonad as Exomonad",
     );
     preamble.push_str("type ActorEffects = '[Exomonad.Notifications]\n");
-    let templates = resident_workbench_templates(
-        &preamble,
-        "ActorEffects",
-        "qualified Tidepool.Inspection as TidepoolInspection\nTidepool.Inspection (print, cellDisplay)",
-    );
+    let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let root = tempfile::tempdir().unwrap();
     let result = run_turn(TurnRequest {
@@ -86,32 +76,10 @@ fn probe(label: &str, text: &str, gen: u64) {
 }
 
 #[test]
-fn display_page_render_bind_projects() {
-    probe(
-        "render bind",
-        "__tidepoolPage1 <- pure ((TidepoolInspection.displayPageWithout [] 8192 \
-         ((\\() -> (Right (Just (3 :: Int)) :: Either Text (Maybe Int))) ())) \
-         :: TidepoolInspection.DisplayPage ActorEffects)",
-        1,
-    );
-}
-
-#[test]
 fn dialect_sensitive_expression_projects() {
     probe(
         "dialect expr",
         "length (show (2 ^ 10)) + T.length \"abc\"",
         2,
-    );
-}
-
-#[test]
-fn opaque_render_fallback_projects() {
-    probe(
-        "opaque bind",
-        "__tidepoolPage2 <- pure ((TidepoolInspection.pageWithContinuation 8192 \
-         (TidepoolInspection.TextLeaf (T.pack \"<opaque value>\")) Nothing) \
-         :: TidepoolInspection.DisplayPage ActorEffects)",
-        3,
     );
 }

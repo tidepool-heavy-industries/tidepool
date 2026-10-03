@@ -52,7 +52,6 @@ TEST_ONLY_SOURCES = {
     'tidepool-runtime': frozenset({
         'tidepool/runtime/src/session/fixtures/unrelated-home-value.hs',
         'tidepool/runtime/src/session/exact_recovery_acceptance_tests.rs',
-        'tidepool/runtime/src/session/fixtures/checked-failed-display-cell.hs',
         'tidepool/runtime/src/session/fixtures/checked-fold-outcome-template.hs',
         'tidepool/runtime/src/session/fixtures/checked-home-relay.hs',
         'tidepool/runtime/src/session/fixtures/checked-home-value.hs',
