@@ -15,7 +15,7 @@ module Tidepool.Inspection
     display,
     expand,
     DisplayHandle,
-    DisplayRoot,
+    DisplayRoot (..),
     ExpansionKey,
     expansions,
     WorkbenchDisplay (..),
