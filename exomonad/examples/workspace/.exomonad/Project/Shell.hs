@@ -122,8 +122,9 @@ splitSections tokens = go
 presentSelected ::
   (Member Commands effects, Member Jev effects, Member Reflect effects) =>
   Command.ObservationPresenter effects
-presentSelected _command _purpose focus observation retained = do
-  (_, prepared) <- Cmd.observeWith observation retained (prepare focus retained)
+presentSelected command _purpose focus observation retained = do
+  let introduceSession = maybe False (const True) command
+  (_, prepared) <- Cmd.observeWith observation retained (prepare introduceSession focus retained)
   pure prepared
 
 -- | Without a focus, output that fits 'Cmd.presentedByteBudget' is shown
@@ -134,12 +135,13 @@ presentSelected _command _purpose focus observation retained = do
 -- is still shown whole, without scoring.
 prepare ::
   (Member Commands effects, Member Jev effects, Member Reflect effects) =>
+  Bool ->
   Maybe Text ->
   Cmd.Job ->
   Cmd.PresentedObservation ->
   Eff effects Command.CommandToolResult
-prepare focus job observed = case Cmd.presentedOutput observed of
-  Left issue -> pure (reply 0 False (statusHeading observed <> "\nOutput unavailable: " <> Cmd.renderCommandError issue <> recovery observed))
+prepare introduceSession focus job observed = case Cmd.presentedOutput observed of
+  Left issue -> pure (reply 0 False (statusHeading introduceSession observed <> "\nOutput unavailable: " <> Cmd.renderCommandError issue <> recovery observed))
   Right output -> do
     let frozen =
           OutputSnapshot
@@ -148,14 +150,14 @@ prepare focus job observed = case Cmd.presentedOutput observed of
             (Cmd.outputAvailableEnd (Cmd.commandStderr output))
     case focus of
       Nothing -> do
-        (text, payloadLines, isComplete) <- prepareUnfocused observed frozen output
+        (text, payloadLines, isComplete) <- prepareUnfocused introduceSession observed frozen output
         pure (reply payloadLines isComplete text)
       Just focusText -> do
         loaded <- loadStreams frozen (Just output)
         case loaded of
-          Left issue -> pure (reply 0 False (statusHeading observed <> "\n" <> renderIssue issue <> recoveryFor frozen))
+          Left issue -> pure (reply 0 False (statusHeading introduceSession observed <> "\n" <> renderIssue issue <> recoveryFor frozen))
           Right (stdoutText, stderrText) -> do
-            let heading = statusHeading observed
+            let heading = statusHeading introduceSession observed
                 budget = Cmd.presentedByteBudget observed
                 bodyBudget = max 0 (budget - utf8Bytes (heading <> "\n"))
                 plain = stdoutText <> stderrText
@@ -173,8 +175,8 @@ prepare focus job observed = case Cmd.presentedOutput observed of
 
 -- The ordinary unfocused view only reads both complete streams when their
 -- frozen endpoints fit. Otherwise it requests bounded head and tail slices.
-prepareUnfocused :: Member Commands effects => Cmd.PresentedObservation -> OutputSnapshot -> CommandOutput -> Eff effects (Text, Int, Bool)
-prepareUnfocused observed frozen output =
+prepareUnfocused :: Member Commands effects => Bool -> Cmd.PresentedObservation -> OutputSnapshot -> CommandOutput -> Eff effects (Text, Int, Bool)
+prepareUnfocused introduceSession observed frozen output =
   case initialIssue of
     Just issue -> pure (prefix <> renderIssue issue <> recovery, 0, False)
     Nothing
@@ -199,7 +201,7 @@ prepareUnfocused observed frozen output =
                 False
               )
   where
-    prefix = statusHeading observed <> "\n"
+    prefix = statusHeading introduceSession observed <> "\n"
     budget = max 0 (Cmd.presentedByteBudget observed)
     recovery = "\n" <> recoveryFor frozen
     totalBytes = stdoutEndpoint frozen + stderrEndpoint frozen
@@ -304,9 +306,9 @@ labelStream :: Cmd.CommandStream -> Text -> Text
 labelStream _ text | T.null text = ""
 labelStream stream text = streamName stream <> ":\n" <> text <> "\n"
 
-statusHeading :: Cmd.PresentedObservation -> Text
-statusHeading observed =
-  "session_id: " <> jobText (Cmd.presentedJob observed) <> "\n" <> case Cmd.presentedStatus observed of
+statusHeading :: Bool -> Cmd.PresentedObservation -> Text
+statusHeading introduceSession observed =
+  (if introduceSession then "session_id: " <> jobText (Cmd.presentedJob observed) <> "\n" else "") <> case Cmd.presentedStatus observed of
     CommandQueued -> "terminal: no · queued (process not started)"
     CommandStarting -> "terminal: no · starting"
     CommandRunning -> "terminal: no · running"

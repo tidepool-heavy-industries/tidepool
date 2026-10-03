@@ -471,15 +471,15 @@ readRetained ReadOutput {session_id = key, stream = selected, offset = position,
           pure (result page text)
 
 defaultPresenter :: (Member Cmd.Commands effects) => ObservationPresenter effects
-defaultPresenter _ _ _ options retained = do
+defaultPresenter command _ _ options retained = do
   (_, shown) <- Cmd.observeWith options retained render
   pure shown
   where
     render observed = case Cmd.presentedOutput observed of
-      Left issue -> pure (observedResult retained (Cmd.presentedStatus observed) Nothing Nothing 0 False (statusText (Cmd.presentedStatus observed) <> "\nOutput unavailable: " <> Cmd.renderCommandError issue))
+      Left issue -> pure (observedResult retained (Cmd.presentedStatus observed) Nothing Nothing 0 False (heading observed <> "\nOutput unavailable: " <> Cmd.renderCommandError issue))
       Right output -> do
-        let heading = "session_id: " <> jobKey retained <> "\n" <> statusText (Cmd.presentedStatus observed)
-            payloadBudget = max 0 (Cmd.presentedByteBudget observed - utf8Bytes (heading <> "\n"))
+        let headingText = heading observed
+            payloadBudget = max 0 (Cmd.presentedByteBudget observed - utf8Bytes (headingText <> "\n"))
             (firstBody, initiallyOmitted) = displayWith payloadBudget output
             recovery = if initiallyOmitted then "\nRecover retained output with read_output(session_id=\"" <> jobKey retained <> "\", stream=\"Stdout\" or \"Stderr\", offset=<next_offset>)." else ""
             body = if initiallyOmitted then fst (displayWith (max 0 (payloadBudget - utf8Bytes recovery)) output) else firstBody
@@ -487,8 +487,11 @@ defaultPresenter _ _ _ options retained = do
             out = Cmd.commandStdout output
             err = Cmd.commandStderr output
             linesShown = lineCount (Cmd.outputText out) + lineCount (Cmd.outputText err)
-            text = heading <> "\n" <> body <> recovery
+            text = headingText <> "\n" <> body <> recovery
          in pure (observedResult retained (Cmd.presentedStatus observed) (Just (Cmd.outputAvailableEnd out)) (Just (Cmd.outputAvailableEnd err)) linesShown (not omitted) text)
+    heading observed =
+      (if maybe False (const True) command then "session_id: " <> jobKey retained <> "\n" else "")
+        <> statusText (Cmd.presentedStatus observed)
 
 observedResult :: Cmd.Job -> Cmd.CommandStatus -> Maybe Int -> Maybe Int -> Int -> Bool -> Text -> CommandToolResult
 observedResult job status outEnd errEnd linesShown isComplete text =
