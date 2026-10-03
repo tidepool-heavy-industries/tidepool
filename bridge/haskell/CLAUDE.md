@@ -60,20 +60,30 @@ default handshake.
 
 ## Exact-scope transport
 
-Execution-bearing requests use `TPEXACTSCOPE` version 6. The execution parcel
-contains `[sha256, absolute graph-file path]` descriptors followed by the same
-six-field exact original references. The request owner captures distinct graph
-files beside the manifest; their unchanged `TPEXECUTIONSOURCE` bytes and digests
-remain independent of the metadata envelope. The worker reads each graph once,
-verifies its digest and validates its exact native owner and compiler producer.
-Metadata retains its four MiB limit; aggregate graph bytes use the certified
-graph inventory's 64 MiB limit, with at most 4096 graphs. Either envelope's
-overflow rejects the request and never removes admitted execution authority.
+Exact-scope manifests use strict `TPEXACTSCOPE` version 8 with nine fields. The final
+fields contain an execution parcel or null and a compiler-purpose authorization
+or null. Interface rows have eight fields; their final field declares one
+closed artifact role: `["module", certificate path, certificate SHA, optional
+Core path, optional Core SHA]`, `["join"]`, or `["value"]`. Native product
+owners require module evidence. Roles never come from module-name spelling.
 
-This is a strict internal migration: version 5 execution-bearing scopes are
-rejected, and old workers reject version 6. Deploy the Rust frontend and Haskell
-worker together. Graph-free version 2/4 requests retain their format; candidate
-execution parcels keep their existing inline graph-byte format.
+Canonical module certificates bind the compiler producer, finalized interface
+and package bytes, original source digest, exact dependency seals, optional
+Core digest, and complete compiler home-unit inventory. The worker checks this
+proof against the selected interface closure before hydration. A Core companion
+is a separate compiler input; reading a type context does not load it or grant
+native execution or lexical imports. Its demanding recovery owner verifies and
+decodes the compiler-native payload without replaying source or Template Haskell.
+
+Execution parcels retain `[SHA, absolute graph-file path]` descriptors and exact
+original references. The request owner captures graph files beside the manifest;
+unchanged `TPEXECUTIONSOURCE` bytes remain independent of the metadata envelope.
+Metadata is limited to four MiB. Execution graphs retain their 64 MiB aggregate
+and 4096-graph bounds; advertised invalid or oversized parcels are rejected.
+
+This is a strict matched worker/frontend migration. Earlier exact-scope versions
+2, 4, 6 and 7 are rejected. Deploy both producers and consumers together and
+regenerate fixtures through their owning producers.
 
 ## Checked inspection inputs
 

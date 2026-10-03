@@ -4,6 +4,11 @@ module Tidepool.ExactScope
   ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..)
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..)
   , PlannedCellAdmission(..), PlannedCellSlot(..)
+  , ExactInterfaceEvidence(..), CanonicalInterfaceProof, CanonicalCoreArtifact
+  , scopeCanonicalInterfaces
+  , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
+  , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
+  , canonicalRequirements
   , readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation, extendSourceSelectedOriginals
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
@@ -58,6 +63,7 @@ data ExactScope = ExactScope
   , scopeProducerSha256 :: String
   , scopeSemanticSha256 :: String
   , scopeInterfaces :: [(ExactIfaceArtifact, FilePath, String)]
+  , scopeInterfaceEvidence :: Map.Map (String,String) ExactInterfaceEvidence
   , scopeLexical :: [((String, String), [(String, String)])]
   , scopeProducts :: [ExactProduct]
   , scopeExecutionGraphs :: [ExecutionSourceGraph]
@@ -72,6 +78,56 @@ data ExactScope = ExactScope
   -- they are never serialized as baseline lexical authority.
   , scopeSourceSelectedOwners :: Set.Set (String,String)
   } deriving (Eq, Show)
+
+-- Canonical proof belongs to its exact interface row. Core is a separate
+-- compiler-input capability, never an imported declaration or native grant.
+data CanonicalCoreArtifact = CanonicalCoreArtifact
+  { canonicalCorePath :: FilePath
+  , canonicalCoreSha256 :: String
+  } deriving (Eq, Show)
+
+data CanonicalInterfaceDescriptor = CanonicalInterfaceDescriptor
+  { descriptorCertificatePath :: FilePath
+  , descriptorCertificateSha256 :: String
+  , descriptorCore :: Maybe CanonicalCoreArtifact
+  } deriving (Eq, Show)
+
+data CanonicalInterfaceProof = CanonicalInterfaceProof
+  { canonicalCertificatePath :: FilePath
+  , canonicalCertificateSha256 :: String
+  , canonicalCoreArtifact :: Maybe CanonicalCoreArtifact
+  , canonicalHomeUnits :: Set.Set String
+  , canonicalSourceSha256 :: String
+  , canonicalRequirements :: Map.Map (String,String) String
+  } deriving (Eq, Show)
+
+data ExactInterfaceEvidence
+  = ModuleInterfaceEvidence CanonicalInterfaceProof
+  | LexicalJoinEvidence
+  | CheckedValueEvidence
+  deriving (Eq, Show)
+
+data ParsedInterfaceEvidence
+  = ParsedModuleEvidence CanonicalInterfaceDescriptor
+  | ParsedJoinEvidence
+  | ParsedValueEvidence
+
+scopeCanonicalInterfaces :: ExactScope -> Map.Map (String,String) CanonicalInterfaceProof
+scopeCanonicalInterfaces = Map.mapMaybe select . scopeInterfaceEvidence
+  where
+    select (ModuleInterfaceEvidence proof) = Just proof
+    select _ = Nothing
+
+data CanonicalModuleCertificate = CanonicalModuleCertificate
+  { certificateProducer :: String
+  , certificateHomeUnits :: [String]
+  , certificateOwner :: (String,String)
+  , certificateSource :: String
+  , certificateInterface :: String
+  , certificatePackages :: String
+  , certificateCore :: Maybe String
+  , certificateRequirements :: [((String,String),String)]
+  }
 
 data CheckedDisplayAdmission = CheckedDisplayAdmission
   { displayAdmissionDigest :: String
@@ -329,7 +385,7 @@ scopeValueInterfaces scope =
     ++ maybe [] displayValueInterfaces (scopeCheckedDisplay scope)
     ++ maybe [] id (scopeCheckedInspection scope)
 
--- Scope v6 separates the bounded metadata envelope from the independently
+-- Scope v8 separates the bounded metadata envelope from the independently
 -- bounded original graph bytes. The request hash seals each path and digest.
 readExactScope :: FilePath -> IO (Either String ExactScope)
 readExactScope path = do
@@ -338,7 +394,7 @@ readExactScope path = do
     captured <- try (do
       unless (isAbsolute path) (fail "exact scope path must be absolute")
       bytes <- readBoundedFile path (4 * 1024 * 1024)
-      (scope, descriptors) <- timeDetailPhase timing "exact_scope" "decode" $ case deserialiseFromBytes decodeScope (BL.fromStrict bytes) of
+      (scope, descriptors, interfaceEvidence) <- timeDetailPhase timing "exact_scope" "decode" $ case deserialiseFromBytes decodeScope (BL.fromStrict bytes) of
         Left failure -> fail (show failure)
         Right (remaining, result)
           | BL.null remaining -> pure result
@@ -356,13 +412,14 @@ readExactScope path = do
         graph <- either fail pure (decodeExecutionSourceGraph sha graphBytes)
         emitCount timing ("hash_bytes.execution_graph." ++ sha) (fromIntegral (BS.length graphBytes))
         pure graph
+      evidence <- validateInterfaceEvidence scope interfaceEvidence
       validateExecutionSources scope graphs
       let sha = digest bytes
       when timing $ do
         _ <- evaluate (length sha)
         emitCount timing ("hash_bytes.scope_metadata." ++ sha) (fromIntegral (BS.length bytes))
       pure scope { scopeManifestPath = path, scopeRequestSha256 = sha
-        , scopeExecutionGraphs = graphs }) :: IO (Either IOException ExactScope)
+        , scopeExecutionGraphs = graphs, scopeInterfaceEvidence = evidence }) :: IO (Either IOException ExactScope)
     pure (either (Left . show) Right captured)
 
 -- A bounded read also closes the stat/read growth race without allocating an
@@ -389,6 +446,122 @@ validateExecutionSources scope graphs = do
     unless (any matchingProduct (scopeProducts scope) && any matchingGraph graphs)
       (fail "original execution reference leaves its admitted native owner")
 
+-- Validate canonical certificates before any interface hydration. The complete
+-- home-unit census is producer evidence, not a classification inferred from the
+-- retained subset. Core bytes are loaded only by their demanding recovery owner.
+validateInterfaceEvidence
+  :: ExactScope -> [((String,String),ParsedInterfaceEvidence)]
+  -> IO (Map.Map (String,String) ExactInterfaceEvidence)
+validateInterfaceEvidence scope offered = do
+  proofs <- validateCanonicalInterfaces scope
+    [(key,descriptor) | (key,ParsedModuleEvidence descriptor) <- offered]
+  let evidence = Map.fromList [(key,case value of
+        ParsedModuleEvidence _ -> ModuleInterfaceEvidence (proofs Map.! key)
+        ParsedJoinEvidence -> LexicalJoinEvidence
+        ParsedValueEvidence -> CheckedValueEvidence) | (key,value) <- offered]
+  unless (Map.keysSet evidence == Set.fromList
+      [(exactUnit iface,exactModule iface) | (iface,_,_) <- scopeInterfaces scope]
+      && all (\product' -> Map.member (originalUnit product',originalModule product') proofs)
+        (scopeProducts scope))
+    (fail "exact interface evidence is incomplete or lacks native module proof")
+  pure evidence
+
+validateCanonicalInterfaces
+  :: ExactScope -> [((String,String),CanonicalInterfaceDescriptor)]
+  -> IO (Map.Map (String,String) CanonicalInterfaceProof)
+validateCanonicalInterfaces scope descriptors = do
+  let interfaces = Map.fromList
+        [((exactUnit iface,exactModule iface),(iface,packages,packageSha))
+        | (iface,packages,packageSha) <- scopeInterfaces scope]
+  proofs <- forM descriptors $ \(key,descriptor) -> do
+    (iface,packages,packageSha) <- maybe (fail "canonical proof has no exact interface") pure
+      (Map.lookup key interfaces)
+    bytes <- readBoundedFile (descriptorCertificatePath descriptor) (4 * 1024 * 1024)
+    unless (digest bytes == descriptorCertificateSha256 descriptor)
+      (fail "canonical module certificate changed")
+    certificate <- case deserialiseFromBytes decodeCanonicalModuleCertificate (BL.fromStrict bytes) of
+      Left failure -> fail (show failure)
+      Right (remaining,value)
+        | BL.null remaining -> pure value
+        | otherwise -> fail "canonical module certificate has trailing bytes"
+    unless (toStrictByteString (encodeCanonicalModuleCertificate certificate) == bytes)
+      (fail "noncanonical module certificate encoding")
+    unless (certificateProducer certificate == scopeProducerSha256 scope
+        && certificateOwner certificate == key
+        && certificateInterface certificate == exactSha256 iface
+        && certificatePackages certificate == packageSha
+        && certificateCore certificate == (canonicalCoreSha256 <$> descriptorCore descriptor))
+      (fail "canonical module certificate differs from exact owner or payload")
+    let requirements = Map.fromList (certificateRequirements certificate)
+    let matchesRequirement (required,seal) = case Map.lookup required interfaces of
+          Just (value,_,_) -> exactSha256 value == seal
+          Nothing -> False
+    unless (Map.keysSet requirements == Set.fromList (exactRequirements iface)
+        && all matchesRequirement (Map.toAscList requirements))
+      (fail "canonical module requirements differ from selected exact interfaces")
+    interfaceBytes <- readBoundedFile (exactPath iface) (32 * 1024 * 1024)
+    packageBytes <- readBoundedFile packages (4 * 1024 * 1024)
+    unless (digest interfaceBytes == certificateInterface certificate
+        && digest packageBytes == certificatePackages certificate)
+      (fail "canonical module interface or package imports changed")
+    pure (key, CanonicalInterfaceProof
+      { canonicalCertificatePath = descriptorCertificatePath descriptor
+      , canonicalCertificateSha256 = descriptorCertificateSha256 descriptor
+      , canonicalCoreArtifact = descriptorCore descriptor
+      , canonicalHomeUnits = Set.fromList (certificateHomeUnits certificate)
+      , canonicalSourceSha256 = certificateSource certificate
+      , canonicalRequirements = requirements
+      })
+  pure (Map.fromList proofs)
+
+decodeCanonicalModuleCertificate :: Decoder s CanonicalModuleCertificate
+decodeCanonicalModuleCertificate = do
+  array 12
+  magic <- string
+  version <- decodeWord
+  profile <- string
+  unless (magic == "TPFINALMODULE" && version == 1
+      && profile == "tidepool-ghc-finalized-module-v1")
+    (fail "unsupported canonical module certificate")
+  producer <- canonicalDigest
+  homes <- bounded 128 nonempty
+  unless (not (null homes) && and (zipWith (<) homes (drop 1 homes)))
+    (fail "invalid complete home unit inventory")
+  key@(unit,_) <- (,) <$> nonempty <*> nonempty
+  source <- canonicalDigest
+  interface <- canonicalDigest
+  packages <- canonicalDigest
+  token <- peekTokenType
+  core <- if token == TypeNull then decodeNull >> pure Nothing else Just <$> canonicalDigest
+  requirements <- bounded 128 (array 3 >> ((,) <$> ((,) <$> nonempty <*> nonempty) <*> canonicalDigest))
+  unless (and (zipWith (<) (map fst requirements) (drop 1 (map fst requirements)))
+      && unit `elem` homes && all ((`elem` homes) . fst . fst) requirements
+      && key `notElem` map fst requirements)
+    (fail "invalid canonical module requirement inventory")
+  pure (CanonicalModuleCertificate producer homes key source interface packages core requirements)
+
+encodeCanonicalModuleCertificate :: CanonicalModuleCertificate -> E.Encoding
+encodeCanonicalModuleCertificate certificate = E.encodeListLen 12
+  <> text "TPFINALMODULE" <> E.encodeWord 1 <> text "tidepool-ghc-finalized-module-v1"
+  <> text (certificateProducer certificate)
+  <> list text (certificateHomeUnits certificate)
+  <> text (fst (certificateOwner certificate)) <> text (snd (certificateOwner certificate))
+  <> text (certificateSource certificate) <> text (certificateInterface certificate)
+  <> text (certificatePackages certificate)
+  <> maybe E.encodeNull text (certificateCore certificate)
+  <> list (\((unit,name),seal) -> E.encodeListLen 3 <> text unit <> text name <> text seal)
+      (certificateRequirements certificate)
+  where
+    text = E.encodeString . T.pack
+    list encode values = E.encodeListLen (fromIntegral (length values)) <> foldMap encode values
+
+canonicalDigest :: Decoder s String
+canonicalDigest = do
+  value <- digestField
+  unless (value /= replicate 64 '0' && all (`elem` ("0123456789abcdef" :: String)) value)
+    (fail "invalid canonical digest")
+  pure value
+
 -- Recheck the entire producer-owned closure in the consuming transaction;
 -- no source file is a substitute for an admitted original interface.
 revalidateExactScope :: HscEnv -> ExactScope -> IO (Either String ())
@@ -398,6 +571,16 @@ revalidateExactScope env scope = do
     result <- try (do
       bytes <- readBoundedFile (scopeManifestPath scope) (4 * 1024 * 1024)
       unless (digest bytes == scopeRequestSha256 scope) (fail "exact scope request changed")
+      evidence <- validateInterfaceEvidence scope
+        [(key,case value of
+          ModuleInterfaceEvidence proof -> ParsedModuleEvidence
+            (CanonicalInterfaceDescriptor (canonicalCertificatePath proof)
+              (canonicalCertificateSha256 proof) (canonicalCoreArtifact proof))
+          LexicalJoinEvidence -> ParsedJoinEvidence
+          CheckedValueEvidence -> ParsedValueEvidence)
+        | (key,value) <- Map.toAscList (scopeInterfaceEvidence scope)]
+      unless (evidence == scopeInterfaceEvidence scope)
+        (fail "exact interface evidence changed")
       revalidatePackageImports env (scopeInterfaces scope) >>= either fail pure
       emitCount timing ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 scope) (fromIntegral (BS.length bytes))
       mapM_ (checkProduct timing) (scopeProducts scope)
@@ -484,19 +667,17 @@ reserveCompilationDirectory parent transaction = attempt (0 :: Int)
             Left failure | isAlreadyExistsError failure -> attempt (ordinal + 1)
             Left failure -> throwIO failure
 
-decodeScope :: Decoder s (ExactScope, [(String, FilePath)])
+decodeScope :: Decoder s (ExactScope, [(String, FilePath)], [((String,String),ParsedInterfaceEvidence)])
 decodeScope = do
   count <- decodeListLen
   magic <- string
   version <- string
-  unless (magic == "TPEXACTSCOPE"
-      && ((version == "2" && count == 7) || (version == "4" && count == 8)
-        || (version == "6" && count == 9)))
+  unless (magic == "TPEXACTSCOPE" && version == "8" && count == 9)
     (fail "unsupported exact scope")
   semantic <- digestField
   producer <- digestField
-  interfaces <- bounded 4096 $ do
-    array 7
+  interfaceRows <- bounded 4096 $ do
+    array 8
     unit <- nonempty
     name <- nonempty
     path <- absolute
@@ -505,7 +686,27 @@ decodeScope = do
     packages <- absolute
     packageSha <- digestField
     unique "exact requirements" requirements
-    pure (ExactIfaceArtifact unit name path sha requirements, packages, packageSha)
+    evidenceCount <- decodeListLen
+    evidenceRole <- string
+    evidence <- case (evidenceRole,evidenceCount) of
+      ("module",5) -> do
+        certificatePath <- absolute
+        certificateSha <- canonicalDigest
+        coreToken <- peekTokenType
+        core <- if coreToken == TypeNull then do
+          decodeNull
+          decodeNull
+          pure Nothing
+          else Just <$> (CanonicalCoreArtifact <$> absolute <*> canonicalDigest)
+        pure (ParsedModuleEvidence (CanonicalInterfaceDescriptor certificatePath certificateSha core))
+      ("join",1) -> pure ParsedJoinEvidence
+      ("value",1) -> pure ParsedValueEvidence
+      _ -> fail "unsupported exact interface evidence role"
+    pure ((ExactIfaceArtifact unit name path sha requirements, packages, packageSha),evidence)
+  let interfaces = map fst interfaceRows
+      interfaceEvidence = [((exactUnit iface,exactModule iface),evidence)
+        | ((iface,_,_),evidence) <- interfaceRows]
+      canonicalOwners = [key | (key,ParsedModuleEvidence _) <- interfaceEvidence]
   lexical <- bounded 4096 $ do
     array 2
     node <- owner
@@ -537,20 +738,22 @@ decodeScope = do
   unless (all (`elem` keys) selected
       && all (`elem` selected) (concatMap snd lexical)
       && all (`elem` keys) productKeys
+      && all (`elem` canonicalOwners) productKeys
       && all (\(iface, _, _) -> all (`elem` keys) (exactRequirements iface)) interfaces
       && all (\originalProduct -> any (\(iface, _, _) ->
           (exactUnit iface, exactModule iface) == (originalUnit originalProduct, originalModule originalProduct)
           && exactSha256 iface == originalIfaceSha256 originalProduct) interfaces) products)
     (fail "incomplete or conflicting exact owner closure")
-  (descriptors, executionOwners) <- if version == "6" then do
+  executionToken <- peekTokenType
+  (descriptors, executionOwners) <- if executionToken /= TypeNull then do
     array 2
     graphs <- bounded 4096 (array 2 >> (,) <$> digestField <*> absolute)
     references <- decodeExecutionSourceReferences
     unique "original execution graphs" (map fst graphs)
     pure (graphs, references)
-    else pure ([], [])
-  nullPurpose <- if version == "6" then (== TypeNull) <$> peekTokenType else pure False
-  (requestTypes, (checked, checkedItem, checkedDisplay, inspectionValues, includes)) <- if version == "2" || nullPurpose
+    else decodeNull >> pure ([], [])
+  nullPurpose <- (== TypeNull) <$> peekTokenType
+  (requestTypes, (checked, checkedItem, checkedDisplay, inspectionValues, includes)) <- if nullPurpose
     then do
       when nullPurpose decodeNull
       pure (Nothing, (Nothing,Nothing,Nothing,Nothing,Nothing))
@@ -572,8 +775,8 @@ decodeScope = do
     admission <- maybe (pure (Nothing,Nothing,Nothing,Nothing,Nothing))
       (uncurry decodePurpose) purpose
     pure (requestTypes, admission)
-  pure (ExactScope "" "" producer semantic interfaces lexical products [] executionOwners
-    checked checkedItem checkedDisplay inspectionValues includes requestTypes Set.empty, descriptors)
+  pure (ExactScope "" "" producer semantic interfaces Map.empty lexical products [] executionOwners
+    checked checkedItem checkedDisplay inspectionValues includes requestTypes Set.empty, descriptors, interfaceEvidence)
   where
     decodePurpose authCount purpose = case purpose of
       "inspection1" -> do
