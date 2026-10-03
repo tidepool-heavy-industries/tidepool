@@ -59,10 +59,10 @@ import Numeric (showHex)
 import System.Directory
   ( copyFile, createDirectory, createDirectoryIfMissing, getTemporaryDirectory, removeDirectoryRecursive
   , removeFile, renameFile, listDirectory, doesFileExist, getPermissions, setPermissions, executable
-  , getModificationTime, setModificationTime )
+  , getModificationTime, setModificationTime, withCurrentDirectory, getCurrentDirectory )
 import System.Environment (getArgs, getExecutablePath, setEnv, lookupEnv, unsetEnv)
 import System.Exit (ExitCode(..))
-import System.FilePath ((</>), takeDirectory)
+import System.FilePath ((</>), takeDirectory, normalise)
 import System.IO (hClose, hFlush, hPutStrLn, hSeek, hSetFileSize, withBinaryFile, IOMode(WriteMode), SeekMode(AbsoluteSeek), openTempFile, stderr)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Process (readProcessWithExitCode)
@@ -204,6 +204,7 @@ main = getArgs >>= \case
   ["--home-instance-edges"] -> selectedHomeInstanceEdges
   ["--fresh", work] -> reuseFresh work >>= requireReused "fresh worker"
   ["--mixed-fresh", work, count] -> reuseFresh work >>= requireMixed (read count)
+  ["--resolution-paths"] -> resolutionPaths
   ["--mixed"] -> do
     setEnv "TIDEPOOL_TIMING" "1"
     forM_ [1, 10, 100] (mixedGraph False)
@@ -3163,6 +3164,68 @@ captureDiagnostics action = do
       hSeek output AbsoluteSeek 0
       diagnostics <- BSC.unpack <$> BS.hGetContents output
       pure (result, diagnostics)
+
+resolutionPaths :: IO ()
+resolutionPaths = do
+  original <- getCurrentDirectory
+  let fixtureRoot = original </> "test-source-boot" </> "fixtures"
+  withScratch $ \work -> withCurrentDirectory work $ do
+    forM_ ["InstanceOwner", "InstanceRelay", "InstanceConsumer"] $ \name ->
+      copyFile (fixtureRoot </> name ++ ".hs") (work </> name ++ ".hs")
+    createDirectory (work </> "padding")
+    createDirectory (work </> "later")
+    cwd <- getCurrentDirectory
+    let parentRoot = "padding" </> ".."
+        roots = [parentRoot, ".", work, "later", parentRoot]
+        target = work </> "InstanceConsumer.hs"
+        extensions = [".hs", ".lhs", ".hsig", ".lhsig"]
+        expectedNegative =
+          [normalise (root </> "Prelude" ++ extension)
+          | root <- [cwd, cwd </> parentRoot, cwd </> "later"], extension <- extensions]
+        resolution name evidence = case
+          [row | row <- dependencyResolutions evidence
+            , dependencyResolutionQualifier row == DependencyUnqualified
+            , dependencyResolutionModule row == name, not (dependencyResolutionBoot row)] of
+          [row] -> pure row
+          _ -> fail ("resolution path fixture lacks one import: " ++ name)
+        resolutionBytes evidence = renderDependencyEvidence (evidence
+          {dependencySources = [], dependencyModules = [], dependencyPackages = []})
+        verify evidence = do
+          package <- resolution "Prelude" evidence
+          unless (isNothing (dependencyResolutionSelected package)
+              && dependencyResolutionCandidates package == expectedNegative) $
+            fail "root aliases changed ordered negative package candidates or collapsed parent segments"
+          home <- resolution "InstanceRelay" evidence
+          let chosen = normalise (cwd </> "InstanceRelay.hs")
+          unless (dependencyResolutionSelected home == Just chosen
+              && dependencyResolutionCandidates home == [chosen]) $
+            fail "selected source cutoff retained a lower root or another extension"
+    cold <- runPipelineSelected (PreparedProducts Nothing) target roots
+    verify (pprDependencies cold)
+    writeManifestFor ["InstanceOwner"] work cold
+    withResidentPipelineSelected roots $ \compile -> do
+      let reuse = compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
+            Nothing target [] Nothing
+      warm <- reuse
+      verify (pprDependencies warm)
+      unless (resolutionBytes (pprDependencies warm) == resolutionBytes (pprDependencies cold)) $
+        fail "warm reuse changed serialized ordered resolution evidence"
+      unless (Set.fromList (map candidateModule (pprAcceptedCandidates warm))
+          == Set.fromList ["InstanceOwner"]) $
+        fail "root alias fixture failed to admit its unchanged candidate owners"
+      let source = work </> "Prelude.hs"
+      (do writeFile source (unlines ["{-# LANGUAGE PackageImports #-}"
+            , "module Prelude (module PackagePrelude) where"
+            , "import \"base\" Prelude as PackagePrelude"])
+          reuse >>= requireRefused "new home selection with root aliases")
+        `finally` removeFile source
+      restored <- reuse
+      verify (pprDependencies restored)
+      unless (resolutionBytes (pprDependencies restored) == resolutionBytes (pprDependencies cold)) $
+        fail "restored selection changed serialized ordered resolution evidence"
+      unless (length (pprAcceptedCandidates restored) == 1) $
+        fail "restored negative root evidence did not recover unchanged owners"
+    putStrLn "resolution-paths scenarios=4: cold/warm ordered aliases and parent roots, new home shadow refusal, restored selection passed"
 
 -- The fixed two-module SOURCE SCC is surrounded by ordinary candidate
 -- products. A separate case makes Independent1 a real ordinary+boot input;
