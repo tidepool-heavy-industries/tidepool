@@ -64,7 +64,7 @@ pub struct ProgramProvenance {
     sites: BTreeMap<u64, YieldSite>,
     // Authentication follows the original compiler bundle through owned roots.
     // Public metadata construction alone cannot authorize a host input mount.
-    authenticated_inputs: std::collections::BTreeSet<u64>,
+    authenticated_inputs: BTreeMap<u64, tidepool_toolchain::artifact_inventory::ArtifactView>,
 }
 
 pub type ProgramProvenanceError = YieldSiteCollision;
@@ -94,11 +94,27 @@ impl ProgramProvenance {
     }
 
     fn merge(&mut self, other: &Self) -> Result<(), ProgramProvenanceError> {
+        for (site, interfaces) in &other.authenticated_inputs {
+            if self
+                .authenticated_inputs
+                .get(site)
+                .is_some_and(|previous| previous != interfaces)
+            {
+                return Err(YieldSiteCollision {
+                    site: *site,
+                    first: Box::new(self.sites[site].clone()),
+                    second: Box::new(other.sites[site].clone()),
+                });
+            }
+        }
         for site in other.sites.values() {
             self.extend(std::slice::from_ref(site))?;
         }
-        self.authenticated_inputs
-            .extend(other.authenticated_inputs.iter().copied());
+        for (site, interfaces) in &other.authenticated_inputs {
+            self.authenticated_inputs
+                .entry(*site)
+                .or_insert_with(|| interfaces.clone());
+        }
         Ok(())
     }
 
@@ -2432,6 +2448,7 @@ where
             scope,
             input_commitment,
             input.input_type_witness.clone(),
+            input.type_evidence.clone(),
             retained_source,
             specification.specification_digest(),
             authority_digest,
@@ -2521,6 +2538,7 @@ where
             specification_digest,
             authority_digest,
             include_paths,
+            None,
         )
     }
 
@@ -2541,6 +2559,7 @@ where
             specification_digest,
             authority_digest,
             include_paths,
+            None,
         )
     }
 
@@ -3362,7 +3381,7 @@ where
             return Err(invalid());
         }
         let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
-        if !provenance.authenticated_inputs.contains(&site) {
+        if !provenance.authenticated_inputs.contains_key(&site) {
             return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
         }
         let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
@@ -3389,7 +3408,19 @@ where
             )),
             None => None,
         };
-        let type_evidence = self.request_site_type_evidence(site).ok_or_else(invalid)?;
+        let signatures = metadata
+            .request_type_signatures
+            .clone()
+            .ok_or_else(invalid)?;
+        let interfaces = provenance
+            .authenticated_inputs
+            .get(&site)
+            .ok_or_else(invalid)?;
+        let type_evidence = self
+            .request_site_type_evidence(site)
+            .ok_or_else(invalid)?
+            .authenticate_request_types(signatures, interfaces)
+            .map_err(SessionError::Compile)?;
         let custody = self
             .live_payload_handle_owned_by(hole.cont_id(), realm)?
             .ok_or_else(invalid)?;
@@ -4895,16 +4926,82 @@ where
             false
         };
         if authenticated {
-            provenance.authenticated_inputs.extend(
+            let certification = code
+                .certification
+                .as_ref()
+                .expect("authenticated compiler bundle");
+            let descriptors = certification.artifact_view.descriptors();
+            let home_units = descriptors
+                .iter()
+                .map(|descriptor| descriptor.owner.unit.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            let owners = descriptors
+                .iter()
+                .map(|descriptor| (&descriptor.owner, descriptor.id))
+                .collect::<BTreeMap<_, _>>();
+            for site in provenance.sites.values().filter(|site| {
+                site.input_type_witnesses.len() == site.inputs.len()
+                    && site.input_type_witnesses.iter().any(Option::is_some)
+            }) {
+                let Some(signatures) = &site.request_type_signatures else {
+                    continue;
+                };
+                let mut roots = std::collections::BTreeSet::new();
+                for name in std::iter::once(signatures.reply())
+                    .chain(signatures.progress())
+                    .flat_map(|signature| signature.names())
+                {
+                    if home_units.contains(name.unit()) {
+                        let owner = tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                            unit: name.unit().to_owned(),
+                            module: name.module().to_owned(),
+                        };
+                        let id = owners.get(&owner).ok_or_else(|| SessionError::Compile(crate::CompileError::ExtractFailed(
+                            format!("request native type owner {}:{} is outside its sealed interface closure", name.unit(), name.module()),
+                        )))?;
+                        roots.insert(*id);
+                    }
+                }
+                if let Some(witness) = site.input_type_witnesses.first().and_then(Option::as_ref) {
+                    for (unit, module, seal) in witness.interface_seals() {
+                        let owner = tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                            unit: unit.to_owned(),
+                            module: module.to_owned(),
+                        };
+                        if let Some(id) = owners.get(&owner) {
+                            let descriptor = descriptors
+                                .iter()
+                                .find(|descriptor| descriptor.id == *id)
+                                .expect("selected owner descriptor");
+                            let actual = descriptor
+                                .interface_sha256
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>();
+                            if actual != seal {
+                                return Err(SessionError::Compile(
+                                    crate::CompileError::ExtractFailed(format!(
+                                        "request input interface seal differs for {unit}:{module}"
+                                    )),
+                                )
+                                .into());
+                            }
+                            roots.insert(*id);
+                        } else if home_units.contains(unit) {
+                            return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
+                                format!("request input owner {unit}:{module} is outside its sealed interface closure"),
+                            )).into());
+                        }
+                    }
+                }
+                let interfaces = certification
+                    .artifact_view
+                    .select_roots(roots.into_iter().collect())
+                    .map_err(SessionError::Compile)?;
                 provenance
-                    .sites
-                    .values()
-                    .filter(|site| {
-                        site.input_type_witnesses.len() == site.inputs.len()
-                            && site.input_type_witnesses.iter().any(Option::is_some)
-                    })
-                    .map(|site| site.site),
-            );
+                    .authenticated_inputs
+                    .insert(site.site, interfaces);
+            }
         }
         Ok(Arc::new(provenance))
     }
@@ -7085,7 +7182,7 @@ mod authored_publication_tests {
         let injected = view.injected_module_names();
         let checked = check_cell_admitted(
             CellCheckRequest {
-                exact_context: view.exact_declaration_context().cloned(),
+                exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
                 cell_text: source,
                 template: &template,
@@ -7120,7 +7217,7 @@ mod authored_publication_tests {
             bound, compiled, ..
         } = run_checked_item(
             TurnRequest {
-                exact_context: view.exact_declaration_context().cloned(),
+                exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
                 turn_text: first.source(),
                 templates: &templates,
@@ -8461,7 +8558,7 @@ mod authored_publication_tests {
         let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         let checked = check_cell_admitted(
             CellCheckRequest {
-                exact_context: view.exact_declaration_context().cloned(),
+                exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
                 cell_text: source,
                 template: &template,
@@ -8485,7 +8582,7 @@ mod authored_publication_tests {
             bound, compiled, ..
         } = run_checked_item(
             TurnRequest {
-                exact_context: view.exact_declaration_context().cloned(),
+                exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
                 turn_text: &checked.items[0].source,
                 templates: &templates,

@@ -1788,6 +1788,7 @@ impl PersistentSession {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1801,6 +1802,7 @@ impl PersistentSession {
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
+        request_evidence: Option<Arc<super::SiteTypeEvidence>>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
         if plan.items().len() != 1
@@ -1826,6 +1828,7 @@ impl PersistentSession {
             Some(plan),
             None,
             Some(NativeCellPurpose::Setup),
+            request_evidence,
         )
     }
 
@@ -1834,6 +1837,7 @@ impl PersistentSession {
         scope: ScopeId,
         input_commitment: [u8; 32],
         input_type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+        request_evidence: Arc<super::SiteTypeEvidence>,
         specification: Arc<dyn Any + Send + Sync>,
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
@@ -1852,6 +1856,7 @@ impl PersistentSession {
                 input_commitment,
                 input_type_witness,
             }),
+            Some(request_evidence),
         )
     }
 
@@ -1879,12 +1884,19 @@ impl PersistentSession {
         plan: Option<Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>>,
         private_execution: Option<Arc<PrivateExecutionAdmission>>,
         native_purpose: Option<NativeCellPurpose>,
+        request_evidence: Option<Arc<super::SiteTypeEvidence>>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.reap_admission_leases();
         let view = self
             .compile_view_in(scope)
             .ok_or(SessionError::DeadScope(scope))?
             .with_scoped_injection();
+        let view = match &request_evidence {
+            Some(evidence) => view
+                .with_request_type_evidence(evidence)
+                .map_err(SessionError::Compile)?,
+            None => view,
+        };
         if let Some(plan) = &plan {
             let injected = view
                 .injected_values()
@@ -2178,6 +2190,9 @@ impl PersistentSession {
         if let Some(purpose) = &native_purpose {
             purpose.frame_authorization(&mut frame);
         }
+        if let Some(evidence) = &request_evidence {
+            frame(&evidence.commitment());
+        }
         let digest = *digest.finalize().as_bytes();
         let planned = planned.map(|mut planned| {
             Arc::get_mut(&mut planned)
@@ -2389,6 +2404,7 @@ impl PersistentSession {
         specification_digest: [u8; 32],
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
+        request_evidence: Option<Arc<super::SiteTypeEvidence>>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.compile_view_for_execution(&execution)?;
         use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
@@ -2407,6 +2423,7 @@ impl PersistentSession {
             Some(plan),
             Some(execution),
             None,
+            request_evidence,
         )
     }
 

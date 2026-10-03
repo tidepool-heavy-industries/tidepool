@@ -2107,7 +2107,6 @@ struct OutstandingInteractive {
     type_evidence: Arc<tidepool_runtime::session::SiteTypeEvidence>,
     input_binding: tidepool_repr::SessionVarId,
     input_scope: tidepool_codegen::scope::ScopeId,
-    type_modules: Vec<String>,
 }
 
 impl OutstandingInteractive {
@@ -2122,7 +2121,6 @@ impl OutstandingInteractive {
             type_evidence: request.type_evidence.clone(),
             input_binding,
             input_scope,
-            type_modules: request.type_modules(),
         }
     }
 }
@@ -4623,7 +4621,7 @@ where
             return Some(self.environment.runner.workbench(
                 outstanding.response.clone(),
                 outstanding.request,
-                outstanding.type_modules.clone(),
+                outstanding.type_evidence.clone(),
             ));
         }
         match &self.standing {
@@ -7604,7 +7602,7 @@ where
             .workbench(
                 request.response.clone(),
                 request.request,
-                request.type_modules(),
+                request.type_evidence.clone(),
             )
             .with_compilation_authority(authority);
         let (input_preview, reply_preview, input_binding) = workbench

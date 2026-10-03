@@ -721,7 +721,9 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
         InspectionQuery::TypeOf("(undefined :: HiddenResult)".into()),
     ];
     let inspected = run_inspections(InspectionRequest {
-        exact_context: Some(context.clone()),
+        exact_context: Some(Arc::new(
+            tidepool_toolchain::declaration_context::ExactCompileContext::new(context.clone()),
+        )),
         preamble: effects.preamble(),
         imports: &imports,
         include: &include,
@@ -736,7 +738,9 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
     assert!(matches!(&inspected[2], InspectionResult::Rejected { .. }));
     let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
     let TurnResult::Expr { compiled, .. } = run_turn(TurnRequest {
-        exact_context: Some(context),
+        exact_context: Some(Arc::new(
+            tidepool_toolchain::declaration_context::ExactCompileContext::new(context),
+        )),
         session_id: Some(view.session()),
         turn_text: "recoveredAnswer (41 :: Int)",
         templates: &templates,

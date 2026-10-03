@@ -33,7 +33,6 @@ use tidepool_toolchain::certified_products::{PendingCertifiedGroup, PendingImpor
 use tidepool_toolchain::checked_cell::{
     CheckedCellSpecification, ExactCheckedCell, ExactCheckedItem, ExactCompiledItem,
 };
-use tidepool_toolchain::declaration_join::ExactDeclarationContext;
 use tidepool_toolchain::extract_module_name;
 use tidepool_toolchain::recovery_artifacts::CertifiedRecoveryProduct;
 
@@ -452,7 +451,7 @@ impl From<std::io::Error> for CellCheckFailure {
 /// Runtime-owned inputs to the compiler worker's whole-cell request.
 pub struct CellCheckRequest<'a> {
     /// Protected original products and selected lexical graph for this check.
-    pub exact_context: Option<Arc<ExactDeclarationContext>>,
+    pub exact_context: Option<Arc<tidepool_toolchain::declaration_context::ExactCompileContext>>,
     pub cell_text: &'a str,
     pub template: &'a str,
     pub include: &'a [&'a Path],
@@ -566,7 +565,7 @@ pub const DECL_TEMPLATE_SOURCE: &str = "{-# LANGUAGE GADTs, OverloadedStrings, T
 /// for the whole block (from [`classify_block`]). GHC-sourced either way.
 pub struct TurnRequest<'a> {
     /// Protected original products and selected lexical graph for this turn.
-    pub exact_context: Option<Arc<ExactDeclarationContext>>,
+    pub exact_context: Option<Arc<tidepool_toolchain::declaration_context::ExactCompileContext>>,
     /// The raw turn text (`x <- e` / `let x = e` / a bare expression / a
     /// declaration), written to `turn.txt` and spliced by the extract into
     /// whichever template the verdict selects.
@@ -1653,8 +1652,9 @@ pub struct CompiledTurn {
     pub certification: Option<TurnCertification>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct TurnCertification {
+    pub(crate) artifact_view: tidepool_toolchain::artifact_inventory::ArtifactView,
     pub(crate) compile_input_identity:
         Option<Arc<tidepool_toolchain::artifacts::SealedCompileInputIdentity>>,
     pub groups: Arc<[PendingCertifiedGroup]>,
@@ -1669,6 +1669,25 @@ pub struct TurnCertification {
         Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledActivationInput>>,
     pub(crate) checked_prefix: Option<Arc<super::RuntimeCheckedPrefix>>,
     pub(crate) checked_display: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>>,
+}
+
+impl Default for TurnCertification {
+    fn default() -> Self {
+        Self {
+            artifact_view: tidepool_toolchain::artifact_inventory::ArtifactInventory::default()
+                .empty_view(),
+            compile_input_identity: None,
+            groups: Arc::from([]),
+            target_owners: Vec::new(),
+            package_interfaces: Default::default(),
+            recovery_products: Vec::new(),
+            checked_item: None,
+            checked_execution: None,
+            checked_activation_input: None,
+            checked_prefix: None,
+            checked_display: None,
+        }
+    }
 }
 
 impl TurnCertification {
@@ -2364,7 +2383,7 @@ pub fn check_activation_input(
     }
     check_cell_admitted(
         CellCheckRequest {
-            exact_context: view.exact_declaration_context().cloned(),
+            exact_context: view.exact_compile_context(),
             cell_text: &owner.specification.cell_source,
             template: &owner.specification.template_source,
             include: &include,
@@ -2406,7 +2425,7 @@ pub fn compile_activation_input(
         .collect::<Vec<_>>();
     let result = run_turn_with_admission(
         TurnRequest {
-            exact_context: view.exact_declaration_context().cloned(),
+            exact_context: view.exact_compile_context(),
             session_id: Some(view.session()),
             turn_text: admission.item().source(),
             templates: &owner.templates,
@@ -2507,7 +2526,7 @@ fn validate_cell_admitted_request(
         || req.session_root != view.session_root()
         || req.compile_generation != view.next_value_generation().0
         || req.inject_modules != view.injected_module_names()
-        || req.exact_context.as_deref() != view.exact_declaration_context().map(Arc::as_ref)
+        || req.exact_context != view.exact_compile_context()
     {
         return Err(CompileError::ExtractFailed(
             "checked-cell request differs from the protected runtime admission".into(),
@@ -2867,6 +2886,7 @@ fn decode_cell_program_turn(
     let products = products.ok_or_else(missing)?;
     let prepared = prepared.ok_or_else(missing)?;
     let certification = TurnCertification {
+        artifact_view: products.artifact_view.clone(),
         compile_input_identity: None,
         groups: products.certified_groups.clone(),
         target_owners: products.pending_imports.clone(),
@@ -2949,7 +2969,7 @@ pub fn run_checked_item(
         || verdict.binders != item.binders()
         || req.session_id != Some(view.session())
         || req.session_root != view.session_root()
-        || req.exact_context.as_deref() != view.exact_declaration_context().map(Arc::as_ref)
+        || req.exact_context != view.exact_compile_context()
         || req.inject_modules != snapshot.compiler_prefix().injected_modules()
         || req.gen != item_admission.generation().0
         || req.target.is_some()
@@ -3321,7 +3341,7 @@ pub(super) fn select_module_candidate_offer(
     producer: &[u8],
     include: &[PathBuf],
     scratch: &Path,
-    context: Option<Arc<ExactDeclarationContext>>,
+    context: Option<Arc<tidepool_toolchain::declaration_context::ExactCompileContext>>,
 ) -> Result<ModuleCandidateOffer, CompileError> {
     match context {
         Some(context) => {
@@ -3406,6 +3426,7 @@ fn retained_compiled_turn(
         asks,
         prepared: native.target_owned(),
         certification: native.products().map(|products| TurnCertification {
+            artifact_view: products.artifact_view.clone(),
             compile_input_identity: products.compile_input_identity.clone(),
             groups: products.certified_groups.clone(),
             target_owners: products.pending_imports.clone(),
@@ -3531,6 +3552,7 @@ fn read_compiled_turn(
         asks,
         prepared,
         certification: sealed.map(|sealed| TurnCertification {
+            artifact_view: sealed.artifact_view,
             compile_input_identity: sealed.compile_input_identity,
             groups: sealed.certified_groups,
             target_owners: sealed.pending_imports,
@@ -5012,7 +5034,7 @@ mod tests {
             .collect::<Vec<_>>();
         let checked = check_cell_admitted(
             CellCheckRequest {
-                exact_context: view.exact_declaration_context().cloned(),
+                exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
                 cell_text: source,
                 template: &template,
@@ -5351,7 +5373,7 @@ mod tests {
             endpoint.identity().producer_bytes(),
             offered_include,
             temp.path(),
-            admission.view().exact_declaration_context().cloned(),
+            admission.view().exact_compile_context(),
             specification,
             tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
             Vec::new(),
@@ -5537,7 +5559,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(check_cell_admitted(
             CellCheckRequest {
-                exact_context: admission.view().exact_declaration_context().cloned(),
+                exact_context: admission.view().exact_compile_context(),
                 session_id: Some(admission.view().session()),
                 cell_text: &specification.cell_source,
                 template: &specification.template_source,
@@ -5791,7 +5813,7 @@ mod tests {
             let started = std::time::Instant::now();
             let checked = check_cell_admitted(
                 CellCheckRequest {
-                    exact_context: view.exact_declaration_context().cloned(),
+                    exact_context: view.exact_compile_context(),
                     session_id: Some(view.session()),
                     cell_text: source,
                     template: &template,
@@ -5908,7 +5930,7 @@ mod tests {
         let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         let outcome = check_cell_admitted(
             CellCheckRequest {
-                exact_context: view.exact_declaration_context().cloned(),
+                exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
                 cell_text: source,
                 template: &template,
@@ -5988,7 +6010,7 @@ mod tests {
         let injected = view.injected_module_names();
         let checked = check_cell_admitted(
             CellCheckRequest {
-                exact_context: view.exact_declaration_context().cloned(),
+                exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
                 cell_text: source,
                 template: &template,
@@ -6093,7 +6115,7 @@ mod tests {
                 bound, compiled, ..
             } = run_checked_item(
                 TurnRequest {
-                    exact_context: current.exact_declaration_context().cloned(),
+                    exact_context: current.exact_compile_context(),
                     session_id: Some(current.session()),
                     turn_text: item.source(),
                     templates: &templates,
@@ -6350,7 +6372,9 @@ mod tests {
             "HiddenOriginal.answer (41 :: Int)".into(),
         )];
         let hidden = run_inspections(InspectionRequest {
-            exact_context: Some(context.clone()),
+            exact_context: Some(Arc::new(
+                tidepool_toolchain::declaration_context::ExactCompileContext::new(context.clone()),
+            )),
             preamble: effects.preamble(),
             imports: &hidden_imports,
             include: &include,
@@ -6376,7 +6400,9 @@ mod tests {
             InspectionQuery::TypeOf("(undefined :: HiddenResult)".into()),
         ];
         let mixed = run_inspections(InspectionRequest {
-            exact_context: Some(context.clone()),
+            exact_context: Some(Arc::new(
+                tidepool_toolchain::declaration_context::ExactCompileContext::new(context.clone()),
+            )),
             preamble: effects.preamble(),
             imports: &imports,
             include: &include,
@@ -6399,7 +6425,9 @@ mod tests {
             InspectionQuery::TypeOf("answer (42 :: Int)".into()),
         ];
         let batch = run_inspections(InspectionRequest {
-            exact_context: Some(context.clone()),
+            exact_context: Some(Arc::new(
+                tidepool_toolchain::declaration_context::ExactCompileContext::new(context.clone()),
+            )),
             preamble: effects.preamble(),
             imports: &imports,
             include: &include,
@@ -6439,7 +6467,11 @@ mod tests {
             .unwrap();
         let checked = check_cell_admitted(
             CellCheckRequest {
-                exact_context: Some(context.clone()),
+                exact_context: Some(Arc::new(
+                    tidepool_toolchain::declaration_context::ExactCompileContext::new(
+                        context.clone(),
+                    ),
+                )),
                 session_id: Some(view.session()),
                 cell_text: "let result = makeResult (41 :: Int)",
                 template: &template,
@@ -6481,7 +6513,11 @@ mod tests {
             bound, compiled, ..
         } = run_checked_item(
             TurnRequest {
-                exact_context: Some(context.clone()),
+                exact_context: Some(Arc::new(
+                    tidepool_toolchain::declaration_context::ExactCompileContext::new(
+                        context.clone(),
+                    ),
+                )),
                 session_id: Some(view.session()),
                 turn_text: &checked.items[0].source,
                 templates: &templates,
@@ -6558,7 +6594,11 @@ mod tests {
             .unwrap();
         let expression_check = check_cell_admitted(
             CellCheckRequest {
-                exact_context: Some(context.clone()),
+                exact_context: Some(Arc::new(
+                    tidepool_toolchain::declaration_context::ExactCompileContext::new(
+                        context.clone(),
+                    ),
+                )),
                 session_id: Some(view.session()),
                 cell_text: expression_source,
                 template: &template,
@@ -6587,7 +6627,11 @@ mod tests {
         let expression_request = |templates: &[TurnTemplate]| {
             run_checked_item(
                 TurnRequest {
-                    exact_context: Some(context.clone()),
+                    exact_context: Some(Arc::new(
+                        tidepool_toolchain::declaration_context::ExactCompileContext::new(
+                            context.clone(),
+                        ),
+                    )),
                     session_id: Some(view.session()),
                     turn_text: expression_source,
                     templates,

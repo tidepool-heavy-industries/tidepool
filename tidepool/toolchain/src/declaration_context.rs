@@ -1901,6 +1901,19 @@ impl ExactDeclarationContext {
     pub fn artifact_view(&self) -> &ArtifactView {
         &self.inventory
     }
+    /// Merge retained interface custody without granting authored imports.
+    pub fn extend_interface_artifacts(
+        mut self,
+        artifacts: &ArtifactView,
+    ) -> Result<Self, CompileError> {
+        for descriptor in artifacts.descriptors() {
+            self.admit_producer(descriptor.producer_sha256)?;
+        }
+        self.inventory = self.inventory.merge(artifacts)?;
+        self.normalize()?;
+        Ok(self)
+    }
+
     pub(crate) fn interface_owners(&self) -> Vec<ExactInterfaceOwner> {
         self.inventory.interface_owners()
     }

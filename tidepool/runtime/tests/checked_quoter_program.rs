@@ -113,6 +113,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
                 specification.specification_digest(),
                 [7; 32],
                 include,
+                None,
             )
             .unwrap();
         let view = admission.view();
@@ -124,7 +125,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
         let started = std::time::Instant::now();
         let (_, program) = compile_cell_program_admitted(
             CellCheckRequest {
-                exact_context: view.exact_declaration_context().cloned(),
+                exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
                 cell_text: source,
                 template: &template,

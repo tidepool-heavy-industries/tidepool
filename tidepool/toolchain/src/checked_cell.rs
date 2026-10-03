@@ -124,6 +124,11 @@ impl CanonicalInputTypeWitness {
         }
         hasher.finalize().into()
     }
+    pub fn interface_seals(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        self.interfaces
+            .iter()
+            .map(|(unit, module, seal)| (unit.as_str(), module.as_str(), seal.as_str()))
+    }
     pub fn signature(&self) -> &ExactCheckedSignature {
         &self.signature
     }

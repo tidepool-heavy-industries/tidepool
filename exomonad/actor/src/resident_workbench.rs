@@ -84,13 +84,13 @@ pub(crate) fn execution_control() -> Option<Arc<crate::WorkbenchExecutionControl
     EXECUTION_CONTROL.try_with(Arc::clone).ok()
 }
 
-impl ResponseExpectation {
-    fn request_preamble(
-        &self,
-        preamble: &str,
-        request: crate::RequestId,
-        effects_alias: &str,
-    ) -> String {
+impl ActorWorkbenchSource {
+    fn request_preamble(&self, request: crate::RequestId, effects_alias: &str) -> String {
+        let preamble = &self.preamble;
+        let signatures = self
+            .request_evidence
+            .as_ref()
+            .and_then(|evidence| evidence.request_type_signatures());
         let mut preamble = insert_preamble_imports(
             preamble,
             "qualified Tidepool.Agent.Reply.Internal as TidepoolReplies",
@@ -98,12 +98,14 @@ impl ResponseExpectation {
         preamble = insert_preamble_imports(&preamble, "qualified Data.Void as TidepoolVoid");
         preamble = insert_preamble_imports(&preamble, "qualified Prelude as TidepoolPrelude");
         preamble.push_str(&format!(
-            "\nsessionReply :: TidepoolReplies.Reply ({0})\nsessionReply = TidepoolReplies.Reply (TidepoolReplies.RequestId {1})\n{2}\nrespond = TidepoolReplies.reply sessionReply\n",
-            self.expected_type(),
+            "\nsessionReply :: TidepoolReplies.Reply TidepoolRequestReply\nsessionReply = TidepoolReplies.Reply (TidepoolReplies.RequestId {})\nrespond :: TidepoolRequestReply -> Eff {effects_alias} TidepoolVoid.Void\nrespond = TidepoolReplies.reply sessionReply\n",
             request.0,
-            self.respond_signature(effects_alias),
         ));
-        if let Some(progress_type) = &self.progress_type {
+        if signatures
+            .and_then(|signatures| signatures.progress())
+            .is_some()
+        {
+            let progress_type = "TidepoolRequestProgress";
             preamble.push_str(&format!(
                 "\nreportProgress :: ({progress_type}) -> Eff {effects_alias} ()\nreportProgress value = do\n  outcome <- TidepoolReplies.reportRequestProgress (TidepoolReplies.ProgressSink (TidepoolReplies.RequestId {})) value\n  case outcome of\n    Left failure -> TidepoolPrelude.error (TidepoolPrelude.show failure)\n    Right () -> pure ()\n", request.0,
             ));
@@ -1295,7 +1297,7 @@ pub struct ResidentActorWorkbench<H, O> {
     access: ResidentMachineAccess<H, O>,
     response: Option<ResponseExpectation>,
     request: Option<crate::RequestId>,
-    type_modules: Arc<[String]>,
+
     json_input: Option<serde_json::Value>,
     compilation_authority: Option<Arc<crate::resident_actor::WorkbenchCompilationAuthority>>,
     private_execution: Option<Arc<ExecutionPrivateScope>>,
@@ -1437,7 +1439,6 @@ enum WorkbenchDisplay {
 struct RequestWorkbenchScope<'a> {
     response: Option<&'a ResponseExpectation>,
     request: Option<crate::RequestId>,
-    type_modules: &'a [String],
 }
 
 impl RequestWorkbenchScope<'_> {
@@ -2929,18 +2930,15 @@ impl<H, O> ResidentActorRunner<H, O> {
         &self,
         response: ResponseExpectation,
         request: crate::RequestId,
-        type_modules: Vec<String>,
+        evidence: Arc<tidepool_runtime::session::SiteTypeEvidence>,
     ) -> ResidentActorWorkbench<H, O> {
-        ResidentActorWorkbench::from_access(
-            self.access.sharing(),
-            Some(response),
-            Some(request),
-            type_modules,
-        )
+        let mut access = self.access.sharing();
+        access.source.request_evidence = Some(evidence);
+        ResidentActorWorkbench::from_access(access, Some(response), Some(request))
     }
 
     pub(crate) fn application_workbench(&self) -> ResidentActorWorkbench<H, O> {
-        ResidentActorWorkbench::from_access(self.access.sharing(), None, None, Vec::new())
+        ResidentActorWorkbench::from_access(self.access.sharing(), None, None)
     }
 }
 
@@ -2951,13 +2949,11 @@ impl<H, O> ResidentActorWorkbench<H, O> {
         source: ActorWorkbenchSource,
         response: Option<ResponseExpectation>,
         request: Option<crate::RequestId>,
-        type_modules: Vec<String>,
     ) -> Self {
         Self::from_access(
             ResidentMachineAccess::new(machines, source),
             response,
             request,
-            type_modules,
         )
     }
 
@@ -2965,13 +2961,12 @@ impl<H, O> ResidentActorWorkbench<H, O> {
         access: ResidentMachineAccess<H, O>,
         response: Option<ResponseExpectation>,
         request: Option<crate::RequestId>,
-        type_modules: Vec<String>,
     ) -> Self {
         Self {
             access,
             response,
             request,
-            type_modules: type_modules.into(),
+
             json_input: None,
             compilation_authority: None,
             private_execution: None,
@@ -3714,7 +3709,7 @@ where
                 access: self.access.sharing(),
                 response: None,
                 request: None,
-                type_modules: Arc::from([]),
+
                 json_input: None,
                 compilation_authority: Some(authority.clone()),
                 private_execution: None,
@@ -4064,20 +4059,12 @@ where
         let carrier = self.carrier_for(&context, HostCarrierKind::Text).await?;
         self.access
             .with_machine(context, move |session, context, source| {
-                mount_text_binding(
-                    session,
-                    context,
-                    source,
-                    &[],
-                    &binding,
-                    &result,
-                    Some(&carrier),
-                )
-                .map_err(|error| {
-                    ResidentActorWorkbenchError::InputMount(format!(
-                        "the whole result could not be bound as {binding}: {error}"
-                    ))
-                })
+                mount_text_binding(session, context, source, &binding, &result, Some(&carrier))
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::InputMount(format!(
+                            "the whole result could not be bound as {binding}: {error}"
+                        ))
+                    })
             })
             .await
     }
@@ -4106,7 +4093,7 @@ where
                 .into();
         }
         source.preamble = actor_preamble(&source.preamble, &context).into();
-        let type_modules = self.type_modules.clone();
+
         let authority = self.compilation_authority.clone().ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
                 "activation requires its original source authority".into(),
@@ -4117,7 +4104,7 @@ where
             .with_machine(context, move |session, context, _| {
                 use tidepool_runtime::session::turn::{check_activation_input, compile_activation_input};
                 reject_activation_declaration(session, context.placement.lexical_scope)?;
-                let view = actor_compile_view(session, context, &source, &type_modules)?;
+                let view = actor_compile_view(session, context, &source)?;
                 let prepared = source.prepare_effectful(&view, &context.haskell_effects_alias)?;
                 let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
                 let candidate = session.next_declaration_module().ok_or_else(|| {
@@ -4237,13 +4224,12 @@ where
         &self,
         context: &crate::ActorSessionContext,
     ) -> Result<Option<HostInputRetirement>, ResidentActorWorkbenchError> {
-        let type_modules = Arc::clone(&self.type_modules);
         let leased_input = match &self.json_input {
             Some(input) => {
                 let carrier = self.carrier_for(context, HostCarrierKind::Json).await?;
                 let mount_context = context.clone();
                 let mount_source = self.access.source.clone();
-                let mount_type_modules = Arc::clone(&type_modules);
+
                 let mount_input = input.clone();
                 let (mounted, lease) = self
                     .access
@@ -4252,7 +4238,6 @@ where
                             session,
                             context,
                             &mount_source,
-                            &mount_type_modules,
                             &mount_input,
                             Some(&carrier),
                         )?;
@@ -4295,7 +4280,7 @@ where
         }
         let admission_execution = execution.clone();
         let snapshot_source = self.access.source.clone();
-        let type_modules = self.type_modules.clone();
+
         let response = self.response.clone();
         let request = self.request;
         let mounted_input = leased_input
@@ -4309,7 +4294,6 @@ where
                     session,
                     context,
                     snapshot_source,
-                    &type_modules,
                     response.as_ref(),
                     request,
                     mounted_input.as_ref(),
@@ -4395,6 +4379,7 @@ where
                         reservation_specification.cell.specification_digest(),
                         reservation_specification._authority.authority_digest(),
                         reservation_specification.include.clone(),
+                        reservation_specification.source.request_evidence.clone(),
                     ),
                     None => session.admit_native_setup_cell_in(
                         context.placement.lexical_scope,
@@ -4403,6 +4388,7 @@ where
                         reservation_specification.cell.specification_digest(),
                         reservation_specification._authority.authority_digest(),
                         reservation_specification.include.clone(),
+                        reservation_specification.source.request_evidence.clone(),
                     ),
                 };
                 admitted.map_err(|error| {
@@ -4423,7 +4409,7 @@ where
                     let view = check_admission.view();
                     tidepool_runtime::session::turn::compile_cell_program_admitted(
                         CellCheckRequest {
-                            exact_context: view.exact_declaration_context().cloned(),
+                            exact_context: view.exact_compile_context(),
                             session_id: Some(view.session()),
                             cell_text: &check_specification.cell.cell_source,
                             template: &check_specification.cell.template_source,
@@ -4500,7 +4486,7 @@ where
     ) -> Result<String, ResidentActorWorkbenchError> {
         let response = self.response.clone();
         let request = self.request;
-        let type_modules = Arc::clone(&self.type_modules);
+
         let mut source = self.access.source.clone();
         self.access
             .with_machine(context, move |session, context, _| {
@@ -4515,7 +4501,7 @@ where
                 }
                 .into();
                 source.preamble = actor_preamble(&source.preamble, context).into();
-                run_status_discovery(session, context, &source, &type_modules, discovery)?
+                run_status_discovery(session, context, &source, discovery)?
                     .map_err(ResidentActorWorkbenchError::ActorProtocol)
             })
             .await
@@ -4548,10 +4534,9 @@ where
         let source = RequestWorkbenchScope {
             response: self.response.as_ref(),
             request: self.request,
-            type_modules: &self.type_modules,
         }
         .source(&self.access.source, &context);
-        let type_modules = Arc::clone(&self.type_modules);
+
         // Whether this workbench is currently presenting a typed request:
         // `Tidepool.RequestWorkbenchScope`'s preamble binds `respond`/
         // `sessionReply`/`sessionInput`/`reportProgress` only then, and a
@@ -4564,7 +4549,7 @@ where
             return self
                 .access
                 .with_machine(context, move |session, context, _| {
-                    let view = actor_compile_view(session, context, &source, &type_modules)?;
+                    let view = actor_compile_view(session, context, &source)?;
                     let provenance = structured_provenance(
                         &view,
                         &source,
@@ -4604,12 +4589,10 @@ where
         }
 
         let snapshot_source = source.clone();
-        let snapshot_modules = Arc::clone(&type_modules);
         let (view, provenance, inspection_values) = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
-                let view =
-                    actor_compile_view(session, context, &snapshot_source, &snapshot_modules)?;
+                let view = actor_compile_view(session, context, &snapshot_source)?;
                 let provenance = structured_provenance(
                     &view,
                     &snapshot_source,
@@ -4733,11 +4716,10 @@ where
         }
 
         let revalidate_source = source.clone();
-        let revalidate_modules = type_modules;
+
         self.access
             .with_machine(context, move |session, context, _| {
-                let fresh_view =
-                    actor_compile_view(session, context, &revalidate_source, &revalidate_modules)?;
+                let fresh_view = actor_compile_view(session, context, &revalidate_source)?;
                 let fresh_prepared = revalidate_source
                     .prepare_effectful(&fresh_view, &context.haskell_effects_alias)?;
                 let source_revision_unchanged =
@@ -4856,7 +4838,7 @@ where
         let (view, generation, retained) = self
             .access
             .with_machine(context.clone(), move |session, context, source| {
-                let view = actor_compile_view(session, context, source, &[])?;
+                let view = actor_compile_view(session, context, source)?;
                 let generation = view.next_value_generation();
                 // Reserve the generation now, under this checkout, so no
                 // concurrent compile can ever mint the same one — the
@@ -4965,7 +4947,6 @@ where
         &self,
         context: crate::ActorSessionContext,
         source: ActorWorkbenchSource,
-        type_modules: Vec<String>,
         block: ParsedBlock,
         verdict: Option<TurnClassification>,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
@@ -4977,7 +4958,7 @@ where
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
         let (stage, changed) = 'split: {
             let snapshot_source = source.clone();
-            let snapshot_type_modules = type_modules.clone();
+
             let snapshot_block = block.clone();
             let snapshot_verdict = verdict.clone();
             let snapshot = self
@@ -4987,7 +4968,6 @@ where
                         session,
                         context,
                         &snapshot_source,
-                        &snapshot_type_modules,
                         &snapshot_block,
                         snapshot_verdict.as_ref(),
                     )
@@ -5027,7 +5007,7 @@ where
                     // the fragment recompiles under one checkout, exactly as
                     // an install-time mismatch does.
                     let revalidate_source = source.clone();
-                    let revalidate_type_modules = type_modules.clone();
+
                     let revalidate_against = snapshot.view.clone();
                     let stale = self
                         .access
@@ -5037,12 +5017,8 @@ where
                             {
                                 return Err(ResidentActorWorkbenchError::MachineLost);
                             }
-                            let fresh_view = actor_compile_view(
-                                session,
-                                context,
-                                &revalidate_source,
-                                &revalidate_type_modules,
-                            )?;
+                            let fresh_view =
+                                actor_compile_view(session, context, &revalidate_source)?;
                             Ok(split_staleness(
                                 session,
                                 &fresh_view,
@@ -5071,7 +5047,7 @@ where
             // running it under the checkout this closure used to hold for
             // `begin_ready_block`'s whole install-and-run.
             let install_source = source.clone();
-            let install_type_modules = type_modules.clone();
+
             let stale = self
                 .access
                 .with_machine(context.clone(), move |session, context, _| {
@@ -5080,12 +5056,7 @@ where
                     {
                         return Err(ResidentActorWorkbenchError::MachineLost);
                     }
-                    let fresh_view = actor_compile_view(
-                        session,
-                        context,
-                        &install_source,
-                        &install_type_modules,
-                    )?;
+                    let fresh_view = actor_compile_view(session, context, &install_source)?;
                     Ok(split_staleness(session, &fresh_view, &snapshot.view, None))
                 })
                 .await?;
@@ -5111,7 +5082,6 @@ where
                     RequestWorkbenchScope {
                         response: None,
                         request: None,
-                        type_modules: &type_modules,
                     },
                     block,
                     verdict.as_ref(),
@@ -5138,7 +5108,7 @@ where
         let snapshot = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
-                let view = actor_compile_view(session, context, &snapshot_source, &[])?;
+                let view = actor_compile_view(session, context, &snapshot_source)?;
                 let provenance = structured_provenance(&view, &snapshot_source, query_scope);
                 let inputs = session
                     .capture_inspection_inputs(view.session_view())
@@ -5184,7 +5154,7 @@ where
                     .collect::<Vec<_>>();
                 run_admitted_inspections(
                     InspectionRequest {
-                        exact_context: compile_view.exact_declaration_context().cloned(),
+                        exact_context: compile_view.exact_compile_context(),
                         preamble: &prepared.preamble,
                         imports: &prepared.imports,
                         include: &include,
@@ -5215,7 +5185,7 @@ where
 
         self.access
             .with_machine(context, move |session, context, _| {
-                let current_view = actor_compile_view(session, context, &source, &[])?;
+                let current_view = actor_compile_view(session, context, &source)?;
                 let current = structured_provenance(&current_view, &source, query.scope.clone());
                 let answer = structured_introspection_answer(kind, inspected, provenance, current);
                 session
@@ -5289,7 +5259,6 @@ fn snapshot_fragment_compile<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
-    type_modules: &[String],
     block: &ParsedBlock,
     checked_verdict: Option<&TurnClassification>,
 ) -> Result<FragmentCompileSnapshot, ResidentActorWorkbenchError>
@@ -5297,7 +5266,7 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let view = actor_compile_view(session, context, source, type_modules)?;
+    let view = actor_compile_view(session, context, source)?;
     let generation = view.next_value_generation();
     let verdict = match checked_verdict {
         Some(checked) => Some(checked.clone()),
@@ -5387,7 +5356,7 @@ fn compile_fragment_off_checkout(
         None
     };
     let request = TurnRequest {
-        exact_context: snapshot.view.exact_declaration_context().cloned(),
+        exact_context: snapshot.view.exact_compile_context(),
         session_id: Some(snapshot.view.session_id()),
         turn_text: &block.source,
         templates: &templates,
@@ -5440,7 +5409,6 @@ where
         context,
         &source,
         &context.haskell_effects_alias,
-        scope.type_modules,
         &block,
         verdict,
     )? {
@@ -9584,7 +9552,6 @@ fn snapshot_cell_program<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     mut source: ActorWorkbenchSource,
-    type_modules: &[String],
     response: Option<&ResponseExpectation>,
     request: Option<crate::RequestId>,
     mounted_input: Option<&MountedHostInput>,
@@ -9638,6 +9605,10 @@ where
             .map_err(|error| {
                 ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
             })?;
+        let session_view = match &source.request_evidence {
+            Some(evidence) => session_view.with_request_type_evidence(evidence)?,
+            None => session_view,
+        };
         context
             .compile_view(session_view)?
             .with_workbench_imports(&source.workbench_imports)
@@ -9651,6 +9622,10 @@ where
                 )),
             ))?
             .with_scoped_injection();
+        let session_view = match &source.request_evidence {
+            Some(evidence) => session_view.with_request_type_evidence(evidence)?,
+            None => session_view,
+        };
         context
             .compile_view(session_view)?
             .with_workbench_imports(&source.workbench_imports)
@@ -9810,7 +9785,6 @@ fn actor_compile_view<H, O>(
     session: &ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
-    type_modules: &[String],
 ) -> Result<crate::ActorCompileView, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -9823,6 +9797,10 @@ where
                 tidepool_runtime::session::SessionError::DeadScope(context.placement.lexical_scope),
             ))
         })?;
+    let session_view = match &source.request_evidence {
+        Some(evidence) => session_view.with_request_type_evidence(evidence)?,
+        None => session_view,
+    };
     Ok(context
         .compile_view(session_view)?
         .with_workbench_imports(&source.workbench_imports)
@@ -9837,7 +9815,6 @@ fn compile_host_binding<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
-    type_modules: &[String],
     binding: &str,
     type_name: &str,
     anchor: &str,
@@ -9848,7 +9825,7 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let view = actor_compile_view(session, context, source, type_modules)?;
+    let view = actor_compile_view(session, context, source)?;
     let generation = view.next_value_generation();
     let retained = session.prepared_retained();
     let (binder, compiled) = compile_host_binding_off_checkout(
@@ -9904,7 +9881,7 @@ fn compile_host_binding_off_checkout(
         )
     };
     let result = run_turn(TurnRequest {
-        exact_context: view.exact_declaration_context().cloned(),
+        exact_context: view.exact_compile_context(),
         session_id: Some(view.session_id()),
         turn_text: &turn,
         templates: &templates,
@@ -9985,7 +9962,6 @@ fn mount_json_input<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
-    type_modules: &[String],
     input: &serde_json::Value,
     carrier: Option<&HostCarrier>,
 ) -> Result<MountedHostInput, ResidentActorWorkbenchError>
@@ -10014,7 +9990,6 @@ where
             session,
             context,
             source,
-            type_modules,
             &binding,
             JSON_INPUT_TYPE_NAME,
             JSON_INPUT_ANCHOR,
@@ -10045,7 +10020,6 @@ fn mount_text_binding<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
-    type_modules: &[String],
     binding: &str,
     text: &str,
     carrier: Option<&HostCarrier>,
@@ -10075,7 +10049,6 @@ where
         session,
         context,
         source,
-        type_modules,
         binding,
         TEXT_BINDING_TYPE_NAME,
         TEXT_BINDING_ANCHOR,
@@ -10214,7 +10187,6 @@ fn compile_block<H, O>(
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
     effect_stack: &str,
-    type_modules: &[String],
     block: &ParsedBlock,
     verdict: Option<&TurnClassification>,
 ) -> Result<CompiledBlock, ResidentActorWorkbenchError>
@@ -10222,13 +10194,12 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let compile_view = actor_compile_view(session, context, source, type_modules)?;
+    let compile_view = actor_compile_view(session, context, source)?;
     compile_block_in_view(
         session,
         context,
         source,
         effect_stack,
-        type_modules,
         block,
         compile_view,
         &[],
@@ -10243,7 +10214,6 @@ fn compile_block_in_view<H, O>(
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
     effect_stack: &str,
-    _type_modules: &[String],
     block: &ParsedBlock,
     compile_view: crate::ActorCompileView,
     staged_names: &[String],
@@ -10379,7 +10349,7 @@ fn compile_block_off_checkout(
         "compiling resident actor workbench item"
     );
     let request = TurnRequest {
-        exact_context: compile_view.exact_declaration_context().cloned(),
+        exact_context: compile_view.exact_compile_context(),
         session_id: Some(compile_view.session_id()),
         turn_text: &block.source,
         templates: &templates,
@@ -10419,7 +10389,6 @@ fn run_status_discovery<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
-    type_modules: &[String],
     command: crate::status_tool::StatusDiscovery,
 ) -> Result<Result<String, String>, ResidentActorWorkbenchError>
 where
@@ -10437,7 +10406,7 @@ where
             let inspected = if queries.is_empty() {
                 Vec::new()
             } else {
-                inspect_actor_batch(session, context, source, type_modules, &queries)?
+                inspect_actor_batch(session, context, source, &queries)?
             };
             let retained = bindings
                 .iter()
@@ -10514,7 +10483,6 @@ fn inspect_actor_batch<H, O>(
     session: &ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
-    type_modules: &[String],
     queries: &[InspectionQuery],
 ) -> Result<
     Vec<Result<tidepool_runtime::session::InspectionResult, String>>,
@@ -10527,7 +10495,7 @@ where
     if queries.is_empty() {
         return Ok(Vec::new());
     }
-    let compile_view = actor_compile_view(session, context, source, type_modules)?;
+    let compile_view = actor_compile_view(session, context, source)?;
     let inputs = session
         .capture_inspection_inputs(compile_view.session_view())
         .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
@@ -10561,7 +10529,7 @@ fn inspect_compile_view(
         .collect::<Vec<_>>();
     match run_admitted_inspections(
         InspectionRequest {
-            exact_context: compile_view.exact_declaration_context().cloned(),
+            exact_context: compile_view.exact_compile_context(),
             preamble: &prepared.preamble,
             imports: &prepared.imports,
             include: &include_refs,
@@ -10653,7 +10621,7 @@ fn inspect_lookup_queries(
     let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let inspect = || {
         let request = InspectionRequest {
-            exact_context: view.exact_declaration_context().cloned(),
+            exact_context: view.exact_compile_context(),
             preamble,
             imports,
             include: &include,
@@ -11152,7 +11120,6 @@ mod request_tests {
             &mut session,
             &context,
             &source,
-            &[],
             &serde_json::json!({
                 "nested": [true, null, {"long": "x".repeat(16 * 1024)}]
             }),
@@ -11186,7 +11153,7 @@ mod request_tests {
             RequestWorkbenchScope {
                 response: None,
                 request: None,
-                type_modules: &[],
+
             },
             ParsedBlock {
                 ordinal: 1,
@@ -11200,7 +11167,6 @@ mod request_tests {
             &mut session,
             &context,
             &source,
-            &[],
             "tool_result",
             "tool output",
             None,
@@ -11217,7 +11183,6 @@ mod request_tests {
             RequestWorkbenchScope {
                 response: None,
                 request: None,
-                type_modules: &[],
             },
             ParsedBlock {
                 ordinal: 1,
@@ -11240,7 +11205,7 @@ mod request_tests {
         let (mut session, context, source, _session_root) = host_mount_fixture();
         let scope = context.placement.lexical_scope;
 
-        let view = actor_compile_view(&session, &context, &source, &[]).expect("compile view");
+        let view = actor_compile_view(&session, &context, &source).expect("compile view");
         let generation = view.next_value_generation();
         session.reserve_value_generations_through(generation);
         let retained = session.prepared_retained();
@@ -11259,7 +11224,7 @@ mod request_tests {
         )
         .expect("Text carrier compiles off-checkout");
 
-        let fresh_view = actor_compile_view(&session, &context, &source, &[]).expect("fresh view");
+        let fresh_view = actor_compile_view(&session, &context, &source).expect("fresh view");
         assert!(
             fresh_view.is_current_for(&view),
             "no mutation happened between snapshot and install: views must still match"
@@ -11289,7 +11254,7 @@ mod request_tests {
         let (mut session, context, source, _session_root) = host_mount_fixture();
         let scope = context.placement.lexical_scope;
 
-        let view = actor_compile_view(&session, &context, &source, &[]).expect("compile view");
+        let view = actor_compile_view(&session, &context, &source).expect("compile view");
         let generation = view.next_value_generation();
         session.reserve_value_generations_through(generation);
         let retained = session.prepared_retained();
@@ -11315,14 +11280,13 @@ mod request_tests {
             &mut session,
             &context,
             &source,
-            &[],
             "interloper",
             "interloper text",
             None,
         )
         .expect("interloping carrier mounts");
 
-        let fresh_view = actor_compile_view(&session, &context, &source, &[]).expect("fresh view");
+        let fresh_view = actor_compile_view(&session, &context, &source).expect("fresh view");
         assert!(
             !fresh_view.is_current_for(&view),
             "an interleaved mutation to the same scope must invalidate the snapshot"
@@ -11337,7 +11301,7 @@ mod request_tests {
         drop((binder, compiled, generation));
 
         // A fresh snapshot recompiles and installs cleanly.
-        let retry_view = actor_compile_view(&session, &context, &source, &[]).expect("retry view");
+        let retry_view = actor_compile_view(&session, &context, &source).expect("retry view");
         let retry_generation = retry_view.next_value_generation();
         session.reserve_value_generations_through(retry_generation);
         let retry_retained = session.prepared_retained();
@@ -11372,7 +11336,7 @@ mod request_tests {
     #[tokio::test]
     async fn two_bind_command_job_calls_on_one_workbench_compile_the_job_carrier_once() {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None);
 
         let before_first = tidepool_extract_cmd::extract_spawn_count();
         let first = workbench
@@ -11419,7 +11383,7 @@ mod request_tests {
     #[tokio::test]
     async fn two_tool_result_mounts_on_one_workbench_compile_the_text_carrier_once() {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None);
 
         let before_first = tidepool_extract_cmd::extract_spawn_count();
         workbench
@@ -11480,7 +11444,6 @@ mod request_tests {
             &mut split_session,
             &split_context,
             &split_source,
-            &[],
             &block,
             Some(&verdict),
         )
@@ -11504,8 +11467,8 @@ mod request_tests {
             _ => panic!("fixture must be a compiled binding"),
         };
 
-        let fresh_view = actor_compile_view(&split_session, &split_context, &split_source, &[])
-            .expect("fresh view");
+        let fresh_view =
+            actor_compile_view(&split_session, &split_context, &split_source).expect("fresh view");
         assert!(
             fresh_view.is_current_for(&snapshot.view),
             "no mutation happened between snapshot and install: views must still match"
@@ -11522,7 +11485,6 @@ mod request_tests {
             RequestWorkbenchScope {
                 response: None,
                 request: None,
-                type_modules: &[],
             },
             block,
             Some(&verdict),
@@ -11602,7 +11564,7 @@ mod request_tests {
         };
 
         let snapshot =
-            snapshot_fragment_compile(&mut session, &context, &source, &[], &block, Some(&verdict))
+            snapshot_fragment_compile(&mut session, &context, &source, &block, Some(&verdict))
                 .expect("fragment compile snapshot");
         let compiled = compile_fragment_off_checkout(
             &snapshot,
@@ -11625,14 +11587,13 @@ mod request_tests {
             &mut session,
             &context,
             &source,
-            &[],
             "interloper",
             "interloper text",
             None,
         )
         .expect("interloping carrier mounts");
 
-        let fresh_view = actor_compile_view(&session, &context, &source, &[]).expect("fresh view");
+        let fresh_view = actor_compile_view(&session, &context, &source).expect("fresh view");
         assert!(
             !fresh_view.is_current_for(&snapshot.view),
             "an interleaved mutation to the same scope must invalidate the snapshot"
@@ -11648,7 +11609,7 @@ mod request_tests {
 
         // A fresh snapshot recompiles and installs cleanly.
         let retry_snapshot =
-            snapshot_fragment_compile(&mut session, &context, &source, &[], &block, Some(&verdict))
+            snapshot_fragment_compile(&mut session, &context, &source, &block, Some(&verdict))
                 .expect("retry snapshot");
         let retry_compiled = compile_fragment_off_checkout(
             &retry_snapshot,
@@ -11664,7 +11625,7 @@ mod request_tests {
             }
         };
         let retry_fresh_view =
-            actor_compile_view(&session, &context, &source, &[]).expect("retry fresh view");
+            actor_compile_view(&session, &context, &source).expect("retry fresh view");
         assert!(retry_fresh_view.is_current_for(&retry_snapshot.view));
 
         let step = begin_ready_block(&mut session, &context, block, retry_ready)
@@ -12039,12 +12000,11 @@ mod request_tests {
     #[tokio::test]
     async fn admitted_cell_preserves_shadowing_polykinds_and_prologue_only_items() {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None);
         let installed = workbench
             .begin_fragment_split(
                 context.clone(),
                 source,
-                vec![],
                 ParsedBlock {
                     ordinal: 1,
                     total: 1,
@@ -12136,7 +12096,7 @@ mod request_tests {
     #[tokio::test]
     async fn authored_cell_requires_both_source_and_private_execution_admission() {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![])
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None)
             .with_json_input(Some(serde_json::json!(42)));
         let scope = crate::call_timing::CallScope::new(
             "cell",
@@ -12178,13 +12138,11 @@ mod request_tests {
     async fn planned_cell_refuses_changed_own_scope_but_ignores_sibling_and_child_commits() {
         for mutate_own in [false, true] {
             let (machines, context, source, _root) = actor_registry_fixture();
-            let workbench =
-                ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+            let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None);
             let first = workbench
                 .begin_fragment_split(
                     context.clone(),
                     source,
-                    vec![],
                     ParsedBlock {
                         ordinal: 1,
                         total: 1,
@@ -12245,7 +12203,6 @@ mod request_tests {
                                 session,
                                 &changing,
                                 &changing_source,
-                                &[],
                                 "laterValue",
                                 "a genuine native scope change",
                                 None,
@@ -12594,7 +12551,6 @@ mod request_tests {
                 source.clone(),
                 None,
                 None,
-                vec![],
             ));
             let validation = if sibling_write {
                 concat!(
@@ -12613,7 +12569,6 @@ mod request_tests {
                 .begin_fragment_split(
                     context.clone(),
                     source.clone(),
-                    Vec::new(),
                     ParsedBlock {
                         ordinal: 1,
                         total: 1,
@@ -12699,7 +12654,6 @@ mod request_tests {
                             session,
                             &sibling_context,
                             &sibling_source,
-                            &[],
                             "lookup_sibling_value",
                             TEXT_BINDING_TYPE_NAME,
                             TEXT_BINDING_ANCHOR,
@@ -12963,21 +12917,17 @@ mod request_tests {
             source.clone(),
             None,
             None,
-            vec![],
         ));
         let trace_path = lookup_trace_path();
         let step = workbench
-            .begin_fragment_split(
-                context.clone(),
-                source.clone(),
-                Vec::new(),
-                ParsedBlock {
+            .begin_fragment_split(context.clone(),
+source.clone(),
+ParsedBlock {
                     ordinal: 1,
                     total: 1,
                     source: "lookupResult <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"pollResponse\"])".into(),
                 },
-                Some(generated_binds_verdict(&["lookupResult".into()])),
-            )
+Some(generated_binds_verdict(&["lookupResult".into()])))
             .await
             .expect("lookup fragment compiles and suspends");
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
@@ -13058,7 +13008,6 @@ mod request_tests {
             .begin_fragment_split(
                 context.clone(),
                 source,
-                Vec::new(),
                 ParsedBlock {
                     ordinal: 1,
                     total: 1,
@@ -13116,7 +13065,7 @@ mod request_tests {
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
         let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![])
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None)
                 .with_compilation_authority(
                     crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
                 );
@@ -13171,7 +13120,6 @@ mod request_tests {
             .begin_fragment_split(
                 private_context.clone(),
                 source,
-                vec![],
                 ParsedBlock {
                     ordinal: 1,
                     total: 1,
@@ -14500,7 +14448,6 @@ mod request_tests {
             &mut child_session,
             &child_context,
             &source,
-            &[],
             "outstanding",
             "still here",
             None,
@@ -14924,7 +14871,7 @@ mod request_tests {
     #[tokio::test]
     async fn planned_cell_defers_declaration_until_its_admitted_item() {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None);
         let public_context = context.clone();
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
@@ -15030,7 +14977,6 @@ mod request_tests {
             source,
             Some(ResponseExpectation::new("()")),
             Some(crate::RequestId(1)),
-            vec![],
         )
         .with_json_input(Some(serde_json::json!({"greeting": "hi"})));
         let (workbench, context) = workbench
@@ -15131,7 +15077,7 @@ mod request_tests {
         source
             .workbench_imports
             .extend_text("qualified Tidepool.Agent.Reply as TidepoolReply");
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![]);
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None);
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
             .await
@@ -15189,7 +15135,7 @@ mod request_tests {
     ) -> Result<tidepool_repr::SessionVarId, ResidentActorWorkbenchError> {
         let scope = context.placement.lexical_scope;
         let source = workbench.access.source.clone();
-        let type_modules = workbench.type_modules.clone();
+
         workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
@@ -15211,7 +15157,6 @@ mod request_tests {
                     session,
                     context,
                     &source,
-                    &type_modules,
                     "sessionInput",
                     "()",
                     "sourceValue",
@@ -15295,7 +15240,7 @@ mod request_tests {
             )
             .unwrap();
         let source = ActorWorkbenchSource::new(preamble, include);
-        let view = actor_compile_view(&session, &context, &source, &[]).unwrap();
+        let view = actor_compile_view(&session, &context, &source).unwrap();
         let prepared = source
             .prepare_effectful(&view, &context.haskell_effects_alias)
             .unwrap();
@@ -15461,7 +15406,7 @@ mod request_tests {
         .unwrap();
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![])
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None)
             .with_compilation_authority(
                 crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
             );
@@ -15540,7 +15485,6 @@ mod request_tests {
             RequestWorkbenchScope {
                 response: None,
                 request: None,
-                type_modules: &[],
             },
             ParsedBlock {
                 ordinal: 1,
@@ -15555,7 +15499,7 @@ mod request_tests {
         let before = session.public_visibility_snapshot_in(public_scope).unwrap();
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
-        let workbench = ResidentActorWorkbench::new(machines, source, None, None, vec![])
+        let workbench = ResidentActorWorkbench::new(machines, source, None, None)
             .with_compilation_authority(
                 crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
             );
@@ -15597,12 +15541,11 @@ mod request_tests {
     #[tokio::test]
     async fn request_scope_alias_borrow_refuses_a_shadowed_mount() {
         let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None);
         let step = workbench
             .begin_fragment_split(
                 context.clone(),
                 source,
-                vec![],
                 ParsedBlock {
                     ordinal: 1,
                     total: 1,
@@ -15655,13 +15598,12 @@ mod request_tests {
             .workbench_imports
             .extend_text("qualified Tidepool.Agent.Reply as TidepoolReply");
         let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
         let runner = ResidentActorRunner::new(machines, source.clone());
         let step = workbench
             .begin_fragment_split(
                 context.clone(),
                 source,
-                vec![],
                 ParsedBlock {
                     ordinal: 1,
                     total: 1,
@@ -15799,7 +15741,7 @@ mod request_tests {
             .workbench_imports
             .extend_text("qualified Tidepool.Agent.Reply as TidepoolReply");
         let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
         let runner = ResidentActorRunner::new(machines, source);
         let (workbench, context) = workbench
             .admit_private_cell_for_test(context)
@@ -15895,11 +15837,11 @@ mod request_tests {
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let (wb_a, context_a) =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![])
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None)
                 .admit_private_cell_for_test(context_a)
                 .await
                 .unwrap();
-        let (wb_b, context_b) = ResidentActorWorkbench::new(machines, source, None, None, vec![])
+        let (wb_b, context_b) = ResidentActorWorkbench::new(machines, source, None, None)
             .admit_private_cell_for_test(context_b)
             .await
             .unwrap();
@@ -15996,7 +15938,7 @@ mod request_tests {
     async fn begin_fragment_split_after_bootstrap_matches_single_checkout_begin_fragment() {
         let (split_machines, split_context, split_source, _split_root) = actor_registry_fixture();
         let split_workbench =
-            ResidentActorWorkbench::new(split_machines, split_source.clone(), None, None, vec![]);
+            ResidentActorWorkbench::new(split_machines, split_source.clone(), None, None);
         let (mut direct_session, direct_context, direct_source, _direct_root) =
             host_mount_fixture();
 
@@ -16023,7 +15965,6 @@ mod request_tests {
             .begin_fragment_split(
                 split_context.clone(),
                 split_source.clone(),
-                Vec::new(),
                 warmup_block,
                 Some(warmup_verdict),
             )
@@ -16044,7 +15985,6 @@ mod request_tests {
             .begin_fragment_split(
                 split_context,
                 split_source,
-                Vec::new(),
                 block.clone(),
                 Some(verdict.clone()),
             )
@@ -16057,7 +15997,6 @@ mod request_tests {
             RequestWorkbenchScope {
                 response: None,
                 request: None,
-                type_modules: &[],
             },
             block,
             Some(&verdict),
@@ -16110,7 +16049,7 @@ mod request_tests {
     async fn public_visibility_snapshot_pairs_declaration_and_exact_binding_identities() {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
         let runner = ResidentActorRunner::new(machines, source.clone());
         let before = runner
             .public_visibility_snapshot(context.clone())
@@ -16120,7 +16059,6 @@ mod request_tests {
             .begin_fragment_split(
                 context.clone(),
                 source,
-                Vec::new(),
                 ParsedBlock {
                     ordinal: 1,
                     total: 1,
@@ -16177,13 +16115,12 @@ mod request_tests {
     async fn answered_haskell_effect_reports_later_continuation_failure_as_delivered() {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
         let runner = ResidentActorRunner::new(machines, source.clone());
         let step = workbench
             .begin_fragment_split(
                 context.clone(),
                 source,
-                Vec::new(),
                 ParsedBlock {
                     ordinal: 1,
                     total: 1,
@@ -16214,13 +16151,12 @@ mod request_tests {
     ) {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
         let runner = ResidentActorRunner::new(Arc::clone(&machines), source.clone());
         let parent = workbench
             .begin_fragment_split(
                 context.clone(),
                 source.clone(),
-                Vec::new(),
                 ParsedBlock {
                     ordinal: 1,
                     total: 1,
@@ -16311,7 +16247,6 @@ mod request_tests {
                 .begin_fragment_split(
                     context.clone(),
                     source.clone(),
-                    Vec::new(),
                     ParsedBlock {
                         ordinal: 1,
                         total: 1,
@@ -16382,7 +16317,6 @@ mod request_tests {
                 .begin_fragment_split(
                     child.clone(),
                     source.clone(),
-                    Vec::new(),
                     ParsedBlock {
                         ordinal: 1,
                         total: 1,
@@ -16500,14 +16434,14 @@ mod request_tests {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
         let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
         let runner = Arc::new(ResidentActorRunner::new(
             Arc::clone(&machines),
             source.clone(),
         ));
         let (block, verdict) = suspending_fragment();
         let step = workbench
-            .begin_fragment_split(context.clone(), source, Vec::new(), block, Some(verdict))
+            .begin_fragment_split(context.clone(), source, block, Some(verdict))
             .await
             .expect("fragment parks");
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
@@ -16594,18 +16528,11 @@ mod request_tests {
             source.clone(),
             None,
             None,
-            vec![],
         ));
 
         let (block, verdict) = suspending_fragment();
         let step = workbench
-            .begin_fragment_split(
-                suspend_context.clone(),
-                source,
-                Vec::new(),
-                block,
-                Some(verdict),
-            )
+            .begin_fragment_split(suspend_context.clone(), source, block, Some(verdict))
             .await
             .expect("fragment split suspends waiting on a host answer");
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
@@ -16692,7 +16619,7 @@ mod request_tests {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
         let workbench =
-            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None);
         let runner = ResidentActorRunner::new(machines, source.clone());
         let cell = ParkedHoleAbortGuard::with_latest(
             &workbench.access,
@@ -16707,13 +16634,7 @@ mod request_tests {
                 for _ in 0..2 {
                     let (block, verdict) = suspending_fragment();
                     let step = workbench
-                        .begin_fragment_split(
-                            context.clone(),
-                            source.clone(),
-                            vec![],
-                            block,
-                            Some(verdict),
-                        )
+                        .begin_fragment_split(context.clone(), source.clone(), block, Some(verdict))
                         .await
                         .expect("real native fragment parks");
                     let ResidentWorkbenchStep::Running { outcome, .. } = step else {
@@ -16847,14 +16768,13 @@ mod request_tests {
             source.clone(),
             None,
             None,
-            vec![],
         ));
         let park = |workbench: Arc<ResidentActorWorkbench<_, _>>,
                     context: crate::ActorSessionContext,
                     source: ActorWorkbenchSource| async move {
             let (block, verdict) = suspending_fragment();
             let step = workbench
-                .begin_fragment_split(context, source, Vec::new(), block, Some(verdict))
+                .begin_fragment_split(context, source, block, Some(verdict))
                 .await
                 .expect("fragment parks");
             let ResidentWorkbenchStep::Running { outcome, .. } = step else {
@@ -16924,17 +16844,10 @@ mod request_tests {
             source.clone(),
             None,
             None,
-            vec![],
         ));
         let (block, verdict) = suspending_fragment();
         let unrelated = workbench
-            .begin_fragment_split(
-                context.clone(),
-                source.clone(),
-                Vec::new(),
-                block,
-                Some(verdict),
-            )
+            .begin_fragment_split(context.clone(), source.clone(), block, Some(verdict))
             .await
             .expect("unrelated fragment parks");
         let ResidentWorkbenchStep::Running { outcome, .. } = unrelated else {
@@ -16964,7 +16877,6 @@ mod request_tests {
                                     RequestWorkbenchScope {
                                         response: None,
                                         request: None,
-                                        type_modules: &[],
                                     },
                                     block,
                                     Some(&verdict),
@@ -17024,17 +16936,10 @@ mod request_tests {
             source.clone(),
             None,
             None,
-            vec![],
         ));
         let (block, verdict) = suspending_fragment();
         let unrelated = workbench
-            .begin_fragment_split(
-                context.clone(),
-                source.clone(),
-                Vec::new(),
-                block,
-                Some(verdict),
-            )
+            .begin_fragment_split(context.clone(), source.clone(), block, Some(verdict))
             .await
             .expect("unrelated fragment parks");
         let ResidentWorkbenchStep::Running { outcome, .. } = unrelated else {
@@ -17054,13 +16959,7 @@ mod request_tests {
                     async {
                         let (block, verdict) = suspending_fragment();
                         let step = slot_workbench
-                            .begin_fragment_split(
-                                task_context,
-                                source,
-                                Vec::new(),
-                                block,
-                                Some(verdict),
-                            )
+                            .begin_fragment_split(task_context, source, block, Some(verdict))
                             .await
                             .expect("slot fragment parks");
                         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
@@ -17117,8 +17016,7 @@ mod request_tests {
     async fn exact_cleanup_acknowledgement_allows_a_later_native_fragment() {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench =
-            ResidentActorWorkbench::new(machines.clone(), source.clone(), None, None, vec![]);
+        let workbench = ResidentActorWorkbench::new(machines.clone(), source.clone(), None, None);
         let guard = ParkedHoleAbortGuard::with_latest(
             &workbench.access,
             context.clone(),
@@ -17132,7 +17030,6 @@ mod request_tests {
                 .scope(workbench.begin_fragment_split(
                     context.clone(),
                     source.clone(),
-                    vec![],
                     block,
                     Some(verdict),
                 ))
@@ -17178,8 +17075,7 @@ mod request_tests {
     async fn failed_abort_frame_owner(lose_machine: bool) {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench =
-            ResidentActorWorkbench::new(machines.clone(), source.clone(), None, None, vec![]);
+        let workbench = ResidentActorWorkbench::new(machines.clone(), source.clone(), None, None);
         let authority = Arc::new(());
         let authority_weak = Arc::downgrade(&authority);
         let mut failed_cleanup_context = context.clone();
@@ -17203,7 +17099,7 @@ mod request_tests {
                         .try_with(|owner| Arc::downgrade(&owner.0))
                         .expect("nested production cleanup owner is installed");
                     let step = workbench
-                        .begin_fragment_split(context.clone(), source, vec![], block, Some(verdict))
+                        .begin_fragment_split(context.clone(), source, block, Some(verdict))
                         .await;
                     (step, nested_cleanup_weak)
                 },
@@ -17332,19 +17228,17 @@ mod request_tests {
             &mut session,
             &sibling,
             &source,
-            &[],
             &serde_json::json!(42),
             None,
         )
         .expect("sibling owns a genuine compiled native value");
-        let raw_view = actor_compile_view(&session, &context, &source, &[]).unwrap();
+        let raw_view = actor_compile_view(&session, &context, &source).unwrap();
         let raw_injection = source.prepare(&raw_view).injected;
         let before_snapshot = raw_view.next_value_generation();
         let (scoped_source, snapshot) = snapshot_cell_program(
             &mut session,
             &context,
             source.clone(),
-            &[],
             None,
             None,
             None,
@@ -17384,7 +17278,7 @@ mod request_tests {
             "data Owned = Owned",
             "_ <- pure ()\n_ <- pure ()",
         ] {
-            let before = actor_compile_view(&session, &context, &source, &[])
+            let before = actor_compile_view(&session, &context, &source)
                 .unwrap()
                 .next_value_generation();
             let specification =
@@ -17422,7 +17316,8 @@ mod request_tests {
                             specification.clone(),
                             specification.specification_digest(),
                             [9; 32],
-                            prepared.include.clone()
+                            prepared.include.clone(),
+                            None
                         )
                         .is_err(),
                     "setup accepted {text:?}"
@@ -17434,7 +17329,7 @@ mod request_tests {
                 );
             }
             assert_eq!(
-                actor_compile_view(&session, &context, &source, &[])
+                actor_compile_view(&session, &context, &source)
                     .unwrap()
                     .next_value_generation(),
                 before,
@@ -17477,7 +17372,7 @@ mod request_tests {
             .map(PathBuf::as_path)
             .collect::<Vec<_>>();
         let request = CellCheckRequest {
-            exact_context: raw_view.exact_declaration_context().cloned(),
+            exact_context: raw_view.exact_compile_context(),
             session_id: Some(raw_view.session()),
             cell_text: &specification.cell_source,
             template: &specification.template_source,
@@ -17511,6 +17406,7 @@ mod request_tests {
             leaked.specification_digest(),
             [9; 32],
             prepared.include.clone(),
+            None,
         ) {
             Err(error) => error,
             Ok(_) => panic!("setup accepted foreign injection"),
@@ -17552,6 +17448,7 @@ mod request_tests {
                 specification.specification_digest(),
                 [9; 32],
                 prepared.include,
+                None,
             )
             .unwrap();
         assert!(admitted.private_execution().is_none());

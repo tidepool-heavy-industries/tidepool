@@ -366,7 +366,7 @@ impl AdmittedInspectionInputs {
             && request
                 .exact_context
                 .as_ref()
-                .map(|context| context.semantic_sha256())
+                .map(|context| context.declarations().semantic_sha256())
                 == self
                     .view
                     .exact_declaration_context()
@@ -378,7 +378,7 @@ impl AdmittedInspectionInputs {
 pub struct InspectionRequest<'a> {
     /// Protected original declarations shared by every query in this batch.
     pub exact_context:
-        Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+        Option<std::sync::Arc<tidepool_toolchain::declaration_context::ExactCompileContext>>,
     pub preamble: &'a str,
     pub imports: &'a str,
     pub include: &'a [&'a Path],

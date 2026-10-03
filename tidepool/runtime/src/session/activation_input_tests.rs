@@ -269,8 +269,8 @@ impl InputFixture {
             "ACTIVATION_TRANSITION {}",
             serde_json::json!({
                 "site": site,
-                "payload_origin_authenticated": payload.provenance.authenticated_inputs.contains(&site),
-                "parked_origin_authenticated": provenance.authenticated_inputs.contains(&site),
+                "payload_origin_authenticated": payload.provenance.authenticated_inputs.contains_key(&site),
+                "parked_origin_authenticated": provenance.authenticated_inputs.contains_key(&site),
                 "original_metadata_matches": metadata_matches,
             })
         );
@@ -423,6 +423,14 @@ fn checked_input(
     let input = resident
         .capture_activation_input(hole, realm, site)
         .expect("claim original input and authenticated canonical type");
+    checked_captured_input(resident, input, recipe)
+}
+
+fn checked_captured_input(
+    resident: &mut TestSession,
+    input: RuntimeActivationInput,
+    recipe: Arc<InputRecipe>,
+) -> (RuntimeActivationInputAdmission, CompiledActivationInput) {
     let view = resident.compile_view_in(ScopeId::ROOT).unwrap();
     let imports = view.turn_imports(&SourceImports::new());
     let template = resident_cell_check_template(&recipe.preamble, &recipe.row, &imports);
@@ -601,7 +609,7 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
     let injected = view.injected_module_names();
     let checked = turn::check_cell_admitted(
         CellCheckRequest {
-            exact_context: view.exact_declaration_context().cloned(),
+            exact_context: view.exact_compile_context(),
             session_id: Some(view.session()),
             cell_text: source,
             template: &template,
@@ -627,7 +635,7 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
         bound, compiled, ..
     } = turn::run_checked_item(
         TurnRequest {
-            exact_context: view.exact_declaration_context().cloned(),
+            exact_context: view.exact_compile_context(),
             session_id: Some(view.session()),
             turn_text: source,
             templates: &templates,
@@ -872,7 +880,7 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
 }
 
 #[test]
-fn activation_opaque_input_refuses_same_spelling_home_shadow_before_mount() {
+fn activation_opaque_input_native_owner_survives_same_spelling_source_shadow() {
     let fixture = InputFixture::compile(
         include_str!("fixtures/activation-input-opaque.hs"),
         true,
@@ -906,23 +914,14 @@ fn activation_opaque_input_refuses_same_spelling_home_shadow_before_mount() {
         .public_visibility_snapshot_in(ScopeId::ROOT)
         .unwrap();
     let (owner, compiled) = checked_input(&mut refused, &hole, site, shadow);
-    let error = refused
-        .mount_activation_input(owner, compiled)
-        .err()
-        .expect("same-spelled distinct home type cannot relabel original input");
-    assert!(
-        matches!(error, ResidentError::ActivationInputTypeMismatch {
-        site: rejected, original, compiled,
-    } if rejected == site && original != compiled),
-        "{error:?}"
-    );
-    assert_eq!(
+    preview_original(&mut refused, owner, compiled);
+    assert_ne!(
         refused
             .public_visibility_snapshot_in(ScopeId::ROOT)
             .unwrap(),
         before
     );
-    assert!(!refused
+    assert!(refused
         .binding_names_in(ScopeId::ROOT)
         .iter()
         .any(|name| name == "sessionInput"));
@@ -959,4 +958,101 @@ fn activation_opaque_input_refuses_same_spelling_home_shadow_before_mount() {
         ResidentOutcome::Completed { .. }
     ));
     assert!(accepted.parked_holes().is_empty());
+}
+
+#[test]
+fn native_input_generation_retains_original_type_owner_after_source_readers_drop() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-input-opaque.hs"),
+        true,
+        SessionId(1712),
+    );
+    let inventory = fixture
+        .producer
+        .certification
+        .as_ref()
+        .expect("original sealed products")
+        .artifact_view
+        .inventory()
+        .clone();
+    let original = fixture
+        .producer
+        .certification
+        .as_ref()
+        .unwrap()
+        .artifact_view
+        .descriptors()
+        .into_iter()
+        .find(|descriptor| descriptor.owner.module == "ActivationInputOriginal")
+        .expect("compiler retained the actual original private home interface");
+    let mut resident = fixture.fresh();
+    let reservation = fixture.start(&mut resident);
+    let (_submission, hole) = fixture.deliver(&mut resident, reservation, 1);
+    let site = parked_site(&mut resident, &hole);
+    let realm = resident.parked_realm(&hole).unwrap();
+    let input = resident
+        .capture_activation_input(&hole, realm, site)
+        .unwrap();
+    let evidence = input.type_evidence().clone();
+    let recipe = Arc::new(InputRecipe {
+        preamble: fixture
+            .recipe
+            .preamble
+            .lines()
+            .filter(|line| !line.contains("ActivationInputOriginal"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+        row: fixture.recipe.row.clone(),
+        include: fixture
+            .recipe
+            .include
+            .iter()
+            .filter(|path| path.file_name().is_none_or(|name| name != "home"))
+            .cloned()
+            .collect(),
+    });
+    let InputFixture {
+        root,
+        producer,
+        receiver,
+        ..
+    } = fixture;
+    drop(producer);
+    drop(receiver);
+    std::fs::remove_dir_all(root.path().join("home")).unwrap();
+    let retained = evidence.compile_context(None).unwrap();
+    assert!(retained
+        .declarations()
+        .artifact_view()
+        .descriptors()
+        .contains(&original));
+    assert!(
+        retained.declarations().lexical_graph().is_empty(),
+        "type custody grants no source names"
+    );
+    drop(retained);
+    assert!(inventory.node_count() > 0);
+
+    let (owner, compiled) = checked_captured_input(&mut resident, input, recipe);
+    assert!(
+        compiled
+            .compiled
+            .certification
+            .as_ref()
+            .expect("native generation sealed products")
+            .artifact_view
+            .descriptors()
+            .contains(&original),
+        "native generation carries its original type-only dependency"
+    );
+    preview_original(&mut resident, owner, compiled);
+    assert!(inventory.node_count() > 0);
+    drop(evidence);
+    drop(resident);
+    assert_eq!(
+        inventory.node_count(),
+        0,
+        "the final native/value/request reader releases the original graph"
+    );
 }

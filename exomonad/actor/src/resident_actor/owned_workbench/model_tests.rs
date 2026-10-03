@@ -78,7 +78,6 @@ fn execution(model: Arc<ModelOwner>) -> OwnedExecution<frunk::HNil, tidepool_mcp
         crate::ActorWorkbenchSource::new("", Vec::new()),
         None,
         None,
-        Vec::new(),
     );
     let cleanup = workbench.continuation_cleanup_owner(
         context.clone(),

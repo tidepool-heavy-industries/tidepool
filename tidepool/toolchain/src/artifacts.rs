@@ -513,6 +513,16 @@ fn checked_cell_authorization(
     checked_search_authorization(purpose, authorization, include)
 }
 
+fn compile_context_with_declarations(
+    context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
+    declarations: Arc<crate::declaration_join::ExactDeclarationContext>,
+) -> crate::declaration_context::ExactCompileContext {
+    match context {
+        Some(context) => (*context).clone().with_declarations(declarations),
+        None => crate::declaration_context::ExactCompileContext::new(declarations),
+    }
+}
+
 fn checked_offer_context(
     context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
 ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
@@ -787,7 +797,7 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Arc<crate::declaration_join::ExactDeclarationContext>,
+        context: Arc<crate::declaration_context::ExactCompileContext>,
     ) -> Result<Self, CompileError> {
         Ok(Self {
             selected: None,
@@ -865,7 +875,7 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
         specification: crate::checked_cell::CheckedCellSpecification,
         purpose: CheckedCellPurpose<'_>,
         checked_values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
@@ -885,7 +895,12 @@ impl ModuleCandidateOffer {
                 "checked initial interface inventory differs from injected owners".into(),
             ));
         }
-        let publication_context = checked_offer_context(context)?;
+        let compile_context = context;
+        let publication_context = checked_offer_context(
+            compile_context
+                .as_ref()
+                .map(|context| context.declarations().clone()),
+        )?;
         let context = checked_value_context(
             Some(publication_context.clone()),
             &checked_values,
@@ -905,7 +920,7 @@ impl ModuleCandidateOffer {
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(
-                context
+                compile_context_with_declarations(compile_context, context.clone())
                     .prepare_compilation_with_authorization(
                         &scratch.join("exact-scope"),
                         producer,
@@ -936,7 +951,7 @@ impl ModuleCandidateOffer {
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
         specification: crate::checked_cell::CheckedCellSpecification,
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         planned: crate::checked_cell::CheckedPlannedCellSpecification,
@@ -959,7 +974,12 @@ impl ModuleCandidateOffer {
         }
         let extension = planned.authorization(&specification, producer, include, scratch)?;
         let mut authorization = specification.manifest_value()?;
-        let publication_context = checked_offer_context(context)?;
+        let compile_context = context;
+        let publication_context = checked_offer_context(
+            compile_context
+                .as_ref()
+                .map(|context| context.declarations().clone()),
+        )?;
         let context = checked_value_context(
             Some(publication_context.clone()),
             &values,
@@ -989,7 +1009,7 @@ impl ModuleCandidateOffer {
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(
-                context
+                compile_context_with_declarations(compile_context, context.clone())
                     .prepare_compilation_with_authorization(
                         &scratch.join("exact-scope"),
                         producer,
@@ -1019,7 +1039,7 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
         item: crate::checked_cell::ExactCheckedItem,
         prefix: crate::checked_cell::ExactCompiledPrefix,
         runtime_prefix_digest: [u8; 32],
@@ -1055,7 +1075,7 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
         item: crate::checked_cell::ExactCheckedItem,
         prefix: crate::checked_cell::ExactCompiledPrefix,
         runtime_prefix_digest: [u8; 32],
@@ -1088,7 +1108,7 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
         item: crate::checked_cell::ExactCheckedItem,
         prefix: crate::checked_cell::ExactCompiledPrefix,
         runtime_prefix_digest: [u8; 32],
@@ -1103,7 +1123,12 @@ impl ModuleCandidateOffer {
         )>,
         purpose: crate::checked_cell::CheckedItemPurpose,
     ) -> Result<Self, CompileError> {
-        let context = prefix.with_initial_value_context(checked_offer_context(context)?)?;
+        let compile_context = context;
+        let context = prefix.with_initial_value_context(checked_offer_context(
+            compile_context
+                .as_ref()
+                .map(|context| context.declarations().clone()),
+        )?)?;
         let settled_values = prefix.select_settled_values(settled_bindings)?;
         let checked_item = crate::checked_cell::CheckedItemOffer {
             purpose,
@@ -1121,44 +1146,47 @@ impl ModuleCandidateOffer {
             checked_item.validate_activation_input()?;
         }
         let mut selected = None;
-        let exact = context.prepare_compilation_authorizing(
-            &scratch.join("exact-scope"),
-            producer,
-            |semantic_sha256| {
-                let authorization = checked_search_authorization(
-                    match purpose {
-                        crate::checked_cell::CheckedItemPurpose::Authored => CheckedPurpose::Item,
-                        crate::checked_cell::CheckedItemPurpose::HostActivationInput => {
-                            CheckedPurpose::HostActivationInput
-                        }
-                    },
-                    checked_item.authorization(producer, semantic_sha256)?,
-                    include,
-                )?;
-                let mut reserved = checked_item
-                    .prefix
-                    .injected_modules()
-                    .into_iter()
-                    .collect::<BTreeSet<_>>();
-                reserved.extend(
-                    checked_item
-                        .item
-                        .reserved_declaration_modules()
-                        .iter()
-                        .cloned(),
-                );
-                reserved.insert(
-                    tidepool_repr::SessionModule::val(tidepool_repr::Generation(
-                        checked_item.generation,
-                    ))
-                    .module_name(),
-                );
-                selected = immutable_candidates_in_context(
-                    &context, producer, include, scratch, reserved,
-                )?;
-                Ok(authorization)
-            },
-        )?;
+        let exact = compile_context_with_declarations(compile_context, context.clone())
+            .prepare_compilation_authorizing(
+                &scratch.join("exact-scope"),
+                producer,
+                |semantic_sha256| {
+                    let authorization = checked_search_authorization(
+                        match purpose {
+                            crate::checked_cell::CheckedItemPurpose::Authored => {
+                                CheckedPurpose::Item
+                            }
+                            crate::checked_cell::CheckedItemPurpose::HostActivationInput => {
+                                CheckedPurpose::HostActivationInput
+                            }
+                        },
+                        checked_item.authorization(producer, semantic_sha256)?,
+                        include,
+                    )?;
+                    let mut reserved = checked_item
+                        .prefix
+                        .injected_modules()
+                        .into_iter()
+                        .collect::<BTreeSet<_>>();
+                    reserved.extend(
+                        checked_item
+                            .item
+                            .reserved_declaration_modules()
+                            .iter()
+                            .cloned(),
+                    );
+                    reserved.insert(
+                        tidepool_repr::SessionModule::val(tidepool_repr::Generation(
+                            checked_item.generation,
+                        ))
+                        .module_name(),
+                    );
+                    selected = immutable_candidates_in_context(
+                        &context, producer, include, scratch, reserved,
+                    )?;
+                    Ok(authorization)
+                },
+            )?;
         Ok(Self {
             selected,
             producer: producer.to_vec(),
@@ -1188,7 +1216,7 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
         capture: Arc<crate::checked_cell::ExactCompiledItem>,
         prefix: crate::checked_cell::ExactCompiledPrefix,
         generation: u64,
@@ -1202,7 +1230,12 @@ impl ModuleCandidateOffer {
             u64,
         )>,
     ) -> Result<Self, CompileError> {
-        let context = prefix.with_initial_value_context(checked_offer_context(context)?)?;
+        let compile_context = context;
+        let context = prefix.with_initial_value_context(checked_offer_context(
+            compile_context
+                .as_ref()
+                .map(|context| context.declarations().clone()),
+        )?)?;
         if !crate::checked_cell::same_include_paths(include, capture.item().cell_include()) {
             return Err(CompileError::ExtractFailed(
                 "checked display include search order changed".into(),
@@ -1220,40 +1253,41 @@ impl ModuleCandidateOffer {
             is_program: false,
         };
         let mut selected = None;
-        let exact = context.prepare_compilation_authorizing(
-            &scratch.join("exact-scope"),
-            producer,
-            |semantic_sha256| {
-                let authorization = checked_search_authorization(
-                    CheckedPurpose::Display,
-                    display.authorization(producer, semantic_sha256)?,
-                    include,
-                )?;
-                let mut reserved = display
-                    .prefix
-                    .injected_modules()
-                    .into_iter()
-                    .collect::<BTreeSet<_>>();
-                reserved.extend(
-                    display
-                        .capture
-                        .item()
-                        .reserved_declaration_modules()
-                        .iter()
-                        .cloned(),
-                );
-                reserved.insert(
-                    tidepool_repr::SessionModule::val(tidepool_repr::Generation(
-                        display.generation,
-                    ))
-                    .module_name(),
-                );
-                selected = immutable_candidates_in_context(
-                    &context, producer, include, scratch, reserved,
-                )?;
-                Ok(authorization)
-            },
-        )?;
+        let exact = compile_context_with_declarations(compile_context, context.clone())
+            .prepare_compilation_authorizing(
+                &scratch.join("exact-scope"),
+                producer,
+                |semantic_sha256| {
+                    let authorization = checked_search_authorization(
+                        CheckedPurpose::Display,
+                        display.authorization(producer, semantic_sha256)?,
+                        include,
+                    )?;
+                    let mut reserved = display
+                        .prefix
+                        .injected_modules()
+                        .into_iter()
+                        .collect::<BTreeSet<_>>();
+                    reserved.extend(
+                        display
+                            .capture
+                            .item()
+                            .reserved_declaration_modules()
+                            .iter()
+                            .cloned(),
+                    );
+                    reserved.insert(
+                        tidepool_repr::SessionModule::val(tidepool_repr::Generation(
+                            display.generation,
+                        ))
+                        .module_name(),
+                    );
+                    selected = immutable_candidates_in_context(
+                        &context, producer, include, scratch, reserved,
+                    )?;
+                    Ok(authorization)
+                },
+            )?;
         Ok(Self {
             selected,
             producer: producer.to_vec(),

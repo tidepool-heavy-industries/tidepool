@@ -296,6 +296,7 @@ fn try_execute_cell_with_template_imports(
             specification.specification_digest(),
             [1; 32],
             admitted_include,
+            None,
         )
         .unwrap();
     let view = admission.view();
@@ -305,7 +306,7 @@ fn try_execute_cell_with_template_imports(
     let compile_cell = || {
         compile_cell_program_admitted(
             CellCheckRequest {
-                exact_context: view.exact_declaration_context().cloned(),
+                exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
                 cell_text: source,
                 template: &template,
