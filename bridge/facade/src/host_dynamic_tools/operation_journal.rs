@@ -72,6 +72,8 @@ pub(super) struct OperationJournal {
     settled_boundaries: BTreeSet<BoundaryKey>,
     created: bool,
     uncertain: bool,
+    #[cfg(test)]
+    fail_after_append: bool,
 }
 
 impl OperationJournal {
@@ -111,6 +113,8 @@ impl OperationJournal {
             settled_boundaries: BTreeSet::new(),
             created: false,
             uncertain: false,
+            #[cfg(test)]
+            fail_after_append: false,
         };
         for row in rows {
             if row.sequence != journal.next_sequence {
@@ -306,8 +310,20 @@ impl OperationJournal {
             self.uncertain = true;
             return Err(error);
         }
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_after_append) {
+            self.uncertain = true;
+            return Err(std::io::Error::other(
+                "injected append error after the row was written",
+            ));
+        }
         self.next_sequence += 1;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn fail_next_append_after_write(&mut self) {
+        self.fail_after_append = true;
     }
 }
 
@@ -367,6 +383,45 @@ mod tests {
             panic!("terminal outcome was not recovered")
         };
         assert_eq!(recovered, response);
+    }
+
+    #[test]
+    fn uncertain_appends_reopen_from_the_retained_durable_prefix() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("operations.jsonl");
+        let request = request("effect-a");
+        let response = CallResponse::text("retained result".into());
+        let boundary = super::super::external_operation(
+            "thread".into(),
+            "turn".into(),
+            "outer-call".into(),
+        );
+
+        let mut journal = OperationJournal::open(path.clone()).unwrap();
+        journal.fail_next_append_after_write();
+        assert!(journal.admit(&request).is_err());
+        drop(journal);
+
+        let mut journal = OperationJournal::open_existing(path.clone()).unwrap();
+        assert!(matches!(
+            journal.admit(&request).unwrap(),
+            Admission::Uncertain
+        ));
+        journal.fail_next_append_after_write();
+        assert!(journal.finish(&request, &response).is_err());
+        drop(journal);
+
+        let mut journal = OperationJournal::open_existing(path.clone()).unwrap();
+        let Admission::Known(recovered) = journal.admit(&request).unwrap() else {
+            panic!("terminal row was not recovered after an uncertain append")
+        };
+        assert_eq!(recovered, response);
+        journal.fail_next_append_after_write();
+        assert!(journal.settle_boundary(boundary.clone()).is_err());
+        drop(journal);
+
+        let journal = OperationJournal::open_existing(path).unwrap();
+        assert_eq!(journal.settled_boundaries().collect::<Vec<_>>(), vec![&boundary]);
     }
 
     #[test]

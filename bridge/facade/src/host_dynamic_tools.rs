@@ -33,11 +33,10 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
 mod operation_journal;
+mod ledger;
 
 pub(crate) fn validate_operation_recovery(path: PathBuf) -> Result<(), String> {
-    operation_journal::OperationJournal::open_existing(path)
-        .map(|_| ())
-        .map_err(|error| format!("hosted-operation recovery evidence is unavailable: {error}"))
+    ledger::HostedOperationLedger::validate_recovery(path)
 }
 
 const PROTOCOL_VERSION: u32 = HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION;
@@ -62,15 +61,6 @@ enum HostToolPhase {
 enum AdmissionKind {
     NewWork,
     CompletionOrRead,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HostBoundaryState {
-    Active,
-    Reconciling,
-    Pending,
-    Recoverable,
-    Settled,
 }
 
 /// One service's HTTP admission control, never resident-effect custody.
@@ -185,8 +175,7 @@ struct HostState {
     endpoint: Arc<dyn ResidentToolEndpoint>,
     binding_path: PathBuf,
     expected_thread: Option<BackendThreadId>,
-    boundaries: Arc<Mutex<HashMap<OriginalOperation, HostBoundaryState>>>,
-    operations: Option<Arc<parking_lot::Mutex<operation_journal::OperationJournal>>>,
+    ledger: ledger::HostedOperationLedger,
 }
 
 /// Immutable actor-specific service inputs.
@@ -254,8 +243,7 @@ impl HostDynamicToolService {
                 endpoint,
                 binding_path,
                 expected_thread,
-                boundaries: Arc::default(),
-                operations: None,
+                ledger: ledger::HostedOperationLedger::new(),
             },
         })
     }
@@ -265,23 +253,7 @@ impl HostDynamicToolService {
         path: PathBuf,
         require_existing: bool,
     ) -> Result<Self, String> {
-        let journal = if require_existing {
-            operation_journal::OperationJournal::open_existing(path)
-        } else {
-            operation_journal::OperationJournal::open(path)
-        }
-        .map_err(|error| format!("cannot open hosted-operation journal: {error}"))?;
-        let mut boundaries = journal
-            .uncertain_boundaries()
-            .map(|boundary| (boundary, HostBoundaryState::Pending))
-            .collect::<HashMap<_, _>>();
-        boundaries.extend(
-            journal
-                .settled_boundaries()
-                .map(|boundary| (boundary.clone(), HostBoundaryState::Settled)),
-        );
-        self.state.boundaries = Arc::new(Mutex::new(boundaries));
-        self.state.operations = Some(Arc::new(parking_lot::Mutex::new(journal)));
+        self.state.ledger = ledger::HostedOperationLedger::with_journal(path, require_existing)?;
         Ok(self)
     }
 
@@ -539,25 +511,13 @@ async fn interrupted(
         ));
     }
     let boundary = validate_completion_boundary(&state, request).await?;
-    let key = boundary.clone();
-    let previous = {
-        let mut boundaries = state.boundaries.lock().await;
-        match boundaries.get(&key).copied() {
-            Some(HostBoundaryState::Reconciling) => {
-                return Ok(Json(WorkbenchInterruptionResponse::Pending));
-            }
-            Some(HostBoundaryState::Settled) => {
-                return Ok(Json(WorkbenchInterruptionResponse::Settled));
-            }
-            previous @ (None
-            | Some(
-                HostBoundaryState::Active
-                | HostBoundaryState::Pending
-                | HostBoundaryState::Recoverable,
-            )) => {
-                boundaries.insert(key.clone(), HostBoundaryState::Reconciling);
-                previous
-            }
+    let claim = match state.ledger.claim_interruption(boundary.clone()).await {
+        ledger::InterruptionAdmission::Claimed(claim) => claim,
+        ledger::InterruptionAdmission::Pending => {
+            return Ok(Json(WorkbenchInterruptionResponse::Pending));
+        }
+        ledger::InterruptionAdmission::Settled => {
+            return Ok(Json(WorkbenchInterruptionResponse::Settled));
         }
     };
     let response = match state
@@ -569,15 +529,7 @@ async fn interrupted(
     {
         Ok(response) => WorkbenchInterruptionResponse::from_reconciliation(response),
         Err(error) => {
-            let mut boundaries = state.boundaries.lock().await;
-            match previous {
-                Some(previous) => {
-                    boundaries.insert(key, previous);
-                }
-                None => {
-                    boundaries.remove(&key);
-                }
-            }
+            claim.restore().await;
             let status = match error {
                 ResidentToolError::CancellationUnsupported => StatusCode::NOT_IMPLEMENTED,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -586,11 +538,11 @@ async fn interrupted(
         }
     };
     let state_after = match &response {
-        WorkbenchInterruptionResponse::Pending => HostBoundaryState::Pending,
-        WorkbenchInterruptionResponse::Recovered { .. } => HostBoundaryState::Recoverable,
-        WorkbenchInterruptionResponse::Settled => HostBoundaryState::Settled,
+        WorkbenchInterruptionResponse::Pending => ledger::BoundaryState::Pending,
+        WorkbenchInterruptionResponse::Recovered { .. } => ledger::BoundaryState::Recoverable,
+        WorkbenchInterruptionResponse::Settled => ledger::BoundaryState::Settled,
     };
-    state.boundaries.lock().await.insert(key, state_after);
+    claim.finish_interruption(state_after).await;
     Ok(Json(response))
 }
 
@@ -670,25 +622,14 @@ async fn completed(
         ));
     }
     let boundary = validate_completion_boundary(&state, request).await?;
-    let key = boundary.clone();
-    let previous = {
-        let mut boundaries = state.boundaries.lock().await;
-        match boundaries.get(&key).copied() {
-            Some(HostBoundaryState::Settled) => return Ok(Json(serde_json::Value::Null)),
-            Some(
-                HostBoundaryState::Active
-                | HostBoundaryState::Reconciling
-                | HostBoundaryState::Pending,
-            ) => {
-                return Err((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "tool completion boundary is still settling; retry acknowledgment".into(),
-                ));
-            }
-            previous => {
-                boundaries.insert(key.clone(), HostBoundaryState::Reconciling);
-                previous
-            }
+    let claim = match state.ledger.claim_completion(boundary.clone()).await {
+        ledger::CompletionAdmission::Claimed(claim) => claim,
+        ledger::CompletionAdmission::Settled => return Ok(Json(serde_json::Value::Null)),
+        ledger::CompletionAdmission::Busy => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "tool completion boundary is still settling; retry acknowledgment".into(),
+            ));
         }
     };
     if let Err(error) = state
@@ -698,33 +639,15 @@ async fn completed(
         ))
         .await
     {
-        let mut boundaries = state.boundaries.lock().await;
-        match previous {
-            Some(previous) => {
-                boundaries.insert(key, previous);
-            }
-            None => {
-                boundaries.remove(&key);
-            }
-        }
+        claim.restore().await;
         return Err((StatusCode::INTERNAL_SERVER_ERROR, error.to_string()));
     }
-    if let Some(operations) = &state.operations {
-        operations
-            .lock()
-            .settle_boundary(key.clone())
-            .map_err(|error| {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    format!("hosted-operation acknowledgment is unconfirmed: {error}"),
-                )
-            })?;
-    }
-    state
-        .boundaries
-        .lock()
-        .await
-        .insert(key, HostBoundaryState::Settled);
+    claim.settle().await.map_err(|error| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("hosted-operation acknowledgment is unconfirmed: {error}"),
+        )
+    })?;
     Ok(Json(serde_json::Value::Null))
 }
 
@@ -1197,56 +1120,20 @@ async fn call(
             ));
         }
     };
-    let boundary_key = request.context_call_id.as_ref().map(|call_id| {
-        external_operation(
-            request.thread_id.clone(),
-            request.turn_id.clone(),
-            call_id.clone(),
-        )
-    });
-    if let Some(key) = &boundary_key {
-        let mut boundaries = state.boundaries.lock().await;
-        match boundaries.get(key) {
-            Some(HostBoundaryState::Settled) => {
-                return Json(CallResponse::failure(&HostToolFailure::SettledBoundary));
-            }
-            Some(
-                HostBoundaryState::Active
-                | HostBoundaryState::Reconciling
-                | HostBoundaryState::Pending
-                | HostBoundaryState::Recoverable,
-            ) => {
-                return Json(CallResponse::failure(&HostToolFailure::ActiveBoundary));
-            }
-            None => {
-                boundaries.insert(key.clone(), HostBoundaryState::Active);
-            }
+    match state.ledger.admit_call(&journal_request).await {
+        ledger::CallAdmission::New => {}
+        ledger::CallAdmission::Known(response) => return Json(response),
+        ledger::CallAdmission::Uncertain => {
+            return Json(CallResponse::failure(&HostToolFailure::OperationUncertain));
         }
-    }
-    if let Some(operations) = &state.operations {
-        let admission = operations.lock().admit(&journal_request);
-        match admission {
-            Ok(operation_journal::Admission::New) => {}
-            Ok(operation_journal::Admission::Known(response)) => {
-                if let Some(key) = &boundary_key {
-                    state.boundaries.lock().await.remove(key);
-                }
-                return Json(response);
-            }
-            Ok(operation_journal::Admission::Uncertain) => {
-                if let Some(key) = &boundary_key {
-                    state.boundaries.lock().await.remove(key);
-                }
-                return Json(CallResponse::failure(&HostToolFailure::OperationUncertain));
-            }
-            Err(error) => {
-                if let Some(key) = &boundary_key {
-                    state.boundaries.lock().await.remove(key);
-                }
-                return Json(CallResponse::failure(&HostToolFailure::OperationJournal(
-                    error.to_string(),
-                )));
-            }
+        ledger::CallAdmission::BoundaryActive => {
+            return Json(CallResponse::failure(&HostToolFailure::ActiveBoundary));
+        }
+        ledger::CallAdmission::BoundarySettled => {
+            return Json(CallResponse::failure(&HostToolFailure::SettledBoundary));
+        }
+        ledger::CallAdmission::JournalError(error) => {
+            return Json(CallResponse::failure(&HostToolFailure::OperationJournal(error)));
         }
     }
     let invocation = ToolInvocation {
@@ -1275,14 +1162,12 @@ async fn call(
                 error = %failure,
                 "resident tool dispatch panicked before returning its future"
             );
-            if let Some(key) = &boundary_key {
-                state.boundaries.lock().await.remove(key);
-            }
             return Json(record_operation_response(
                 &state,
                 &journal_request,
                 CallResponse::failure(&failure),
-            ));
+            )
+            .await);
         }
     };
     let response = match result {
@@ -1312,25 +1197,16 @@ async fn call(
             CallResponse::failure(&failure)
         }
     };
-    let response = record_operation_response(&state, &journal_request, response);
-    if let Some(key) = &boundary_key {
-        let mut boundaries = state.boundaries.lock().await;
-        if boundaries.get(key) == Some(&HostBoundaryState::Active) {
-            boundaries.remove(key);
-        }
-    }
+    let response = record_operation_response(&state, &journal_request, response).await;
     Json(response)
 }
 
-fn record_operation_response(
+async fn record_operation_response(
     state: &HostState,
     request: &CallRequest,
     response: CallResponse,
 ) -> CallResponse {
-    let Some(operations) = &state.operations else {
-        return response;
-    };
-    match operations.lock().finish(request, &response) {
+    match state.ledger.finish_call(request, &response).await {
         Ok(()) => response,
         Err(error) => CallResponse::failure(&HostToolFailure::OperationJournal(format!(
             "terminal outcome is unconfirmed: {error}"
@@ -1639,7 +1515,7 @@ pub(crate) mod tests {
             assert_eq!(error.0, StatusCode::BAD_REQUEST);
         }
         assert!(calls.lock().unwrap().is_empty());
-        assert!(state.boundaries.lock().await.is_empty());
+        assert!(state.ledger.boundaries_is_empty().await);
     }
 
     #[tokio::test]
@@ -1679,15 +1555,14 @@ pub(crate) mod tests {
         let thread_id = "01a05a16-97f5-7722-aa8d-467e01e2e5b4";
         let key = external_operation(thread_id.into(), "turn".into(), "call-a".into());
         for boundary_state in [
-            HostBoundaryState::Active,
-            HostBoundaryState::Reconciling,
-            HostBoundaryState::Pending,
+            ledger::BoundaryState::Active,
+            ledger::BoundaryState::Reconciling,
+            ledger::BoundaryState::Pending,
         ] {
             state
-                .boundaries
-                .lock()
-                .await
-                .insert(key.clone(), boundary_state);
+                .ledger
+                .set_boundary_state(key.clone(), boundary_state)
+                .await;
             let error = completed(
                 State(state.clone()),
                 Json(CompletionRequest {
@@ -1701,15 +1576,14 @@ pub(crate) mod tests {
             .unwrap_err();
             assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(
-                state.boundaries.lock().await.get(&key),
-                Some(&boundary_state)
+                state.ledger.boundary_state(&key).await,
+                Some(boundary_state)
             );
         }
         state
-            .boundaries
-            .lock()
-            .await
-            .insert(key.clone(), HostBoundaryState::Recoverable);
+            .ledger
+            .set_boundary_state(key.clone(), ledger::BoundaryState::Recoverable)
+            .await;
         let response = completed(
             State(state.clone()),
             Json(CompletionRequest {
@@ -1723,8 +1597,8 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(response.0, serde_json::Value::Null);
         assert_eq!(
-            state.boundaries.lock().await.get(&key),
-            Some(&HostBoundaryState::Settled)
+            state.ledger.boundary_state(&key).await,
+            Some(ledger::BoundaryState::Settled)
         );
     }
 
@@ -2062,6 +1936,54 @@ pub(crate) mod tests {
         })
     }
 
+    struct BlockingEndpoint {
+        tools: Vec<HostedTool>,
+        dispatches: Arc<std::sync::atomic::AtomicUsize>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl ResidentToolEndpoint for BlockingEndpoint {
+        fn tools(&self) -> &[HostedTool] {
+            &self.tools
+        }
+
+        fn instructions(&self) -> Option<&str> {
+            None
+        }
+
+        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolFuture {
+            self.dispatches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(serde_json::json!({ "released": true }))
+            })
+        }
+    }
+
+    fn blocking_endpoint(
+        dispatches: Arc<std::sync::atomic::AtomicUsize>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) -> Arc<dyn ResidentToolEndpoint> {
+        Arc::new(BlockingEndpoint {
+            tools: vec![HostedTool::Custom(CustomToolDeclaration {
+                name: "haskell".into(),
+                description: "Run Haskell".into(),
+                schedule: exomonad_tool::ToolScheduling::default(),
+                implementation: exomonad_tool::ToolImplementation::default(),
+                effect_keys: Vec::new(),
+            })],
+            dispatches,
+            entered,
+            release,
+        })
+    }
+
     async fn bind_test_thread(state: &HostState) {
         *state.control.bound_thread.lock().await = Some(BackendThreadId(
             "01a05a16-97f5-7722-aa8d-467e01e2e5b4".into(),
@@ -2099,6 +2021,49 @@ pub(crate) mod tests {
         .state;
         bind_test_thread(&recovered).await;
         assert_eq!(call(State(recovered), Json(request)).await.0, expected);
+        assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_duplicate_call_is_uncertain_and_dispatches_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let dispatches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let state = HostDynamicToolService::new(
+            blocking_endpoint(
+                Arc::clone(&dispatches),
+                Arc::clone(&entered),
+                Arc::clone(&release),
+            ),
+            directory.path().join("binding"),
+            None,
+        )
+        .unwrap()
+        .with_operation_journal(directory.path().join("operations.jsonl"), false)
+        .unwrap()
+        .state;
+        bind_test_thread(&state).await;
+        let request = call_request(serde_json::Value::String("effect".into()));
+        let first_state = state.clone();
+        let first_request = request.clone();
+        let first = tokio::spawn(async move { call(State(first_state), Json(first_request)).await.0 });
+
+        entered.notified().await;
+        let duplicate = call(State(state.clone()), Json(request.clone())).await.0;
+        assert!(!duplicate.success);
+        let CallContent::InputText { text } = &duplicate.content_items[0];
+        assert!(text.contains("outcome is uncertain"));
+        assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        release.notify_one();
+        let completed = first.await.unwrap();
+        assert!(completed.success);
+        assert_eq!(
+            call(State(state), Json(request)).await.0,
+            completed,
+            "a retry after settlement returns the retained response"
+        );
         assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
