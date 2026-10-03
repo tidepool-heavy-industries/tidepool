@@ -3137,20 +3137,26 @@ dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
         | summary <- graphSummaries
         , (qualifier, imported) <- ms_srcimps summary
         ]
-      roots = nub (concatMap (importPaths . ms_hspp_opts) graphSummaries)
+      roots = nubOrd (concatMap (importPaths . ms_hspp_opts) graphSummaries)
       moduleRelative name =
         map (\c -> if c == '.' then pathSeparator else c) (moduleNameString name)
-      rawCandidates name isBoot =
-        [ root </> moduleRelative name ++ extension
-        | root <- roots
+      homeLookup (OtherPkg _) = False
+      homeLookup _ = True
+  -- Root normalization belongs to this evidence capture. The worker holds its
+  -- request's working directory until compilation returns; filesystem absence
+  -- and selected-source checks still run freshly at their admission boundaries.
+  absoluteRoots <- if any (\(qualifier, _, _) -> homeLookup qualifier) allImports
+    then mapM (fmap normalise . makeAbsolute) roots
+    else pure []
+  let candidatesFor name isBoot =
+        [ normalise (root </> moduleRelative name ++ extension)
+        | root <- absoluteRoots
         , extension <- if isBoot then [".hs-boot", ".lhs-boot"]
             else [".hs", ".lhs", ".hsig", ".lhsig"]
         ]
   absoluteCandidates <- forM allImports $ \(qualifier, imported, isBoot) -> do
-    candidates <- case qualifier of
-      OtherPkg _ -> pure []
-      _ -> mapM (fmap normalise . makeAbsolute) (rawCandidates imported isBoot)
-    let chosen = homeSelection qualifier imported isBoot
+    let candidates = if homeLookup qualifier then candidatesFor imported isBoot else []
+        chosen = homeSelection qualifier imported isBoot
         throughSelected = case chosen of
           Nothing -> candidates
           Just path -> case break (== path) candidates of
@@ -3161,7 +3167,7 @@ dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
       , dependencyResolutionModule = moduleNameString imported
       , dependencyResolutionBoot = isBoot
       , dependencyResolutionSelected = chosen
-      , dependencyResolutionCandidates = nub throughSelected
+      , dependencyResolutionCandidates = nubOrd throughSelected
       }
   moduleNodes <- forM (zip graphSummaries summarySources) $ \(summary, sourcePath) -> do
     let name = ms_mod_name summary
