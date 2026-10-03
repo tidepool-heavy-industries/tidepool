@@ -1293,6 +1293,9 @@ mod tests {
         use crate::session::{ModuleEnv, PersistentSession, SessionId, SessionLib};
         eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
+        let include = tempfile::tempdir().unwrap();
+        assert!(include.path().is_absolute());
+        assert!(std::fs::read_dir(include.path()).unwrap().next().is_none());
         let lib =
             SessionLib::open(SessionId(903), root.path(), ModuleEnv::standalone_default()).unwrap();
         let session = PersistentSession::new(Some(lib), 1024 * 1024);
@@ -1313,7 +1316,7 @@ mod tests {
                     "inspectionIdentity :: Int -> Int\ninspectionIdentity value = value\n"
                 ),
                 imports: "",
-                include: &[],
+                include: &[include.path()],
                 session_root: view.session_root(),
                 inject_modules: &[],
                 queries: &queries,
