@@ -34,13 +34,13 @@ use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
     hide_preamble_exports, insert_preamble_imports, render_turn_compile_rejection,
-    resident_cell_check_template, resident_workbench_templates, run_inspections, run_turn,
-    BoundBinder, CellCheck, CellCheckRequest, CompiledTurn, ExpressionPresentation,
-    HostBindingAuthority, HostBindingType, HostCarrier, HostPayload, InspectionQuery,
-    InspectionRequest, OutputSink, ParsedBlock, PendingPreparedInstall, PendingPreparedMode,
-    ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError,
-    ResidentSession, RootCustody, SourceImports, TurnClassification, TurnCode, TurnKind,
-    TurnRequest, TurnResult,
+    resident_cell_check_template, resident_workbench_templates, run_admitted_inspections,
+    run_inspections, run_turn, BoundBinder, CellCheck, CellCheckRequest, CompiledTurn,
+    ExpressionPresentation, HostBindingAuthority, HostBindingType, HostCarrier, HostPayload,
+    InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, PendingPreparedInstall,
+    PendingPreparedMode, ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome,
+    ResidentResumeError, ResidentSession, RootCustody, SourceImports, TurnClassification, TurnCode,
+    TurnKind, TurnRequest, TurnResult,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, spawn_blocking_in_span, CompileError, FailureClass,
@@ -4585,6 +4585,7 @@ where
                         |queries| {
                             inspect_lookup_queries(
                                 &view,
+                                None,
                                 &prepared.preamble,
                                 &prepared.imports,
                                 &prepared.include,
@@ -4607,7 +4608,7 @@ where
 
         let snapshot_source = source.clone();
         let snapshot_modules = Arc::clone(&type_modules);
-        let (view, provenance) = self
+        let (view, provenance, inspection_values) = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
                 let view =
@@ -4617,7 +4618,12 @@ where
                     &snapshot_source,
                     tidepool_runtime::session::NameScope::Current,
                 );
-                Ok((view, provenance))
+                let values = session
+                    .capture_inspection_inputs(view.session_view())
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                Ok((view, provenance, values))
             })
             .await?;
 
@@ -4663,6 +4669,7 @@ where
                                 |queries| {
                                     inspect_lookup_queries(
                                         &inspection_view,
+                                        Some(&inspection_values),
                                         &preamble,
                                         &imports,
                                         &include,
@@ -4711,6 +4718,7 @@ where
                 |queries| {
                     inspect_lookup_queries(
                         &view,
+                        Some(&inspection_values),
                         &prepared.preamble,
                         &prepared.imports,
                         &prepared.include,
@@ -5155,10 +5163,13 @@ where
             .with_machine(context.clone(), move |session, context, _| {
                 let view = actor_compile_view(session, context, &snapshot_source, &[])?;
                 let provenance = structured_provenance(&view, &snapshot_source, query_scope);
-                Ok((view, provenance))
+                let inputs = session
+                    .capture_inspection_inputs(view.session_view())
+                    .map_err(|error| error.to_string());
+                Ok((view, provenance, inputs))
             })
             .await?;
-        let (compile_view, provenance) = snapshot;
+        let (compile_view, provenance, inputs) = snapshot;
         let request_query = match kind {
             StructuredInspectionKind::Info => InspectionQuery::StructuredInfo {
                 query: query.clone(),
@@ -5185,6 +5196,7 @@ where
         let spawn = {
             let _entered = inspection_span.enter();
             spawn_blocking_in_span(move || {
+                let inputs = inputs?;
                 let prepared = compiler_source
                     .prepare_effectful(&compile_view, &effects)
                     .map_err(|error| error.to_string())?;
@@ -5193,16 +5205,20 @@ where
                     .iter()
                     .map(PathBuf::as_path)
                     .collect::<Vec<_>>();
-                run_inspections(InspectionRequest {
-                    exact_context: compile_view.exact_declaration_context().cloned(),
-                    preamble: &prepared.preamble,
-                    imports: &prepared.imports,
-                    include: &include,
-                    session_root: compile_view.session_root(),
-                    inject_modules: &prepared.injected,
-                    queries: &[request_query],
-                    effects: Some(&effects),
-                })
+                run_admitted_inspections(
+                    InspectionRequest {
+                        exact_context: compile_view.exact_declaration_context().cloned(),
+                        preamble: &prepared.preamble,
+                        imports: &prepared.imports,
+                        include: &include,
+                        session_root: compile_view.session_root(),
+                        inject_modules: &prepared.injected,
+                        queries: &[request_query],
+                        effects: Some(&effects),
+                    },
+                    compile_view.session_view(),
+                    &inputs,
+                )
                 .map_err(|error| error.to_string())
                 .and_then(|mut results| {
                     if results.len() == 1 {
@@ -11308,9 +11324,16 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
+    if queries.is_empty() {
+        return Ok(Vec::new());
+    }
     let compile_view = actor_compile_view(session, context, source, type_modules)?;
+    let inputs = session
+        .capture_inspection_inputs(compile_view.session_view())
+        .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
     inspect_compile_view(
         &compile_view,
+        &inputs,
         source,
         queries,
         Some(&context.haskell_effects_alias),
@@ -11319,6 +11342,7 @@ where
 
 fn inspect_compile_view(
     compile_view: &crate::ActorCompileView,
+    inputs: &tidepool_runtime::session::AdmittedInspectionInputs,
     source: &ActorWorkbenchSource,
     queries: &[InspectionQuery],
     effects: Option<&str>,
@@ -11335,16 +11359,20 @@ fn inspect_compile_view(
         .iter()
         .map(PathBuf::as_path)
         .collect::<Vec<_>>();
-    match run_inspections(InspectionRequest {
-        exact_context: compile_view.exact_declaration_context().cloned(),
-        preamble: &prepared.preamble,
-        imports: &prepared.imports,
-        include: &include_refs,
-        session_root: compile_view.session_root(),
-        inject_modules: &prepared.injected,
-        queries,
-        effects,
-    }) {
+    match run_admitted_inspections(
+        InspectionRequest {
+            exact_context: compile_view.exact_declaration_context().cloned(),
+            preamble: &prepared.preamble,
+            imports: &prepared.imports,
+            include: &include_refs,
+            session_root: compile_view.session_root(),
+            inject_modules: &prepared.injected,
+            queries,
+            effects,
+        },
+        compile_view.session_view(),
+        inputs,
+    ) {
         Ok(results) if results.len() == queries.len() => Ok(results
             .into_iter()
             .map(|result| match result {
@@ -11409,6 +11437,7 @@ fn structured_introspection_answer(
 
 fn inspect_lookup_queries(
     view: &crate::ActorCompileView,
+    values: Option<&tidepool_runtime::session::AdmittedInspectionInputs>,
     preamble: &str,
     imports: &str,
     include: &[PathBuf],
@@ -11423,7 +11452,7 @@ fn inspect_lookup_queries(
     }
     let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let inspect = || {
-        run_inspections(InspectionRequest {
+        let request = InspectionRequest {
             exact_context: view.exact_declaration_context().cloned(),
             preamble,
             imports,
@@ -11432,7 +11461,11 @@ fn inspect_lookup_queries(
             inject_modules: injected,
             queries,
             effects: Some(effects),
-        })
+        };
+        match values {
+            Some(inputs) => run_admitted_inspections(request, view.session_view(), inputs),
+            None => run_inspections(request),
+        }
         .map_err(crate::lookup::LookupInspectionError::Compiler)
     };
     let result = match timing {
@@ -13270,6 +13303,290 @@ mod request_tests {
     }
 
     #[tokio::test]
+    async fn lookup_inspects_checked_bound_value_on_repeated_requests() {
+        let (machines, context, source, _root) = actor_lookup_registry_fixture();
+        let workbench =
+            ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None, None, vec![]);
+        let mut sibling_context = context.clone();
+        sibling_context.placement.lexical_scope = workbench
+            .access
+            .with_machine(context.clone(), |session, _, _| {
+                Ok(session.mint_isolated_scope())
+            })
+            .await
+            .expect("private sibling scope");
+        sibling_context.actor = crate::ActorRef::first(crate::ActorId(2));
+        let runner = workbench_runner_for_test(&workbench);
+        let mut checked_workbenches = Vec::new();
+        for mut public_context in [context, sibling_context] {
+            let descriptor =
+                crate::ActorDescriptor::new("checked inspection", public_context.placement);
+            let owner = crate::resident_actor::WorkbenchPublicOwner::issue(
+                &public_context,
+                &descriptor,
+                None,
+            )
+            .expect("ephemeral public owner");
+            let authority = crate::resident_actor::WorkbenchCompilationAuthority::for_test(
+                public_context.clone(),
+            );
+            let private = Arc::new(
+                runner
+                    .begin_private_execution(
+                        public_context.clone(),
+                        owner,
+                        tidepool_runtime::session::PublicationDecision::new(),
+                    )
+                    .await
+                    .expect("private execution admission"),
+            );
+            assert_ne!(
+                private.private_scope,
+                public_context.placement.lexical_scope
+            );
+            public_context.placement.lexical_scope = private.private_scope;
+            let checked_workbench = ResidentActorWorkbench::new(
+                Arc::clone(&machines),
+                source.clone(),
+                None,
+                None,
+                vec![],
+            )
+            .with_compilation_authority(authority)
+            .with_private_execution(private);
+            checked_workbenches.push((public_context, checked_workbench));
+        }
+        let context = checked_workbenches[0].0.clone();
+        let sibling_context = checked_workbenches[1].0.clone();
+        for (index, cell) in [
+            (
+                0,
+                "data InspectionPrivateType = InspectionPrivateType".to_owned(),
+            ),
+            (0, "checkedLookupValue <- pure (42 :: Int)".to_owned()),
+            (1, "privateSiblingValue <- pure (43 :: Int)".to_owned()),
+        ] {
+            let (binding_context, checked_workbench) = &checked_workbenches[index];
+            let (_, prepared) = checked_workbench
+                .prepare_cell((*binding_context).clone(), cell.clone())
+                .await
+                .expect("checked binding compiles");
+            let PreparedCell::Ready { mut items, .. } = prepared else {
+                panic!("checked binding is executable")
+            };
+            assert_eq!(items.len(), 1);
+            assert!(
+                matches!(&items[0].ready, PreparedCellStep::Checked { .. }),
+                "regression must install certified checked native output"
+            );
+            let step = checked_workbench
+                .begin_prepared_cell_item(
+                    (*binding_context).clone(),
+                    ParsedBlock {
+                        ordinal: 1,
+                        total: 1,
+                        source: cell,
+                    },
+                    items.remove(0),
+                    4096,
+                )
+                .await
+                .expect("checked binding starts");
+            let settled = match step {
+                ResidentWorkbenchStep::Running { fragment, outcome } => checked_workbench
+                    .settle_item((*binding_context).clone(), *fragment, *outcome)
+                    .await
+                    .expect("checked binding settles"),
+                other => other,
+            };
+            assert!(matches!(settled, ResidentWorkbenchStep::Committed { .. }));
+            checked_workbench
+                .access
+                .with_machine((*binding_context).clone(), |session, context, _| {
+                    let view = session
+                        .compile_view_in(context.placement.lexical_scope)
+                        .expect("private checked scope remains live");
+                    session.capture_inspection_inputs(&view).map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                    Ok(())
+                })
+                .await
+                .expect("checked interfaces retained immediately after each installation");
+        }
+        let inspection_source = source.clone();
+        let (view, inputs, prepared) = workbench
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let view = actor_compile_view(session, context, &inspection_source, &[])?;
+                let inputs = session
+                    .capture_inspection_inputs(view.session_view())
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                let prepared =
+                    inspection_source.prepare_effectful(&view, &context.haskell_effects_alias)?;
+                Ok((view, inputs, prepared))
+            })
+            .await
+            .expect("native input snapshot captures with view");
+        assert!(!inputs.view().reachable_values().is_empty());
+        let sibling_module = workbench
+            .access
+            .with_machine(sibling_context.clone(), |session, context, _| {
+                let view = session
+                    .compile_view_in(context.placement.lexical_scope)
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                            tidepool_runtime::session::SessionError::DeadScope(
+                                context.placement.lexical_scope,
+                            ),
+                        ))
+                    })?;
+                Ok(view
+                    .reachable_values()
+                    .first()
+                    .expect("checked sibling owner")
+                    .module_name())
+            })
+            .await
+            .expect("sibling owner view");
+        assert!(!inputs
+            .view()
+            .reachable_values()
+            .iter()
+            .any(|owner| owner.module_name() == sibling_module));
+        for _ in 0..2 {
+            let inspected = inspect_lookup_queries(
+                &view,
+                Some(&inputs),
+                &prepared.preamble,
+                &prepared.imports,
+                &prepared.include,
+                &prepared.injected,
+                &context.haskell_effects_alias,
+                &[InspectionQuery::Info("checkedLookupValue".into())],
+                None,
+            )
+            .expect("native bound lookup succeeds");
+            assert!(
+                matches!(&inspected[..], [tidepool_runtime::session::InspectionResult::Info { entries, .. }]
+                if entries.iter().any(|entry| entry.name == "checkedLookupValue"))
+            );
+        }
+        let query = tidepool_runtime::session::NameQuery {
+            scope: tidepool_runtime::session::NameScope::Current,
+            namespace: tidepool_runtime::session::NameNamespace::Value,
+            name: "checkedLookupValue".into(),
+        };
+        let provenance = structured_provenance(&view, &source, query.scope.clone());
+        let mut queries = vec![
+            InspectionQuery::TypeOf("checkedLookupValue".into()),
+            InspectionQuery::StructuredInfo {
+                query: query.clone(),
+                provenance: provenance.clone(),
+            },
+            InspectionQuery::StructuredType {
+                query,
+                provenance: provenance.clone(),
+            },
+            InspectionQuery::StructuredInfo {
+                query: tidepool_runtime::session::NameQuery {
+                    scope: tidepool_runtime::session::NameScope::Current,
+                    namespace: tidepool_runtime::session::NameNamespace::Value,
+                    name: "privateSiblingValue".into(),
+                },
+                provenance: provenance.clone(),
+            },
+        ];
+        let private_modules = [
+            inputs.view().reachable_values()[0].module_name(),
+            sibling_module,
+            view.library()
+                .expect("checked declaration owner")
+                .module_name(),
+        ];
+        for (index, module) in private_modules.iter().enumerate() {
+            let scope = tidepool_runtime::session::NameScope::PublicModule(module.clone());
+            queries.push(InspectionQuery::StructuredInfo {
+                query: tidepool_runtime::session::NameQuery {
+                    scope: scope.clone(),
+                    namespace: if index == 2 {
+                        tidepool_runtime::session::NameNamespace::Type
+                    } else {
+                        tidepool_runtime::session::NameNamespace::Value
+                    },
+                    name: if index == 2 {
+                        "InspectionPrivateType"
+                    } else {
+                        "checkedLookupValue"
+                    }
+                    .into(),
+                },
+                provenance: structured_provenance(&view, &source, scope),
+            });
+        }
+        let scope = tidepool_runtime::session::NameScope::PublicModule("Data.Maybe".into());
+        queries.push(InspectionQuery::StructuredInfo {
+            query: tidepool_runtime::session::NameQuery {
+                scope: scope.clone(),
+                namespace: tidepool_runtime::session::NameNamespace::Value,
+                name: "isJust".into(),
+            },
+            provenance: structured_provenance(&view, &source, scope),
+        });
+        let inspection_source = source.clone();
+        let (batch, status) = workbench
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let batch =
+                    inspect_actor_batch(session, context, &inspection_source, &[], &queries)?;
+                let status = run_status_discovery(
+                    session,
+                    context,
+                    &inspection_source,
+                    &[],
+                    crate::status_tool::StatusDiscovery::Bindings,
+                )?;
+                Ok((batch, status))
+            })
+            .await
+            .expect("modern inspection consumers accept checked native input");
+        assert_eq!(batch.len(), 8);
+        assert!(
+            matches!(&batch[0], Ok(tidepool_runtime::session::InspectionResult::Type { display, .. })
+            if display.contains("Int"))
+        );
+        assert!(
+            matches!(&batch[1], Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info)))
+            if info.identifier.name == "checkedLookupValue" && info.provenance == provenance)
+        );
+        assert!(
+            matches!(&batch[2], Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info)))
+            if info.identifier.name == "checkedLookupValue" && info.expression.canonical == "Int"
+                && info.provenance == provenance)
+        );
+        assert!(
+            matches!(&batch[3], Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(
+            Err(tidepool_runtime::session::QueryError::Unknown(query))))
+            if query.name == "privateSiblingValue")
+        );
+        for (result, module) in batch[4..7].iter().zip(&private_modules) {
+            assert!(
+                matches!(result, Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(
+                Err(tidepool_runtime::session::QueryError::UnknownModule(rejected)))) if rejected == module)
+            );
+        }
+        assert!(
+            matches!(&batch[7], Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info)))
+            if info.identifier.name == "isJust")
+        );
+        let status = status.expect("status binding types are available");
+        assert!(status.contains("checkedLookupValue :: Int"), "{status}");
+        assert!(!status.contains("<type unavailable>"), "{status}");
+    }
+
+    #[tokio::test]
     async fn lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc() {
         for sibling_write in [false, true] {
             let (machines, context, source, _root) = actor_lookup_registry_fixture();
@@ -13436,6 +13753,208 @@ mod request_tests {
                 "Haskell continuation validates the stale or preserved lookup result"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn actor_empty_snapshot_answers_uncancelled_type_search() {
+        let (machines, context, source, _root) = actor_lookup_registry_fixture();
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        let (view, inputs, prepared) = workbench
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let view = actor_compile_view(session, context, &source, &[])?;
+                let inputs = session
+                    .capture_inspection_inputs(view.session_view())
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                let prepared = source.prepare_effectful(&view, &context.haskell_effects_alias)?;
+                Ok((view, inputs, prepared))
+            })
+            .await
+            .expect("original actor inspection view captures without native values");
+        assert!(inputs.view().reachable_values().is_empty());
+        assert!(inputs.view().exact_declaration_context().is_none());
+        assert!(!prepared.include.is_empty());
+        let results = inspect_lookup_queries(
+            &view,
+            Some(&inputs),
+            &prepared.preamble,
+            &prepared.imports,
+            &prepared.include,
+            &prepared.injected,
+            &context.haskell_effects_alias,
+            &[InspectionQuery::TypeSearch("Int -> Int".into())],
+            None,
+        )
+        .expect("uncancelled actor type search must return its actual worker response");
+        assert!(
+            matches!(&results[..], [tidepool_runtime::session::InspectionResult::TypeMatches { matches, .. }]
+            if matches.iter().any(|entry| entry.name == "id"
+                && entry.module.as_deref() == Some("GHC.Internal.Base")
+                && entry.quality == tidepool_runtime::session::TypeMatchQuality::Usable)),
+            "actor context must expose imported id for concrete Int -> Int: {results:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parked_actor_snapshot_answers_uncancelled_type_search() {
+        let (machines, context, source, _root) = actor_lookup_registry_fixture();
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        let step = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source.clone(),
+                Vec::new(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: "lookupResult <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"pollResponse\"])".into(),
+                },
+                Some(generated_binds_verdict(&["lookupResult".into()])),
+            )
+            .await
+            .expect("same cancellation fixture fragment parks lookup effect");
+        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+            panic!("lookup fragment should suspend")
+        };
+        let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+            panic!("lookup effect should park continuation")
+        };
+        let continuation_id = hole.cont_id().to_owned();
+        let guard = ParkedHoleAbortGuard::new(
+            &workbench.access,
+            context.clone(),
+            continuation_id.clone(),
+            "parked inspection qualification abandoned".into(),
+        );
+        let source = RequestWorkbenchScope {
+            response: workbench.response.as_ref(),
+            request: workbench.request,
+            type_modules: &workbench.type_modules,
+        }
+        .source(&workbench.access.source, &context);
+        let (view, inputs, prepared) = workbench
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let view = actor_compile_view(session, context, &source, &[])?;
+                let inputs = session
+                    .capture_inspection_inputs(view.session_view())
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                let prepared = source.prepare_effectful(&view, &context.haskell_effects_alias)?;
+                Ok((view, inputs, prepared))
+            })
+            .await
+            .expect("original actor inspection view captures without native values");
+        assert!(inputs.view().reachable_values().is_empty());
+        assert!(inputs.view().exact_declaration_context().is_none());
+        assert!(!prepared.include.is_empty());
+        let results = inspect_lookup_queries(
+            &view,
+            Some(&inputs),
+            &prepared.preamble,
+            &prepared.imports,
+            &prepared.include,
+            &prepared.injected,
+            &context.haskell_effects_alias,
+            &[InspectionQuery::TypeSearch("Int -> Int".into())],
+            None,
+        );
+        let cleanup_id = continuation_id.clone();
+        workbench
+            .access
+            .with_machine(context, move |session, _, _| {
+                abort_owned_hole(
+                    session,
+                    cleanup_id.clone(),
+                    "parked inspection qualification completed".into(),
+                )?;
+                assert!(!session.parked_holes().contains(&cleanup_id.as_str()));
+                Ok(())
+            })
+            .await
+            .expect("owned parked lookup continuation is cleaned up");
+        guard
+            .registration()
+            .observe(ResidentContinuationEvent::Retired(continuation_id));
+        let results = results.expect(
+            "uncancelled post-suspension type search must return its actual worker response",
+        );
+        assert!(
+            matches!(&results[..], [tidepool_runtime::session::InspectionResult::TypeMatches { matches, .. }]
+            if matches.iter().any(|entry| entry.name == "id"
+                && entry.module.as_deref() == Some("GHC.Internal.Base")
+                && entry.quality == tidepool_runtime::session::TypeMatchQuality::Usable)),
+            "actor context must expose imported id for concrete Int -> Int: {results:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parked_lookup_transaction_answers_uncancelled_varied_type_search() {
+        let (machines, context, source, _root) = actor_lookup_registry_fixture();
+        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None, None, vec![]);
+        let step = workbench
+            .begin_fragment_split(
+                context.clone(),
+                source.clone(),
+                Vec::new(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: concat!(
+                        "lookupValidation <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"pollResponse\"]) >>= \\result -> ",
+                        "if lookupIssue result == Nothing && not (null (lookupResults result)) ",
+                        "then pure True else error \"uncancelled varied lookup returned a typed failure\""
+                    ).into(),
+                },
+                Some(generated_bind_verdict("lookupValidation")),
+            )
+            .await
+            .expect("lookup fragment compiles and suspends");
+        let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
+            panic!("lookup effect should suspend the fragment")
+        };
+        let ResidentOutcome::Suspended { hole, .. } = *outcome else {
+            panic!("lookup effect should park a continuation")
+        };
+        let continuation_id = hole.cont_id().to_owned();
+        let guard = ParkedHoleAbortGuard::new(
+            &workbench.access,
+            context.clone(),
+            continuation_id.clone(),
+            "uncancelled varied lookup qualification".into(),
+        );
+        let outcome = SLOT_CONTINUATION_OWNER
+            .scope(
+                guard.registration(),
+                workbench.resume_lookup(
+                    context.clone(),
+                    hole,
+                    real_lookup_request(varied_lookup_queries()),
+                    crate::UsagePointerTable::default(),
+                    None,
+                ),
+            )
+            .await
+            .expect("uncancelled production lookup resumes with its actual worker result");
+        let settled = workbench
+            .settle_item(context.clone(), *fragment, outcome)
+            .await
+            .expect("uncancelled varied lookup continuation settles");
+        assert!(
+            matches!(settled, ResidentWorkbenchStep::Committed { .. }),
+            "Haskell continuation must reject a typed inspection failure"
+        );
+        workbench
+            .access
+            .with_machine(context, move |session, _, _| {
+                assert!(!session.parked_holes().contains(&continuation_id.as_str()));
+                Ok(())
+            })
+            .await
+            .expect("production lookup consumed its owned parked continuation");
     }
 
     #[tokio::test]

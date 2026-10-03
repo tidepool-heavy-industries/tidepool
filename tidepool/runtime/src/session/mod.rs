@@ -46,10 +46,11 @@ pub use dialect::{
 };
 
 pub use inspection::{
-    run_inspections, ClassMethodInfo, ConstructorInfo, DeclarationInfo, FieldInfo, IdentifierInfo,
-    IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability, InspectionQuery,
-    InspectionRequest, InspectionResult, NameNamespace, NameQuery, NameScope, QueryError,
-    ScopeProvenance, TypeExpression, TypeInfo, TypeMatch, TypeMatchQuality,
+    run_admitted_inspections, run_inspections, AdmittedInspectionInputs, ClassMethodInfo,
+    ConstructorInfo, DeclarationInfo, FieldInfo, IdentifierInfo, IdentifierNamespace,
+    IdentifierRef, InfoEntry, InspectionAvailability, InspectionQuery, InspectionRequest,
+    InspectionResult, NameNamespace, NameQuery, NameScope, QueryError, ScopeProvenance,
+    TypeExpression, TypeInfo, TypeMatch, TypeMatchQuality,
 };
 pub use kernel::{admit_checkout, Aged, SuspendableSession};
 

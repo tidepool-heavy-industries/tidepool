@@ -65,6 +65,7 @@ data ExactScope = ExactScope
   , scopeCheckedCell :: Maybe CheckedCellAdmission
   , scopeCheckedItem :: Maybe CheckedItemAdmission
   , scopeCheckedDisplay :: Maybe CheckedDisplayAdmission
+  , scopeCheckedInspection :: Maybe [ExactIfaceArtifact]
   , scopeIncludePaths :: Maybe [FilePath]
   , scopeRequestTypes :: Maybe RequestTypeSignatures
   -- Request-local source proof roots are revalidated by subsequent stages;
@@ -326,6 +327,7 @@ scopeValueInterfaces scope =
   maybe [] checkedValueInterfaces (scopeCheckedCell scope)
     ++ maybe [] itemValueInterfaces (scopeCheckedItem scope)
     ++ maybe [] displayValueInterfaces (scopeCheckedDisplay scope)
+    ++ maybe [] id (scopeCheckedInspection scope)
 
 -- Scope v6 separates the bounded metadata envelope from the independently
 -- bounded original graph bytes. The request hash seals each path and digest.
@@ -548,10 +550,10 @@ decodeScope = do
     pure (graphs, references)
     else pure ([], [])
   nullPurpose <- if version == "6" then (== TypeNull) <$> peekTokenType else pure False
-  (requestTypes, (checked, checkedItem, checkedDisplay, includes)) <- if version == "2" || nullPurpose
+  (requestTypes, (checked, checkedItem, checkedDisplay, inspectionValues, includes)) <- if version == "2" || nullPurpose
     then do
       when nullPurpose decodeNull
-      pure (Nothing, (Nothing,Nothing,Nothing,Nothing))
+      pure (Nothing, (Nothing,Nothing,Nothing,Nothing,Nothing))
     else do
     outerCount <- decodeListLen
     outerPurpose <- string
@@ -563,6 +565,14 @@ decodeScope = do
       pure (count, purpose, Just native)
       else pure (outerCount, outerPurpose, Nothing)
     admission <- case purpose of
+      "inspection1" -> do
+        unless (authCount == 4) (fail "invalid inspection admission")
+        injected <- bounded 4096 nonempty
+        values <- valueInterfaces
+        unique "inspection injected modules" injected
+        validateInterfaces injected values
+        paths <- includePaths
+        pure (Nothing,Nothing,Nothing,Just values,Just paths)
       tag | tag == "cell-check2" || tag == "host-input-check1" -> do
         unless (authCount == if tag == "host-input-check1" then 10 else 9) (fail "invalid cell-check admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
@@ -578,7 +588,7 @@ decodeScope = do
         unique "checked injected modules" (checkedInjectedModules admission)
         unique "checked reserved modules" (checkedReservedModules admission)
         paths <- includePaths
-        pure (Just admission,Nothing,Nothing,Just paths)
+        pure (Just admission,Nothing,Nothing,Nothing,Just paths)
       "cell-program1" -> do
         unless (authCount == 14) (fail "invalid compiled cell admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
@@ -597,7 +607,7 @@ decodeScope = do
           <*> pure AuthoredCellCheck
         validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
         paths <- includePaths
-        pure (Just admission,Nothing,Nothing,Just paths)
+        pure (Just admission,Nothing,Nothing,Nothing,Just paths)
       tag | tag == "checked-item2" || tag == "host-activation-input1" -> do
         unless (authCount == 19) (fail "invalid checked-item admission")
         admissionDigest <- digestField
@@ -651,7 +661,7 @@ decodeScope = do
             (fail "invalid host activation input admission")
         paths <- includePaths
         pure (Nothing, Just (CheckedItemAdmission role admissionDigest receiptDigest index sourceDigest kind binders
-          templates injected signatures liftPlan presentation generation prefix valueImports observation planned values valueInputs), Nothing, Just paths)
+          templates injected signatures liftPlan presentation generation prefix valueImports observation planned values valueInputs), Nothing, Nothing, Just paths)
       "checked-display2" -> do
         unless (authCount == 18) (fail "invalid checked-display admission")
         admission <- CheckedDisplayAdmission <$> digestField <*> digestField <*> decodeWord64
@@ -671,11 +681,11 @@ decodeScope = do
             && all ((`elem` displayInjectedModules admission) . fst) (displayValueImports admission))
           (fail "invalid display presentation or imported owner")
         paths <- includePaths
-        pure (Nothing,Nothing,Just admission,Just paths)
+        pure (Nothing,Nothing,Just admission,Nothing,Just paths)
       _ -> fail "unsupported exact compile purpose"
     pure (requestTypes, admission)
   pure (ExactScope "" "" producer semantic interfaces lexical products [] executionOwners
-    checked checkedItem checkedDisplay includes requestTypes Set.empty, descriptors)
+    checked checkedItem checkedDisplay inspectionValues includes requestTypes Set.empty, descriptors)
   where
     includePaths = bounded 4096 $ do
       path <- absolute

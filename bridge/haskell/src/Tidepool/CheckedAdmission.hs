@@ -1,11 +1,12 @@
 module Tidepool.CheckedAdmission
-  ( validateCheckedCellAdmission, validateCheckedItemAdmission
+  ( matchesInspectionAdmission, validateCheckedCellAdmission, validateCheckedItemAdmission
   , checkedDisplayBinders, validateCheckedDisplayAdmission
   ) where
 
 import Control.Monad (forM, unless, when)
 import qualified Data.ByteString as BS
 import Data.List (isInfixOf)
+import Data.Maybe (isJust)
 import Data.Word (Word64)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
@@ -17,6 +18,20 @@ import Tidepool.ExactScope
   ( CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedDisplayAdmission(..) )
 import Tidepool.ExtractRequest (WorkerRequest(..))
 import Tidepool.ExtractUtil (shaHex)
+
+-- An inspection input cap cannot be used by an executable or publication mode.
+matchesInspectionAdmission :: WorkerRequest -> [String] -> Bool
+matchesInspectionAdmission args values =
+  not (null (requestInspections args)) && isJust (requestInspectOut args)
+    && not (requestTurn args) && not (requestCell args) && not (requestClassify args)
+    && not (requestCheckSource args) && not (requestCellPlan args)
+    && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
+    && not (requestHarnessProfile args) && not (requestCellFoldTurn args)
+    && not (isJust (requestDeclarationJoin args))
+    && not (isJust (requestBindGen args)) && not (isJust (requestTurnPin args))
+    && not (isJust (requestTarget args)) && null (requestTargets args)
+    && Map.null (requestRetainedGenerations args)
+    && requestInjectVals args == values
 
 -- Each checkpoint rereads the ordered recipe inventory, including duplicates.
 -- A successful earlier admission does not authorize changed files later.

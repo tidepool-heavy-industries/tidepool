@@ -75,6 +75,19 @@ rejected, and old workers reject version 6. Deploy the Rust frontend and Haskell
 worker together. Graph-free version 2/4 requests retain their format; candidate
 execution parcels keep their existing inline graph-byte format.
 
+## Checked inspection inputs
+
+Resident lookup captures reachable checked value interfaces with its immutable
+actor view while owning the session checkout. The `inspection1` exact-scope
+purpose seals their module inventory, original bytes and ordered include roots.
+It authorizes inspection only; cell checking, prepared execution, certification,
+declaration joining and display cannot consume it. Successful answers still
+require exact consumed source receipts. Mutable session files and legacy
+interfaces do not replace the retained checked certificates.
+
+This is an internal matched worker/frontend migration: previous workers reject
+`inspection1`. Existing graph and metadata versions and budgets are unchanged.
+
 ## Current source selection of retained originals
 
 `TPEXACTCOMPILE` version 2 retains the fresh source receipt fields and adds a

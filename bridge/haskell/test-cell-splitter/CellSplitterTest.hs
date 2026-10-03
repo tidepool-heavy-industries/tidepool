@@ -55,6 +55,8 @@ import Tidepool.PreparedStg (PreparedModule(..))
 import HarnessSourceTest (harnessSourceChecks)
 import InspectionRunnerTest (inspectionRunnerChecks)
 import WorkerDiagnosticsTest (runWorkerDiagnosticsTests)
+import QuasiQuoteOccurrencesTest (quasiQuoteOccurrenceChecks, quasiQuoteOccurrenceChecksWith)
+import QuasiQuoteOccurrencesBenchmark (quasiQuoteOccurrenceBenchmark)
 import CheckedAdmissionTest (checkedAdmissionChecks)
 import CellProgramStateTest (cellProgramStateChecks)
 import UnreachableCompileTimeTest (unreachableCompileTimeCompilation)
@@ -75,6 +77,9 @@ main = getArgs >>= \case
   ["--memo-lifecycle"] -> memoLifecycleCompilation >> putStrLn "request memo lifecycle: 1 passed"
   ["--metadata"] -> metadataCompilation >> putStrLn "metadata compilation: 1 passed"
   ["--prepared-session"] -> preparedSessionLeafCompilation >> putStrLn "prepared session leaf: 1 passed"
+  "--quasiquote-benchmark" : iterations : files -> quasiQuoteOccurrenceBenchmark iterations files
+  ["--quasiquote-occurrences"] -> quasiQuoteOccurrenceChecks
+  ["--untracked-compile-time"] -> untrackedCompileTimeCompilation >> putStrLn "untracked compile-time: origin and cold/warm checks passed"
   ["--compiler-boundaries"] -> compilerBoundaryChecks
   ["--checked-admission"] -> checkedAdmissionChecks
   ["--cell-accumulation"] -> cellProgramStateChecks
@@ -113,6 +118,7 @@ runAllTests = do
           "<cell-test>"
     (lexicalFlags, _, _) <- parseDynamicFilePragma flags lexicalOptions
     liftIO $ do
+      quasiQuoteOccurrenceChecksWith flags
       lexicalIslands lexicalFlags
       commentsPragmasAndLayout lexicalFlags
       declarationsBecomeOneCellItem flags

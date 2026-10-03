@@ -98,7 +98,7 @@ import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
   ( SourceRejection(..), InputRejection(..) )
 import Tidepool.CheckedAdmission
-  ( validateCheckedCellAdmission, validateCheckedItemAdmission
+  ( matchesInspectionAdmission, validateCheckedCellAdmission, validateCheckedItemAdmission
   , checkedDisplayBinders, validateCheckedDisplayAdmission )
 import Tidepool.CheckedRecipe
   ( checkedDisplayRecipe, checkedProgramDisplayRecipe, writeCheckedDisplayReceipt
@@ -252,6 +252,9 @@ dispatch compiler caches timing args = do
       forM_ (scopeIncludePaths scope) $ \includes ->
         unless (requestIncludes args == includes)
           (throwIO SearchInputsChanged)
+      forM_ (scopeCheckedInspection scope) $ \values ->
+        unless (matchesInspectionAdmission args (map exactModule values))
+          (throwIO CheckedPurposeMismatch)
       forM_ (scopeCheckedCell scope) $ \_ ->
         unless (requestCell args && not (requestTurn args) && not (requestClassify args)
           && null (requestInspections args) && not (isJust (requestDeclarationJoin args))

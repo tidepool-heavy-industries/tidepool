@@ -1660,8 +1660,8 @@ fn select_records_inner(
             iface_sha256: sha(&record.interface),
             package_imports_path: package_imports_path.clone(),
             package_imports_sha256: sha(&record.package_imports),
-            package_imports_bytes: record.package_imports.clone(),
-            product_bytes: record.products.clone(),
+            package_imports_bytes: record.package_imports,
+            product_bytes: record.products,
             evidence: record.evidence.clone(),
             target_source: record.target_source.clone(),
             origin,
@@ -1678,10 +1678,10 @@ fn select_records_inner(
         {
             return None;
         }
-        let selected_product = &by_owner[&(record.unit.clone(), record.module.clone())].product;
+        let selected = &by_owner[&(record.unit.clone(), record.module.clone())];
         let product_path =
             scratch.join(format!("candidate-{}.tpmod", hex(&owner.module_version.0)));
-        tidepool_atomic_write::write_best_effort(&product_path, &record.products).ok()?;
+        tidepool_atomic_write::write_best_effort(&product_path, &selected.product_bytes).ok()?;
         manifest.push(Value::Array(vec![
             Value::Text(owner.unit),
             Value::Text(owner.module),
@@ -1693,9 +1693,9 @@ fn select_records_inner(
             Value::Text(hex(&product_sha)),
             Value::Text(evidence_sha),
             Value::Array(imports),
-            inventory.groups(&selected_product.groups)?,
+            inventory.groups(&selected.product.groups)?,
             Value::Text(package_imports_path.to_string_lossy().into_owned()),
-            Value::Text(sha(&record.package_imports)),
+            Value::Text(sha(&selected.package_imports_bytes)),
             Value::Text(product_path.to_string_lossy().into_owned()),
         ]));
     }
@@ -2916,6 +2916,8 @@ mod tests {
         let mut b = candidate_fixture(root.path(), "B");
         let c = candidate_fixture(root.path(), "C");
         let d = candidate_fixture(root.path(), "D");
+        let expected_products = d.products.clone();
+        let expected_packages = d.package_imports.clone();
         import_candidate(&mut b, &c);
         import_candidate(&mut a, &b);
         let context =
@@ -2933,7 +2935,12 @@ mod tests {
         assert_eq!(row.len(), 14);
         let original = fs::read(row[13].as_text().unwrap()).unwrap();
         let bundle = &selected.by_owner[&("u".into(), "D".into())];
+        assert_eq!(original, expected_products);
         assert_eq!(original, bundle.product_bytes);
+        let packages = fs::read(row[11].as_text().unwrap()).unwrap();
+        assert_eq!(packages, expected_packages);
+        assert_eq!(packages, bundle.package_imports_bytes);
+        assert_eq!(row[12].as_text(), Some(sha(&packages).as_str()));
         assert_eq!(row[7].as_text(), Some(sha(&original).as_str()));
         assert_eq!(
             row[6].as_text(),

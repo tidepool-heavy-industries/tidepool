@@ -1322,6 +1322,37 @@ impl RuntimeCellAdmission {
 }
 
 impl PersistentSession {
+    pub(super) fn capture_value_interfaces(
+        &self,
+        view: &super::SessionCompileView,
+        require_checked: bool,
+    ) -> Result<Vec<AdmittedValueInterface>, SessionError> {
+        view.reachable_values()
+            .iter()
+            .map(|module| {
+                let checked_artifact = self.retained_checked_value_artifact(*module).cloned();
+                if require_checked
+                    && checked_artifact
+                        .as_ref()
+                        .is_none_or(|artifact| !artifact.is_checked_output())
+                {
+                    return Err(SessionError::MissingRetainedValueInterface(*module));
+                }
+                let bytes = match self.retained_value_interface(*module) {
+                    Some(bytes) => bytes.clone(),
+                    None if !require_checked && self.uses_legacy_value_interface(*module) => {
+                        std::fs::read(view.session_root().join(module.relative_hi_path()))?.into()
+                    }
+                    None => return Err(SessionError::MissingRetainedValueInterface(*module)),
+                };
+                Ok(AdmittedValueInterface {
+                    module: *module,
+                    bytes,
+                    checked_artifact,
+                })
+            })
+            .collect()
+    }
     pub(super) fn consume_host_activation_reservation(
         &self,
         admission: &Arc<RuntimeCheckedItemAdmission>,
@@ -2258,24 +2289,7 @@ impl PersistentSession {
             .into_iter()
             .collect::<Vec<_>>();
         let native_imports = Arc::new(self.capture_admitted_native_imports(scope)?);
-        let interfaces = view
-            .reachable_values()
-            .iter()
-            .map(|module| {
-                let bytes = match self.retained_value_interface(*module) {
-                    Some(bytes) => bytes.clone(),
-                    None if self.uses_legacy_value_interface(*module) => {
-                        std::fs::read(view.session_root().join(module.relative_hi_path()))?.into()
-                    }
-                    None => return Err(SessionError::MissingRetainedValueInterface(*module)),
-                };
-                Ok(AdmittedValueInterface {
-                    module: *module,
-                    bytes,
-                    checked_artifact: self.retained_checked_value_artifact(*module).cloned(),
-                })
-            })
-            .collect::<Result<Vec<_>, SessionError>>()?;
+        let interfaces = self.capture_value_interfaces(&view, false)?;
         let native_count = match &plan {
             Some(plan) => plan.items().iter().try_fold(0u64, |count, item| {
                 use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
@@ -3076,6 +3090,29 @@ mod tests {
             session.admit_cell_for_execution(private, 0, Arc::new(()), [7; 32], [8; 32], Vec::new()),
             Err(SessionError::MissingRetainedValueInterface(owner)) if owner == module
         ));
+    }
+
+    #[test]
+    fn inspection_capture_refuses_uncertified_retained_and_legacy_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(985), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let mut value = crate::session::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "untrusted",
+            915,
+        );
+        value.value.identity.module = value.module.module_name();
+        let module = value.module;
+        session.bind(value).unwrap();
+        session.retain_fixture_value_interface(module, Arc::from([1, 2, 3]));
+        let view = session.compile_view_in(ScopeId::ROOT).unwrap();
+        assert!(matches!(session.capture_value_interfaces(&view, true),
+            Err(SessionError::MissingRetainedValueInterface(owner)) if owner == module));
+        session.mark_legacy_value_interface(module);
+        assert!(matches!(session.capture_value_interfaces(&view, true),
+            Err(SessionError::MissingRetainedValueInterface(owner)) if owner == module));
     }
 
     #[test]

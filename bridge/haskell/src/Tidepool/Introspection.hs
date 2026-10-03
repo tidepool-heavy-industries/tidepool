@@ -80,6 +80,7 @@ import Tidepool.ExtractRequest
     StructuredNameNamespace (..), StructuredNameScope (..)
   )
 import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.Session (parseSessionModule)
 
 data InfoEntry = InfoEntry
   { infoName :: String,
@@ -571,11 +572,13 @@ inspectStructured rdrEnv mode query = do
 namesInScope :: GhcMonad m => GlobalRdrEnv -> StructuredInspection -> m (Either String ([Name], [Name]))
 namesInScope rdrEnv query = case structuredScope query of
   StructuredCurrentScope -> pure (Right (filter matches currentNames, currentNames))
-  StructuredPublicModule requested -> handleSourceError (\_ -> pure (Left requested)) $ do
-    mdl <- findModule (mkModuleName requested) Nothing
-    resolvedInfo <- getModuleInfo mdl
-    let visible = nub (maybe [] modInfoExports resolvedInfo)
-    pure (Right (filter matches visible, visible))
+  StructuredPublicModule requested
+    | isJust (parseSessionModule requested) -> pure (Left requested)
+    | otherwise -> handleSourceError (\_ -> pure (Left requested)) $ do
+        mdl <- findModule (mkModuleName requested) Nothing
+        resolvedInfo <- getModuleInfo mdl
+        let visible = nub (maybe [] modInfoExports resolvedInfo)
+        pure (Right (filter matches visible, visible))
   where
     currentNames = nub (map greName (globalRdrEnvElts rdrEnv))
     matches name = matchesNameQuery (structuredName query) name

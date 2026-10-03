@@ -6,6 +6,8 @@ use crate::artifacts::SealedTurnProducts;
 use crate::declaration_context::ExactSourceAdmission;
 use std::collections::BTreeMap;
 
+// Includes materialization, closure certification and descriptor assembly.
+// Caller inventory and final context admission remain outside this stage.
 pub(super) fn admit_authored_artifact_closure(
     products: &[CertifiedRecoveryProduct],
     selected_owner: &ExactModuleIdentity,
@@ -24,28 +26,67 @@ pub(super) fn admit_authored_artifact_closure(
     ),
     CompileError,
 > {
+    let started = std::time::Instant::now();
+    let result = admit_authored_artifact_closure_inner(
+        products,
+        selected_owner,
+        toolchain_identity_sha256,
+        evidence,
+        source_admission,
+        context,
+        includes,
+    )?;
+    let elapsed = started.elapsed();
+    let bytes = products
+        .iter()
+        .flat_map(|product| product.original_byte_anchors())
+        .map(|bytes| bytes.len() as u64)
+        .sum();
+    crate::timing::record_stage_with_owners(
+        crate::timing::NO_NODE,
+        crate::timing::NO_ROUND,
+        "products.authored_closure_admission",
+        elapsed,
+        bytes,
+        products.len(),
+    );
+    Ok(result)
+}
+
+fn admit_authored_artifact_closure_inner(
+    products: &[CertifiedRecoveryProduct],
+    selected_owner: &ExactModuleIdentity,
+    toolchain_identity_sha256: [u8; 32],
+    evidence: &[crate::cache::ModuleEvidence],
+    source_admission: Option<&ExactSourceAdmission>,
+    context: Option<&Arc<ExactDeclarationContext>>,
+    includes: &[PathBuf],
+) -> Result<
+    (
+        tempfile::TempDir,
+        Vec<DeclarationArtifact>,
+        Vec<ExactInterfaceOwner>,
+        Vec<ExactLexicalNode>,
+        Vec<crate::recovery_artifacts::CertifiedJoinedInterface>,
+    ),
+    CompileError,
+> {
     let scratch = tempfile::tempdir()?;
+    let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
     let references = crate::recovery_artifacts::materialize_certified_products_with_validation(
         scratch.path(),
         toolchain_identity_sha256,
         products,
-        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        &mut validation,
         crate::recovery_artifacts::MaterializationMode::Scratch,
     )
     .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
-    let verified = references
-        .iter()
-        .map(|reference| {
-            crate::recovery_artifacts::verify_materialized_ref(scratch.path(), reference)
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
-    crate::certified_products::certify_inherited_products(
-        &verified
-            .iter()
-            .map(|artifact| crate::certified_products::InheritedProductInput { artifact })
-            .collect::<Vec<_>>(),
+    let owned = products.iter().collect::<Vec<_>>();
+    crate::certified_products::certify_owned_products_in_context_with_validation(
+        &owned,
         &[],
+        &owned,
+        &mut validation,
     )
     .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
     let mut artifacts = Vec::with_capacity(products.len());
@@ -735,6 +776,170 @@ mod tests {
             unit: "main".into(),
             module: module.into(),
         }
+    }
+
+    #[test]
+    fn authored_closure_reuses_owned_witnesses_and_preserves_legacy_validation() {
+        use crate::certified_products::{
+            tests::{original_witness_fixture, recovered_witness_fixtures},
+            PendingImportOwner, ORIGINAL_PRODUCT_DECODES,
+        };
+        use tidepool_repr::execution_schema::testing;
+
+        let source = |owner| PendingImportOwner::Source {
+            binder: testing::identity("B", "entry"),
+            owner,
+            original_ordinal: 7,
+        };
+        let retained = PendingImportOwner::Retained {
+            identity: testing::identity("Value", "live"),
+            generation: 11,
+        };
+        let packages = BTreeMap::new();
+        let b = original_witness_fixture("B", Some(retained.clone()), 7, &packages);
+        let a = original_witness_fixture("A", Some(source(b.owner().clone())), 7, &packages);
+        let legacy = vec![a, b];
+        let recovered = recovered_witness_fixtures(&legacy);
+        let products = recovered
+            .iter()
+            .map(|row| row.product.clone())
+            .collect::<Vec<_>>();
+        let root = tempfile::tempdir().unwrap();
+        let evidence = products
+            .iter()
+            .map(|product| crate::cache::ModuleEvidence {
+                unit: product.owner().unit.clone(),
+                module: product.owner().module.clone(),
+                boot: false,
+                source: root.path().join(format!("{}.hs", product.owner().module)),
+                imports: vec![],
+                product: ProductAvailability::Ready,
+            })
+            .collect::<Vec<_>>();
+        let owner = ExactModuleIdentity {
+            unit: "fixture".into(),
+            module: "A".into(),
+        };
+        let admit = |selected: &[CertifiedRecoveryProduct]| {
+            admit_authored_artifact_closure(
+                selected,
+                &owner,
+                [1; 32],
+                &evidence,
+                None,
+                None,
+                &[root.path().to_path_buf()],
+            )
+        };
+        let before = ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get);
+        let (_scratch, artifacts, _, _, _) = admit(&products).unwrap();
+        assert_eq!(artifacts.len(), products.len());
+        for (artifact, product) in artifacts.iter().zip(&products) {
+            assert_eq!(
+                std::fs::read(&artifact.interface.path).unwrap(),
+                product.interface_bytes()
+            );
+            assert_eq!(artifact.interface.sha256, sha256(product.interface_bytes()));
+            let snapshot = artifact.product.as_ref().unwrap();
+            assert_eq!(
+                std::fs::read(&snapshot.path).unwrap(),
+                product.product_bytes()
+            );
+            assert_eq!(snapshot.sha256, sha256(product.product_bytes()));
+        }
+        assert_eq!(ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get), before);
+        assert!(
+            admit(&products[..1]).is_err(),
+            "selected source closure must be complete"
+        );
+        assert!(admit(&[
+            products[0].clone(),
+            products[0].clone(),
+            products[1].clone()
+        ])
+        .is_err());
+        let wrong_version = original_witness_fixture("B", Some(retained), 8, &packages);
+        assert!(admit(&[products[0].clone(), wrong_version]).is_err());
+        let legacy_before = ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get);
+        admit(&legacy).unwrap();
+        assert!(
+            ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get) > legacy_before,
+            "uncaptured originals still use the full byte validator"
+        );
+    }
+
+    #[test]
+    fn authored_closure_refuses_package_drift_and_zero_group_home_downgrade() {
+        use crate::certified_products::{
+            tests::{original_witness_fixture, recovered_witness_fixtures},
+            PackageInterfaceWitness, PendingImportOwner,
+        };
+        use tidepool_repr::execution_schema::testing;
+
+        let root = tempfile::tempdir().unwrap();
+        let package_path = root.path().join("External.hi");
+        std::fs::write(&package_path, [0x43]).unwrap();
+        let digest = Sha256::digest([0x43]).into();
+        let packages = BTreeMap::from([(
+            ("fixture".into(), "External".into()),
+            PackageInterfaceWitness {
+                selected_path: package_path.clone(),
+                sha256: digest,
+            },
+        )]);
+        let consumer = original_witness_fixture(
+            "Consumer",
+            Some(PendingImportOwner::Package {
+                unit: "fixture".into(),
+                module: "External".into(),
+                binder: testing::identity("External", "entry"),
+                interface_digest: digest,
+            }),
+            7,
+            &packages,
+        );
+        let empty = original_witness_fixture("External", None, 7, &BTreeMap::new());
+        let recovered = recovered_witness_fixtures(&[consumer, empty]);
+        let products = recovered
+            .iter()
+            .map(|row| row.product.clone())
+            .collect::<Vec<_>>();
+        let evidence = products
+            .iter()
+            .map(|product| crate::cache::ModuleEvidence {
+                unit: product.owner().unit.clone(),
+                module: product.owner().module.clone(),
+                boot: false,
+                source: root.path().join(format!("{}.hs", product.owner().module)),
+                imports: vec![],
+                product: ProductAvailability::Ready,
+            })
+            .collect::<Vec<_>>();
+        let owner = ExactModuleIdentity {
+            unit: "fixture".into(),
+            module: "Consumer".into(),
+        };
+        let admit = |selected: &[CertifiedRecoveryProduct]| {
+            admit_authored_artifact_closure(
+                selected,
+                &owner,
+                [1; 32],
+                &evidence,
+                None,
+                None,
+                &[root.path().to_path_buf()],
+            )
+        };
+        admit(&products[..1]).unwrap();
+        assert!(
+            admit(&products).is_err(),
+            "zero-group home cannot be treated as a package"
+        );
+        std::fs::write(&package_path, [0x44]).unwrap();
+        assert!(
+            admit(&products[..1]).is_err(),
+            "a later admission must reread live package bytes"
+        );
     }
 
     #[test]
