@@ -79,7 +79,7 @@ pub(super) fn schedule_embedded_notification_drain(
     });
 }
 
-fn embedded_notification_operation_id(
+pub(super) fn embedded_notification_operation_id(
     inbox_key: &str,
     sequence: u64,
     sender: ActorRef,
@@ -421,7 +421,7 @@ pub(super) async fn deliver_pending(
 /// exchange deadline: a submit that timed out may still be admitted late
 /// within one more exchange.
 #[cfg(feature = "codex-compat")]
-const WITHDRAW_WITHOUT_EVIDENCE_AFTER: Duration =
+pub(super) const WITHDRAW_WITHOUT_EVIDENCE_AFTER: Duration =
     exomonad_agent::INPUT_CONTROL_DEADLINE.saturating_mul(2);
 
 /// Cadence at which an unchanged pending-delivery WARN is repeated.
@@ -431,18 +431,19 @@ const PENDING_DELIVERY_WARN_INTERVAL: Duration = Duration::from_secs(30);
 /// Leading line on a re-delivered message whose earlier copy native input
 /// control admitted without proving whether the model saw it.
 #[cfg(feature = "codex-compat")]
-const POSSIBLY_SEEN_PREFIX: &str = "(possibly already seen)";
+pub(super) const POSSIBLY_SEEN_PREFIX: &str = "(possibly already seen)";
 
 /// Leading line on every re-delivered message: it was queued again behind
 /// the messages that were waiting for it.
 #[cfg(feature = "codex-compat")]
-const REDELIVERED_PREFIX: &str = "(re-delivered: messages sent after it may have arrived first)";
+pub(super) const REDELIVERED_PREFIX: &str =
+    "(re-delivered: messages sent after it may have arrived first)";
 
 /// Pump memory for a tracked row whose native input control answers without
 /// evidence (no record, or an unknown dispatch outcome).
 #[derive(Debug, Clone, Copy)]
 #[cfg(feature = "codex-compat")]
-enum WithoutEvidence {
+pub(super) enum WithoutEvidence {
     /// First answered without evidence at this instant.
     Since(std::time::Instant),
     /// Withdrawal itself had no evidence to act on (native input control is
@@ -1307,7 +1308,7 @@ pub(super) async fn run_delivery_pump(
 /// retirement boundary. An admitted observation finishes or makes delivery
 /// cleanup forced, which retains the checkout it might still be reading.
 #[cfg(feature = "codex-compat")]
-async fn supervise_delivery<D, PF, P, SF, S>(
+pub(super) async fn supervise_delivery<D, PF, P, SF, S>(
     actor: ActorRef,
     runtime_observation: &exomonad_actor::ActorRuntimeObservationHandle,
     mut shutdown: oneshot::Receiver<()>,
@@ -1372,7 +1373,7 @@ async fn supervise_delivery<D, PF, P, SF, S>(
 
 #[derive(Debug)]
 #[cfg(feature = "codex-compat")]
-enum ActorObservation {
+pub(super) enum ActorObservation {
     Provider,
     Source,
 }
@@ -1382,7 +1383,7 @@ enum ActorObservation {
 /// the delivery grace period. Dropping the owning JoinSet aborts async tasks;
 /// a detached blocking Git read is then covered by the forced retirement.
 #[cfg(feature = "codex-compat")]
-async fn run_periodic_observation<F, Fut>(
+pub(super) async fn run_periodic_observation<F, Fut>(
     mut shutdown: oneshot::Receiver<()>,
     period: Duration,
     mut observe: F,
@@ -1414,7 +1415,7 @@ pub(super) async fn until_shutdown(shutdown: &mut oneshot::Receiver<()>, work: i
 }
 
 #[cfg(feature = "codex-compat")]
-const PROVIDER_POLL_INTERVAL: Duration = Duration::from_secs(10);
+pub(super) const PROVIDER_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Push one reminder to an actor whose provider turn ended after its current
 /// request was activated and the request is still open. The idle age is the status line's

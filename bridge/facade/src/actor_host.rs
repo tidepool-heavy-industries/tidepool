@@ -61,7 +61,14 @@ use delivery::deliver_pending;
 use delivery::{
     admit_notification, deliver_pending_checked, observe_inbound_delivery,
     observe_notification_receipt, remind_turn_ended_without_respond, run_delivery_pump,
+};
+#[cfg(test)]
+use delivery::embedded_notification_operation_id;
+#[cfg(all(test, feature = "codex-compat"))]
+use delivery::{
     run_periodic_observation, supervise_delivery, turn_end_reminder, until_shutdown,
+    ActorObservation, PROVIDER_POLL_INTERVAL, POSSIBLY_SEEN_PREFIX, REDELIVERED_PREFIX,
+    WITHDRAW_WITHOUT_EVIDENCE_AFTER, WithoutEvidence,
 };
 #[cfg(feature = "codex-compat")]
 mod native_launch;
