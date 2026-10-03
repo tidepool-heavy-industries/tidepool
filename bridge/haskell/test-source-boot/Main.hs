@@ -251,29 +251,39 @@ main = getArgs >>= \case
     mixedGraph True 10
   _ -> fail "unexpected SOURCE boot test arguments"
 
--- The SOURCE SCC reuses one genuine immutable packet across isolated mutable
--- compiler sessions; its v8 scope carries the same original native products.
+-- One immutable capture supplies SOURCE SCC candidates and a separate ordinary
+-- native dependency pair. SOURCE imports cannot issue execution source recipes.
 sourceBootReuseAt :: FilePath -> IO ()
 sourceBootReuseAt work = do
-  forM_ ["CacheEven.hs", "CacheEven.hs-boot", "CacheOdd.hs", "CacheEntry.hs"] $ \file ->
+  forM_ ["CacheEven.hs", "CacheEven.hs-boot", "CacheOdd.hs", "CacheEntry.hs"
+        , "NativeScopeBase.hs", "NativeScopeOwner.hs", "SourceBootCapture.hs"] $ \file ->
     copyFile ("test-source-boot/fixtures" </> file) (work </> file)
   cold <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
-    (work </> "CacheEntry.hs") [work] (Just (work </> "build-products"))
-  unless (all (`elem` preparedNames cold) ["CacheEven", "CacheOdd", "CacheEntry"]
+    (work </> "SourceBootCapture.hs") [work] (Just (work </> "build-products"))
+  unless (all (`elem` preparedNames cold) ["CacheEven", "CacheOdd", "CacheEntry"
+      , "NativeScopeBase", "NativeScopeOwner", "SourceBootCapture"]
       && null (pprAcceptedCandidates cold)) $
     fail "cold SOURCE graph omitted original defining products"
   unless (dependencyCacheSafe (pprDependencies cold)
       && dependencySelectionComplete (pprDependencies cold)) $
     fail "cold SOURCE graph lacks final source/package evidence"
-  let nativeScope = work </> "native-scope.cbor"
-  writeGenuineCandidateNativeScope ["CacheEven", "CacheOdd"] work
-    (work </> "CacheEntry.hs") [work] nativeScope cold
+  let nativeScope = work </> "ordinary-native-scope.cbor"
+  writeGenuineCandidateNativeScope ["CacheEven", "CacheOdd"]
+    ["NativeScopeBase", "NativeScopeOwner"] work
+    (work </> "SourceBootCapture.hs") [work] nativeScope cold
   deliveredScope <- readExactScope nativeScope >>= either fail pure
   unless (Set.fromList (map originalModule (scopeProducts deliveredScope))
-      == Set.fromList ["CacheEven", "CacheOdd"]
+      == Set.fromList ["NativeScopeBase", "NativeScopeOwner"]
       && not (null (scopeExecutionGraphs deliveredScope))
       && not (null (scopeExecutionNativeOwners deliveredScope))) $
-    fail "genuine SOURCE scope omitted original native rows or authenticated execution custody"
+    fail "genuine ordinary scope omitted original native rows or authenticated execution custody"
+  candidates <- readModuleCandidates (manifest work) >>= either fail pure
+  unless (Set.fromList (map candidateModule candidates) == Set.fromList ["CacheEven", "CacheOdd"]
+      && all (\candidate -> case candidateExecutionSource candidate of
+        Nothing -> True
+        Just _ -> False) candidates) $
+    fail "SOURCE SCC candidate issued unsupported execution source custody"
+  putStrLn "SOURCE execution custody: CacheEven/CacheOdd recipes absent; ordinary NativeScopeBase/NativeScopeOwner recipes admitted"
   exactScopeV8Checks nativeScope
   candidateCanonicalChecks nativeScope (manifest work)
   verifyHydration work cold

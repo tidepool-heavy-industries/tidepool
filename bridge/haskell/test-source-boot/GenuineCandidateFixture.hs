@@ -53,10 +53,11 @@ writeGenuineEmptyMetadataScope destination =
 -- Native products and candidate descriptors share one immutable finalization
 -- packet. The Rust owner retains the complete canonical interface closure and
 -- admits native execution only from its genuinely certified original products.
+-- Candidate interface custody and native execution roots are selected separately.
 writeGenuineCandidateNativeScope
-  :: [String] -> FilePath -> FilePath -> [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
-writeGenuineCandidateNativeScope names work source includes destination prepared =
-  writePacket work (Just (source, includes, prepared)) names [] names (Just destination)
+  :: [String] -> [String] -> FilePath -> FilePath -> [FilePath] -> FilePath -> PreparedPipelineResult -> IO ()
+writeGenuineCandidateNativeScope candidates nativeOwners work source includes destination prepared =
+  writePacket work (Just (source, includes, prepared)) candidates candidates nativeOwners (Just destination)
 
 writePacket
   :: FilePath -> Maybe (FilePath, [FilePath], PreparedPipelineResult)
