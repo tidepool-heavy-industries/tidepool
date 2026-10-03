@@ -1007,31 +1007,38 @@ async fn resident_await_watch_case(case: WatchCase) {
     } else {
         181
     });
-    let declarations = [
-        tidepool_mcp::agent_tools_decl(),
-        tidepool_mcp::actor_decl(),
-        tidepool_mcp::actor_kernel_decl(),
-        tidepool_mcp::actor_local_decl(),
-        tidepool_mcp::commands_decl(),
-        tidepool_mcp::fs_read_decl(),
-        tidepool_mcp::sleep_decl(),
-    ];
+    let declarations = if direct_binding_cell {
+        vec![tidepool_mcp::commands_decl()]
+    } else {
+        vec![
+            tidepool_mcp::agent_tools_decl(),
+            tidepool_mcp::actor_decl(),
+            tidepool_mcp::actor_kernel_decl(),
+            tidepool_mcp::actor_local_decl(),
+            tidepool_mcp::commands_decl(),
+            tidepool_mcp::fs_read_decl(),
+            tidepool_mcp::sleep_decl(),
+        ]
+    };
     let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
     let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
-    let preamble = insert_preamble_imports(
-        &tidepool_mcp::build_preamble(&declarations, false),
-        "Tidepool.Agent.Contract",
-    );
-    let preamble = insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Watch as Watch");
-    let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
-    let preamble = format!(
-        "{preamble}\
-         type ActorEffects = '[AgentTools, Actor, Commands, Watch.Watches, Sleep]\n\
-         data WaitInput = WaitInput {{ delay :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
-         data WaitOutput = WaitOutput {{ settled :: Bool }} deriving (Generic, ToJSON, JsonSchema)\n\
-         data ResidentTools mode = ResidentTools {{ waitForCommand :: mode :- Call WaitInput WaitOutput }} deriving (Generic)\n"
-    );
+    let preamble = tidepool_mcp::build_preamble(&declarations, false);
+    let preamble = if direct_binding_cell {
+        format!("{preamble}type ActorEffects = '[Commands]\n")
+    } else {
+        let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Contract");
+        let preamble =
+            insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Watch as Watch");
+        let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
+        format!(
+            "{preamble}\
+             type ActorEffects = '[AgentTools, Actor, Commands, Watch.Watches, Sleep]\n\
+             data WaitInput = WaitInput {{ delay :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
+             data WaitOutput = WaitOutput {{ settled :: Bool }} deriving (Generic, ToJSON, JsonSchema)\n\
+             data ResidentTools mode = ResidentTools {{ waitForCommand :: mode :- Call WaitInput WaitOutput }} deriving (Generic)\n"
+        )
+    };
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let session_root = tempfile::tempdir().expect("session root");
@@ -1103,11 +1110,15 @@ async fn resident_await_watch_case(case: WatchCase) {
         let actor = forest
             .new_workbench(
                 "resident-await-watch".into(),
-                exomonad_actor::EffectiveRole::root().with_effect_keys(vec![
-                    exomonad_actor::ActorEffectKey::Commands,
-                    exomonad_actor::ActorEffectKey::Watches,
-                    exomonad_actor::ActorEffectKey::Sleep,
-                ]),
+                exomonad_actor::EffectiveRole::root().with_effect_keys(if direct_binding_cell {
+                    vec![exomonad_actor::ActorEffectKey::Commands]
+                } else {
+                    vec![
+                        exomonad_actor::ActorEffectKey::Commands,
+                        exomonad_actor::ActorEffectKey::Watches,
+                        exomonad_actor::ActorEffectKey::Sleep,
+                    ]
+                }),
             )
             .await
             .expect("spawn primary workbench");
