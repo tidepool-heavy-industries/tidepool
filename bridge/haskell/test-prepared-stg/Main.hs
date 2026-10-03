@@ -50,7 +50,8 @@ import Tidepool.ExecutionIR
 import Tidepool.PreparedSites
   ( PreparedSite(..), SiteRejection(..), buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings )
 import RetainedPluginTest (verifyCompilerReuse, verifyPreparedScope)
-import ModuleProductRoundtripTest (verifyModuleProductInterfaceRoundtrip)
+import ModuleProductRoundtripTest
+  ( verifyModuleProductInterfaceRoundtrip, verifyOriginalProductCatalogue )
 import TypeEvidenceChecks (runTypeEvidenceChecks)
 import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthority)
 
@@ -721,6 +722,13 @@ main = do
         (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
         removePathForcibly
         verifyModuleProductInterfaceRoundtrip
+    ["--original-product-catalogue"] -> do
+      tmp <- getTemporaryDirectory
+      let work = tmp </> "tidepool-original-product-catalogue-test"
+      bracket
+        (removePathForcibly work >> createDirectoryIfMissing True work >> pure work)
+        removePathForcibly
+        verifyOriginalProductCatalogue
     [] -> fullMain
     _ -> ioError (userError ("unknown test arguments: " ++ show args))
 

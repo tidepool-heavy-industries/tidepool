@@ -13,6 +13,8 @@ extra-source-files:
   test-prepared-stg/RepPolyImport.hs
   test-prepared-stg/ModuleProductA.hs
   test-prepared-stg/ModuleProductB.hs
+  test-prepared-stg/ModuleProductCatalogA.hs
+  test-prepared-stg/ModuleProductCatalogB.hs
   test-cell-splitter/fixtures/declaration-join/*/*.hs
   test-cell-splitter/fixtures/session-fixities/*.hs
   test-cell-splitter/fixtures/quasiquote-occurrences/*.hs
