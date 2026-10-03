@@ -54,7 +54,6 @@ pub(super) fn publish(
     ) {
         return;
     }
-    let was_unconfirmed = request.was_unconfirmed();
     let result = (|| {
         let admission = forest
             .authorize_display_publication(request)
@@ -149,7 +148,7 @@ pub(super) fn publish(
         Err(error) => {
             let detail = error.to_string();
             let outcome = match error {
-                _ if was_unconfirmed => DisplayPublicationOutcome::Unconfirmed(detail),
+                _ if request.was_unconfirmed() => DisplayPublicationOutcome::Unconfirmed(detail),
                 StoreError::InvalidActorOutput
                 | StoreError::ActorOutputRefused
                 | StoreError::ActorOutputAuthority(_)

@@ -39,6 +39,7 @@ main = do
   shortGroupBudgetDoesNotForceFields
   exactBudgetRetainsUnknownSuffixes
   tinyGrantsRetainConstructorNames
+  oversizedConstructorNamesMakeProgressWithoutHidingFields
   unavailableDetailDoesNotReplaceSupportedText
 
 applicationsParenthesizeOnlyAboveApplicationPrecedence :: IO ()
@@ -262,9 +263,34 @@ tinyGrantsRetainConstructorNames = do
     _ -> fail "nullary constructor suffix was lost"
   assertEqual "compound constructor preview respects the tiny allowance" "O" (displayStateText record)
   case displayStateKeys record of
-    [(key, _)] -> assertEqual "compound constructor keeps its complete envelope" (Just "Outer {value = 7}")
-      (fmap displayStateText (expandDisplayState 64 key record))
+    [(nameKey, _), (fieldsKey, _)] -> do
+      assertEqual "compound constructor retains the actual name suffix" (Just "uter")
+        (fmap displayStateText (expandDisplayState 64 nameKey record))
+      assertEqual "compound constructor fields remain independently available" (Just " {value = 7}")
+        (fmap displayStateText (expandDisplayState 64 fieldsKey record))
     _ -> fail "compound constructor envelope was lost"
+
+oversizedConstructorNamesMakeProgressWithoutHidingFields :: IO ()
+oversizedConstructorNamesMakeProgressWithoutHidingFields = do
+  let name = Text.replicate (8192 * 2 + 7) "x"
+      state = newDisplayState 8192 (Constructor name [("left", TextLeaf "A"), ("right", TextLeaf "B")])
+  assertEqual "the first constructor name page is bounded" (Text.take 8192 name) (displayStateText state)
+  case displayStateKeys state of
+    [(nameKey, _), (fieldsKey, _)] -> do
+      fields <- requireExpansion fieldsKey state
+      assertEqual "fields can be reached before the constructor name finishes" " {left = A, right = B}" (displayStateText fields)
+      middle <- requireExpansion nameKey fields
+      assertEqual "the constructor name cursor advances" (Text.replicate 8192 "x") (displayStateText middle)
+      case displayStateKeys middle of
+        [(lastKey, _)] -> do
+          final <- requireExpansion lastKey middle
+          assertEqual "the final constructor name suffix is exact" "xxxxxxx" (displayStateText final)
+          assertEqual "the constructor name finishes at the capped grant" [] (displayStateKeys final)
+        _ -> fail "constructor name suffix was lost or repeated"
+    _ -> fail "constructor name and fields must have separate cursors"
+  where
+    requireExpansion key state = maybe (fail "constructor cursor was lost") pure
+      (expandDisplayState 8192 key state)
 
 unavailableDetailDoesNotReplaceSupportedText :: IO ()
 unavailableDetailDoesNotReplaceSupportedText = do

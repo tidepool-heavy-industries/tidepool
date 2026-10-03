@@ -220,11 +220,17 @@ preview budget depth next label tree
       Constructor name [] -> ordinary (TextLeaf name)
       Constructor name fields
         | budget <= T.length name + 5 ->
-            (T.take budget name, [(ExpansionKey next, label, tree)], next + 1, False)
+            constructorPrefix name fields
         | otherwise -> children (name <> " {") "}" fields
       Sequence opening closing items -> sequenceChildren opening closing (0 :: Int) items
       _ -> ordinary tree
   where
+    constructorPrefix name fields =
+        let (value, remaining, unavailable) = renderTree budget (TextLeaf name)
+            (nameBranches, following) = case remaining of
+              Nothing -> ([], next)
+              Just suffix -> ([(ExpansionKey next, label <> ".constructor", suffix)], next + 1)
+        in (value, nameBranches ++ [(ExpansionKey following, label <> ".fields", Constructor "" fields)], following + 1, unavailable)
     ordinary valueTree =
         let (value, remaining, unavailable) = renderTree budget valueTree
         in case remaining of
