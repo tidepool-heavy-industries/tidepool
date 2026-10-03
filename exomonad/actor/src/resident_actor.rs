@@ -1389,59 +1389,12 @@ fn install_cell_preparation(
             .map(|item| item.source.clone())
             .collect(),
     );
-    match prepared {
-        PreparedCell::Ready {
-            items,
-            dependencies,
-        } => {
-            cursor.dependencies = Some(dependencies.into());
-            cursor.prepared_cell = Some(items.into_iter().map(Some).collect::<Vec<_>>());
-        }
-        PreparedCell::Rejected {
-            index: rejected_index,
-            diagnostic,
-        } => {
-            let items = (0..=rejected_index)
-                .map(|prior| WorkbenchItemReceipt {
-                    diagnostics: if prior == rejected_index {
-                        diagnostic.diagnostics.clone()
-                    } else {
-                        Vec::new()
-                    },
-                    index: prior,
-                    kind: None,
-                    span: None,
-                    source_items: Vec::new(),
-                    status: if prior == rejected_index {
-                        WorkbenchItemStatus::Rejected
-                    } else {
-                        WorkbenchItemStatus::NotRun
-                    },
-                    output: if prior == rejected_index {
-                        diagnostic.output.clone()
-                    } else {
-                        String::new()
-                    },
-                    warnings: Vec::new(),
-                    installed_bindings: Vec::new(),
-                    operations: Vec::new(),
-                    terminal_transfer: None,
-                    failure_layer: if prior == rejected_index {
-                        Some(WorkbenchFailureLayer::Compile)
-                    } else {
-                        None
-                    },
-                })
-                .collect();
-            return Ok(Some(KernelStep::Continue(workbench_response(
-                WorkbenchRunStatus::Rejected,
-                items,
-                rejected_index,
-                request.items.len(),
-                Some(&checked.items),
-            ))));
-        }
-    }
+    let PreparedCell {
+        items,
+        dependencies,
+    } = prepared;
+    cursor.dependencies = Some(dependencies.into());
+    cursor.prepared_cell = Some(items.into_iter().map(Some).collect::<Vec<_>>());
     cursor.cell_check = Some(checked);
     cursor.preparation_done = true;
     Ok(None)

@@ -3751,15 +3751,10 @@ where
                     "tool installer must be one checked bind without public binders".into(),
                 ));
             }
-            let PreparedCell::Ready {
+            let PreparedCell {
                 mut items,
                 dependencies,
-            } = prepared
-            else {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "tool installer checked program was rejected before execution".into(),
-                ));
-            };
+            } = prepared;
             let item = items.pop().ok_or_else(|| {
                 ResidentActorWorkbenchError::ActorProtocol(
                     "tool installer checked program has no executable item".into(),
@@ -4491,7 +4486,7 @@ where
             .await?;
         Ok((
             checked,
-            PreparedCell::Ready {
+            PreparedCell {
                 items,
                 dependencies: CellPreparationLease {
                     _bindings: bindings,
@@ -10334,15 +10329,9 @@ struct PreparedCellStep {
     item: tidepool_toolchain::checked_cell::ExactCheckedItem,
 }
 
-pub(crate) enum PreparedCell {
-    Ready {
-        items: Vec<PreparedCellItem>,
-        dependencies: CellPreparationLease,
-    },
-    Rejected {
-        index: usize,
-        diagnostic: tidepool_runtime::session::CompileRejection,
-    },
+pub(crate) struct PreparedCell {
+    pub(crate) items: Vec<PreparedCellItem>,
+    pub(crate) dependencies: CellPreparationLease,
 }
 
 enum CompiledBlock {
@@ -13043,7 +13032,7 @@ mod request_tests {
             .await
             .expect("one admitted declaration shadows its prior exact owner");
         assert_eq!(checked.items.len(), 2);
-        assert!(matches!(prepared, PreparedCell::Ready { .. }));
+        assert_eq!(prepared.items.len(), 2);
 
         let (expression, prepared) = workbench
             .prepare_cell(
@@ -13056,9 +13045,7 @@ mod request_tests {
         assert!(!expression.expression_plans[0]
             .type_display
             .contains("ZonkAny"));
-        let PreparedCell::Ready { items, .. } = prepared else {
-            panic!("ready expression program")
-        };
+        let PreparedCell { items, .. } = prepared;
         assert_eq!(
             items
                 .iter()
@@ -13076,9 +13063,7 @@ mod request_tests {
             assert_eq!(checked.items.len(), 1);
             assert!(checked.items[0].prologue_only);
             assert!(checked.items[0].verdict.binders.is_empty());
-            let PreparedCell::Ready { items, .. } = prepared else {
-                panic!("ready prologue")
-            };
+            let PreparedCell { items, .. } = prepared;
             assert!(matches!(&items[0].ready, PreparedCellStep { item, .. }
                 if item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Declaration));
         }
@@ -13246,7 +13231,7 @@ mod request_tests {
             } else {
                 let (_, prepared) =
                     result.expect("unrelated scopes leave the admitted program current");
-                assert!(matches!(prepared, PreparedCell::Ready { .. }));
+                assert_eq!(prepared.items.len(), 1);
             }
             workbench
                 .access
@@ -15174,9 +15159,7 @@ mod request_tests {
             })
             .await
             .unwrap();
-        let PreparedCell::Ready { mut items, .. } = prepared else {
-            panic!("ready declaration program")
-        };
+        let PreparedCell { mut items, .. } = prepared;
         assert!(matches!(&items[0].ready, PreparedCellStep { item, .. }
             if item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Declaration));
         let step = workbench
@@ -15284,7 +15267,7 @@ mod request_tests {
                 .all(|item| item.verdict.kind == TurnKind::Bind),
             "neither item is a declaration: {checked:?}"
         );
-        let PreparedCell::Ready {
+        let PreparedCell {
             items,
             dependencies,
         } = prepared
@@ -15374,9 +15357,7 @@ mod request_tests {
             .await
             .expect("closed request scope compiles with site evidence");
         assert_eq!(checked.items.len(), 1);
-        let PreparedCell::Ready { mut items, .. } = prepared else {
-            panic!("ready scope item")
-        };
+        let PreparedCell { mut items, .. } = prepared;
         let PreparedCellStep {
             specification,
             prefix,
@@ -15938,9 +15919,7 @@ mod request_tests {
             .prepare_cell(context.clone(), cell.clone())
             .await
             .unwrap();
-        let PreparedCell::Ready { mut items, .. } = prepared else {
-            panic!("ready private cell")
-        };
+        let PreparedCell { mut items, .. } = prepared;
         let step = workbench
             .begin_prepared_cell_item(
                 context.clone(),
@@ -16047,9 +16026,7 @@ mod request_tests {
             .prepare_cell(context.clone(), cell.clone())
             .await
             .expect("request access compiles");
-        let PreparedCell::Ready { mut items, .. } = prepared else {
-            panic!("request access is an executable cell")
-        };
+        let PreparedCell { mut items, .. } = prepared;
         let step = workbench
             .begin_prepared_cell_item(
                 context.clone(),
