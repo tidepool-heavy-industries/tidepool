@@ -934,7 +934,7 @@ async fn watch_documentation_request_options_reports_progress_then_settles() {
         .filter(|snippet| snippet.contains("let progressOptions = assignment"))
         .collect();
     assert_eq!(snippets.len(), 1, "one complete documented progress setup");
-    committed(root.as_ref(), snippets[0]).await;
+    displayed(&mut campaign, root.as_ref(), snippets[0]).await;
     let child = campaign
         .next_deployment(
             "documented progress child policy installation",
@@ -963,24 +963,46 @@ async fn watch_documentation_request_options_reports_progress_then_settles() {
     // Exercise the real resident actor path, without a model/provider execution claim.
     committed(child.policy.as_ref(), "reportProgress [\"finding\"]").await;
     campaign.await_watch_ready().await;
-    let progress = committed(
+    let progress = displayed(
+        &mut campaign,
         root.as_ref(),
         include_str!("watch_documentation_progress.hs"),
     )
     .await;
-    assert_eq!(progress["items"][2]["output"], "True", "{progress}");
-    assert_eq!(progress["items"][3]["output"], "True", "{progress}");
+    let pages: Vec<_> = progress["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["operations"].as_array().unwrap())
+        .filter_map(|operation| operation.get("display").map(|display| &display["text"]))
+        .collect();
+    assert_eq!(
+        pages,
+        vec![&serde_json::json!("True"), &serde_json::json!("True")],
+        "{progress}"
+    );
     let reply =
         dispatch_haskell_script(child.policy.as_ref(), "respond (\"final report\" :: Text)").await;
     assert_eq!(reply["status"], "replied", "{reply}");
     campaign.await_watch_ready().await;
-    let settled = committed(
+    let settled = displayed(
+        &mut campaign,
         root.as_ref(),
         include_str!("watch_documentation_settled.hs"),
     )
     .await;
-    assert_eq!(settled["items"][2]["output"], "True", "{settled}");
-    assert_eq!(settled["items"][3]["output"], "True", "{settled}");
+    let pages: Vec<_> = settled["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["operations"].as_array().unwrap())
+        .filter_map(|operation| operation.get("display").map(|display| &display["text"]))
+        .collect();
+    assert_eq!(
+        pages,
+        vec![&serde_json::json!("True"), &serde_json::json!("True")],
+        "{settled}"
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -1319,9 +1341,15 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         .split("```haskell\n")
         .skip(1)
     {
-        committed(root.as_ref(), block.split_once("```").unwrap().0).await;
+        displayed(
+            &mut campaign,
+            root.as_ref(),
+            block.split_once("```").unwrap().0,
+        )
+        .await;
     }
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         if rich_response {
             include_str!("../actor_host_fixtures/generic_actor/rich_response_setup.hs")
@@ -1477,19 +1505,29 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         }
         presented.insert(activation.id.actor());
     }
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         "let sharedAfterUnfold = (\"later parent value\" :: Text)",
     )
     .await;
     for child in &children {
-        let inherited = committed(child.policy.as_ref(), "sharedAfterUnfold").await;
+        let inherited = displayed(
+            &mut campaign,
+            child.policy.as_ref(),
+            "display sharedAfterUnfold",
+        )
+        .await;
         assert_eq!(
-            inherited["items"][0]["output"].as_str().unwrap().trim(),
+            explicit_display_output(&inherited)["text"]
+                .as_str()
+                .unwrap()
+                .trim(),
             "ready"
         );
     }
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         include_str!("../actor_host_fixtures/generic_actor/response_computation.hs"),
     )
@@ -1506,26 +1544,41 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         assert_eq!(result["status"], "replied", "{result:?}");
     }
     campaign.await_watch_ready().await;
-    let first = committed(root.as_ref(), "pollWatch joined").await;
-    let second = committed(root.as_ref(), "pollWatch joined").await;
+    let first = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "firstState <- pollWatch joined\ndisplay firstState",
+    )
+    .await;
+    let second = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "secondState <- pollWatch joined\ndisplay secondState",
+    )
+    .await;
     for observation in [&first, &second] {
-        assert!(observation["items"][0]["output"]
+        assert!(explicit_display_output(observation)["text"]
             .as_str()
             .unwrap()
             .starts_with("WatchReady"));
     }
-    let saved = first["items"][0]["installedBindings"][0].as_str().unwrap();
-    let full = committed(root.as_ref(), &format!("inspectFull ({saved} ())")).await;
-    assert!(full["items"][0]["output"]
+    let full = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "display (inspectFull firstState)",
+    )
+    .await;
+    assert!(explicit_display_output(&full)["text"]
         .as_str()
         .unwrap()
         .contains("ReplyAvailable"));
-    committed(
-        root.as_ref(),
+    displayed(
+        &mut campaign, root.as_ref(),
         "import Tidepool.Actors.Observe (actorContext)\ncontext <- actorContext\ncontextFirstUsage context\ncontextLatestUsage context",
     )
     .await;
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         "let worker = responseActor (fst workers)\nlet task = 9 :: Int",
     )
@@ -1541,9 +1594,9 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         if rich_response {
             break;
         }
-        committed(root.as_ref(), example(document)).await;
-        committed(
-            root.as_ref(),
+        displayed(&mut campaign, root.as_ref(), example(document)).await;
+        displayed(
+            &mut campaign, root.as_ref(),
             "let readyLabel = \"followup-result\" :: WatchLabel\nready <- watch readyLabel (awaitResponse response)",
         )
         .await;
@@ -1551,15 +1604,19 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
             dispatch_haskell_script(domain.policy.as_ref(), "respond (Report sessionInput)").await;
         assert_eq!(reply["status"], "replied", "{reply:?}");
         campaign.await_watch_ready().await;
-        let result = committed(root.as_ref(), "pollResponse response").await;
-        assert!(result["items"][0]["output"]
+        let result = displayed(
+            &mut campaign,
+            root.as_ref(),
+            "responseState <- pollResponse response\ndisplay responseState",
+        )
+        .await;
+        assert!(explicit_display_output(&result)["text"]
             .as_str()
             .unwrap()
             .starts_with("ResponseReady"));
-        let saved = result["items"][0]["installedBindings"][0].as_str().unwrap();
-        let full = committed(root.as_ref(), &format!("inspectFull ({saved} ())")).await;
+        let full = displayed(&mut campaign, root.as_ref(), "display (show responseState)").await;
         assert!(
-            full["items"][0]["output"]
+            explicit_display_output(&full)["text"]
                 .as_str()
                 .unwrap()
                 .contains("Report 9"),
