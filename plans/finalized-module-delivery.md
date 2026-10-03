@@ -14,9 +14,12 @@ worker-tree trial. Source-ready candidates are not acceptance evidence.
 - Ordinary checks may use provisional interfaces. Durable witnesses require
   finalized owners, finalized in dependency order before their importers.
   Never retarget provisional certificates to a different final interface.
-- One canonical interface node owns each exact module identity. A native
-  implementation is a separate immutable node with an edge to that interface.
-  Interface nodes never acquire edges to later native implementations.
+- One canonical interface node owns each exact module identity within a selected
+  sealed closure. The inventory may retain independent immutable versions
+  globally by content ID; admission and merge resolve requirements only within
+  the selected closure. Each native implementation is a separate immutable node
+  with an edge to its exact carried canonical interface ID. Interface nodes
+  never acquire edges to later native implementations.
 - A type-only capability cannot gain executable authority when native code is
   added. Native dependency edges select exact implementation versions.
 - A certificate binds producer/profile, interface and Core companion hashes,

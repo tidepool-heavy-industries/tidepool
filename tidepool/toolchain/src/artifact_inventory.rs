@@ -78,6 +78,8 @@ pub enum ArtifactInventoryFailure {
     MetadataConflict { artifact: ArtifactId },
     #[error("original owner {owner:?} has differing artifacts")]
     OwnerConflict { owner: ExactModuleIdentity },
+    #[error("owner {owner:?} selects multiple native implementations")]
+    NativeOwnerAmbiguity { owner: ExactModuleIdentity },
     #[error("{dependent:?} requires another exact interface seal for {required:?}")]
     InterfaceSealMismatch {
         dependent: ExactModuleIdentity,
@@ -169,7 +171,7 @@ impl std::fmt::Display for ArtifactInventoryError {
 
 impl std::error::Error for ArtifactInventoryError {}
 
-fn admission_failure(failure: ArtifactInventoryFailure) -> CompileError {
+pub(crate) fn admission_failure(failure: ArtifactInventoryFailure) -> CompileError {
     ArtifactInventoryError {
         failure,
         diagnostic_artifacts: None,
@@ -594,8 +596,6 @@ struct InventoryState {
     graph: StableDiGraph<ArtifactDescriptor, ArtifactDependency>,
     indices: BTreeMap<ArtifactId, NodeIndex>,
     payloads: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    owners: BTreeMap<ExactModuleIdentity, ArtifactId>,
-    native_owners: BTreeMap<NativeOwnerKey, ArtifactId>,
     roots: BTreeMap<ArtifactId, usize>,
     graph_visits: AtomicU64,
     view_queries: AtomicU64,
@@ -605,6 +605,163 @@ struct InventoryState {
     reclamation_candidate_nodes: u64,
     reclaimed_nodes: u64,
     reclamation_elapsed_ns: u64,
+}
+
+/// Owner selection belongs to one sealed reachable closure, not the inventory.
+#[derive(Default)]
+struct SelectedOwners {
+    interfaces: BTreeMap<ExactModuleIdentity, ArtifactId>,
+    native: BTreeMap<NativeOwnerKey, ArtifactId>,
+}
+impl SelectedOwners {
+    fn new(
+        state: &InventoryState,
+        entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        parent_ids: &BTreeSet<ArtifactId>,
+    ) -> Result<Self, CompileError> {
+        let mut selected = Self::default();
+        for (id, entry) in entries {
+            state
+                .admission_owner_lookups
+                .fetch_add(1, Ordering::Relaxed);
+            let previous = if let ArtifactPayload::Original(product) = &entry.payload {
+                selected
+                    .native
+                    .insert(NativeOwnerKey::from_owner(product.owner()), *id)
+            } else {
+                selected
+                    .interfaces
+                    .insert(entry.descriptor.owner.clone(), *id)
+            };
+            if let Some(previous) = previous.filter(|previous| previous != id) {
+                let (existing, incoming) =
+                    if parent_ids.contains(id) && !parent_ids.contains(&previous) {
+                        (entry, &entries[&previous])
+                    } else {
+                        (&entries[&previous], entry)
+                    };
+                return Err(ArtifactInventoryError {
+                    failure: ArtifactInventoryFailure::OwnerConflict {
+                        owner: entry.descriptor.owner.clone(),
+                    },
+                    diagnostic_artifacts: None,
+                    owner_conflict: Some(ArtifactOwnerConflictEvidence {
+                        existing: Arc::clone(existing),
+                        incoming: Arc::clone(incoming),
+                        existing_in_parent: parent_ids.contains(&existing.descriptor.id),
+                    }),
+                }
+                .into());
+            }
+        }
+        Ok(selected)
+    }
+    fn planned_edges(
+        &self,
+        state: &InventoryState,
+        entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    ) -> Result<BTreeMap<ArtifactId, BTreeSet<(ArtifactId, ArtifactDependency)>>, CompileError>
+    {
+        let mut additions = BTreeMap::new();
+        for (id, entry) in entries {
+            let expected = self.dependencies(state, entry, entries)?;
+            if let Some(index) = state.indices.get(id) {
+                let actual = state
+                    .graph
+                    .edges(*index)
+                    .map(|edge| (state.graph[edge.target()].id, edge.weight().clone()))
+                    .collect::<BTreeSet<_>>();
+                if actual != expected {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::MetadataConflict { artifact: *id },
+                    ));
+                }
+            } else {
+                additions.insert(*id, expected);
+            }
+        }
+        Ok(additions)
+    }
+    fn dependencies(
+        &self,
+        state: &InventoryState,
+        entry: &ArtifactEntry,
+        entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    ) -> Result<BTreeSet<(ArtifactId, ArtifactDependency)>, CompileError> {
+        if matches!(
+            entry.payload,
+            ArtifactPayload::Canonical(_) | ArtifactPayload::Original(_)
+        ) && entry.requirements.iter().collect::<BTreeSet<_>>()
+            != entry.interface_seals.keys().collect()
+        {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::MetadataConflict {
+                    artifact: entry.descriptor.id,
+                },
+            ));
+        }
+        let resolve = |owner: &ExactModuleIdentity, dependency: &ArtifactDependency| {
+            state
+                .admission_owner_lookups
+                .fetch_add(1, Ordering::Relaxed);
+            let id = if matches!(dependency, ArtifactDependency::NativeGroup { .. }) {
+                entry
+                    .native_owners
+                    .get(owner)
+                    .and_then(|key| self.native.get(key))
+            } else {
+                self.interfaces.get(owner)
+            };
+            id.copied().ok_or_else(|| {
+                admission_failure(ArtifactInventoryFailure::MissingDependency {
+                    artifact: entry.descriptor.id,
+                    dependent: entry.descriptor.owner.clone(),
+                    required: owner.clone(),
+                    dependency: dependency.clone(),
+                })
+            })
+        };
+        for (owner, seal) in &entry.interface_seals {
+            let id = resolve(owner, &ArtifactDependency::Interface)?;
+            let required = &entries[&id].descriptor;
+            if required.interface_sha256 != *seal
+                || required.producer_sha256 != entry.descriptor.producer_sha256
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::InterfaceSealMismatch {
+                        dependent: entry.descriptor.owner.clone(),
+                        required: owner.clone(),
+                    },
+                ));
+            }
+        }
+        let mut edges = BTreeSet::new();
+        for owner in &entry.requirements {
+            let id = resolve(owner, &ArtifactDependency::Interface)?;
+            if !entry.is_native() {
+                edges.insert((id, ArtifactDependency::Interface));
+            }
+        }
+        for (owner, dependency) in &entry.native_requirements {
+            edges.insert((resolve(owner, dependency)?, dependency.clone()));
+        }
+        if let ArtifactPayload::Original(product) = &entry.payload {
+            let carrier = ArtifactEntry::canonical(
+                product
+                    .module_interface()
+                    .ok_or_else(|| failure("native canonical carrier missing"))?
+                    .clone(),
+            );
+            let id = resolve(&entry.descriptor.owner, &ArtifactDependency::Interface)?;
+            if id != carrier.descriptor.id {
+                return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
+                    owner: entry.descriptor.owner.clone(),
+                }));
+            }
+            edges.insert((id, ArtifactDependency::Interface));
+        }
+        Ok(edges)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -685,229 +842,69 @@ impl ArtifactInventory {
         if entries.is_empty() {
             return Ok(parent.clone());
         }
-        let supplied = entries
-            .iter()
-            .filter(|entry| matches!(entry.payload, ArtifactPayload::Canonical(_)))
-            .map(|entry| (entry.descriptor.owner.clone(), entry))
-            .collect::<BTreeMap<_, _>>();
+        // Every native implementation retains its own authenticated canonical
+        // carrier, including when that implementation already exists by ID.
+        let mut expanded = entries;
         let mut implicit = Vec::new();
-        for entry in &entries {
+        for entry in &expanded {
             if let ArtifactPayload::Original(product) = &entry.payload {
-                let canonical = ArtifactEntry::canonical(
+                implicit.push(Arc::new(ArtifactEntry::canonical(
                     product
                         .module_interface()
                         .ok_or_else(|| failure("native canonical carrier missing"))?
                         .clone(),
-                );
-                if let Some(existing) = supplied.get(&canonical.descriptor.owner) {
-                    if existing.as_ref() != &canonical {
-                        return Err(admission_failure(
-                            ArtifactInventoryFailure::MetadataConflict {
-                                artifact: canonical.descriptor.id,
-                            },
-                        ));
-                    }
-                } else {
-                    implicit.push(Arc::new(canonical));
-                }
+                )));
             }
         }
-        drop(supplied);
-        let mut expanded = entries;
         expanded.extend(implicit);
         let mut state = self.0.lock().expect("inventory lock");
-        let mut additions = BTreeMap::new();
-        let mut roots = BTreeSet::new();
+        let parent_ids = closure(&state, parent.roots().into_iter());
+        let mut supplied = BTreeMap::new();
         for entry in expanded {
             let id = entry.descriptor.id;
-            roots.insert(id);
-            if let Some(previous) = state.payloads.get(&id).or_else(|| additions.get(&id)) {
+            if let Some(previous) = state.payloads.get(&id).or_else(|| supplied.get(&id)) {
                 if previous != &entry {
                     return Err(admission_failure(
                         ArtifactInventoryFailure::MetadataConflict { artifact: id },
                     ));
                 }
-            } else {
-                additions.insert(id, entry);
             }
+            supplied.insert(id, entry);
         }
-        let mut owners = BTreeMap::new();
-        for entry in additions.values().filter(|entry| !entry.is_native()) {
-            let owner = &entry.descriptor.owner;
-            if owners.insert(owner.clone(), entry.descriptor.id).is_some() {
-                return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
-                    owner: owner.clone(),
-                }));
-            }
-        }
-        let native_owners = additions
-            .values()
-            .filter_map(|entry| match &entry.payload {
-                ArtifactPayload::Original(product) => Some((
-                    NativeOwnerKey::from_owner(product.owner()),
-                    entry.descriptor.id,
-                )),
-                _ => None,
-            })
+        let roots = supplied.keys().copied().collect::<Vec<_>>();
+        // Reused immutable nodes bring their actual graph targets, never the
+        // inventory's unrelated owner variants, into the selected closure.
+        let mut selected_ids = parent_ids.clone();
+        selected_ids.extend(closure(
+            &state,
+            supplied
+                .keys()
+                .filter(|id| state.payloads.contains_key(*id))
+                .copied(),
+        ));
+        let mut selected = selected_ids
+            .iter()
+            .map(|id| (*id, Arc::clone(&state.payloads[id])))
             .collect::<BTreeMap<_, _>>();
-        for (owner, id) in &native_owners {
-            if state
-                .native_owners
-                .get(owner)
-                .is_some_and(|previous| previous != id)
-            {
-                return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
-                    owner: owner.owner.clone(),
-                }));
-            }
-        }
-        for entry in additions.values() {
-            state
-                .admission_owner_lookups
-                .fetch_add(1, Ordering::Relaxed);
-            if let Some(existing_id) = state
-                .owners
-                .get(&entry.descriptor.owner)
-                .filter(|_| !entry.is_native())
-            {
-                tracing::warn!(
-                    existing = ?state.payloads[existing_id].descriptor,
-                    incoming = ?entry.descriptor,
-                    "refusing different artifacts for one exact original owner",
-                );
-                return Err(ArtifactInventoryError {
-                    failure: ArtifactInventoryFailure::OwnerConflict {
-                        owner: entry.descriptor.owner.clone(),
-                    },
-                    diagnostic_artifacts: None,
-                    owner_conflict: Some(ArtifactOwnerConflictEvidence {
-                        existing: Arc::clone(&state.payloads[existing_id]),
-                        incoming: Arc::clone(entry),
-                        existing_in_parent: closure(&state, parent.roots().into_iter())
-                            .contains(existing_id),
-                    }),
-                }
-                .into());
-            }
-            for (owner, seal) in &entry.interface_seals {
-                state
-                    .admission_owner_lookups
-                    .fetch_add(1, Ordering::Relaxed);
-                let required = owners
-                    .get(owner)
-                    .map(|id| &additions[id].descriptor)
-                    .or_else(|| {
-                        state
-                            .owners
-                            .get(owner)
-                            .map(|id| &state.payloads[id].descriptor)
-                    });
-                if let Some(required) = required {
-                    if required.interface_sha256 != *seal
-                        || required.producer_sha256 != entry.descriptor.producer_sha256
-                    {
-                        return Err(admission_failure(
-                            ArtifactInventoryFailure::InterfaceSealMismatch {
-                                dependent: entry.descriptor.owner.clone(),
-                                required: owner.clone(),
-                            },
-                        ));
-                    }
-                }
-            }
-            for (owner, dependency) in entry
-                .requirements
-                .iter()
-                .map(|owner| (owner, ArtifactDependency::Interface))
-                .chain(
-                    entry
-                        .native_requirements
-                        .iter()
-                        .map(|(owner, dependency)| (owner, dependency.clone())),
-                )
-            {
-                state
-                    .admission_owner_lookups
-                    .fetch_add(1, Ordering::Relaxed);
-                let present = if matches!(dependency, ArtifactDependency::NativeGroup { .. }) {
-                    let exact = entry
-                        .native_owners
-                        .get(owner)
-                        .ok_or_else(|| failure("native group lacks exact source owner"))?;
-                    state.native_owners.contains_key(exact) || native_owners.contains_key(exact)
-                } else {
-                    state.owners.contains_key(owner) || owners.contains_key(owner)
-                };
-                if !present {
-                    tracing::error!(
-                        dependent = ?entry.descriptor.owner,
-                        required = ?owner,
-                        artifact = ?entry.descriptor.id,
-                        "incomplete interface requirements"
-                    );
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::MissingDependency {
-                            artifact: entry.descriptor.id,
-                            dependent: entry.descriptor.owner.clone(),
-                            required: owner.clone(),
-                            dependency,
-                        },
-                    ));
-                }
-            }
-        }
-        let roots = roots.into_iter().collect::<Vec<_>>();
-        for (id, entry) in &additions {
-            let index = state.graph.add_node(entry.descriptor.clone());
+        state
+            .entry_handle_copies
+            .fetch_add(selected.len() as u64, Ordering::Relaxed);
+        selected.extend(supplied);
+        let owners = SelectedOwners::new(&state, &selected, &parent_ids)?;
+        let edges = owners.planned_edges(&state, &selected)?;
+        // All owner, seal and graph checks finish before any inventory mutation.
+        for id in edges.keys() {
+            let index = state.graph.add_node(selected[id].descriptor.clone());
             state.indices.insert(*id, index);
         }
-        for (id, entry) in additions {
+        for (id, dependencies) in edges {
             let source = state.indices[&id];
-            for owner in entry.requirements.iter().filter(|_| !entry.is_native()) {
-                let target = state.indices[&state
-                    .owners
-                    .get(owner)
-                    .copied()
-                    .unwrap_or_else(|| owners[owner])];
-                state
-                    .graph
-                    .add_edge(source, target, ArtifactDependency::Interface);
+            for (target, dependency) in dependencies {
+                let target = state.indices[&target];
+                state.graph.add_edge(source, target, dependency);
             }
-            for (owner, dependency) in &entry.native_requirements {
-                let target_id = if matches!(dependency, ArtifactDependency::NativeGroup { .. }) {
-                    let exact = &entry.native_owners[owner];
-                    state
-                        .native_owners
-                        .get(exact)
-                        .copied()
-                        .unwrap_or_else(|| native_owners[exact])
-                } else {
-                    state
-                        .owners
-                        .get(owner)
-                        .copied()
-                        .unwrap_or_else(|| owners[owner])
-                };
-                let target = state.indices[&target_id];
-                state.graph.add_edge(source, target, dependency.clone());
-            }
-            if let ArtifactPayload::Original(product) = &entry.payload {
-                let interface_id = state
-                    .owners
-                    .get(&entry.descriptor.owner)
-                    .copied()
-                    .unwrap_or_else(|| owners[&entry.descriptor.owner]);
-                let target = state.indices[&interface_id];
-                state
-                    .graph
-                    .add_edge(source, target, ArtifactDependency::Interface);
-                state
-                    .native_owners
-                    .insert(NativeOwnerKey::from_owner(product.owner()), id);
-            } else {
-                state.owners.insert(entry.descriptor.owner.clone(), id);
-            }
-            state.payloads.insert(id, entry);
+            state.payloads.insert(id, Arc::clone(&selected[&id]));
+            state.entry_handle_copies.fetch_add(1, Ordering::Relaxed);
         }
         // Root registration occurs under the same lock as admission, so another
         // view's release cannot reclaim the newly admitted nodes.
@@ -984,14 +981,7 @@ impl Drop for ViewLease {
             let index = state.indices.remove(id).expect("indexed artifact");
             state.graph.remove_node(index);
             state.reclaimed_nodes += 1;
-            let entry = state.payloads.remove(id).expect("owned payload");
-            if let ArtifactPayload::Original(product) = &entry.payload {
-                state
-                    .native_owners
-                    .remove(&NativeOwnerKey::from_owner(product.owner()));
-            } else if state.owners.get(&entry.descriptor.owner) == Some(id) {
-                state.owners.remove(&entry.descriptor.owner);
-            }
+            state.payloads.remove(id).expect("owned payload");
         }
         state.reclamation_elapsed_ns += started.elapsed().as_nanos() as u64;
         // Parent drops after the lock guard, preserving recursive release.
@@ -1027,10 +1017,21 @@ pub struct ArtifactView(Arc<ViewLease>);
 pub(crate) struct ArtifactMetadataSnapshot {
     pub entries: BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
     pub artifacts: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    pub ambiguous_native_owners: BTreeSet<ExactModuleIdentity>,
     dependencies: Vec<(ArtifactId, ArtifactId, ArtifactDependency)>,
 }
 
 impl ArtifactMetadataSnapshot {
+    pub(crate) fn validate_native_selection(&self) -> Result<(), CompileError> {
+        if let Some(owner) = self.ambiguous_native_owners.first() {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeOwnerAmbiguity {
+                    owner: owner.clone(),
+                },
+            ));
+        }
+        Ok(())
+    }
     pub fn dependencies(&self) -> Vec<(ArtifactId, ArtifactId, ArtifactDependency)> {
         self.dependencies.clone()
     }
@@ -1050,10 +1051,13 @@ impl ArtifactView {
         let mut entries = BTreeMap::new();
         let mut artifacts = BTreeMap::new();
         let mut dependencies = Vec::new();
+        let mut natives = BTreeMap::<ExactModuleIdentity, Vec<ArtifactId>>::new();
         for id in ids {
             let entry = &state.payloads[&id];
             let owner = entry.descriptor.owner.clone();
-            if entry.is_native() || !entries.contains_key(&owner) {
+            if entry.is_native() {
+                natives.entry(owner).or_default().push(id);
+            } else {
                 entries.insert(owner, id);
             }
             artifacts.insert(id, Arc::clone(entry));
@@ -1063,6 +1067,14 @@ impl ArtifactView {
                     .edges(state.indices[&id])
                     .map(|edge| (id, state.graph[edge.target()].id, edge.weight().clone())),
             );
+        }
+        let mut ambiguous_native_owners = BTreeSet::new();
+        for (owner, ids) in natives {
+            if ids.len() == 1 {
+                entries.insert(owner, ids[0]);
+            } else {
+                ambiguous_native_owners.insert(owner);
+            }
         }
         dependencies.sort();
         let entries = entries
@@ -1076,6 +1088,7 @@ impl ArtifactView {
             entries,
             artifacts,
             dependencies,
+            ambiguous_native_owners,
         }
     }
 
@@ -1231,10 +1244,26 @@ impl ArtifactView {
         Ok(self.0.inventory.retain(roots, Vec::new()))
     }
     pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
+        if Arc::ptr_eq(&self.0, &other.0) || other.is_empty() {
+            return Ok(self.clone());
+        }
         if self.is_empty() {
             return Ok(other.clone());
         }
         if Arc::ptr_eq(&self.0.inventory.0, &other.0.inventory.0) {
+            let state = self.0.inventory.0.lock().expect("inventory lock");
+            let parent_ids = closure(&state, self.roots().into_iter());
+            let mut ids = parent_ids.clone();
+            ids.extend(closure(&state, other.roots().into_iter()));
+            let entries = ids
+                .iter()
+                .map(|id| (*id, Arc::clone(&state.payloads[id])))
+                .collect();
+            state
+                .entry_handle_copies
+                .fetch_add(ids.len() as u64, Ordering::Relaxed);
+            SelectedOwners::new(&state, &entries, &parent_ids)?.planned_edges(&state, &entries)?;
+            drop(state);
             Ok(ArtifactView(Arc::new(ViewLease {
                 inventory: self.0.inventory.clone(),
                 roots: Vec::new(),
@@ -1284,25 +1313,41 @@ impl ArtifactView {
     pub(crate) fn entries_for_owners(
         &self,
         owners: impl Iterator<Item = ExactModuleIdentity>,
-    ) -> BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>> {
+    ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
         let state = self.0.inventory.0.lock().expect("inventory lock");
         let owned = closure(&state, self.roots().into_iter());
-        let entries = owners
-            .filter_map(|owner| {
-                let native = state
-                    .native_owners
-                    .iter()
-                    .find_map(|(key, id)| (key.owner == owner && owned.contains(id)).then_some(id));
-                let id = native.or_else(|| state.owners.get(&owner))?;
-                owned
-                    .contains(id)
-                    .then(|| (owner, Arc::clone(&state.payloads[id])))
-            })
-            .collect::<BTreeMap<_, _>>();
+        let mut interfaces = BTreeMap::new();
+        let mut native = BTreeMap::<ExactModuleIdentity, Vec<ArtifactId>>::new();
+        for id in owned {
+            let entry = &state.payloads[&id];
+            if entry.is_native() {
+                native
+                    .entry(entry.descriptor.owner.clone())
+                    .or_default()
+                    .push(id);
+            } else {
+                interfaces.insert(entry.descriptor.owner.clone(), id);
+            }
+        }
+        let mut entries = BTreeMap::new();
+        for owner in owners {
+            let id = match native.get(&owner).map(Vec::as_slice) {
+                Some([id]) => Some(*id),
+                Some(_) => {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::NativeOwnerAmbiguity { owner },
+                    ))
+                }
+                None => interfaces.get(&owner).copied(),
+            };
+            if let Some(id) = id {
+                entries.insert(owner, Arc::clone(&state.payloads[&id]));
+            }
+        }
         state
             .entry_handle_copies
             .fetch_add(entries.len() as u64, Ordering::Relaxed);
-        entries
+        Ok(entries)
     }
 
     pub fn interface_projection(
@@ -1311,14 +1356,19 @@ impl ArtifactView {
     ) -> Result<Self, CompileError> {
         let state = self.0.inventory.0.lock().expect("inventory lock");
         let owned = closure(&state, self.roots().into_iter());
+        let selected = owned
+            .iter()
+            .filter_map(|id| {
+                let entry = &state.payloads[id];
+                (!entry.is_native()).then_some((entry.descriptor.owner.clone(), *id))
+            })
+            .collect::<BTreeMap<_, _>>();
         let roots = owners
             .iter()
             .map(|owner| {
-                state
-                    .owners
+                selected
                     .get(owner)
                     .copied()
-                    .filter(|id| owned.contains(id))
                     .ok_or_else(|| failure("type owner outside retained view"))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1452,6 +1502,147 @@ mod tests {
         entry
     }
 
+    fn native_variant(entry: &ArtifactEntry, version: u8) -> ArtifactEntry {
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            panic!("native fixture")
+        };
+        let interface = product.module_interface().unwrap().clone();
+        let mut owner = product.owner().clone();
+        owner.module_version = ModuleVersion([version; 32]);
+        let certification = crate::certified_products::encode_home_certification_with_module(
+            &owner,
+            &[],
+            &BTreeMap::new(),
+            interface.requirements(),
+            digest(interface.certificate_bytes()),
+        )
+        .unwrap();
+        let variant = CertifiedRecoveryProduct::from_certification(
+            owner,
+            product.interface_bytes().to_vec(),
+            product.product_bytes().to_vec(),
+            product.package_imports_bytes().to_vec(),
+            certification,
+        )
+        .with_module_interface(interface)
+        .unwrap();
+        ArtifactEntry::original(entry.descriptor.producer_sha256, variant, Vec::new()).unwrap()
+    }
+
+    #[test]
+    fn native_variants_keep_exact_carriers_and_require_explicit_materialization_selection() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let first = native_entry("Original", &[]);
+        let second = native_variant(&first, 2);
+        let mut consumer = native_entry("Consumer", &["Original"]);
+        let ArtifactPayload::Original(product) = &second.payload else {
+            unreachable!()
+        };
+        consumer.native_owners.insert(
+            module("Original"),
+            NativeOwnerKey::from_owner(product.owner()),
+        );
+        consumer.native_requirements.push((
+            module("Original"),
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 0,
+                required_ordinal: 0,
+            },
+        ));
+        let view = inventory
+            .admit(
+                &empty,
+                vec![first.clone(), second.clone(), consumer.clone()],
+            )
+            .unwrap();
+        let metadata = view.metadata_snapshot();
+        assert_eq!(
+            metadata.ambiguous_native_owners,
+            BTreeSet::from([module("Original")])
+        );
+        assert!(view
+            .entries_for_owners(std::iter::once(module("Original")))
+            .is_err());
+        let carrier = match &first.payload {
+            ArtifactPayload::Original(product) => {
+                ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+                    .descriptor
+                    .id
+            }
+            _ => unreachable!(),
+        };
+        let dependencies = view.dependencies();
+        for native in [&first, &second] {
+            assert!(dependencies.contains(&(
+                native.descriptor.id,
+                carrier,
+                ArtifactDependency::Interface
+            )));
+        }
+        assert!(dependencies.contains(&(
+            consumer.descriptor.id,
+            second.descriptor.id,
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 0,
+                required_ordinal: 0
+            }
+        )));
+        assert!(!dependencies.contains(&(
+            consumer.descriptor.id,
+            first.descriptor.id,
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 0,
+                required_ordinal: 0
+            }
+        )));
+        let selected = view.select_roots(vec![first.descriptor.id]).unwrap();
+        assert!(selected
+            .metadata_snapshot()
+            .ambiguous_native_owners
+            .is_empty());
+        assert_eq!(
+            selected
+                .entries_for_owners(std::iter::once(module("Original")))
+                .unwrap()[&module("Original")]
+                .descriptor
+                .id,
+            first.descriptor.id
+        );
+        let types = view.interface_projection(&[module("Original")]).unwrap();
+        assert_eq!(types.artifact_ids(), vec![carrier]);
+        drop(view);
+        assert_eq!(inventory.node_count(), 2);
+        drop(selected);
+        assert_eq!(inventory.node_count(), 1);
+        drop(types);
+        assert_eq!(inventory.node_count(), 0);
+    }
+
+    #[test]
+    fn native_requirement_cannot_select_an_ambient_exact_native_key() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let original = native_entry("Original", &[]);
+        let ambient = inventory.admit(&empty, vec![original.clone()]).unwrap();
+        let mut consumer = native_entry("Consumer", &["Original"]);
+        consumer.native_requirements.push((
+            module("Original"),
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 0,
+                required_ordinal: 0,
+            },
+        ));
+        let types = ambient.interface_projection(&[module("Original")]).unwrap();
+        assert!(inventory.admit(&types, vec![consumer.clone()]).is_err());
+        let selected = inventory.admit(&ambient, vec![consumer]).unwrap();
+        assert!(selected
+            .dependencies()
+            .iter()
+            .any(|(_, target, dependency)| *target == original.descriptor.id
+                && matches!(dependency, ArtifactDependency::NativeGroup { .. })));
+    }
+
     #[test]
     fn later_native_admission_cannot_broaden_an_interface_capability() {
         let inventory = ArtifactInventory::default();
@@ -1493,8 +1684,9 @@ mod tests {
             .admit(&inventory.empty_view(), vec![first, second])
             .unwrap();
         assert_eq!(view.descriptors().len(), 2);
-        let entries =
-            view.entries_for_owners([first_owner.clone(), second_owner.clone()].into_iter());
+        let entries = view
+            .entries_for_owners([first_owner.clone(), second_owner.clone()].into_iter())
+            .unwrap();
         assert_eq!(entries[&first_owner].descriptor.id, first_id);
         assert_eq!(entries[&second_owner].descriptor.id, second_id);
         assert_eq!(
@@ -1655,8 +1847,9 @@ mod tests {
                 BTreeMap::new(),
             ));
         let retained = inventory.admit(&empty, vec![existing.clone()]).unwrap();
-        let CompileError::ArtifactInventory(error) =
-            inventory.admit(&empty, vec![incoming.clone()]).unwrap_err()
+        let CompileError::ArtifactInventory(error) = inventory
+            .admit(&retained, vec![incoming.clone()])
+            .unwrap_err()
         else {
             panic!("expected exact owner conflict")
         };
@@ -1667,7 +1860,7 @@ mod tests {
         let root = destination.path().join("owner-conflict");
         let index: serde_json::Value =
             serde_json::from_slice(&std::fs::read(root.join("index.json")).unwrap()).unwrap();
-        assert_eq!(index["existing_in_parent"], false);
+        assert_eq!(index["existing_in_parent"], true);
         for (label, entry) in [("existing", existing), ("incoming", incoming)] {
             let ArtifactPayload::Canonical(interface) = entry.payload else {
                 unreachable!()
@@ -1698,6 +1891,7 @@ mod tests {
         assert_eq!(
             first
                 .entries_for_owners([first_owner.clone(), second_owner].into_iter())
+                .unwrap()
                 .keys()
                 .collect::<Vec<_>>(),
             vec![&first_owner],
@@ -1714,6 +1908,131 @@ mod tests {
         assert_eq!(readmitted.descriptors()[0].owner, first_owner);
         drop(readmitted);
         assert_eq!(inventory.node_count(), 0);
+    }
+
+    #[test]
+    fn disjoint_exact_owner_variants_survive_and_reclaim_independently() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let old = entry("Shared", &[]);
+        let new = ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+            [3; 32],
+            "unit",
+            "Shared",
+            BTreeMap::new(),
+        ));
+        let old_view = inventory.admit(&empty, vec![old.clone()]).unwrap();
+        let new_view = inventory.admit(&empty, vec![new.clone()]).unwrap();
+        assert_eq!(old_view.descriptors(), vec![old.descriptor.clone()]);
+        assert_eq!(new_view.descriptors(), vec![new.descriptor.clone()]);
+        assert_eq!(inventory.node_count(), 2);
+        let before = inventory.node_count();
+        assert!(old_view.merge(&new_view).is_err());
+        assert_eq!(inventory.node_count(), before);
+        let duplicate = inventory.admit(&empty, vec![old]).unwrap();
+        drop(old_view);
+        assert_eq!(inventory.node_count(), 2);
+        drop(duplicate);
+        assert_eq!(inventory.node_count(), 1);
+        assert_eq!(new_view.descriptors(), vec![new.descriptor]);
+        drop(new_view);
+        assert_eq!(inventory.node_count(), 0);
+    }
+
+    #[test]
+    fn cross_inventory_conflicting_merge_is_atomic() {
+        let first = ArtifactInventory::default();
+        let second = ArtifactInventory::default();
+        let old = first
+            .admit(&first.empty_view(), vec![entry("Shared", &[])])
+            .unwrap();
+        let new = second
+            .admit(
+                &second.empty_view(),
+                vec![
+                    ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+                        [3; 32],
+                        "unit",
+                        "Shared",
+                        BTreeMap::new(),
+                    )),
+                    entry("Fresh", &[]),
+                ],
+            )
+            .unwrap();
+        let old_ids = old.artifact_ids();
+        let new_ids = new.artifact_ids();
+        assert!(old.merge(&new).is_err());
+        assert_eq!(first.node_count(), 1);
+        assert_eq!(second.node_count(), 2);
+        assert_eq!(old.artifact_ids(), old_ids);
+        assert_eq!(new.artifact_ids(), new_ids);
+    }
+
+    #[test]
+    fn ambient_owner_cannot_satisfy_a_dependency_or_missing_seal() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let ambient = inventory
+            .admit(&empty, vec![entry("Support", &[])])
+            .unwrap();
+        let dependent = entry("Consumer", &["Support"]);
+        assert!(matches!(inventory.admit(&empty, vec![dependent.clone()]),
+            Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::MissingDependency { .. })));
+        assert_eq!(inventory.node_count(), 1);
+        let mut unsealed = dependent.clone();
+        unsealed.interface_seals.clear();
+        assert!(inventory.admit(&ambient, vec![unsealed]).is_err());
+        assert_eq!(inventory.node_count(), 1);
+        let selected = inventory.admit(&ambient, vec![dependent]).unwrap();
+        assert_eq!(selected.descriptors().len(), 2);
+    }
+
+    #[test]
+    fn reused_artifact_cannot_hide_a_conflicting_dependency_variant() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let consumer = entry("Consumer", &["Support"]);
+        let retained = inventory
+            .admit(&empty, vec![consumer.clone(), entry("Support", &[])])
+            .unwrap();
+        let replacement =
+            ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+                [3; 32],
+                "unit",
+                "Support",
+                BTreeMap::new(),
+            ));
+        assert!(inventory
+            .admit(&empty, vec![consumer, replacement, entry("Fresh", &[])])
+            .is_err());
+        assert_eq!(inventory.node_count(), 2);
+        assert_eq!(retained.descriptors().len(), 2);
+    }
+
+    #[test]
+    fn reused_graph_targets_must_match_the_selected_sealed_dependencies() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let consumer = entry("Consumer", &["Support"]);
+        let retained = inventory
+            .admit(&empty, vec![consumer.clone(), entry("Support", &[])])
+            .unwrap();
+        let unrelated = inventory
+            .admit(&empty, vec![entry("Unrelated", &[])])
+            .unwrap();
+        // Exercise the owning admission guard against a corrupted reused graph.
+        let mut state = inventory.0.lock().unwrap();
+        let source = state.indices[&consumer.descriptor.id];
+        let target = state.indices[&unrelated.0.roots[0]];
+        state
+            .graph
+            .add_edge(source, target, ArtifactDependency::Interface);
+        drop(state);
+        assert!(inventory.admit(&empty, vec![consumer]).is_err());
+        assert_eq!(inventory.node_count(), 3);
+        drop(retained);
+        drop(unrelated);
     }
 
     #[test]
@@ -1905,12 +2224,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             inventory.metrics().admission_owner_lookups - after.admission_owner_lookups,
-            2
+            4
         );
         drop(second);
         drop(view);
         assert_eq!(inventory.node_count(), 0);
-        // Reclamation removes the metadata indexes with the graph entries.
+        // Reclamation removes the immutable ID registry entries with the graph nodes.
         let replacement = inventory
             .admit(&empty, vec![entry("Original", &[])])
             .unwrap();
@@ -1971,7 +2290,7 @@ mod tests {
             .admit(&empty, vec![entry("A", &["B"]), entry("B", &["A"])])
             .unwrap();
         let incoming = inventory
-            .admit(&empty, vec![entry("Outside", &["A"])])
+            .admit(&cycle, vec![entry("Outside", &["A"])])
             .unwrap();
         let unrelated = inventory
             .admit(&empty, vec![entry("Unrelated", &[])])
@@ -1979,7 +2298,7 @@ mod tests {
         let before = inventory.metrics().graph_visits;
         drop(cycle);
         assert_eq!(inventory.node_count(), 4);
-        assert_eq!(inventory.metrics().graph_visits - before, 4);
+        assert_eq!(inventory.metrics().graph_visits - before, 0);
         drop(incoming);
         assert_eq!(inventory.node_count(), 1);
         assert_eq!(unrelated.descriptors()[0].owner.module, "Unrelated");

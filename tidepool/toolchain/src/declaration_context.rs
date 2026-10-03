@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::artifact_inventory::{
-    ArtifactEntry, ArtifactInventory, ArtifactKind, ArtifactMetadataSnapshot, ArtifactPayload,
-    ArtifactView,
+    admission_failure, ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure, ArtifactKind,
+    ArtifactMetadataSnapshot, ArtifactPayload, ArtifactView,
 };
 use crate::certified_products::{
     certify_owned_products_in_context_with_validation, PendingCertifiedGroup,
@@ -1166,7 +1166,7 @@ impl ExactCompilationRequest {
             products
                 .iter()
                 .map(|product| identity(&product.owner().unit, &product.owner().module)),
-        );
+        )?;
         let fresh = products
             .iter()
             .filter(|product| {
@@ -1260,7 +1260,7 @@ impl ExactCompilationRequest {
                 .iter()
                 .map(|product| identity(&product.owner().unit, &product.owner().module))
                 .chain(selected_originals.keys().cloned()),
-        );
+        )?;
         for (owner, selected) in &selected_originals {
             let Some(entry) = entries.get(owner) else {
                 return Err(failure(
@@ -1340,13 +1340,13 @@ impl ExactCompilationRequest {
             planned
                 .original_home_imports()
                 .map(|(owner, _)| owner.clone()),
-        );
+        )?;
         let entries = view.entries_for_owners(
             planned
                 .original_home_imports()
                 .filter(|(owner, _)| !retained.contains_key(*owner))
                 .map(|(owner, _)| owner.clone()),
-        );
+        )?;
         let support =
             view.select_roots(entries.values().map(|entry| entry.descriptor.id).collect())?;
         let mut request = self.clone();
@@ -1971,7 +1971,7 @@ impl ExactDeclarationContext {
             products
                 .iter()
                 .map(|product| identity(&product.owner().unit, &product.owner().module)),
-        );
+        )?;
         let mut entries = Vec::new();
         let mut validation = PackageInterfaceValidation::default();
         for product in products {
@@ -2226,7 +2226,7 @@ impl ExactDeclarationContext {
         .lexical;
         let entries = self
             .artifact_view()
-            .entries_for_owners(lexical.iter().map(|node| node.owner.clone()));
+            .entries_for_owners(lexical.iter().map(|node| node.owner.clone()))?;
         if entries.len() != lexical.len() {
             return Err(failure(
                 "retained source surface lacks its exact artifact owner",
@@ -2253,7 +2253,9 @@ impl ExactDeclarationContext {
         let values = values
             .map(|(owner, bytes)| (identity("main", &owner.module_name()), bytes))
             .collect::<BTreeMap<_, _>>();
-        let entries = initial.inventory.entries_for_owners(values.keys().cloned());
+        let entries = initial
+            .inventory
+            .entries_for_owners(values.keys().cloned())?;
         let mut roots = Vec::new();
         for (owner, entry) in entries {
             let ArtifactPayload::Interface(interface, ArtifactKind::ValueInterface) =
@@ -2310,6 +2312,15 @@ impl ExactDeclarationContext {
         use sha2::Digest;
         let mut lexical = self.lexical.iter().collect::<Vec<_>>();
         lexical.sort_by_key(|node| &node.owner);
+        let mut native = metadata
+            .artifacts
+            .values()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Original(product) => Some((&entry.descriptor, product)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        native.sort_by_key(|(descriptor, _)| (&descriptor.owner, descriptor.id));
         let value = Value::Array(vec![
             text("TPEXACTCONTEXT"),
             text("2"),
@@ -2327,13 +2338,8 @@ impl ExactDeclarationContext {
             .into())),
             text(hex(&self.producer)),
             Value::Array(
-                metadata
-                    .entries
-                    .values()
-                    .filter_map(|entry| match &entry.payload {
-                        ArtifactPayload::Original(product) => Some((&entry.descriptor, product)),
-                        _ => None,
-                    })
+                native
+                    .into_iter()
                     .map(|(descriptor, product)| {
                         let owner = product.owner();
                         Value::Array(vec![
@@ -2401,6 +2407,7 @@ impl ExactDeclarationContext {
         artifacts: &[DeclarationArtifact],
         metadata: &ArtifactMetadataSnapshot,
     ) -> Result<(), CompileError> {
+        metadata.validate_native_selection()?;
         let mut seen = BTreeSet::new();
         for artifact in artifacts {
             let exact = &artifact.interface;
@@ -2559,6 +2566,19 @@ impl ExactDeclarationContext {
         ),
         CompileError,
     > {
+        let mut native_owners = BTreeSet::new();
+        for entry in entries
+            .iter()
+            .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
+        {
+            if !native_owners.insert(entry.descriptor.owner.clone()) {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeOwnerAmbiguity {
+                        owner: entry.descriptor.owner.clone(),
+                    },
+                ));
+            }
+        }
         let products = entries
             .iter()
             .filter_map(|entry| match &entry.payload {
@@ -2675,6 +2695,7 @@ impl ExactDeclarationContext {
         authorization: Option<Value>,
     ) -> Result<ExactCompilationRequest, CompileError> {
         let metadata = self.inventory.metadata_snapshot();
+        metadata.validate_native_selection()?;
         let semantic_sha256 = self.semantic_sha256_from_metadata(&metadata);
         self.prepare_compilation_from_metadata(
             root,
@@ -2694,6 +2715,7 @@ impl ExactDeclarationContext {
         authorize: impl FnOnce([u8; 32]) -> Result<Value, CompileError>,
     ) -> Result<ExactCompilationRequest, CompileError> {
         let metadata = self.inventory.metadata_snapshot();
+        metadata.validate_native_selection()?;
         let semantic_sha256 = self.semantic_sha256_from_metadata(&metadata);
         let authorization = authorize(semantic_sha256)?;
         self.prepare_compilation_from_metadata(
@@ -2969,14 +2991,14 @@ pub(crate) fn certified_artifact_view(
         || ArtifactInventory::default().empty_view(),
         |context| context.artifact_view().clone(),
     );
-    let selected = compiled.entries_for_owners(
-        products
-            .iter()
-            .map(|product| identity(&product.owner().unit, &product.owner().module)),
-    );
-    let view = view.merge(
-        &compiled.select_roots(selected.values().map(|entry| entry.descriptor.id).collect())?,
-    )?;
+    let selected = products
+        .iter()
+        .map(|product| {
+            ArtifactEntry::original(producer, product.clone(), Vec::new())
+                .map(|entry| entry.descriptor.id)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let view = view.merge(&compiled.select_roots(selected)?)?;
     let mut entries = Vec::new();
     for product in products {
         let owner = identity(&product.owner().unit, &product.owner().module);
@@ -3386,6 +3408,64 @@ mod tests {
         };
         context.clone().normalize().unwrap();
         (Arc::new(context), producer)
+    }
+
+    #[test]
+    fn ambiguous_native_owner_refuses_materialization_and_authorization() {
+        let (initial, producer) = metadata_fixture();
+        let existing = initial
+            .inventory
+            .entries_for_owners(std::iter::once(identity("fixture", "Alpha")))
+            .unwrap();
+        let ArtifactPayload::Original(product) = &existing[&identity("fixture", "Alpha")].payload
+        else {
+            panic!("native fixture")
+        };
+        let interface = product.module_interface().unwrap().clone();
+        let mut owner = product.owner().clone();
+        owner.module_version = tidepool_repr::execution_schema::ModuleVersion([9; 32]);
+        let certification = crate::certified_products::encode_home_certification_with_module(
+            &owner,
+            &[],
+            &BTreeMap::new(),
+            interface.requirements(),
+            <sha2::Sha256 as sha2::Digest>::digest(interface.certificate_bytes()).into(),
+        )
+        .unwrap();
+        let variant = CertifiedRecoveryProduct::from_certification(
+            owner,
+            product.interface_bytes().to_vec(),
+            product.product_bytes().to_vec(),
+            product.package_imports_bytes().to_vec(),
+            certification,
+        )
+        .with_module_interface(interface)
+        .unwrap();
+        let mut context = initial.as_ref().clone();
+        context.inventory = context
+            .inventory
+            .inventory()
+            .admit(
+                &context.inventory,
+                vec![ArtifactEntry::original(context.producer, variant, Vec::new()).unwrap()],
+            )
+            .unwrap();
+        let context = Arc::new(context);
+        assert_ne!(initial.semantic_sha256(), context.semantic_sha256());
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("uncreated");
+        assert!(
+            matches!(context.materialize(&root), Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, ArtifactInventoryFailure::NativeOwnerAmbiguity { .. }))
+        );
+        assert!(!root.exists());
+        assert!(
+            matches!(context.prepare_compilation_authorizing(&root, &producer, |_| {
+            panic!("ambiguous context must refuse before purpose authorization")
+        }), Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, ArtifactInventoryFailure::NativeOwnerAmbiguity { .. }))
+        );
+        assert!(!root.exists());
     }
 
     #[test]
@@ -3854,7 +3934,8 @@ mod tests {
         );
         let originals = context
             .artifact_view()
-            .entries_for_owners([identity("main", "A"), identity("main", "B")].into_iter());
+            .entries_for_owners([identity("main", "A"), identity("main", "B")].into_iter())
+            .unwrap();
         let products =
             ["A", "B"].map(
                 |module| match &originals[&identity("main", module)].payload {
@@ -3867,7 +3948,8 @@ mod tests {
             .unwrap();
         let after = effective
             .artifact_view()
-            .entries_for_owners([identity("main", "A"), identity("main", "B")].into_iter());
+            .entries_for_owners([identity("main", "A"), identity("main", "B")].into_iter())
+            .unwrap();
         for module in ["A", "B"] {
             assert!(Arc::ptr_eq(
                 &originals[&identity("main", module)],
@@ -4330,7 +4412,8 @@ mod tests {
         assert!(baseline.lexical_graph().is_empty());
         let relay = context
             .artifact_view()
-            .entries_for_owners(std::iter::once(identity("fixture", "InstanceRelay")));
+            .entries_for_owners(std::iter::once(identity("fixture", "InstanceRelay")))
+            .unwrap();
         assert_eq!(
             relay[&identity("fixture", "InstanceRelay")].requirements,
             vec![identity("fixture", "InstanceOwner")]
@@ -4416,7 +4499,8 @@ mod tests {
         );
         let entries = context
             .artifact_view()
-            .entries_for_owners(std::iter::once(identity("fixture", "InstanceRelay")));
+            .entries_for_owners(std::iter::once(identity("fixture", "InstanceRelay")))
+            .unwrap();
         let mut request = program_request(directory.path(), context.clone());
         request.program_support = Some(
             context
@@ -4475,7 +4559,8 @@ mod tests {
         let owner = identity("fixture", "InstanceRelay");
         let entries = context
             .artifact_view()
-            .entries_for_owners(std::iter::once(owner.clone()));
+            .entries_for_owners(std::iter::once(owner.clone()))
+            .unwrap();
         let value = context
             .artifact_view()
             .select_roots(vec![entries[&owner].descriptor.id])
@@ -4852,7 +4937,8 @@ mod tests {
         );
         let entry = context
             .artifact_view()
-            .entries_for_owners(std::iter::once(identity("fixture", "ValFirst")));
+            .entries_for_owners(std::iter::once(identity("fixture", "ValFirst")))
+            .unwrap();
         assert_eq!(
             entry[&identity("fixture", "ValFirst")].requirements,
             vec![
