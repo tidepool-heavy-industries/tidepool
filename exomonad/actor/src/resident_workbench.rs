@@ -1840,6 +1840,13 @@ pub(crate) enum ResidentActorBoundary {
         continuation: ResidentHole,
         text: String,
     },
+    DisplayAllowance {
+        continuation: ResidentHole,
+    },
+    DisplayAllowanceGranted {
+        continuation: ResidentHole,
+        allowance: i64,
+    },
     DisplayPublish {
         continuation: ResidentHole,
         output: tidepool_runtime::session::WorkbenchDisplayOutput,
@@ -2085,6 +2092,9 @@ impl ResidentActorBoundary {
                 ..
             } => WorkbenchOperationDisposition::Read,
             Self::Context { .. } => WorkbenchOperationDisposition::Staged,
+            Self::DisplayAllowance { .. } | Self::DisplayAllowanceGranted { .. } => {
+                WorkbenchOperationDisposition::Read
+            }
             _ => WorkbenchOperationDisposition::Committed,
         }
     }
@@ -2101,6 +2111,9 @@ impl ResidentActorBoundary {
             Self::Console { .. } => "print",
             Self::DisplayPublish { .. } | Self::DisplayPublished { .. } => "display",
             Self::DisplayExpand { .. } | Self::DisplayExpanded { .. } => "expand",
+            Self::DisplayAllowance { .. } | Self::DisplayAllowanceGranted { .. } => {
+                "display allowance"
+            }
             Self::NotificationSend { .. } => "notify",
             Self::NotificationPoll { .. } => "pollNotification",
             Self::ActorContext(_) => "actorContext",
@@ -4075,6 +4088,7 @@ where
         callback: Arc<RootCustody>,
         identity: (i64, i64, i64),
         key: i64,
+        allowance: i64,
     ) -> Result<
         (
             tidepool_runtime::session::WorkbenchDisplayOutput,
@@ -4082,6 +4096,7 @@ where
         ),
         ResidentActorWorkbenchError,
     > {
+        let allowance = allowance.clamp(0, 8192);
         let mut context = context;
         context.effect_policy = tidepool_effect::EffectRunPolicy::SuspendAll;
         self.access.with_machine(context, move |session, context, _| {
@@ -4097,7 +4112,7 @@ where
                             match ResidentRequest::decode(&request, session.data_con_table())? {
                                 ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayExpansionInputWith) if !input_received => {
                                     input_received = true;
-                                    Ok(session.resume(hole.clone(), (identity, key)))
+                                    Ok(session.resume(hole.clone(), (identity, key, allowance)))
                                 }
                                 ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayWith((issued, text, expansions), _)) if input_received && published.is_none() && issued == identity => {
                                     let callback = session.live_payload_handle_owned_by(hole.cont_id(), scope)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("display update has no retained callback".into()))?;
@@ -8772,6 +8787,7 @@ where
                         })
                     }
                     ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayExpandWith((identity, key))) => Ok(ResidentActorBoundary::DisplayExpand { continuation: hole, identity, key }),
+                    ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayAllowanceWith) => Ok(ResidentActorBoundary::DisplayAllowance { continuation: hole }),
                     ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayExpansionInputWith) => Err(ResidentActorWorkbenchError::ActorProtocol("display expansion input requires a retained callback invocation".into())),
                     ResidentRequest::Commands(request) => Ok(ResidentActorBoundary::Command { continuation: hole, request }),
                     ResidentRequest::AgentControl(

@@ -391,6 +391,14 @@ impl ResidentActorRecord {
     }
 }
 
+const DEFAULT_DISPLAY_CHARACTER_ALLOWANCE: i64 = 8192;
+
+/// Four UTF-8 bytes per character guarantees the renderer's accepted page fits
+/// the existing transport allowance without discarding part of its preview.
+fn display_character_allowance(remaining_bytes: usize) -> i64 {
+    (remaining_bytes / 4).min(DEFAULT_DISPLAY_CHARACTER_ALLOWANCE as usize) as i64
+}
+
 #[derive(Default)]
 struct ActorDisplays {
     next_slot: i64,
@@ -520,6 +528,22 @@ impl Drop for DisplayExpansionLease {
 #[cfg(test)]
 mod display_tests {
     use super::*;
+
+    #[test]
+    fn display_allowance_preserves_rendered_utf8_page_in_transport_budget() {
+        for remaining in [0, 1, 3, 4, 127, 8192, 32768, 65536, usize::MAX] {
+            let allowance = display_character_allowance(remaining) as usize;
+            assert!(allowance <= 8192);
+            for scalar in ["a", "λ", "界", "🙂"] {
+                let page = scalar.repeat(allowance);
+                assert!(page.len() <= remaining);
+                assert_eq!(
+                    crate::workbench_display::bounded_output(&page, remaining),
+                    page
+                );
+            }
+        }
+    }
 
     #[test]
     fn display_expansion_validates_exact_incarnation_and_issued_slot() {
@@ -4441,6 +4465,15 @@ where
                         .await
                 })
             }
+            ResidentActorBoundary::DisplayAllowanceGranted {
+                continuation,
+                allowance,
+            } => Box::pin(async move {
+                environment
+                    .runner
+                    .resume_value(context.clone(), continuation, allowance)
+                    .await
+            }),
             ResidentActorBoundary::DisplayPublished {
                 continuation,
                 identity,
@@ -4816,6 +4849,7 @@ where
         context: &ActorSessionContext,
         identity: (i64, i64, i64),
         key: i64,
+        allowance: i64,
     ) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError> {
         let (callback, lease) = {
             let records = self.environment.actors.lock();
@@ -4842,7 +4876,7 @@ where
         let (output, callback) = self
             .environment
             .runner
-            .expand_display(context.clone(), callback, identity, key)
+            .expand_display(context.clone(), callback, identity, key, allowance)
             .await?;
         let records = self.environment.actors.lock();
         let record = records
@@ -4865,9 +4899,17 @@ where
         &self,
         context: &ActorSessionContext,
         boundary: ResidentActorBoundary,
+        allowance: i64,
     ) -> Result<(ResidentActorBoundary, Option<WorkbenchDisplayOutput>), ResidentActorWorkbenchError>
     {
         match boundary {
+            ResidentActorBoundary::DisplayAllowance { continuation } => Ok((
+                ResidentActorBoundary::DisplayAllowanceGranted {
+                    continuation,
+                    allowance,
+                },
+                None,
+            )),
             ResidentActorBoundary::DisplayPublish {
                 continuation,
                 output,
@@ -4887,7 +4929,9 @@ where
                 identity,
                 key,
             } => {
-                let output = self.expand_display(context, identity, key).await?;
+                let output = self
+                    .expand_display(context, identity, key, allowance)
+                    .await?;
                 Ok((
                     ResidentActorBoundary::DisplayExpanded {
                         continuation,
@@ -4909,7 +4953,9 @@ where
         boundary: ResidentActorBoundary,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         let boundary = prepare_execution_effect(context, &effect_owner, boundary);
-        let (boundary, display) = self.prepare_display_boundary(context, boundary).await?;
+        let (boundary, display) = self
+            .prepare_display_boundary(context, boundary, DEFAULT_DISPLAY_CHARACTER_ALLOWANCE)
+            .await?;
         if let Some(display) = display {
             tracing::debug!(actor = ?context.actor, identity = ?display.identity, output = %display.text, "actor display");
         }
@@ -8090,8 +8136,13 @@ where
                         &CurrentEffectOwner::Workbench(execution_state),
                         boundary,
                     );
-                    let (boundary, mut display) =
-                        self.prepare_display_boundary(context, boundary).await?;
+                    let (boundary, mut display) = self
+                        .prepare_display_boundary(
+                            context,
+                            boundary,
+                            display_character_allowance(*unit.display_remaining),
+                        )
+                        .await?;
                     current
                         .inflight_effect
                         .as_mut()
@@ -11399,7 +11450,12 @@ where
                         detail: "display actor is unavailable or invocation was cancelled".into(),
                     });
                 }
-                let expansion = self.expand_display(&context, identity, key);
+                let expansion = self.expand_display(
+                    &context,
+                    identity,
+                    key,
+                    DEFAULT_DISPLAY_CHARACTER_ALLOWANCE,
+                );
                 let output = match control {
                     Some(control) => {
                         crate::resident_workbench::with_execution_control(control, expansion).await
