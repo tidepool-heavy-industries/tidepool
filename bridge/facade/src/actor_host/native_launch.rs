@@ -698,7 +698,7 @@ pub(super) async fn launch_prepared_interactive_application(
 }
 
 enum ProcessActivation {
-    Activated(ActiveWorkspace),
+    Activated(Arc<ActiveWorkspace>),
     Cancelled(NativeRetirement),
 }
 
@@ -711,8 +711,8 @@ async fn activate_process_supervisor(
     launch_id: String,
     pairing_secret: String,
     cancelled: &mut oneshot::Receiver<NativeRetirement>,
-    workspace: PreparedWorkspace,
-    worktrees: exomonad_worktree::WorktreeRegistry,
+    workspace: Arc<PreparedWorkspace>,
+    worktrees: WorktreeManager,
     provider: provider_attachment::ProviderAttachment,
 ) -> Result<ProcessActivation, InteractiveApplicationError> {
     let activation_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));

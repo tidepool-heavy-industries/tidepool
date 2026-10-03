@@ -79,17 +79,6 @@ pub(super) async fn run_interactive_applications(
         LocalActorRef,
         Result<(), embedded_service::EmbeddedDriverError>,
     )> = JoinSet::new();
-    let mut embedded_task_actors = HashMap::new();
-    let mut embedded_cleanup_failures: Vec<(ActorRef, embedded_service::EmbeddedDriverError)> =
-        Vec::new();
-    let mut embedded_cancellations: HashMap<ActorRef, watch::Sender<bool>> = HashMap::new();
-    let mut embedded_live = BTreeSet::new();
-    let mut embedded_conversations: HashMap<ActorRef, embedded_harness::EmbeddedActorBinding> =
-        HashMap::new();
-    let mut embedded_pending_activations: HashMap<
-        ActorRef,
-        Vec<exomonad_actor::ResidentActivation>,
-    > = HashMap::new();
     let (embedded_ready_tx, mut embedded_ready_rx) = mpsc::unbounded_channel::<(
         (ActorRef, provider_attachment::ProviderAttachment),
         LocalActorRef,
@@ -123,6 +112,7 @@ pub(super) async fn run_interactive_applications(
     let mut process_observations: JoinSet<()> = JoinSet::new();
     let mut health = tokio::time::interval(Duration::from_secs(1));
     if let Some(service) = embedded_service.as_ref() {
+        let live_actors = embedded_live_actors(&application_owners);
         embedded_projection
             .publish(
                 &service.control,
@@ -142,7 +132,7 @@ pub(super) async fn run_interactive_applications(
                                 .map(|request| request.0)
                         })
                 },
-                |actor| !embedded_live.contains(&actor),
+                |actor| !live_actors.contains(&actor),
             )
             .map_err(|error| format!("embedded actor history projection failed: {error}"))?;
     }
@@ -158,6 +148,8 @@ pub(super) async fn run_interactive_applications(
                 if changed.is_ok() {
                     let states = (*embedded_lifecycle_rx.borrow_and_update()).clone();
                     if let Some(service) = embedded_service.as_ref() {
+                        let conversations = embedded_bindings(&application_owners);
+                        let live_actors = embedded_live_actors(&application_owners);
                         if let Err(error) = service.control.refresh_completed_model_requests(&service.runtime.store()) {
                             break Some(format!("embedded request projection failed: {error}"));
                         }
@@ -166,25 +158,25 @@ pub(super) async fn run_interactive_applications(
                             &embedded_run,
                             &(host_graph)(),
                             &states,
-                            |actor| embedded_conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
+                            |actor| conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
                             |identity| service.runtime.store().embedded_round_frontier(identity).map(|frontier| frontier.pending_head.or(frontier.settled_head).map(|request| request.0)),
-                            |actor| !embedded_live.contains(&actor),
+                            |actor| !live_actors.contains(&actor),
                         ) {
                             break Some(format!("embedded actor history projection failed: {error}"));
                         }
                     }
                     for actor in states.keys() {
-                        if let Some(binding) = embedded_conversations.get(actor).cloned() {
+                        if let Some(binding) = embedded_binding(&application_owners, *actor) {
                             schedule_embedded_notification_drain(*actor, binding, &mut notifications);
                         }
                     }
                 }
             }
             _ = health.tick() => {
-                for (actor, binding) in &embedded_conversations {
+                for (actor, binding) in embedded_bindings(&application_owners) {
                     schedule_embedded_notification_drain(
-                        *actor,
-                        binding.clone(),
+                        actor,
+                        binding,
                         &mut notifications,
                     );
                 }
@@ -199,10 +191,12 @@ pub(super) async fn run_interactive_applications(
                         };
                         break Some(format!("embedded browser server failed: {detail}"));
                     }
+                    let live_actors = embedded_live_actors(&application_owners);
+                    let conversations = embedded_bindings(&application_owners);
                     if let Err(error) = drain_embedded_browser_commands(
                         &service.runtime.store(), &service.control, &embedded_run,
-                        &(host_graph)(), &embedded_live, &embedded_projection,
-                        &embedded_conversations, &embedded_lifecycle_tx,
+                        &(host_graph)(), &live_actors, &embedded_projection,
+                        &conversations, &embedded_lifecycle_tx,
                     ).await {
                         break Some(format!("embedded browser command drain failed: {error}"));
                     }
@@ -211,9 +205,9 @@ pub(super) async fn run_interactive_applications(
                         &embedded_run,
                         &(host_graph)(),
                         &(*embedded_lifecycle_rx.borrow()).clone(),
-                        |actor| embedded_conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
+                        |actor| conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
                         |identity| service.runtime.store().embedded_round_frontier(identity).map(|frontier| frontier.pending_head.or(frontier.settled_head).map(|request| request.0)),
-                        |actor| !embedded_live.contains(&actor),
+                        |actor| !live_actors.contains(&actor),
                     ) {
                         break Some(format!("embedded actor history projection failed: {error}"));
                     }
@@ -380,9 +374,11 @@ pub(super) async fn run_interactive_applications(
                         });
                     }
                 }
+                let live_actors = embedded_live_actors(&application_owners);
+                let conversations = embedded_bindings(&application_owners);
                 if let Err(error) = drain_embedded_browser_commands(
                     &store, &service.control, &embedded_run, &(host_graph)(),
-                    &embedded_live, &embedded_projection, &embedded_conversations,
+                    &live_actors, &embedded_projection, &conversations,
                     &embedded_lifecycle_tx,
                 ).await {
                     break Some(format!("embedded browser command drain failed: {error}"));
@@ -392,16 +388,29 @@ pub(super) async fn run_interactive_applications(
                 let (task_id, (actor, local_actor, outcome)) = match result {
                     Ok(joined) => joined,
                     Err(error) => {
-                        let actor = embedded_task_actors.remove(&error.id());
+                        let task_id = error.id();
+                        let actor = embedded_actor_for_task(&application_owners, task_id);
+                        if let Some(actor) = actor {
+                            update_embedded_state(&application_owners, actor, |state| {
+                                if state.task_id == Some(task_id) {
+                                    state.task_id = None;
+                                }
+                            });
+                        }
                         break Some(match actor {
                             Some(actor) => format!("embedded Engine task for {actor:?} failed: {error}"),
                             None => format!("unattributed embedded Engine task failed: {error}"),
                         });
                     }
                 };
-                embedded_task_actors.remove(&task_id);
-                embedded_live.remove(&actor);
-                embedded_pending_activations.remove(&actor);
+                update_embedded_state(&application_owners, actor, |state| {
+                    if state.task_id == Some(task_id) {
+                        state.task_id = None;
+                    }
+                    state.live = false;
+                    state.pending_activations = None;
+                    state.cancellation = None;
+                });
                 let lifecycle = match local_actor.terminal().get().map(|terminal| terminal.kind) {
                     Some(ActorExitKind::Completed | ActorExitKind::Cancelled) => {
                         harness::server::HostActorLifecycle::Retired
@@ -409,11 +418,12 @@ pub(super) async fn run_interactive_applications(
                     Some(ActorExitKind::Failed) | None => harness::server::HostActorLifecycle::Lost,
                 };
                 embedded_lifecycle_tx.publish(actor, lifecycle);
-                embedded_cancellations.remove(&actor);
-                    if let Some(binding) = embedded_conversations.get_mut(&actor) {
-                    binding.mark_retired();
-                }
-                if let Some(binding) = embedded_conversations.get(&actor).cloned() {
+                if let Some(binding) = embedded_binding(&application_owners, actor) {
+                    update_embedded_state(&application_owners, actor, |state| {
+                        if let Some(binding) = state.conversation.as_ref() {
+                            binding.mark_retired();
+                        }
+                    });
                     schedule_embedded_notification_drain(actor, binding, &mut notifications);
                 }
                 if let Some(waiters) = release_waiters.remove(&actor) {
@@ -436,9 +446,12 @@ pub(super) async fn run_interactive_applications(
                     }
                     Ok(()) => {}
                     Err(error) => {
+                        let cleanup_failed = error.cleanup_failed();
                         let detail = error.to_string();
-                        if error.cleanup_failed() {
-                            embedded_cleanup_failures.push((actor, error));
+                        if cleanup_failed {
+                            update_embedded_state(&application_owners, actor, |state| {
+                                state.cleanup_failure = Some(error);
+                            });
                         }
                         tracing::error!(?actor, %detail, "embedded Engine failed");
                         if local_actor.terminal().get().is_none() {
@@ -458,19 +471,23 @@ pub(super) async fn run_interactive_applications(
             Some(((actor, provider_attachment), local_actor, conversation, ready_ack)) = embedded_ready_rx.recv() => {
                 if let Err(error) = provider_attachment.validate() {
                     tracing::warn!(?actor, %error, "embedded provider attachment became unavailable");
-                    if let Some(cancel) = embedded_cancellations.get(&actor) { cancel.send_replace(true); }
+                    if let Some(cancel) = with_embedded_state(&application_owners, actor, |state| state.cancellation.clone()).flatten() {
+                        cancel.send_replace(true);
+                    }
                     continue;
                 }
-                let Some(activations) = embedded_pending_activations.remove(&actor) else {
+                let Some(activations) = with_embedded_state(&application_owners, actor, |state| state.pending_activations.take()).flatten() else {
                     continue;
                 };
-                if !embedded_live.contains(&actor) || !embedded_cancellations.contains_key(&actor) {
+                if !embedded_is_live(&application_owners, actor)
+                    || with_embedded_state(&application_owners, actor, |state| state.cancellation.is_some()) != Some(true)
+                {
                     continue;
                 }
                 let Ok(_admission) = local_actor.admit_transaction() else {
                     continue;
                 };
-                let Some(binding) = embedded_conversations.get_mut(&actor) else {
+                let Some(mut binding) = embedded_binding(&application_owners, actor) else {
                     tracing::warn!(?actor, "embedded child attachment has no notification owner");
                     continue;
                 };
@@ -482,6 +499,9 @@ pub(super) async fn run_interactive_applications(
                     tracing::warn!(?actor, ?error, "embedded child attachment was not accepted");
                     continue;
                 }
+                update_embedded_state(&application_owners, actor, |state| {
+                    state.conversation = Some(binding.clone());
+                });
                 schedule_embedded_notification_drain(actor, binding.clone(), &mut notifications);
                 let mut activation_error = None;
                 for activation in activations {
@@ -499,15 +519,19 @@ pub(super) async fn run_interactive_applications(
                     }
                 }
                 if let Some(error) = activation_error {
-                    if let Some(binding) = embedded_conversations.get(&actor) {
-                        binding.mark_retired();
-                    }
+                    update_embedded_state(&application_owners, actor, |state| {
+                        if let Some(binding) = state.conversation.as_ref() {
+                            binding.mark_retired();
+                        }
+                    });
                     tracing::warn!(?actor, %error, "embedded child attachment refused an activation");
                     continue;
                 }
                 if let Err(error) = provider_attachment.validate() {
                     tracing::warn!(?actor, %error, "embedded provider readiness became unavailable");
-                    if let Some(cancel) = embedded_cancellations.get(&actor) { cancel.send_replace(true); }
+                    if let Some(cancel) = with_embedded_state(&application_owners, actor, |state| state.cancellation.clone()).flatten() {
+                        cancel.send_replace(true);
+                    }
                     continue;
                 }
                 ready_ack.send(()).ok();
@@ -545,8 +569,12 @@ pub(super) async fn run_interactive_applications(
                                 break Some("embedded backend has no launch settings".into());
                             };
                             let actor = installation.actor.identity();
+                            application_owners
+                                .lock()
+                                .entry(actor)
+                                .or_insert_with(InteractiveApplicationOwner::embedded);
                             let selected_parent = if actor != root_identity && installation.checkpoint.is_none() && installation.context_parent.is_none() && installation.checkpoint_attachment.is_none() {
-                                let identities = embedded_conversations.iter().map(|(actor, conversation)| (*actor, conversation.identity().clone())).collect();
+                                let identities = embedded_bindings(&application_owners).iter().map(|(actor, conversation)| (*actor, conversation.identity().clone())).collect();
                                 match embedded_context::selected_provider_parent(
                                     &embedded_run, installation.creator.or(installation.supervisor_parent), &(host_graph)(), &identities,
                                 ) {
@@ -577,9 +605,7 @@ pub(super) async fn run_interactive_applications(
                                 };
                                 captured.child_path(actor)
                             };
-                            if let std::collections::hash_map::Entry::Vacant(entry) =
-                                embedded_conversations.entry(actor)
-                            {
+                            if embedded_binding(&application_owners, actor).is_none() {
                                 let binding = match open_embedded_actor_binding(
                                     &launch_context.run_root,
                                     actor,
@@ -591,7 +617,9 @@ pub(super) async fn run_interactive_applications(
                                         "embedded actor {actor:?} notification owner could not open: {error}"
                                     )),
                                 };
-                                entry.insert(binding);
+                                update_embedded_state(&application_owners, actor, |state| {
+                                    state.conversation = Some(binding);
+                                });
                             }
                             let is_root = actor == root_identity;
                             let mode = InteractiveLaunchMode::Fresh;
@@ -668,9 +696,11 @@ pub(super) async fn run_interactive_applications(
                                 #[cfg(test)]
                                 let test_transport = service.test_transport();
                                 let (cancel, mut cancellation_rx) = watch::channel(false);
-                                embedded_cancellations.insert(actor, cancel.clone());
-                                embedded_pending_activations.insert(actor, Vec::new());
-                                embedded_live.insert(actor);
+                                update_embedded_state(&application_owners, actor, |state| {
+                                    state.cancellation = Some(cancel.clone());
+                                    state.pending_activations = Some(Vec::new());
+                                    state.live = true;
+                                });
                                 let task = embedded_tasks.spawn(async move {
                                     let result = async {
                                         if let Some(gate) = committed_gate {
@@ -740,14 +770,16 @@ pub(super) async fn run_interactive_applications(
                                     }.await;
                                     (actor, local_actor, result)
                                 });
-                                embedded_task_actors.insert(task.id(), actor);
+                                update_embedded_state(&application_owners, actor, |state| {
+                                    state.task_id = Some(task.id());
+                                });
                                 // The child attachment may wait for checkpoint publication.
                                 // Its actor input queue is already owned here, so advertise
                                 // readiness before that wait: the issuing cell can be waiting
                                 // for this group to become ready before it delivers the capture.
                                 if let Some(gate) = fork_gate {
                                     if let Err(error) = gate.mark_ready() {
-                                        if let Some(cancel) = embedded_cancellations.get(&actor) {
+                                        if let Some(cancel) = with_embedded_state(&application_owners, actor, |state| state.cancellation.clone()).flatten() {
                                             cancel.send_replace(true);
                                         }
                                         tracing::warn!(?actor, %error, "embedded child fork admission refused");
@@ -778,11 +810,14 @@ pub(super) async fn run_interactive_applications(
                                 break Some(format!("actor {actor:?} provider attachment became unavailable: {error}"));
                             }
                             let root_conversation = Arc::clone(&embedded.conversation);
-                            let binding = embedded_conversations
-                                .get_mut(&actor)
-                                .expect("embedded notification owner was opened before attach");
+                            let Some(mut binding) = embedded_binding(&application_owners, actor) else {
+                                break Some(format!("embedded notification owner was not retained for {actor:?}"));
+                            };
                             let Ok(attachment_admission) = local_actor.admit_transaction() else {
                                 binding.mark_retired();
+                                update_embedded_state(&application_owners, actor, |state| {
+                                    state.conversation = Some(binding.clone());
+                                });
                                 embedded.cancellation.send_replace(true);
                                 continue;
                             };
@@ -798,31 +833,38 @@ pub(super) async fn run_interactive_applications(
                                     ));
                                 }
                             }
+                            update_embedded_state(&application_owners, actor, |state| {
+                                state.conversation = Some(binding.clone());
+                            });
                             embedded_projection
                                 .attached(actor, root_conversation.identity());
-                            if let Some(binding) = embedded_conversations.get(&actor).cloned() {
+                            if let Some(binding) = embedded_binding(&application_owners, actor) {
                                 schedule_embedded_notification_drain(
                                     actor,
                                     binding,
                                     &mut notifications,
                                 );
                             }
-                            embedded_cancellations.insert(actor, embedded.cancellation.clone());
-                            embedded_live.insert(actor);
+                            update_embedded_state(&application_owners, actor, |state| {
+                                state.cancellation = Some(embedded.cancellation.clone());
+                                state.live = true;
+                            });
                             embedded_lifecycle_tx.publish(
                                 actor,
                                 harness::server::HostActorLifecycle::Waiting,
                             );
                             let lifecycle_states =
                                 (*embedded_lifecycle_rx.borrow()).clone();
+                            let conversations = embedded_bindings(&application_owners);
+                            let live_actors = embedded_live_actors(&application_owners);
                             if let Err(error) = embedded_projection.publish(
                                 &service.control,
                                 &embedded_run,
                                 &(host_graph)(),
                                 &lifecycle_states,
-                                |actor| embedded_conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
+                                |actor| conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
                                 |identity| service.runtime.store().embedded_round_frontier(identity).map(|frontier| frontier.pending_head.or(frontier.settled_head).map(|request| request.0)),
-                                |actor| !embedded_live.contains(&actor),
+                                |actor| !live_actors.contains(&actor),
                             ) {
                                 break Some(format!("embedded actor history projection failed: {error}"));
                             }
@@ -881,7 +923,9 @@ pub(super) async fn run_interactive_applications(
                                 .await;
                                 (actor, local_actor, result)
                             });
-                            embedded_task_actors.insert(task.id(), actor);
+                            update_embedded_state(&application_owners, actor, |state| {
+                                state.task_id = Some(task.id());
+                            });
                             // The permanent root has an installed workbench but
                             // no typed request activation. PolicyInstalled is its
                             // actor-owned readiness boundary; SessionReady below
@@ -962,6 +1006,7 @@ pub(super) async fn run_interactive_applications(
                             launch: HostLaunchState::Pending,
                             #[cfg(feature = "codex-compat")]
                             pending_activations: Vec::new(),
+                            embedded: None,
                             terminal: None,
                             retirement: Arc::new(Mutex::new(None)),
                         };
@@ -1036,15 +1081,22 @@ pub(super) async fn run_interactive_applications(
                     LocalResidentDeployment::SessionReady { activation } => {
                         let actor = activation.id.actor();
                         if launch_context.config.backend.kind() == crate::exomonad::ExomonadBackend::Embedded {
-                            if let Some(pending) = embedded_pending_activations.get_mut(&actor) {
-                                pending.push(activation);
+                            if with_embedded_state(&application_owners, actor, |state| {
+                                state.pending_activations.is_some()
+                            }) == Some(true)
+                            {
+                                update_embedded_state(&application_owners, actor, |state| {
+                                    if let Some(pending) = state.pending_activations.as_mut() {
+                                        pending.push(activation);
+                                    }
+                                });
                                 continue;
                             }
-                            let Some(conversation) = embedded_conversations.get(&actor)
+                            let Some(conversation) = embedded_binding(&application_owners, actor)
                                 .filter(|binding| binding.is_live())
                                 .and_then(|binding| binding.conversation()) else {
                                 if actor != root_identity {
-                                    if let Some(cancel) = embedded_cancellations.get(&actor) {
+                                    if let Some(cancel) = with_embedded_state(&application_owners, actor, |state| state.cancellation.clone()).flatten() {
                                         cancel.send_replace(true);
                                     }
                                     tracing::warn!(?actor, "embedded child activation arrived without an attached conversation");
@@ -1062,7 +1114,7 @@ pub(super) async fn run_interactive_applications(
                             .await
                             {
                                 if actor != root_identity {
-                                    if let Some(cancel) = embedded_cancellations.get(&actor) {
+                                    if let Some(cancel) = with_embedded_state(&application_owners, actor, |state| state.cancellation.clone()).flatten() {
                                         cancel.send_replace(true);
                                     }
                                     tracing::warn!(?actor, %error, "embedded child activation was refused");
@@ -1099,14 +1151,17 @@ pub(super) async fn run_interactive_applications(
 
                     LocalResidentDeployment::Retired { actor, terminal } => {
                         worktree_authority.remove_grant(actor.into());
-                        if let Some(cancel) = embedded_cancellations.remove(&actor) {
-                            cancel.send_replace(true);
-                        }
-                        embedded_pending_activations.remove(&actor);
-                        if let Some(binding) = embedded_conversations.get_mut(&actor) {
-                            binding.mark_retired();
-                        }
-                        if let Some(binding) = embedded_conversations.get(&actor).cloned() {
+                        let binding = with_embedded_state(&application_owners, actor, |state| {
+                            if let Some(cancel) = state.cancellation.take() {
+                                cancel.send_replace(true);
+                            }
+                            state.pending_activations = None;
+                            if let Some(binding) = state.conversation.as_ref() {
+                                binding.mark_retired();
+                            }
+                            state.conversation.clone()
+                        }).flatten();
+                        if let Some(binding) = binding {
                             schedule_embedded_notification_drain(
                                 actor,
                                 binding,
@@ -1147,7 +1202,7 @@ pub(super) async fn run_interactive_applications(
                         // retirement in flight. An actor without a row never
                         // held interactive resources.
                         let actor = request.actor;
-                        let settled = observed_resource_release(actor, &embedded_live, &embedded_cleanup_failures, &application_owners);
+                        let settled = observed_resource_release(actor, &application_owners);
                         match settled {
                             Some(release) => { request.answer(release); }
                             None => release_waiters.entry(actor).or_default().push(request),
@@ -1196,10 +1251,8 @@ pub(super) async fn run_interactive_applications(
                         if launch_context.config.backend.kind()
                             == crate::exomonad::ExomonadBackend::Embedded
                         {
-                            if let Some(binding) = embedded_conversations
-                                .get(&target)
-                                .filter(|binding| binding.is_live())
-                            {
+                            if let Some(binding) = embedded_binding(&application_owners, target)
+                                .filter(|binding| binding.is_live()) {
                                 schedule_embedded_notification_send(
                                     command,
                                     binding,
@@ -1232,10 +1285,8 @@ pub(super) async fn run_interactive_applications(
                     #[cfg(not(feature = "codex-compat"))]
                     LocalResidentDeployment::NotificationSend(command) => {
                         let target = command.target();
-                        if let Some(binding) = embedded_conversations
-                            .get(&target)
-                            .filter(|binding| binding.is_live())
-                        {
+                        if let Some(binding) = embedded_binding(&application_owners, target)
+                            .filter(|binding| binding.is_live()) {
                             schedule_embedded_notification_send(
                                 command,
                                 binding,
@@ -1251,7 +1302,7 @@ pub(super) async fn run_interactive_applications(
                             == crate::exomonad::ExomonadBackend::Embedded
                         {
                             let target = command.receipt().target();
-                            let result = match embedded_conversations.get(&target) {
+                            let result = match embedded_binding(&application_owners, target) {
                                 Some(binding) => {
                                     observe_embedded_notification(&command, binding, target).await
                                 }
@@ -1272,7 +1323,7 @@ pub(super) async fn run_interactive_applications(
                     #[cfg(not(feature = "codex-compat"))]
                     LocalResidentDeployment::NotificationPoll(command) => {
                         let target = command.receipt().target();
-                        let result = match embedded_conversations.get(&target) {
+                        let result = match embedded_binding(&application_owners, target) {
                             Some(binding) => {
                                 observe_embedded_notification(&command, binding, target).await
                             }
@@ -1813,12 +1864,7 @@ pub(super) async fn run_interactive_applications(
     .unwrap_or_else(|_| Some("interactive application supervisor panicked".into()));
 
     close_release_observations(&mut lifecycle, &mut release_waiters, |actor| {
-        observed_resource_release(
-            actor,
-            &embedded_live,
-            &embedded_cleanup_failures,
-            &application_owners,
-        )
+        observed_resource_release(actor, &application_owners)
     });
 
     let native_retirement = if failure.is_some() {
@@ -1829,14 +1875,18 @@ pub(super) async fn run_interactive_applications(
     for owner in application_owners.lock().values_mut() {
         owner.native_retirement = native_retirement;
         owner.cancel();
-    }
-    for cancellation in embedded_cancellations.values() {
-        cancellation.send_replace(true);
+        if let Some(cancellation) = owner
+            .embedded
+            .as_ref()
+            .and_then(|embedded| embedded.cancellation.as_ref())
+        {
+            cancellation.send_replace(true);
+        }
     }
     let embedded_cleanup = drain_embedded_shutdown(
         &mut embedded_tasks,
-        &mut embedded_task_actors,
         APPLICATION_SHUTDOWN_TIMEOUT,
+        |task_id| embedded_actor_for_task(&application_owners, task_id),
         |actor, release| {
             answer_release_waiters(&mut release_waiters, actor, release);
         },
@@ -1959,13 +2009,20 @@ pub(super) async fn run_interactive_applications(
     #[cfg(not(feature = "codex-compat"))]
     let cleanup_failure: Option<String> = None;
     retain_unsettled_release_waiters(&mut release_waiters);
-    let earlier_embedded_cleanup = (!embedded_cleanup_failures.is_empty()).then(|| {
-        embedded_cleanup_failures
-            .into_iter()
-            .map(|(actor, error)| format!("embedded Engine {actor:?}: {error}"))
-            .collect::<Vec<_>>()
-            .join("; ")
-    });
+    let earlier_embedded_cleanup = {
+        let failures = application_owners
+            .lock()
+            .iter()
+            .filter_map(|(actor, owner)| {
+                owner
+                    .embedded
+                    .as_ref()
+                    .and_then(|embedded| embedded.cleanup_failure.as_ref())
+                    .map(|error| format!("embedded Engine {actor:?}: {error}"))
+            })
+            .collect::<Vec<_>>();
+        (!failures.is_empty()).then(|| failures.join("; "))
+    };
     let cleanup_failures = [
         earlier_embedded_cleanup,
         launch_failure,

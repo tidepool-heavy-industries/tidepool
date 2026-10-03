@@ -2015,8 +2015,34 @@ struct InteractiveApplicationOwner {
     launch: HostLaunchState,
     #[cfg(feature = "codex-compat")]
     pending_activations: Vec<exomonad_actor::ResidentActivation>,
+    embedded: Option<EmbeddedApplicationState>,
     terminal: Option<ActorTerminal>,
     retirement: Arc<Mutex<Option<InteractiveCleanupReceipt>>>,
+}
+
+/// Per-actor Engine custody, liveness, and retained conversation state.
+/// Projection state remains in `EmbeddedProjection`; this state owns the
+/// resources and facts needed to move one actor through its host lifecycle.
+struct EmbeddedApplicationState {
+    task_id: Option<tokio::task::Id>,
+    cancellation: Option<watch::Sender<bool>>,
+    live: bool,
+    conversation: Option<embedded_harness::EmbeddedActorBinding>,
+    pending_activations: Option<Vec<exomonad_actor::ResidentActivation>>,
+    cleanup_failure: Option<embedded_service::EmbeddedDriverError>,
+}
+
+impl EmbeddedApplicationState {
+    fn new() -> Self {
+        Self {
+            task_id: None,
+            cancellation: None,
+            live: false,
+            conversation: None,
+            pending_activations: None,
+            cleanup_failure: None,
+        }
+    }
 }
 
 /// Coordination failure does not authorize terminating the native conversation.
@@ -2053,6 +2079,92 @@ impl HostLaunchState {
 }
 
 type InteractiveOwners = Arc<Mutex<HashMap<ActorRef, InteractiveApplicationOwner>>>;
+
+fn with_embedded_state<R>(
+    owners: &InteractiveOwners,
+    actor: ActorRef,
+    update: impl FnOnce(&mut EmbeddedApplicationState) -> R,
+) -> Option<R> {
+    owners
+        .lock()
+        .get_mut(&actor)
+        .and_then(|owner| owner.embedded.as_mut())
+        .map(update)
+}
+
+fn update_embedded_state(
+    owners: &InteractiveOwners,
+    actor: ActorRef,
+    update: impl FnOnce(&mut EmbeddedApplicationState),
+) {
+    if let Some(state) = owners
+        .lock()
+        .get_mut(&actor)
+        .and_then(|owner| owner.embedded.as_mut())
+    {
+        update(state);
+    }
+}
+
+fn embedded_is_live(owners: &InteractiveOwners, actor: ActorRef) -> bool {
+    owners
+        .lock()
+        .get(&actor)
+        .and_then(|owner| owner.embedded.as_ref())
+        .is_some_and(|embedded| embedded.live)
+}
+
+fn embedded_binding(
+    owners: &InteractiveOwners,
+    actor: ActorRef,
+) -> Option<embedded_harness::EmbeddedActorBinding> {
+    owners
+        .lock()
+        .get(&actor)
+        .and_then(|owner| owner.embedded.as_ref())
+        .and_then(|embedded| embedded.conversation.clone())
+}
+
+fn embedded_bindings(
+    owners: &InteractiveOwners,
+) -> HashMap<ActorRef, embedded_harness::EmbeddedActorBinding> {
+    owners
+        .lock()
+        .iter()
+        .filter_map(|(actor, owner)| {
+            owner
+                .embedded
+                .as_ref()
+                .and_then(|embedded| embedded.conversation.clone())
+                .map(|binding| (*actor, binding))
+        })
+        .collect()
+}
+
+fn embedded_live_actors(owners: &InteractiveOwners) -> BTreeSet<ActorRef> {
+    owners
+        .lock()
+        .iter()
+        .filter_map(|(actor, owner)| {
+            owner
+                .embedded
+                .as_ref()
+                .is_some_and(|embedded| embedded.live)
+                .then_some(*actor)
+        })
+        .collect()
+}
+
+fn embedded_actor_for_task(owners: &InteractiveOwners, task: tokio::task::Id) -> Option<ActorRef> {
+    owners.lock().iter().find_map(|(actor, owner)| {
+        owner
+            .embedded
+            .as_ref()
+            .filter(|embedded| embedded.task_id == Some(task))
+            .map(|_| *actor)
+    })
+}
+
 
 #[derive(Clone)]
 struct BoundWorkspace {
@@ -2140,6 +2252,30 @@ impl NativeForkAdmission {
 }
 
 impl InteractiveApplicationOwner {
+    fn embedded() -> Self {
+        Self {
+            #[cfg(feature = "codex-compat")]
+            supervisor: None,
+            creator_workspace: None,
+            cancel: None,
+            native_retirement: NativeRetirement::Preserve,
+            pane: Arc::new(Mutex::new(None)),
+            fork_gate: None,
+            custody: None,
+            scoped_retention: None,
+            #[cfg(feature = "codex-compat")]
+            hosted: Arc::new(Mutex::new(None)),
+            embedded_policy: None,
+            #[cfg(feature = "codex-compat")]
+            launch: HostLaunchState::Published,
+            #[cfg(feature = "codex-compat")]
+            pending_activations: Vec::new(),
+            embedded: Some(EmbeddedApplicationState::new()),
+            terminal: None,
+            retirement: Arc::new(Mutex::new(None)),
+        }
+    }
+
     #[cfg(feature = "codex-compat")]
     fn reserve_scope(
         &mut self,
@@ -4698,27 +4834,26 @@ fn embedded_resource_release(
 
 fn observed_resource_release(
     actor: ActorRef,
-    embedded_live: &BTreeSet<ActorRef>,
-    embedded_cleanup_failures: &[(ActorRef, embedded_service::EmbeddedDriverError)],
     owners: &InteractiveOwners,
 ) -> Option<exomonad_actor::ResourceRelease> {
-    if embedded_live.contains(&actor) {
-        None
-    } else if let Some((_, error)) = embedded_cleanup_failures
-        .iter()
-        .find(|(failed, _)| *failed == actor)
-    {
-        Some(embedded_resource_release(Some(error)))
-    } else {
-        match owners.lock().get(&actor) {
-            None => Some(exomonad_actor::ResourceRelease::Released),
-            Some(owner) => owner
-                .retirement
-                .lock()
-                .as_ref()
-                .map(InteractiveCleanupReceipt::release),
+    let owners = owners.lock();
+    let Some(owner) = owners.get(&actor) else {
+        return Some(exomonad_actor::ResourceRelease::Released);
+    };
+    if let Some(embedded) = owner.embedded.as_ref() {
+        if embedded.live {
+            return None;
         }
+        if let Some(error) = embedded.cleanup_failure.as_ref() {
+            return Some(embedded_resource_release(Some(error)));
+        }
+        return Some(exomonad_actor::ResourceRelease::Released);
     }
+    owner
+        .retirement
+        .lock()
+        .as_ref()
+        .map(InteractiveCleanupReceipt::release)
 }
 
 /// Fence admission and preserve release waits already queued when shutdown wins.
@@ -4764,16 +4899,15 @@ fn answer_release_waiters(
 
 async fn drain_embedded_shutdown<A: fmt::Debug + Send + 'static, L: Send + 'static>(
     tasks: &mut JoinSet<(A, L, Result<(), embedded_service::EmbeddedDriverError>)>,
-    task_actors: &mut HashMap<tokio::task::Id, ActorRef>,
     grace: Duration,
+    mut actor_for_task: impl FnMut(tokio::task::Id) -> Option<ActorRef>,
     mut released: impl FnMut(A, exomonad_actor::ResourceRelease),
 ) -> Option<String> {
     let mut failure = None;
     match tokio::time::timeout(grace, async {
         while let Some(result) = tasks.join_next_with_id().await {
             match result {
-                Ok((task_id, (actor, _local_actor, outcome))) => {
-                    task_actors.remove(&task_id);
+                Ok((_task_id, (actor, _local_actor, outcome))) => {
                     let release = embedded_resource_release(outcome.as_ref().err());
                     if let Err(error) = outcome {
                         tracing::warn!(?actor, %error, "embedded Engine stopped with an error during host shutdown");
@@ -4782,7 +4916,7 @@ async fn drain_embedded_shutdown<A: fmt::Debug + Send + 'static, L: Send + 'stat
                     released(actor, release);
                 }
                 Err(error) => {
-                    let actor = task_actors.remove(&error.id());
+                    let actor = actor_for_task(error.id());
                     failure.get_or_insert_with(|| match actor {
                         Some(actor) => format!("embedded Engine task for {actor:?}: {error}"),
                         None => format!("unattributed embedded Engine task: {error}"),
