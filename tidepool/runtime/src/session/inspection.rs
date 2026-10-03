@@ -613,6 +613,32 @@ fn run_inspections_with_policy(
     }
     offer.apply_to(&mut command)?;
     crate::paths::apply_build_products_dir(&mut command, &endpoint);
+    #[cfg(test)]
+    if std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1") {
+        if let Some(root) = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
+            let retain = || -> std::io::Result<PathBuf> {
+                let root = PathBuf::from(root).join("inspection-inputs");
+                std::fs::create_dir_all(&root)?;
+                let retained = TempDir::new_in(root)?;
+                std::fs::write(
+                    retained.path().join("worker-request.cbor"),
+                    command.request_bytes(),
+                )?;
+                let mut source_bytes = Vec::new();
+                ciborium::ser::into_writer(&sources.iter().collect::<Vec<_>>(), &mut source_bytes)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                std::fs::write(retained.path().join("generated-sources.cbor"), source_bytes)?;
+                if let Some(scope) = offer.exact_scope_path() {
+                    std::fs::copy(scope, retained.path().join("exact-scope.cbor"))?;
+                }
+                Ok(retained.keep())
+            };
+            match retain() {
+                Ok(path) => eprintln!("owned inspection inputs retained at {}", path.display()),
+                Err(error) => eprintln!("could not retain owned inspection inputs: {error}"),
+            }
+        }
+    }
     let run = endpoint.execute(&command).map_err(map_spawn)?;
     timing::record_stage(
         timing::NO_NODE,
@@ -1211,6 +1237,47 @@ mod tests {
     }
     use super::*;
     use tidepool_testing::eval_harness;
+
+    #[test]
+    fn admitted_empty_snapshot_answers_type_search() {
+        use crate::session::{ModuleEnv, PersistentSession, SessionId, SessionLib};
+        eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(903), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let view = session
+            .compile_view_in(tidepool_codegen::scope::ScopeId::ROOT)
+            .unwrap();
+        assert!(view.exact_declaration_context().is_none());
+        assert!(view.reachable_values().is_empty());
+        let values = session.capture_value_interfaces(&view, true).unwrap();
+        assert!(values.is_empty());
+        let inputs = AdmittedInspectionInputs::capture(view.clone(), values);
+        let queries = [InspectionQuery::TypeSearch("Int -> Int".into())];
+        let results = run_admitted_inspections(
+            InspectionRequest {
+                exact_context: None,
+                preamble: concat!(
+                    "module Expr where\nimport Prelude\n",
+                    "inspectionIdentity :: Int -> Int\ninspectionIdentity value = value\n"
+                ),
+                imports: "",
+                include: &[],
+                session_root: view.session_root(),
+                inject_modules: &[],
+                queries: &queries,
+                effects: None,
+            },
+            &view,
+            &inputs,
+        )
+        .expect("fresh empty checked snapshot supports a valid type search");
+        assert!(
+            matches!(&results[..], [InspectionResult::TypeMatches { matches, .. }]
+            if matches.iter().any(|entry| entry.name == "inspectionIdentity"))
+        );
+    }
 
     fn encoded(value: CborValue) -> Vec<u8> {
         let mut bytes = Vec::new();
