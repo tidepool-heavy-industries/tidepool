@@ -8,9 +8,11 @@
 module Tidepool.TurnSource
   ( extractModuleName
   , spliceTemplate
+  , renderImportBinder
   , replaceTemplateMarker
   ) where
 
+import GHC.Types.Name.Occurrence (isSymOcc, mkVarOcc)
 import Data.Char (isAlphaNum, isSpace)
 import Data.List (isPrefixOf, isSuffixOf, stripPrefix)
 import Data.Maybe (listToMaybe)
@@ -83,3 +85,8 @@ extractModuleName source = listToMaybe
           (dropWhile (== ' ') rest)
   , not (null name)
   ]
+
+renderImportBinder :: String -> String
+renderImportBinder name
+  | isSymOcc (mkVarOcc name) = "(" ++ name ++ ")"
+  | otherwise = name

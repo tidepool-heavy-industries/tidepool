@@ -17,7 +17,7 @@ import Control.Exception
   ( evaluate, try, throwIO, SomeAsyncException, SomeException, Exception
   , fromException, toException, IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Data.List (intercalate, nub, isInfixOf, isPrefixOf, stripPrefix)
+import Data.List (intercalate, nub, isInfixOf, isPrefixOf)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Data.Word (Word64)
 import Data.Bits (shiftR)
@@ -34,10 +34,9 @@ import GHC.Unit.Types (unitString)
 import GHC.Core (Bind(..), CoreBind)
 import GHC.Core.DataCon (DataCon)
 import GHC.Core.TyCon (TyCon)
-import GHC.Types.Name (nameOccName, nameModule)
-import GHC.Builtin.Types (intTyConName)
+import GHC.Types.Name (nameOccName)
 import GHC.Types.Id (idName)
-import GHC.Types.Name.Occurrence (occNameString, isSymOcc, mkVarOcc)
+import GHC.Types.Name.Occurrence (occNameString)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
@@ -88,8 +87,7 @@ import Tidepool.ExecutionSource
   ( ExecutionSourceRecipe(..), ExecutionSourceGraph(..), ExecutionSourceIdentity(..)
   , ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceFailure(..)
   , issueExecutionSourceRecipe, executionIdentityKey, executionSourceProspectiveReferences )
-import qualified Crypto.Hash.SHA256 as SHA256
-import Numeric (showHex, readHex)
+import Numeric (readHex)
 import Tidepool.DeclarationJoin
   ( DeclarationOperation(..), readDeclarationOperation, validateDeclarationJoin
   , DeclarationExport(..), ExportIdentity(..), ExportNamespace(..)
@@ -99,7 +97,13 @@ import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
   ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..), InputRejection(..), DependencyLoadFailure(..)
   , diagsFromSourceError, diagFromException, renderDiagsJson )
-import Tidepool.ExtractUtil (capitalize)
+import Tidepool.CheckedAdmission
+  ( validateCheckedCellAdmission, validateCheckedItemAdmission
+  , checkedDisplayBinders, validateCheckedDisplayAdmission )
+import Tidepool.CheckedRecipe
+  ( checkedDisplayRecipe, checkedProgramDisplayRecipe, writeCheckedDisplayReceipt
+  , checkedItemCompilePurpose, checkedRecipeSource, replaceRecipeMarker, writeCheckedItemReceipt )
+import Tidepool.ExtractUtil (capitalize, shaHex)
 import Tidepool.ExtractRequest (RequestShapeError(..), validateRequestShape, InspectionRequest(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.ExactScope
@@ -130,7 +134,7 @@ import Tidepool.Metadata
   , wiredInDataCons )
 import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut)
 import Tidepool.Timing (readTimingEnabled, timePhase, timeDetailPhase)
-import Tidepool.TurnSource (extractModuleName, spliceTemplate, replaceTemplateMarker)
+import Tidepool.TurnSource (extractModuleName, spliceTemplate, renderImportBinder)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencySource(..), DependencyImport(..), ProductAvailability(..)
   , renderDependencyEvidence, revalidateDependencyEvidence, selectedHomeRequirements )
@@ -811,10 +815,6 @@ writeModuleProducts originalInterfaces outDir (Just inventory) interfaces packag
         <> encodeBytes sidecar) packageBundles))
   pure (Map.fromList [(key, status) | (key, status, _, _) <- outcomes], products)
 
-shaHex :: BS.ByteString -> String
-shaHex = concatMap (\byte -> let text = showHex byte "" in
-  replicate (2 - length text) '0' ++ text) . BS.unpack . SHA256.hash
-
 requireProjection :: Either ProjectionError a -> IO a
 requireProjection = \case
   Left (RejectedTypedSite message) -> throwIO (SourceRejection (T.unpack message))
@@ -1096,7 +1096,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
                   (Nothing, Just admission) -> do
                     withPrefix <- if null (itemValueImports admission) then pure tmplWithImports else
                       replaceRecipeMarker "default (Int, Double, Text)\n"
-                        (concatMap (\(moduleName',names) -> "import " ++ moduleName' ++ " (" ++ intercalate ", " (map renderProgramBinder names) ++ ")\n")
+                        (concatMap (\(moduleName',names) -> "import " ++ moduleName' ++ " (" ++ intercalate ", " (map renderImportBinder names) ++ ")\n")
                           (itemValueImports admission) ++ "default (Int, Double, Text)\n") tmplWithImports
                     checkedRecipeSource admission withPrefix turnSrc
           rendered <- if requestActivationPreview args
@@ -1586,11 +1586,6 @@ priorProgramImports :: ProgramCellState -> [String]
 priorProgramImports state = [owner | ((_,owner),_) <- programOriginals state
   , Just owner /= fmap (snd . fst) (programOriginal state)]
 
-renderProgramBinder :: String -> String
-renderProgramBinder name
-  | isSymOcc (mkVarOcc name) = "(" ++ name ++ ")"
-  | otherwise = name
-
 programValueImport :: CompletedValueImport -> (String,[String])
 programValueImport value = (completedValueModule value,map fst (completedValueBinders value))
 
@@ -1612,7 +1607,7 @@ installProgramImports values original plan = plan { cellPlanPrologue = prologue
     imports = [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ owner)
       | ((_,owner),_) <- original]
       ++ [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ completedValueModule value
-        ++ " (" ++ intercalate ", " (map (renderProgramBinder . fst) (completedValueBinders value)) ++ ")") | value <- values]
+        ++ " (" ++ intercalate ", " (map (renderImportBinder . fst) (completedValueBinders value)) ++ ")") | value <- values]
 
 globalProgramKeys :: Int -> Int -> String -> String
 globalProgramKeys offset count source = T.unpack $ T.replace "__tidepool_program_" "__tidepool_cell_"
@@ -2020,175 +2015,6 @@ originalDeclarationWrapper template = do
   let stripped = T.replace "{{CELL_PRAGMAS}}" "" prefix
   when ("{{" `T.isInfixOf` T.replace "{{CELL_IMPORTS}}" "" stripped) (fail "original declaration wrapper has an unknown placeholder")
   pure (T.unpack stripped ++ "\n{{TURN}}\n__result :: Int\n__result = (0 :: Int)\n")
-
-validateCheckedCellAdmission :: WorkerRequest -> CheckedCellAdmission -> String -> String -> IO ()
-validateCheckedCellAdmission args admission cellSource template = do
-  templateDigests <- forM (requestTurnTemplates args) $ \(kind, path) -> do
-    bytes <- BS.readFile path
-    pure (kind, shaHex bytes)
-  unless (shaHex (TE.encodeUtf8 (T.pack cellSource)) == checkedCellSha256 admission
-      && shaHex (TE.encodeUtf8 (T.pack template)) == checkedTemplateSha256 admission
-      && templateDigests == checkedTurnTemplates admission
-      && requestInjectVals args == checkedInjectedModules admission)
-    (fail "cell body, wrapper or injected interfaces differ from immutable admission")
-
-validateCheckedItemAdmission :: WorkerRequest -> CheckedItemAdmission -> String -> StmtBinders -> IO ()
-validateCheckedItemAdmission args admission source verdict = do
-  templates <- forM (requestTurnTemplates args) $ \(kind,path) -> (,) kind . shaHex <$> BS.readFile path
-  generation <- requireArg "--bind-gen" (requestBindGen args)
-  let expectedKind = case sbKind verdict of KBind -> "bind"; KExpr -> "expr"; KDecl -> "decl"
-      keys = if expectedKind == "bind"
-        then ["__tidepool_cell_pin_" ++ show (itemIndex admission) ++ "_" ++ binder | binder <- itemBinders admission]
-        else ["__tidepool_cell_expr_" ++ show (itemIndex admission)]
-  unless (shaHex (TE.encodeUtf8 (T.pack source)) == itemSourceDigest admission
-      && expectedKind == itemKind admission && sbBinders verdict == itemBinders admission
-      && generation == itemGeneration admission && requestInjectVals args == itemInjectedModules admission
-      && templates == itemTurnTemplates admission && map signatureKey (itemSignatures admission) == keys)
-    (fail "checked item body, verdict, generation, signatures or recipe differs from its protected offer")
-  when ("__tidepool_checked_annotation_" `isInfixOf` source)
-    (fail "authored checked item uses a compiler-reserved annotation name")
-
-checkedDisplayBinders :: CheckedDisplayAdmission -> [String]
-checkedDisplayBinders admission =
-  ["__tidepoolPage" ++ show (displayGeneration admission)
-  ,"__tidepoolMetadata" ++ show (displayGeneration admission),"cellDisplay"]
-
-validateCheckedDisplayAdmission :: WorkerRequest -> CheckedDisplayAdmission -> String -> StmtBinders -> IO ()
-validateCheckedDisplayAdmission args admission source verdict = do
-  templates <- forM (requestTurnTemplates args) $ \(kind,path) -> (,) kind . shaHex <$> BS.readFile path
-  generation <- requireArg "--bind-gen" (requestBindGen args)
-  unless (null source && sbKind verdict == KBind && sbBinders verdict == checkedDisplayBinders admission
-      && generation == displayGeneration admission && templates == displayTurnTemplates admission
-      && requestInjectVals args == displayInjectedModules admission
-      && not (requestActivationPreview args))
-    (fail "display request differs from its completed observation admission")
-  let observation = SymbolIdentity "main"
-        (T.pack ("Tidepool.Session.Val.G" ++ show (displayCaptureGeneration admission)))
-        "value" (T.pack (displayObservationName admission)) Nothing
-  unless (Map.lookup observation (requestRetainedGenerations args) == Just (displayCaptureGeneration admission))
-    (fail "display lacks its exact retained observation generation")
-
-checkedDisplayRecipe :: CheckedDisplayAdmission -> String -> IO String
-checkedDisplayRecipe = checkedDisplayRecipeWithInputs False
-
-checkedProgramDisplayRecipe :: CheckedDisplayAdmission -> String -> IO String
-checkedProgramDisplayRecipe = checkedDisplayRecipeWithInputs True
-
-checkedDisplayRecipeWithInputs :: Bool -> CheckedDisplayAdmission -> String -> IO String
-checkedDisplayRecipeWithInputs generic admission template = do
-  let rowPrefix = "{{TURN_STMT}} ; _ <- (pure () :: Eff "
-      rows = [suffix | line <- lines template, Just suffix <- [stripPrefix rowPrefix line]]
-  effectRow <- case rows of
-    [suffix] -> do
-      case T.stripSuffix " ())" (T.pack suffix) of
-        Just row | not (T.null row) -> pure (T.unpack row)
-        _ -> fail "display requires the canonical bind effect-row pin"
-    _ -> fail "display requires one exact bind effect-row pin"
-  withImports <- replaceRecipeMarker "default (Int, Double, Text)\n"
-    ("import qualified Tidepool.Inspection as TidepoolInspection\n"
-      ++ (if generic then "import qualified " ++ show (unitString (moduleUnit (nameModule intTyConName)))
-        ++ " " ++ moduleNameString (moduleName (nameModule intTyConName))
-        ++ " as TidepoolProgramTypes\nimport qualified \"text\" Data.Text as TidepoolProgramText\n" else "")
-      ++ concatMap (\(name, binders) -> "import " ++ name ++ " (" ++ intercalate ", " (map renderProgramBinder binders) ++ ")\n")
-        (displayValueImports admission) ++ "default (Int, Double, Text)\n") template
-  unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` withImports)
-    (fail "display requires canonical bind recipe version one")
-  (page,metadata,alias) <- case checkedDisplayBinders admission of
-    [page,metadata,alias] -> pure (page,metadata,alias)
-    _ -> fail "display requires its three canonical binders"
-  let keys = intercalate "," ["T.pack " ++ show key | key <- displayPresented admission]
-      budget = if generic then "(__tidepoolBudget :: TidepoolProgramTypes.Int)" else show (displayBudget admission)
-      presented = if generic then "(__tidepoolPresented :: [TidepoolProgramText.Text])" else "[" ++ keys ++ "]"
-      rendering = if displayPresentation admission == "rendered"
-        then "TidepoolInspection.displayPageWithout " ++ presented ++ " " ++ budget
-          ++ " (" ++ displayObservationName admission ++ " ())"
-        else "TidepoolInspection.pageWithContinuation " ++ budget
-          ++ " (TidepoolInspection.TextLeaf (T.pack \"<opaque value>\")) Nothing"
-      statement = "(" ++ intercalate ", " [page,metadata,alias] ++ ") <- do {\n"
-        ++ page ++ " <- pure ((" ++ rendering ++ ") :: TidepoolInspection.DisplayPage " ++ effectRow ++ ");\n"
-        ++ metadata ++ " <- pure (T.copy (TidepoolInspection.text " ++ page ++ "), TidepoolInspection.pageHasMore "
-        ++ page ++ ", TidepoolInspection.pageUnavailable " ++ page ++ ");\n"
-        ++ alias ++ " <- pure " ++ page ++ ";\npure (" ++ intercalate ", " [page,metadata,alias] ++ ")\n}"
-  let spliced = (if generic then ("{-# LANGUAGE PackageImports, ScopedTypeVariables #-}\n" ++) else id) (spliceTemplate withImports statement (intercalate ", " [page,metadata,alias]))
-  if generic then do
-    withArgument <- replaceRecipeMarker "__result = do {" "__result ((__tidepoolBudget :: TidepoolProgramTypes.Int), (__tidepoolPresented :: [TidepoolProgramText.Text])) = do {" spliced
-    prepared <- replaceRecipeMarker "__prepared = TidepoolResume.settle __result" "__prepared input = TidepoolResume.settle (__result input)" withArgument
-    pure prepared
-  else pure spliced
-
-writeCheckedDisplayReceipt :: FilePath -> ExactScope -> CheckedDisplayAdmission -> String -> IO ()
-writeCheckedDisplayReceipt root scope admission source = do
-  let text = encodeString . T.pack
-      receipt = encodeListLen 8 <> text "TPEXACTDISPLAY" <> text "1"
-        <> text (scopeRequestSha256 scope) <> text (displayCellReceiptDigest admission)
-        <> encodeWord64 (displayItemIndex admission) <> text (displayPrefixDigest admission)
-        <> text (shaHex (TE.encodeUtf8 (T.pack source))) <> text "tidepool-display-recipe-1"
-  BS.writeFile (root </> "checked-display.cbor") (toStrictByteString receipt)
-
-checkedRecipeAnnotations :: CheckedItemAdmission -> [(String,CheckedSignature)]
-checkedRecipeAnnotations admission =
-  [("__tidepool_checked_annotation_" ++ show index,signature)
-  | (index,signature) <- zip [(0::Int)..] (itemSignatures admission)]
-
-checkedItemCompilePurpose :: CheckedItemAdmission -> CompilePurpose
-checkedItemCompilePurpose admission = case itemPurpose admission of
-  AuthoredCheckedItem -> CheckedItemCompile annotations original values
-  HostActivationInput -> HostActivationInputCompile annotations original values
-  where
-    annotations = checkedRecipeAnnotations admission
-    original = itemPlannedDeclaration admission
-    values = itemCompletedValues admission
-
--- The admitted template is a versioned recipe input. Transform its markers
--- before inserting authored bytes, so authored syntax is never rescanned.
-checkedRecipeSource :: CheckedItemAdmission -> String -> String -> IO String
-checkedRecipeSource admission template source = case itemKind admission of
-  "bind" -> do
-    unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` template)
-      (fail "checked bind requires canonical recipe version one")
-    let aliases = checkedRecipeAnnotations admission
-        declarations = intercalate "; " [alias ++ " :: (" ++ signatureType signature ++ "); "
-          ++ alias ++ " = " ++ binder | ((alias,signature),binder) <- zip aliases (itemBinders admission)]
-        result = intercalate ", " (map fst aliases)
-    amended <- if null aliases then pure template else replaceRecipeMarker "{{TURN_STMT}}"
-      ("{{TURN_STMT}}\n; let { " ++ declarations ++ " }\n") template
-    pure (spliceTemplate amended source result)
-  "expr" -> case checkedRecipeAnnotations admission of
-    [(alias,signature)] -> do
-      observation <- maybe (fail "checked expression has no owning observation name") pure (itemObservationName admission)
-      unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` template)
-        (fail "checked expression capture requires canonical bind recipe version two")
-      let liftStatement = case itemExpressionLift admission of
-            Just "effectful" -> "__tidepool_checked_captured_value <- " ++ alias
-              ++ "\n; let { " ++ observation ++ " = (\\() -> __tidepool_checked_captured_value) }"
-            Just "pure" -> "let { " ++ observation ++ " = (\\() -> " ++ alias ++ ") }"
-            _ -> ""
-      when (null liftStatement) (fail "checked expression has no certified lift plan")
-      let statement = "let { " ++ alias ++ " :: (" ++ signatureType signature ++ "); "
-            ++ alias ++ " = (\n" ++ source ++ "\n) }\n; " ++ liftStatement
-      pure (spliceTemplate template statement observation)
-    _ -> fail "checked expression has no unique full signature"
-  _ -> fail "checked declaration lacks an original identity certificate"
-
-replaceRecipeMarker :: String -> String -> String -> IO String
-replaceRecipeMarker marker replacement template =
-  either fail pure (replaceTemplateMarker marker replacement template)
-
-writeCheckedItemReceipt :: FilePath -> ExactScope -> CheckedItemAdmission -> String -> IO ()
-writeCheckedItemReceipt root scope admission source = do
-  let (file,magic,profile) = case itemPurpose admission of
-        AuthoredCheckedItem -> ("checked-item.cbor","TPEXACTITEM","tidepool-checked-recipe-2")
-        HostActivationInput -> ("activation-input.cbor","TPEXACTACTIVATIONINPUT2","tidepool-host-activation-input-2")
-      text = encodeString . T.pack
-      receipt = encodeListLen (if itemPurpose admission == HostActivationInput then 9 else 8) <> text magic
-        <> text (if itemPurpose admission == HostActivationInput then "2" else "1")
-        <> text (scopeRequestSha256 scope) <> text (itemAdmissionDigest admission)
-        <> text (itemCellReceiptDigest admission) <> encodeWord64 (itemIndex admission)
-        <> text (shaHex (TE.encodeUtf8 (T.pack source))) <> text profile
-  witness <- case itemPurpose admission of
-    AuthoredCheckedItem -> pure mempty
-    HostActivationInput -> encodeBytes <$> BS.readFile (root </> "activation-type.cbor")
-  BS.writeFile (root </> file) (toStrictByteString (receipt <> witness))
 
 -- Fold eligibility and attempted compilation are separate from whole-cell
 -- checking. An expression or declaration is a successful ineligible outcome.

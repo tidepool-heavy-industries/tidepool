@@ -4,9 +4,13 @@
 -- can depend on this instead.
 module Tidepool.ExtractUtil
   ( getLibdir
+  , shaHex
   , capitalize
   ) where
 
+import qualified Crypto.Hash.SHA256 as SHA256
+import qualified Data.ByteString as BS
+import Numeric (showHex)
 import Data.Char (toUpper)
 import System.Environment (lookupEnv)
 import System.Process (readProcess)
@@ -26,3 +30,7 @@ getLibdir = do
 capitalize :: String -> String
 capitalize [] = []
 capitalize (c:cs) = toUpper c : cs
+
+shaHex :: BS.ByteString -> String
+shaHex = concatMap (\byte -> let text = showHex byte "" in
+  replicate (2 - length text) '0' ++ text) . BS.unpack . SHA256.hash
