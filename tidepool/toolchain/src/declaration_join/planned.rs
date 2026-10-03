@@ -72,27 +72,21 @@ fn admit_authored_artifact_closure_inner(
     CompileError,
 > {
     let scratch = tempfile::tempdir()?;
+    let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
     let references = crate::recovery_artifacts::materialize_certified_products_with_validation(
         scratch.path(),
         toolchain_identity_sha256,
         products,
-        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        &mut validation,
         crate::recovery_artifacts::MaterializationMode::Scratch,
     )
     .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
-    let verified = references
-        .iter()
-        .map(|reference| {
-            crate::recovery_artifacts::verify_materialized_ref(scratch.path(), reference)
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
-    crate::certified_products::certify_inherited_products(
-        &verified
-            .iter()
-            .map(|artifact| crate::certified_products::InheritedProductInput { artifact })
-            .collect::<Vec<_>>(),
+    let owned = products.iter().collect::<Vec<_>>();
+    crate::certified_products::certify_owned_products_in_context_with_validation(
+        &owned,
         &[],
+        &owned,
+        &mut validation,
     )
     .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
     let mut artifacts = Vec::with_capacity(products.len());
