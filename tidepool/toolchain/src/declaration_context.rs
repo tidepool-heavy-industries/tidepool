@@ -2325,15 +2325,8 @@ impl ExactDeclarationContext {
             text("TPEXACTCONTEXT"),
             text("2"),
             text(hex(&sha2::Sha256::digest(
-                serde_json::to_vec(&(
-                    metadata
-                        .artifacts
-                        .values()
-                        .map(|entry| &entry.descriptor)
-                        .collect::<Vec<_>>(),
-                    metadata.dependencies(),
-                ))
-                .expect("inventory encoding"),
+                serde_json::to_vec(&(metadata.descriptors(), metadata.dependencies()))
+                    .expect("inventory encoding"),
             )
             .into())),
             text(hex(&self.producer)),
@@ -3526,7 +3519,12 @@ mod tests {
         wrong_kind[2].product = artifacts[0].product.clone();
         assert!(context.validate_artifacts(&wrong_kind).is_err());
         let mut wrong_requirements = artifacts.clone();
-        wrong_requirements[1].interface.requirements.clear();
+        let required = wrong_requirements
+            .iter_mut()
+            .find(|artifact| artifact.interface.module == "Joined")
+            .unwrap();
+        assert!(!required.interface.requirements.is_empty());
+        required.interface.requirements.clear();
         assert!(context.validate_artifacts(&wrong_requirements).is_err());
         let mut foreign = artifacts.clone();
         foreign[0].interface.module = "Foreign".into();
@@ -3583,15 +3581,15 @@ mod tests {
             })
             .unwrap();
         let after = context.inventory.inventory().metrics();
-        assert_eq!(after.graph_visits - before.graph_visits, 4);
+        assert_eq!(after.graph_visits - before.graph_visits, 6);
         assert_eq!(after.view_queries - before.view_queries, 1);
         assert_eq!(request.semantic_sha256, expected);
         let value: Value =
             ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice())
                 .unwrap();
-        let fields = row(&value, 8).unwrap();
+        let fields = row(&value, 9).unwrap();
         assert_eq!(string(&fields[2]).unwrap(), hex(&expected));
-        assert_eq!(row(&fields[7], 2).unwrap()[1], text(hex(&expected)));
+        assert_eq!(row(&fields[8], 2).unwrap()[1], text(hex(&expected)));
         std::fs::write(&request.artifacts[0].interface.path, b"late corruption").unwrap();
         assert!(request
             .context
@@ -3606,7 +3604,7 @@ mod tests {
         let before = context.inventory.inventory().metrics();
         assert_eq!(context.semantic_sha256(), expected);
         let after = context.inventory.inventory().metrics();
-        assert_eq!(after.graph_visits - before.graph_visits, 4);
+        assert_eq!(after.graph_visits - before.graph_visits, 6);
         assert_eq!(after.view_queries - before.view_queries, 1);
         for _ in 0..2 {
             let directory = tempfile::tempdir().unwrap();

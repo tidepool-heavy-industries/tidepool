@@ -1053,6 +1053,17 @@ impl ArtifactMetadataSnapshot {
         }
         Ok(())
     }
+    /// The semantic wire order is exact owner followed by immutable artifact ID.
+    /// The payload registry itself remains keyed by content ID.
+    pub(crate) fn descriptors(&self) -> Vec<&ArtifactDescriptor> {
+        let mut descriptors = self
+            .artifacts
+            .values()
+            .map(|entry| &entry.descriptor)
+            .collect::<Vec<_>>();
+        descriptors.sort_by_key(|descriptor| (&descriptor.owner, descriptor.id));
+        descriptors
+    }
     pub fn dependencies(&self) -> Vec<(ArtifactId, ArtifactId, ArtifactDependency)> {
         self.dependencies.clone()
     }
@@ -1314,7 +1325,10 @@ impl ArtifactView {
         state
             .entry_handle_copies
             .fetch_add(entries.len() as u64, Ordering::Relaxed);
-        entries.sort_by(|a, b| a.descriptor.owner.cmp(&b.descriptor.owner));
+        entries.sort_by(|left, right| {
+            (&left.descriptor.owner, left.descriptor.id)
+                .cmp(&(&right.descriptor.owner, right.descriptor.id))
+        });
         entries
     }
     /// Explicitly retained roots, excluding their hidden dependency closure.
@@ -2295,9 +2309,9 @@ mod tests {
         let metadata = view.metadata_snapshot();
         assert_eq!(
             metadata
-                .artifacts
-                .values()
-                .map(|entry| entry.descriptor.clone())
+                .descriptors()
+                .into_iter()
+                .cloned()
                 .collect::<Vec<_>>(),
             expected_descriptors,
         );
