@@ -17,6 +17,7 @@ pub fn get_qualified(table: &DataConTable, qualified_name: &str, arity: u32) -> 
 const UNIT: &str = "GHC.Tuple.()";
 const PAIR: &str = "GHC.Tuple.(,)";
 const TRIPLE: &str = "GHC.Tuple.(,,)";
+const QUADRUPLE: &str = "GHC.Tuple.(,,,)";
 const INT: &str = "GHC.Types.I#";
 const WORD: &str = "GHC.Types.W#";
 const DOUBLE: &str = "GHC.Types.D#";
@@ -862,6 +863,54 @@ impl<A: ToHaskell, B: ToHaskell, C: ToHaskell> ToHaskell for (A, B, C) {
     }
 }
 
+impl<A, B, C, D> FromHaskellSealed for (A, B, C, D) {}
+impl<A, B, C, D> ToHaskellSealed for (A, B, C, D) {}
+
+impl<A: FromHaskell, B: FromHaskell, C: FromHaskell, D: FromHaskell> FromHaskell for (A, B, C, D) {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
+        // See the 2-tuple impl above: missing-constructor is split out of the
+        // type-mismatch arm (#F6).
+        let quadruple_id = get_qualified(table, QUADRUPLE, 4)
+            .ok_or_else(|| BridgeError::UnknownDataConName("(,,,)".into()))?;
+        match value {
+            HaskellValue::Con(id, fields) if *id == quadruple_id => {
+                if fields.len() == 4 {
+                    Ok((
+                        A::from_value(&fields[0], table)?,
+                        B::from_value(&fields[1], table)?,
+                        C::from_value(&fields[2], table)?,
+                        D::from_value(&fields[3], table)?,
+                    ))
+                } else {
+                    Err(BridgeError::ArityMismatch {
+                        con: *id,
+                        expected: 4,
+                        got: fields.len(),
+                    })
+                }
+            }
+            _ => Err(type_mismatch("(,,,)", value)),
+        }
+    }
+}
+
+impl<A: ToHaskell, B: ToHaskell, C: ToHaskell, D: ToHaskell> ToHaskell for (A, B, C, D) {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        let quadruple_id = get_qualified(table, QUADRUPLE, 4)
+            .ok_or_else(|| BridgeError::UnknownDataConName("(,,,)".into()))?;
+        visitor.begin_constructor(quadruple_id, 4)?;
+        self.0.visit(table, visitor)?;
+        self.1.visit(table, visitor)?;
+        self.2.visit(table, visitor)?;
+        self.3.visit(table, visitor)?;
+        visitor.end_constructor()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::approx_constant)] // tests use 3.14159 as a float round-trip literal
 mod tests {
@@ -1033,6 +1082,64 @@ mod tests {
         let table = test_table();
         roundtrip(42i32, &table);
         roundtrip(-7i32, &table);
+    }
+
+    #[test]
+    fn quadruple_roundtrip_preserves_nested_display_packet_fields() {
+        let mut table = test_table();
+        table.insert(DataCon {
+            id: DataConId(100),
+            name: "(,,,)".into(),
+            tag: 1,
+            rep_arity: 4,
+            field_bangs: vec![],
+            qualified_name: Some(QUADRUPLE.into()),
+            type_name: String::new(),
+        });
+        roundtrip(
+            (
+                (1i64, 2i64, 3i64),
+                "preview\nλ".to_string(),
+                vec![(7i64, "field".to_string())],
+                true,
+            ),
+            &table,
+        );
+    }
+
+    #[test]
+    fn quadruple_decode_requires_constructor_identity_and_exact_arity() {
+        type Packet = (i64, i64, i64, i64);
+        let mut table = test_table();
+        let fields = || vec![HaskellValue::Lit(Literal::LitInt(1)); 4];
+        let id = DataConId(100);
+        let value = HaskellValue::Con(id, fields());
+        assert!(matches!(
+            Packet::from_value(&value, &table),
+            Err(BridgeError::UnknownDataConName(_))
+        ));
+        table.insert(DataCon {
+            id,
+            name: "(,,,)".into(),
+            tag: 1,
+            rep_arity: 4,
+            field_bangs: vec![],
+            qualified_name: Some(QUADRUPLE.into()),
+            type_name: String::new(),
+        });
+        assert!(matches!(
+            Packet::from_value(&HaskellValue::Con(DataConId(101), fields()), &table),
+            Err(BridgeError::TypeMismatch { .. })
+        ));
+        assert!(matches!(
+            Packet::from_value(&HaskellValue::Con(id, vec![]), &table),
+            Err(BridgeError::ArityMismatch {
+                expected: 4,
+                got: 0,
+                ..
+            })
+        ));
+        assert_eq!(Packet::from_value(&value, &table).unwrap(), (1, 1, 1, 1));
     }
 
     #[test]
