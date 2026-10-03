@@ -46,7 +46,7 @@ import Tidepool.Binders
   , classifyWithFlags, classifyBlock, exportItemName, defaultParserDynFlags
   , analyzeCell, analyzeOrderedCell, cellInferenceSegments, renderCellCheckSource, CellSourceSpan(..)
   , CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), BoundBinder(..),
-    SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ExpressionLiftPlan(..), ExpressionPresentation(..), installCellDisplayDeclarations
+    SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
   , declarationSourceWithTemplateFlags, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
@@ -56,7 +56,7 @@ import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..)
   , withResidentPipelineSelectedRequests, withExactInterfaceTransaction
-  , cellDisplayDeclarations, checkCellInstances
+  , checkCellInstances
   , cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, stripMonadHead, generatedScaffoldRecipe, activationPreviewInputType )
 import Tidepool.ExecutionEncode
@@ -1133,15 +1133,7 @@ runLegacyCellMode compiler caches args cellPath = do
       compiler checkedSelection Set.empty checkPurpose scope modulePath (requestIncludes args) (requestBuildProductsDir args))
         (maybe initialPlan (\(plan,_,_,_) -> plan) preparedDeclaration)
     checkedSource <- either fail pure (renderCellCheckSource checkingTemplate (checkPlan analyzed))
-    (finalPlan, finalSource, compiled) <- if isJust preparedDeclaration || null (cellPlanDisplayTargets analyzed)
-      then pure (analyzed, checkedSource, provisional)
-      else do
-        declarations <- cellDisplayDeclarations provisional analyzed
-        let finalized = installCellDisplayDeclarations declarations analyzed
-        finalizedSource <- either fail pure (renderCellCheckSource checkingTemplate finalized)
-        writeFile modulePath finalizedSource
-        finalizedResult <- compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)) Set.empty checkPurpose scope modulePath (requestIncludes args) (requestBuildProductsDir args)
-        pure (finalized, finalizedSource, finalizedResult)
+    let (finalPlan, finalSource, compiled) = (analyzed, checkedSource, provisional)
     -- Presentation observations remain separate from native signature authority.
     expressionEvidence <- cellExpressionEvidence compiled
     let outputBytes = encodeCellOut finalPlan (crCheckedBinderPins compiled)
@@ -1479,10 +1471,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
         compiler (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)) Set.empty OriginalDeclarationCompile scope sourcePath
           (requestIncludes args) (requestBuildProductsDir args)
   createDirectoryIfMissing True directory
-  (analyzed, provisional) <- checkCellInstances checkOriginal initial
-  finalized <- if null (cellPlanDisplayTargets analyzed) then pure analyzed else do
-    fields <- cellDisplayDeclarations provisional analyzed
-    pure (installCellDisplayDeclarations fields analyzed)
+  (finalized, _) <- checkCellInstances checkOriginal initial
   original <- writeOriginal finalized
   prepared <- compiler (PreparedProducts (requestModuleCandidates args)) (Map.keysSet (requestRetainedGenerations args))
     OriginalDeclarationCompile scope sourcePath (requestIncludes args) (requestBuildProductsDir args)
