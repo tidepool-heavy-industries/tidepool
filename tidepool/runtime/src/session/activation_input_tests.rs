@@ -363,7 +363,7 @@ fn compile_turn(
                 assert!(retained.is_empty(), "startup has no retained native inputs");
                 None
             }
-            FixtureCompilation::Scoped => view.exact_declaration_context().cloned(),
+            FixtureCompilation::Scoped => view.exact_compile_context(),
         },
         session_id: match purpose {
             FixtureCompilation::Startup => None,

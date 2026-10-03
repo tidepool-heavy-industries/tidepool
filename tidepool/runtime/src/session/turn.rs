@@ -5055,7 +5055,7 @@ mod tests {
         let item_admission = session.admit_checked_item(prefix, item).unwrap();
         let TurnResult::Bind { compiled, .. } = run_checked_item(
             TurnRequest {
-                exact_context: view.exact_declaration_context().cloned(),
+                exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
                 turn_text: source,
                 templates: &templates,
@@ -5834,7 +5834,7 @@ mod tests {
             let item_admission = session.admit_checked_item(prefix, item).unwrap();
             let TurnResult::Bind { compiled, .. } = run_checked_item(
                 TurnRequest {
-                    exact_context: view.exact_declaration_context().cloned(),
+                    exact_context: view.exact_compile_context(),
                     session_id: Some(view.session()),
                     turn_text: source,
                     templates: &templates,
