@@ -35,7 +35,6 @@ import Control.Monad.State.Strict
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.IntMap.Strict qualified as IntMap
-import Data.List (foldl')
 import Data.Foldable (toList)
 import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
@@ -303,8 +302,8 @@ closeOriginalProducts originalOwners outcomes refusals =
       drain queue droppedKeys rejectedGroups = case Seq.viewl queue of
         Seq.EmptyL -> (droppedKeys, reverse rejectedGroups)
         missing Seq.:< rest ->
-          let reject state@(nextQueue, missingGroups, groupRefusals) key@(owner, ordinal)
-                | key `Set.member` missingGroups = state
+          let reject accumulator@(nextQueue, missingGroups, groupRefusals) key@(owner, ordinal)
+                | key `Set.member` missingGroups = accumulator
                 | otherwise =
                     let group = groups Map.! key
                         refusal = PreparedGroupRefusal ordinal (projectedBinders group)
