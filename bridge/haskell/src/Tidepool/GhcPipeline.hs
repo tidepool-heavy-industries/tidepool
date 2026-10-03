@@ -712,7 +712,7 @@ candidateManifestFor _ = Nothing
 compilerProducerFor :: PipelineVariant -> Maybe String
 compilerProducerFor variant = case pvCompilerProducer variant of
   Just (CompilerProducerIdentity producer) -> Just producer
-  Nothing -> scopeProducerSha256 <$> pvExactScope variant
+  Nothing -> Nothing
 
 exactCompileCycle :: PipelineSelection result -> PipelineVariant -> Bool
 exactCompileCycle selection variant =
@@ -919,6 +919,7 @@ data CanonicalFrontendFailure
   = CustomLoadPhaseHook
   | CustomLoadFrontendHook
   | UnsupportedLoadBackend
+  | CompilerProducerUnavailable
   | CompilerProducerScopeMismatch
   | LoadedFinalizationOwnerMismatch
   | MissingLoadedFrontend
@@ -1537,9 +1538,10 @@ runCompileCycle
   :: PipelineSelection result -> Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
   -> RetainedContext -> Maybe String -> Bool -> Word64 -> Double -> Maybe ResourceTimingStart -> PipelineVariant -> FilePath -> Ghc result
 runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing requestIdentity sessionT0 setupResources variant path = withCycleHooks $ withCompilerViewDirectory $ \compilerViewDirectory -> do
-    forM_ (compilerProducerFor variant) $ \producer ->
-      forM_ (pvExactScope variant) $ \scope ->
-        unless (producer == scopeProducerSha256 scope)
+    forM_ (pvExactScope variant) $ \scope ->
+      case compilerProducerFor variant of
+        Nothing -> liftIO (throwIO CompilerProducerUnavailable)
+        Just producer -> unless (producer == scopeProducerSha256 scope)
           (liftIO (throwIO CompilerProducerScopeMismatch))
     memoTrace <- liftIO readMemoTraceEnabled
     let preparation = selectionKind selection
