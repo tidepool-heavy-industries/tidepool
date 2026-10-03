@@ -321,7 +321,7 @@ pub(super) async fn observe_embedded_notification(
     }
 }
 
-#[cfg(feature = "codex-compat")]
+#[cfg(any(test, feature = "codex-compat"))]
 pub(super) fn admit_notification(
     command: &exomonad_actor::NotificationSend,
     key: String,
@@ -346,7 +346,7 @@ pub(super) fn admit_notification(
     }
 }
 
-#[cfg(feature = "codex-compat")]
+#[cfg(any(test, feature = "codex-compat"))]
 pub(super) fn observe_notification_receipt(
     command: &exomonad_actor::NotificationPoll,
     target: ActorRef,

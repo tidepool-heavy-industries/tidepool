@@ -57,7 +57,9 @@ use delivery::deliver_pending;
 #[cfg(test)]
 use delivery::embedded_notification_operation_id;
 #[cfg(feature = "codex-compat")]
-use delivery::{admit_notification, observe_notification_receipt, run_delivery_pump};
+use delivery::run_delivery_pump;
+#[cfg(any(test, feature = "codex-compat"))]
+use delivery::{admit_notification, observe_notification_receipt};
 #[cfg(all(test, feature = "codex-compat"))]
 use delivery::{
     deliver_pending_checked, observe_inbound_delivery, remind_turn_ended_without_respond,
