@@ -1328,6 +1328,18 @@ pub(crate) struct ResidentWorkbenchFragment {
 }
 
 impl ResidentWorkbenchFragment {
+    #[cfg(test)]
+    pub(crate) fn empty_for_test() -> Self {
+        Self {
+            display: WorkbenchDisplay::Discard,
+            output: Vec::new(),
+            presented: Vec::new(),
+            recovered_jobs: Vec::new(),
+            warnings: Vec::new(),
+            started_jobs: Vec::new(),
+        }
+    }
+
     pub(crate) fn summarizes_bound_commands(&self) -> bool {
         matches!(
             &self.display,

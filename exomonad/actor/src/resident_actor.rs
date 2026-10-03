@@ -16850,8 +16850,8 @@ mod tests {
     fn completed_observation_failure_keeps_recovered_bindings_and_classification() {
         let recovered = vec!["commandJob".to_owned()];
         let source = ResidentActorWorkbenchError::CompletedResultObservation {
-            detail: "command observation receipt: displayed-page bookkeeping failed".into(),
-            recovered_bindings: recovered.clone(),
+            detail: "presenter result exceeded observation budget".into(),
+            recovered_bindings: Vec::new(),
         };
         let execution = WorkbenchExecutionId::from_digest([10; 16]);
         let operation = WorkbenchOperationReceipt {
@@ -16862,7 +16862,7 @@ mod tests {
                 input_unit_index: 0,
                 effect_ordinal: 0,
             },
-            effect: "retain command job binding before display receipt".into(),
+            effect: "retain command job binding".into(),
             disposition: WorkbenchOperationDisposition::Committed,
         };
         let failure = workbench_failure_after_unit(&[], 0, 1, source, vec![operation], &recovered);
@@ -16876,6 +16876,42 @@ mod tests {
             receipt.failure_layer,
             Some(WorkbenchFailureLayer::Observation)
         );
+        assert_eq!(receipt.installed_bindings, recovered);
+        assert!(receipt.output.contains("effects committed"));
+        assert!(receipt.output.contains("retained bindings: commandJob"));
+        assert_eq!(
+            receipt.operations[0].disposition,
+            WorkbenchOperationDisposition::Committed
+        );
+    }
+
+    #[test]
+    fn displayed_receipt_failure_keeps_committed_command_binding_recovery() {
+        let recovered = vec!["commandJob".to_owned()];
+        let source = ResidentActorWorkbenchError::CompletedResultObservation {
+            detail: "command observation receipt: displayed-page bookkeeping failed".into(),
+            recovered_bindings: recovered.clone(),
+        };
+        let execution = WorkbenchExecutionId::from_digest([12; 16]);
+        let operation = WorkbenchOperationReceipt {
+            display_publication: None,
+            display: None,
+            id: WorkbenchOperationId {
+                execution,
+                input_unit_index: 0,
+                effect_ordinal: 0,
+            },
+            effect: "retain command job binding".into(),
+            disposition: WorkbenchOperationDisposition::Committed,
+        };
+        let failure = workbench_failure_after_unit(&[], 0, 1, source, vec![operation], &recovered);
+        let receipt = failure
+            .receipts
+            .last()
+            .expect("display receipt failure retains its completed effect evidence");
+
+        assert_eq!(receipt.status, WorkbenchItemStatus::Diagnostic);
+        assert_eq!(receipt.failure_layer, Some(WorkbenchFailureLayer::Observation));
         assert_eq!(receipt.installed_bindings, recovered);
         assert!(receipt.output.contains("effects committed"));
         assert!(receipt.output.contains("retained bindings: commandJob"));
