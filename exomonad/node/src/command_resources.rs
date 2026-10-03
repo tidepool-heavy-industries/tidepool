@@ -230,7 +230,9 @@ impl State {
     }
 
     fn set_status(&mut self, key: &Key, status: CommandResourceStatus) {
-        self.update_entry(key, |entry| entry.status.send_replace(status));
+        self.update_entry(key, |entry| {
+            entry.status.send_replace(status);
+        });
     }
 
     fn acknowledge(&mut self, key: &Key) {
