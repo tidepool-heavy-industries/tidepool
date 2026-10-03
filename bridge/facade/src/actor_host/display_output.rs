@@ -54,7 +54,7 @@ pub(super) fn publish(
     ) {
         return;
     }
-    let was_unconfirmed = matches!(previous, Some(DisplayPublicationOutcome::Unconfirmed(_)));
+    let was_unconfirmed = request.was_unconfirmed();
     let result = (|| {
         let admission = forest
             .authorize_display_publication(request)
