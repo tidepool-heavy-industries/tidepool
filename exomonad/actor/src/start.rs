@@ -10,7 +10,7 @@ use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{BridgeError, FromHaskell};
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_repr::{DataConTable, Generation, SessionModule};
+use tidepool_repr::{DataConTable, Generation};
 use tidepool_runtime::session::{
     MaterializedFacade, OutputSink, ResidentHole, ResidentSession, RootCustody,
 };
@@ -265,16 +265,17 @@ pub enum ActorStartCaptureError {
     ExactExports(#[from] tidepool_runtime::session::ExactExportError),
     #[error(transparent)]
     Facade(#[from] tidepool_runtime::session::ExactFacadeError),
-    #[error(
-        "actor export `{head}` drifted from rooted definition module `{expected}` to `{actual}`"
-    )]
+    #[error("actor export `{head}` drifted from rooted definition {expected:?} to {actual:?}")]
     ShadowDrift {
         head: String,
-        expected: String,
-        actual: String,
+        expected: tidepool_runtime::NominalHead,
+        actual: tidepool_toolchain::declaration_join::ExportIdentity,
     },
-    #[error("actor export `{head}` has more than one rooted nominal incarnation: {modules:?}")]
-    AmbiguousIncarnation { head: String, modules: Vec<String> },
+    #[error("actor export `{head}` has more than one rooted nominal incarnation: {identities:?}")]
+    AmbiguousIncarnation {
+        head: String,
+        identities: Vec<tidepool_runtime::NominalHead>,
+    },
     #[error("actor start has no live declaration plane")]
     NoCompileView,
     #[error("context fork parent lexical scope is no longer live")]
@@ -602,9 +603,9 @@ where
 {
     let heads = facade_heads(provenance);
     let scope = session.run_context().lexical_scope;
-    validate_head_incarnations(session, scope, provenance, &heads)?;
     let names: Vec<_> = heads.iter().map(String::as_str).collect();
     let surface = session.exact_exports_in(scope, &names)?;
+    validate_head_incarnations(surface.declarations()?, provenance, &heads)?;
     // A child with no declaration exports needs no module or source import.
     // Its executable entry and type-site provenance remain owned by custody.
     if surface.items().is_empty() {
@@ -650,17 +651,13 @@ where
     Some(sources)
 }
 
-fn validate_head_incarnations<H, O>(
-    session: &ResidentSession<H, O>,
-    scope: tidepool_codegen::scope::ScopeId,
+fn validate_head_incarnations(
+    declarations: &[tidepool_toolchain::declaration_join::DeclarationExport],
     provenance: &tidepool_runtime::session::ProgramProvenance,
     selected: &BTreeSet<String>,
-) -> Result<(), ActorStartCaptureError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    let mut rooted: std::collections::BTreeMap<String, BTreeSet<String>> =
+) -> Result<(), ActorStartCaptureError> {
+    use tidepool_toolchain::declaration_join::ExportNamespace;
+    let mut rooted: std::collections::BTreeMap<String, BTreeSet<tidepool_runtime::NominalHead>> =
         std::collections::BTreeMap::new();
     for site in provenance.sites() {
         for head in site
@@ -673,32 +670,33 @@ where
                 rooted
                     .entry(head.name.clone())
                     .or_default()
-                    .insert(head.module.clone());
+                    .insert(head.clone());
             }
         }
     }
 
-    let visible: std::collections::BTreeMap<_, _> =
-        session.current_decl_heads_in(scope).into_iter().collect();
-    for (head, modules) in rooted {
-        if modules.len() != 1 {
+    for (head, identities) in rooted {
+        if identities.len() != 1 {
             return Err(ActorStartCaptureError::AmbiguousIncarnation {
                 head,
-                modules: modules.into_iter().collect(),
+                identities: identities.into_iter().collect(),
             });
         }
-        let Some(expected) = modules.into_iter().next() else {
-            unreachable!("the rooted module count was validated above");
-        };
-        let Some(generation) = visible.get(&head) else {
-            continue;
-        };
-        let actual = SessionModule::lib(Generation(*generation)).module_name();
-        if actual != expected {
+        let expected = identities.into_iter().next().expect("one rooted identity");
+        let actual = declarations
+            .iter()
+            .find(|export| {
+                export.head.namespace == ExportNamespace::Type && export.head.occurrence == head
+            })
+            .ok_or(tidepool_runtime::session::ExactExportError::UncertifiedExports)?;
+        if actual.head.unit != expected.unit
+            || actual.head.module != expected.module
+            || actual.head.occurrence != expected.name
+        {
             return Err(ActorStartCaptureError::ShadowDrift {
                 head,
                 expected,
-                actual,
+                actual: actual.head.clone(),
             });
         }
     }
@@ -896,6 +894,94 @@ mod tests {
             )) if name == "Missing")
         );
         assert!(!root.path().join("Tidepool/Actor/Surface").exists());
+    }
+
+    fn nominal_provenance(
+        heads: Vec<tidepool_runtime::NominalHead>,
+    ) -> tidepool_runtime::session::ProgramProvenance {
+        tidepool_runtime::session::ProgramProvenance::from_sites(&[tidepool_runtime::YieldSite {
+            input_type_witnesses: Vec::new(),
+            site: 17,
+            origin: "entry".into(),
+            ordinal: 0,
+            ty: "Original".into(),
+            modules: heads.iter().map(|head| head.module.clone()).collect(),
+            heads,
+            inputs: vec![],
+            reply_declaration: None,
+            request_type_signatures: None,
+        }])
+        .unwrap()
+    }
+
+    fn original_nominal() -> tidepool_runtime::NominalHead {
+        tidepool_runtime::NominalHead {
+            unit: "main".into(),
+            module: "Tidepool.Session.Lib.G1".into(),
+            name: "Original".into(),
+        }
+    }
+
+    fn original_declaration() -> tidepool_toolchain::declaration_join::DeclarationExport {
+        use tidepool_toolchain::declaration_join::{
+            DeclarationExport, DeclarationKind, ExportIdentity, ExportNamespace,
+        };
+        let head = original_nominal();
+        DeclarationExport {
+            kind: DeclarationKind::Type,
+            head: ExportIdentity {
+                unit: head.unit,
+                module: head.module,
+                namespace: ExportNamespace::Type,
+                occurrence: head.name,
+                record_parent: None,
+            },
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn facade_nominal_identity_preserves_original_owner_after_join() {
+        let provenance = nominal_provenance(vec![original_nominal()]);
+        let selected = super::facade_heads(&provenance);
+        // The facade's current wrapper generation is deliberately not an input
+        // to validation: the compiler export retains its original G1 owner.
+        super::validate_head_incarnations(&[original_declaration()], &provenance, &selected)
+            .unwrap();
+    }
+
+    #[test]
+    fn facade_nominal_identity_refuses_unit_module_namespace_and_ambiguity_drift() {
+        use tidepool_toolchain::declaration_join::ExportNamespace;
+        let provenance = nominal_provenance(vec![original_nominal()]);
+        let selected = super::facade_heads(&provenance);
+        for foreign_unit in [false, true] {
+            let mut actual = original_declaration();
+            if foreign_unit {
+                actual.head.unit = "foreign".into();
+            } else {
+                actual.head.module = "Tidepool.Session.Lib.G9".into();
+            }
+            assert!(matches!(
+                super::validate_head_incarnations(&[actual], &provenance, &selected),
+                Err(super::ActorStartCaptureError::ShadowDrift { .. })
+            ));
+        }
+        let mut value = original_declaration();
+        value.head.namespace = ExportNamespace::Value;
+        assert!(matches!(
+            super::validate_head_incarnations(&[value], &provenance, &selected),
+            Err(super::ActorStartCaptureError::ExactExports(
+                tidepool_runtime::session::ExactExportError::UncertifiedExports
+            ))
+        ));
+        let mut other = original_nominal();
+        other.unit = "foreign".into();
+        let ambiguous = nominal_provenance(vec![original_nominal(), other]);
+        assert!(matches!(
+            super::validate_head_incarnations(&[original_declaration()], &ambiguous, &selected),
+            Err(super::ActorStartCaptureError::AmbiguousIncarnation { .. })
+        ));
     }
 
     /// The errand's authority comes from holding no worktree, not from a

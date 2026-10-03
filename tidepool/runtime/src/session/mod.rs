@@ -1611,10 +1611,31 @@ impl SessionLib {
                 selected.push(item);
             }
         }
+        let declarations = if selected.is_empty() {
+            Some(Vec::new())
+        } else {
+            self.log
+                .certified_exports_at(self.scope_tip(scope))
+                .and_then(|exports| {
+                    selected
+                        .iter()
+                        .map(|item| {
+                            exports
+                                .iter()
+                                .find(|export| {
+                                    export.head.namespace == item.head_namespace()
+                                        && export.head.occurrence == item.head_name()
+                                })
+                                .cloned()
+                        })
+                        .collect::<Option<Vec<_>>>()
+                })
+        };
         Ok(ExactExportSurface::new(
             self.id,
             self.current_module_in(scope),
             selected,
+            declarations,
         ))
     }
 

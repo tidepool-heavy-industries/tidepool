@@ -18,9 +18,26 @@ fn examples(document: &str) -> impl Iterator<Item = &str> {
 
 #[tokio::test]
 async fn deferred_inherited_child_preserves_original_owner_after_parent_shadowing() {
+    assert_deferred_original_owner(
+        include_str!("../actor_host_fixtures/generic_actor/deferred_original_owner.hs"),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn deferred_checkpoint_child_preserves_prior_nominal_owner_after_publication() {
+    assert_deferred_original_owner(
+        include_str!("../actor_host_fixtures/generic_actor/deferred_checkpoint_original_owner.hs"),
+        true,
+    )
+    .await;
+}
+
+async fn assert_deferred_original_owner(source: &str, checkpoint: bool) {
     let mut campaign = TestCampaign::start().await;
     let root = Arc::clone(&campaign.root_installation.policy);
-    let call_id = "deferred-original-owner".to_owned();
+    let call_id = format!("deferred-original-owner-{checkpoint}");
     committed(root.as_ref(), "data DeferredInput = DeferredInput Int deriving Show\ndata DeferredReply = DeferredReply Int deriving Show").await;
     let result = root
         .dispatch_boxed(ToolInvocation {
@@ -32,10 +49,7 @@ async fn deferred_inherited_child_preserves_original_owner_after_parent_shadowin
                 Some("haskell".into()),
             )),
             name: exomonad_actor::HASKELL_TOOL.into(),
-            arguments: ToolArguments::Raw(
-                include_str!("../actor_host_fixtures/generic_actor/deferred_original_owner.hs")
-                    .into(),
-            ),
+            arguments: ToolArguments::Raw(source.into()),
         })
         .await
         .unwrap();
@@ -68,6 +82,7 @@ async fn deferred_inherited_child_preserves_original_owner_after_parent_shadowin
             },
         )
         .await;
+    assert_eq!(child.checkpoint.is_some(), checkpoint);
     let child_id = child.actor.identity();
     campaign
         .next_deployment(
@@ -86,6 +101,13 @@ async fn deferred_inherited_child_preserves_original_owner_after_parent_shadowin
             },
         )
         .await;
+    if checkpoint {
+        committed(
+            root.as_ref(),
+            "Right () <- releaseCheckpoint originalOwnerSeed\npure ()",
+        )
+        .await;
+    }
     let parent_failure = dispatch_haskell_script(
         root.as_ref(),
         "error \"parent-failure-after-deferred-release\" >> pure ()",

@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use tidepool_repr::{SessionId, SessionModule};
+use tidepool_toolchain::declaration_join::DeclarationExport;
 
 use super::{ExportItem, SessionCompileView};
 
@@ -21,6 +22,7 @@ pub struct ExactExportSurface {
     session: SessionId,
     source: Option<SessionModule>,
     items: Vec<ExportItem>,
+    declarations: Option<Vec<DeclarationExport>>,
 }
 
 impl ExactExportSurface {
@@ -28,6 +30,7 @@ impl ExactExportSurface {
         session: SessionId,
         source: Option<SessionModule>,
         mut items: Vec<ExportItem>,
+        declarations: Option<Vec<DeclarationExport>>,
     ) -> Self {
         items.sort_by_key(ExportItem::render_entry);
         items.dedup_by(|left, right| left.head_name() == right.head_name());
@@ -35,6 +38,7 @@ impl ExactExportSurface {
             session,
             source,
             items,
+            declarations,
         }
     }
 
@@ -51,6 +55,14 @@ impl ExactExportSurface {
     #[must_use]
     pub fn items(&self) -> &[ExportItem] {
         &self.items
+    }
+
+    /// Compiler-issued original identities for the selected export membrane.
+    /// Legacy source-only surfaces cannot authorize nominal actor payloads.
+    pub fn declarations(&self) -> Result<&[DeclarationExport], ExactExportError> {
+        self.declarations
+            .as_deref()
+            .ok_or(ExactExportError::UncertifiedExports)
     }
 
     /// Materialize this surface under the exact session root named by `view`.
@@ -184,6 +196,8 @@ pub enum ExactFacadeError {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExactExportError {
+    #[error("selected declaration exports have no compiler-certified original identities")]
+    UncertifiedExports,
     #[error("session has no declaration plane")]
     NoDeclarationPlane,
     #[error("scope {0:?} is not live")]
@@ -225,6 +239,44 @@ mod tests {
     use tidepool_repr::Generation;
 
     #[test]
+    fn certified_export_surface_preserves_original_identity_under_join_wrapper() {
+        use tidepool_toolchain::declaration_join::{
+            DeclarationKind, ExportIdentity, ExportNamespace,
+        };
+        let identity = |namespace, occurrence: &str| ExportIdentity {
+            unit: "original-unit".into(),
+            module: "Tidepool.Session.Lib.G1".into(),
+            namespace,
+            occurrence: occurrence.into(),
+            record_parent: None,
+        };
+        let original = DeclarationExport {
+            kind: DeclarationKind::Type,
+            head: identity(ExportNamespace::Type, "Original"),
+            children: vec![identity(
+                ExportNamespace::Constructor,
+                "OriginalConstructor",
+            )],
+        };
+        let surface = ExactExportSurface::new(
+            SessionId(8),
+            Some(SessionModule::lib(Generation(9))),
+            vec![ExportItem::Type {
+                name: "Original".into(),
+                cons: vec!["OriginalConstructor".into()],
+            }],
+            Some(vec![original.clone()]),
+        );
+        assert_eq!(surface.declarations().unwrap(), &[original]);
+        assert_eq!(
+            surface.source_module(),
+            Some(SessionModule::lib(Generation(9)))
+        );
+        let source = render_facade(&FacadeIdentity::for_surface(&surface), &surface);
+        assert!(source.contains("import Tidepool.Session.Lib.G9 (Original(..))"));
+    }
+
+    #[test]
     fn materialized_facade_reexports_only_selected_exact_items() {
         let dir = tempfile::tempdir().expect("tempdir");
         let view = SessionCompileView {
@@ -258,8 +310,13 @@ mod tests {
                     cons: vec!["Finding".into()],
                 },
             ],
+            None,
         );
 
+        assert!(matches!(
+            surface.declarations(),
+            Err(ExactExportError::UncertifiedExports)
+        ));
         let facade = surface.materialize(&view).expect("materialize facade");
         assert!(facade.source().contains("Finding(..)"));
         assert!(facade.source().contains("review"));

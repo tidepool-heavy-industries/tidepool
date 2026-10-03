@@ -545,6 +545,20 @@ impl DeclLog {
             .unwrap_or(Generation(0))
     }
 
+    /// Original selected export identities certified at this exact lexical tip.
+    /// A joined wrapper's generation does not identify the definitions it exports.
+    pub(crate) fn certified_exports_at(
+        &self,
+        generation: Generation,
+    ) -> Option<&[tidepool_toolchain::declaration_join::DeclarationExport]> {
+        match self.turns.get(&generation)? {
+            DeclarationSlot::CertifiedAuthored { evidence, .. } => Some(evidence.lexical_exports()),
+            DeclarationSlot::Joined(joined) => Some(joined.evidence.exports()),
+            DeclarationSlot::Recovered(recovered) => Some(recovered.evidence.exports()),
+            DeclarationSlot::Reserved | DeclarationSlot::Committed(_) => None,
+        }
+    }
+
     pub(crate) fn admitted_surface_at(
         &self,
         generation: Generation,
