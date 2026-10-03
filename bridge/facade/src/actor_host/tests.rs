@@ -4167,6 +4167,7 @@ async fn socket_postsubmission_error_and_retirement_report_retention() {
 async fn selected_context_child_reaches_its_supervisor_through_parent_agent() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
+    let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
     let root_id = campaign.actor.identity();
     let setup = dispatch_haskell_script(root.as_ref(), include_str!("notification_setup.hs")).await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
@@ -4234,7 +4235,11 @@ async fn selected_context_child_reaches_its_supervisor_through_parent_agent() {
     assert_eq!(sent["status"], "committed", "{sent:?}");
     let policy = child.policy.clone();
     let poll = tokio::spawn(async move {
-        dispatch_haskell_script(policy.as_ref(), "pollNotification receipt").await
+        dispatch_haskell_script(
+            policy.as_ref(),
+            "_ <- pollNotification receipt >>= display . show",
+        )
+        .await
     });
     let poll_command = campaign
         .next_deployment(
@@ -4249,7 +4254,10 @@ async fn selected_context_child_reaches_its_supervisor_through_parent_agent() {
     let result = observe_notification_receipt(&poll_command, root_id, inbox_key, &inbox);
     assert_eq!(result, Ok(exomonad_actor::NotificationState::Accepted));
     poll_command.observed(result);
-    let observed = poll.await.unwrap();
+    let observed = campaign
+        .drive_actor_output(&output_store, poll)
+        .await
+        .unwrap();
     assert!(
         observed.to_string().contains("NotificationAccepted"),
         "{observed:?}"
