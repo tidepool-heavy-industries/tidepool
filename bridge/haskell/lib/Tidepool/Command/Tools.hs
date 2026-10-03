@@ -340,7 +340,7 @@ executeWith presenter
           Left Cmd.CommandUnauthorized ->
             pure (rejected Bash "this actor has no command authority" NoSideEffect)
           Left issue -> pure $ rejected Bash (T.pack (show issue)) NoSideEffect
-      Right retained@(Job key)
+          Right retained@(Job key)
             | inBackground -> do
                 binding <- Cmd.retainJobBinding retained
                 current <- Cmd.status retained
