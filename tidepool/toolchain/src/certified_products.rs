@@ -3610,7 +3610,7 @@ pub(crate) fn certify_products(
                     owner: (module.unit.clone(), module.module.clone()),
                     dependency: key.clone(),
                     expected: hex(seal),
-                    actual: admitted_interfaces.get(key).map(hex),
+                    actual: admitted_interfaces.get(key).map(|seal| hex(seal)),
                 });
             }
         }
