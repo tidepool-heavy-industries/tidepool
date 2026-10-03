@@ -1303,6 +1303,10 @@ where
                         );
                         slot.receipt.status = WorkbenchItemStatus::Stopped;
                         slot.receipt.failure_layer = Some(WorkbenchFailureLayer::Effect);
+                        super::merge_retained_bindings(
+                            &mut slot.receipt,
+                            &owned.state.cursor.unit.recovered_bindings,
+                        );
                         slot.receipt.operations =
                             std::mem::take(&mut owned.state.cursor.unit.operations);
                         owned.state.cursor.receipts.push(slot.receipt);
@@ -1323,6 +1327,10 @@ where
                 }
                 slot.receipt.output =
                     behavior.render_owned_after_tool(&slot.frame, answer, binding);
+                super::merge_retained_bindings(
+                    &mut slot.receipt,
+                    &owned.state.cursor.unit.recovered_bindings,
+                );
                 owned.state.cursor.completed = Some(slot.receipt);
                 Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
             },
@@ -1816,20 +1824,21 @@ where
                     timing.sync_scope(|| {
                         cleanup.sync_scope(|| {
                             let result = prepared.and_then(|prepared| {
+                                let cursor = &mut owned.state.cursor;
+                                let fragment = cursor
+                                    .running
+                                    .as_mut()
+                                    .expect("same presentation fragment")
+                                    .fragment
+                                    .as_mut()
+                                    .expect("presentation retains its fragment");
                                 prepared.apply(
                                     &environment.commands,
                                     owned.state.effects.context.actor,
-                                    owned
-                                        .state
-                                        .cursor
-                                        .running
-                                        .as_mut()
-                                        .expect("same presentation fragment")
-                                        .fragment
-                                        .as_mut()
-                                        .expect("presentation retains its fragment"),
-                                    &mut owned.state.cursor.unit.display_remaining,
-                                    &mut owned.state.cursor.unit.command_output,
+                                    fragment,
+                                    &mut cursor.unit.display_remaining,
+                                    &mut cursor.unit.command_output,
+                                    &mut cursor.unit.recovered_bindings,
                                 )
                             });
                             if let Err(error) = result {

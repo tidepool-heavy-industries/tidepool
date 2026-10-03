@@ -2390,25 +2390,31 @@ fn workbench_failure_after_unit(
         }
     };
     let receipt = &mut failure.receipts[receipt_index];
-    for binding in unit_bindings {
+    let mut names = receipt.installed_bindings.clone();
+    names.extend_from_slice(unit_bindings);
+    merge_retained_bindings(receipt, &names);
+    if layer == Some(WorkbenchFailureLayer::Effect) {
+        receipt.status = WorkbenchItemStatus::Stopped;
+    }
+    failure
+}
+
+fn merge_retained_bindings(receipt: &mut WorkbenchItemReceipt, bindings: &[String]) {
+    for binding in bindings {
         if !receipt.installed_bindings.contains(binding) {
             receipt.installed_bindings.push(binding.clone());
         }
     }
-    let retained = format!(
-        "retained bindings: {}",
-        receipt.installed_bindings.join(", ")
-    );
+    if bindings.is_empty() || receipt.output.contains("retained bindings:") {
+        return;
+    }
+    let retained = format!("retained bindings: {}", receipt.installed_bindings.join(", "));
     if receipt.output.is_empty() {
         receipt.output = retained;
     } else {
         receipt.output.push('\n');
         receipt.output.push_str(&retained);
     }
-    if layer == Some(WorkbenchFailureLayer::Effect) {
-        receipt.status = WorkbenchItemStatus::Stopped;
-    }
-    failure
 }
 
 /// A short, human-facing framing sentence for a failure layer — the tool
@@ -10312,12 +10318,13 @@ where
                                 &mut cursor.unit.operations,
                                 WorkbenchOperationDisposition::Unknown,
                             );
-                            return Err(workbench_failure_after_operations(
+                            return Err(workbench_failure_after_unit(
                                 &cursor.receipts,
                                 cursor.index,
                                 request.items.len(),
                                 ResidentActorWorkbenchError::ActorProtocol(source.to_string()),
                                 std::mem::take(&mut cursor.unit.operations),
+                                &cursor.unit.recovered_bindings,
                             ));
                         }
                         settle_prepared_operations(
@@ -10339,22 +10346,24 @@ where
                             &mut cursor.unit.operations,
                             WorkbenchOperationDisposition::Rejected,
                         );
-                        cursor.receipts.push(WorkbenchItemReceipt {
-                            diagnostics: Vec::new(),
-                            index: cursor.index,
-                            kind: None,
-                            span: None,
-                            source_items: Vec::new(),
-                            status: WorkbenchItemStatus::Rejected,
-                            output: "unfold admission ended without committing every fork group"
-                                .into(),
-                            value: None,
-                            warnings: Vec::new(),
-                            installed_bindings: Vec::new(),
-                            operations: std::mem::take(&mut cursor.unit.operations),
-                            terminal_transfer: None,
-                            failure_layer: Some(WorkbenchFailureLayer::Effect),
-                        });
+                        let mut failure_receipt = receipt;
+                        failure_receipt.status = if cursor.unit.recovered_bindings.is_empty() {
+                            WorkbenchItemStatus::Rejected
+                        } else {
+                            WorkbenchItemStatus::Stopped
+                        };
+                        failure_receipt.output = format!(
+                            "{}\nunfold admission ended without committing every fork group",
+                            failure_receipt.output
+                        );
+                        failure_receipt.operations =
+                            std::mem::take(&mut cursor.unit.operations);
+                        failure_receipt.failure_layer = Some(WorkbenchFailureLayer::Effect);
+                        merge_retained_bindings(
+                            &mut failure_receipt,
+                            &cursor.unit.recovered_bindings,
+                        );
+                        cursor.receipts.push(failure_receipt);
                         return Ok(WorkbenchRunAdvance::Complete(KernelStep::Continue(
                             workbench_response(
                                 WorkbenchRunStatus::Rejected,
@@ -10800,21 +10809,34 @@ where
                             Some(effects.invocation_work.as_ref()),
                         )
                         .await;
-                        cursor.receipts.push(WorkbenchItemReceipt {
+                        let mut failure_receipt = WorkbenchItemReceipt {
                             diagnostics,
                             index: cursor.index,
                             kind: None,
                             span: None,
                             source_items: Vec::new(),
-                            status: WorkbenchItemStatus::Rejected,
+                            status: if cursor.unit.recovered_bindings.is_empty() {
+                                WorkbenchItemStatus::Rejected
+                            } else {
+                                WorkbenchItemStatus::Stopped
+                            },
                             output,
                             value: None,
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
                             operations: std::mem::take(&mut cursor.unit.operations),
                             terminal_transfer: None,
-                            failure_layer: Some(WorkbenchFailureLayer::Compile),
-                        });
+                            failure_layer: Some(if cursor.unit.recovered_bindings.is_empty() {
+                                WorkbenchFailureLayer::Compile
+                            } else {
+                                WorkbenchFailureLayer::Effect
+                            }),
+                        };
+                        merge_retained_bindings(
+                            &mut failure_receipt,
+                            &cursor.unit.recovered_bindings,
+                        );
+                        cursor.receipts.push(failure_receipt);
                         return Ok(WorkbenchRunAdvance::Complete(KernelStep::Continue(
                             workbench_response(
                                 WorkbenchRunStatus::Rejected,
@@ -10847,15 +10869,16 @@ where
                         )
                         .await
                         .map_err(|error| {
-                            workbench_failure_after_operations(
+                            workbench_failure_after_unit(
                                 &cursor.receipts,
                                 cursor.index,
                                 request.items.len(),
                                 error,
                                 cursor.unit.operations.clone(),
+                                &cursor.unit.recovered_bindings,
                             )
                         })?;
-                        cursor.receipts.push(WorkbenchItemReceipt {
+                        let mut receipt = WorkbenchItemReceipt {
                             diagnostics: Vec::new(),
                             index: cursor.index,
                             kind: None,
@@ -10869,7 +10892,12 @@ where
                             operations: std::mem::take(&mut cursor.unit.operations),
                             terminal_transfer: Some(WorkbenchTerminalTransfer::ReplyAccepted),
                             failure_layer: None,
-                        });
+                        };
+                        merge_retained_bindings(
+                            &mut receipt,
+                            &cursor.unit.recovered_bindings,
+                        );
+                        cursor.receipts.push(receipt);
                         return Ok(WorkbenchRunAdvance::Complete(KernelStep::ContinueLater(
                             workbench_response(
                                 WorkbenchRunStatus::Replied,
@@ -10899,7 +10927,7 @@ where
                             self.environment
                                 .requests
                                 .rollback_cancellation_acknowledgement(request_id);
-                            return Err(workbench_failure_after_operations(
+                            return Err(workbench_failure_after_unit(
                             &cursor.receipts,
                             cursor.index,
                             request.items.len(),
@@ -10908,6 +10936,7 @@ where
                                     .into(),
                             ),
                             std::mem::take(&mut cursor.unit.operations),
+                            &cursor.unit.recovered_bindings,
                         ));
                         }
                         if self.pending_program.is_some()
@@ -10917,7 +10946,7 @@ where
                             self.environment
                                 .requests
                                 .rollback_cancellation_acknowledgement(request_id);
-                            return Err(workbench_failure_after_operations(
+                            return Err(workbench_failure_after_unit(
                                 &cursor.receipts,
                                 cursor.index,
                                 request.items.len(),
@@ -10926,6 +10955,7 @@ where
                                         .into(),
                                 ),
                                 std::mem::take(&mut cursor.unit.operations),
+                                &cursor.unit.recovered_bindings,
                             ));
                         }
                         let awaiting =
@@ -10947,7 +10977,7 @@ where
                                     self.environment
                                         .requests
                                         .rollback_cancellation_acknowledgement(request_id);
-                                    return Err(workbench_failure_after_operations(
+                                    return Err(workbench_failure_after_unit(
                                         &cursor.receipts,
                                         cursor.index,
                                         request.items.len(),
@@ -10955,6 +10985,7 @@ where
                                             "cancellation did not match the active request".into(),
                                         ),
                                         std::mem::take(&mut cursor.unit.operations),
+                                        &cursor.unit.recovered_bindings,
                                     ));
                                 }
                                 standing => {
@@ -10962,7 +10993,7 @@ where
                                     self.environment
                                         .requests
                                         .rollback_cancellation_acknowledgement(request_id);
-                                    return Err(workbench_failure_after_operations(
+                                    return Err(workbench_failure_after_unit(
                                         &cursor.receipts,
                                         cursor.index,
                                         request.items.len(),
@@ -10970,6 +11001,7 @@ where
                                             "cancellation lost its active request".into(),
                                         ),
                                         std::mem::take(&mut cursor.unit.operations),
+                                        &cursor.unit.recovered_bindings,
                                     ));
                                 }
                             };
@@ -10978,7 +11010,7 @@ where
                             self.environment
                                 .requests
                                 .rollback_cancellation_acknowledgement(request_id);
-                            return Err(workbench_failure_after_operations(
+                            return Err(workbench_failure_after_unit(
                                 &cursor.receipts,
                                 cursor.index,
                                 request.items.len(),
@@ -10986,6 +11018,7 @@ where
                                     "cancellation lost its mailbox continuation".into(),
                                 ),
                                 std::mem::take(&mut cursor.unit.operations),
+                                &cursor.unit.recovered_bindings,
                             ));
                         };
                         let outcome = match self
@@ -11005,12 +11038,13 @@ where
                                 self.environment
                                     .requests
                                     .rollback_cancellation_acknowledgement(request_id);
-                                return Err(workbench_failure_after_operations(
+                                return Err(workbench_failure_after_unit(
                                     &cursor.receipts,
                                     cursor.index,
                                     request.items.len(),
                                     error,
                                     std::mem::take(&mut cursor.unit.operations),
+                                    &cursor.unit.recovered_bindings,
                                 ));
                             }
                         };
@@ -11041,19 +11075,20 @@ where
                                     .outcome,
                             )
                             .map_err(|error| {
-                                workbench_failure_after_operations(
+                                workbench_failure_after_unit(
                                     &cursor.receipts,
                                     cursor.index,
                                     request.items.len(),
                                     error,
                                     cursor.unit.operations.clone(),
+                                    &cursor.unit.recovered_bindings,
                                 )
                             })?;
                         self.pending_program
                             .as_mut()
                             .expect("native cancellation pending")
                             .cleanup = cleanup;
-                        cursor.receipts.push(WorkbenchItemReceipt {
+                        let mut receipt = WorkbenchItemReceipt {
                             diagnostics: Vec::new(),
                             index: cursor.index,
                             kind: None,
@@ -11069,7 +11104,12 @@ where
                                 WorkbenchTerminalTransfer::CancellationAcknowledged,
                             ),
                             failure_layer: None,
-                        });
+                        };
+                        merge_retained_bindings(
+                            &mut receipt,
+                            &cursor.unit.recovered_bindings,
+                        );
+                        cursor.receipts.push(receipt);
                         return Ok(WorkbenchRunAdvance::Complete(KernelStep::ContinueLater(
                             workbench_response(
                                 WorkbenchRunStatus::RequestCancelled,
@@ -16812,9 +16852,22 @@ mod tests {
         let recovered = vec!["commandJob".to_owned()];
         let source = ResidentActorWorkbenchError::CompletedResultObservation {
             detail: "presenter result exceeded observation budget".into(),
-            recovered_bindings: recovered.clone(),
+            recovered_bindings: Vec::new(),
         };
-        let failure = workbench_failure_after_unit(&[], 0, 1, source, Vec::new(), &recovered);
+        let execution = WorkbenchExecutionId::from_digest([10; 16]);
+        let operation = WorkbenchOperationReceipt {
+            display_publication: None,
+            display: None,
+            id: WorkbenchOperationId {
+                execution,
+                input_unit_index: 0,
+                effect_ordinal: 0,
+            },
+            effect: "retain command job binding".into(),
+            disposition: WorkbenchOperationDisposition::Committed,
+        };
+        let failure =
+            workbench_failure_after_unit(&[], 0, 1, source, vec![operation], &recovered);
 
         let receipt = failure
             .receipts
@@ -16825,6 +16878,10 @@ mod tests {
         assert_eq!(receipt.installed_bindings, recovered);
         assert!(receipt.output.contains("effects committed"));
         assert!(receipt.output.contains("retained bindings: commandJob"));
+        assert_eq!(
+            receipt.operations[0].disposition,
+            WorkbenchOperationDisposition::Committed
+        );
     }
 
     fn completed_context_operations() -> Vec<WorkbenchOperationReceipt> {

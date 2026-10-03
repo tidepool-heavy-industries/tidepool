@@ -25,8 +25,10 @@ impl PreparedCommandPresentation {
         fragment: &mut ResidentWorkbenchFragment,
         remaining: &mut usize,
         output: &mut Vec<String>,
+        recovered_bindings: &mut Vec<String>,
     ) -> Result<(), ResidentActorWorkbenchError> {
         if let Some(binding) = self.binding {
+            recovered_bindings.push(binding.clone());
             fragment.retain_job_binding(binding);
         }
         let rendered = fragment.present_command(self.job.clone(), self.presentation, remaining);
