@@ -360,6 +360,13 @@ pub enum CertificationError {
     Receipt(&'static str),
     #[error("compiler product certificate disagrees with {0}")]
     Mismatch(&'static str),
+    #[error("compiler product certificate interface closure mismatch: {owner:?} requires {dependency:?} at {expected}, admitted {actual:?}")]
+    OriginalInterfaceClosure {
+        owner: (String, String),
+        dependency: (String, String),
+        expected: String,
+        actual: Option<String>,
+    },
     #[error("compiler product evidence is no longer valid")]
     StaleEvidence,
     #[error("original candidate evidence for {unit}:{module} failed: {failure:?}")]
@@ -3599,9 +3606,12 @@ pub(crate) fn certify_products(
             if key == &(module.unit.clone(), module.module.clone())
                 || admitted_interfaces.get(key) != Some(seal)
             {
-                return Err(CertificationError::Mismatch(
-                    "original interface owner closure",
-                ));
+                return Err(CertificationError::OriginalInterfaceClosure {
+                    owner: (module.unit.clone(), module.module.clone()),
+                    dependency: key.clone(),
+                    expected: hex(seal),
+                    actual: admitted_interfaces.get(key).map(hex),
+                });
             }
         }
     }
