@@ -44,7 +44,7 @@ import GHC.Unit.Module.ModIface (mi_module, mi_iface_hash, mi_final_exts)
 import GHC.Unit.Module.WholeCoreBindings (WholeCoreBindings(..), emptyIfaceForeign)
 import GHC.Unit.Types (Module, UnitId)
 import GHC.Utils.Binary
-  ( Binary(..), get, openBinMem, unsafeUnpackBinBuffer, withBinBuffer )
+  ( Binary(..), openBinMem, unsafeUnpackBinBuffer, withBinBuffer )
 import GHC.Utils.Outputable (text)
 import Tidepool.ExtractUtil (trySynchronous)
 import Tidepool.FinalizedModule (FinalizedModule(..))

@@ -231,6 +231,7 @@ haskell_binary(
         "Main.hs": "test-source-boot/Main.hs",
         "ExecutionSourceDecodeTest.hs": "test-source-boot/ExecutionSourceDecodeTest.hs",
         "ProgressBoundaryTest.hs": "test-source-boot/ProgressBoundaryTest.hs",
+        "FinalizedCoreTest.hs": "test-source-boot/FinalizedCoreTest.hs",
     },
     deps = [":tidepool_extract_internal"],
     compiler_flags = extractor_binary_flags("-XOverloadedStrings", "-package", "process"),
