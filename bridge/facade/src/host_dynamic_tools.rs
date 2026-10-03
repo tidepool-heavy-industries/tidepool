@@ -895,8 +895,56 @@ fn workbench_failure_transcript(failure: &exomonad_actor::KernelWorkbenchFailure
         .flat_map(|receipt| &receipt.operations)
     {
         let effect = exomonad_actor::bound_workbench_display(&operation.effect, 256);
+        let publication =
+            operation
+                .display_publication
+                .as_ref()
+                .map_or_else(String::new, |state| {
+                    use tidepool_runtime::session::WorkbenchDisplayPublication;
+                    let (identity, detail) = match state {
+                        WorkbenchDisplayPublication::Pending { publication } => {
+                            (publication, "pending".to_owned())
+                        }
+                        WorkbenchDisplayPublication::Unconfirmed {
+                            publication,
+                            detail,
+                        } => (
+                            publication,
+                            format!(
+                                "unconfirmed ({})",
+                                exomonad_actor::bound_workbench_display(detail, 256)
+                            ),
+                        ),
+                        WorkbenchDisplayPublication::Published {
+                            publication,
+                            output,
+                        } => (
+                            publication,
+                            format!(
+                                "committed at {}:{}",
+                                exomonad_actor::bound_workbench_display(&output.run, 256),
+                                output.sequence
+                            ),
+                        ),
+                        WorkbenchDisplayPublication::Refused {
+                            publication,
+                            detail,
+                        } => (
+                            publication,
+                            format!(
+                                "refused ({})",
+                                exomonad_actor::bound_workbench_display(detail, 256)
+                            ),
+                        ),
+                    };
+                    let (actor, incarnation, slot) = identity.display;
+                    format!(
+                        "; display {actor}:{incarnation}:{slot} page {} {detail}",
+                        identity.page_ordinal
+                    )
+                });
         let line = format!(
-            "operation {}:{}:{} {:?} ({effect})\n",
+            "operation {}:{}:{} {:?} ({effect}){publication}\n",
             operation.id.execution,
             operation.id.input_unit_index + 1,
             operation.id.effect_ordinal + 1,
@@ -2367,6 +2415,24 @@ pub(crate) mod tests {
         let uncertain_text = workbench_failure_transcript(&uncertain);
         assert!(uncertain_text.contains("publication durability remains unconfirmed"));
         assert!(!uncertain_text.contains("publication rejected"));
+        let page = tidepool_runtime::session::WorkbenchDisplayPublicationIdentity {
+            display: (3, 5, 7),
+            page_ordinal: 11,
+        };
+        uncertain.receipts[0].operations[0].display_publication = Some(
+            tidepool_runtime::session::WorkbenchDisplayPublication::Pending { publication: page },
+        );
+        let pending_text = workbench_failure_transcript(&uncertain);
+        assert!(pending_text.contains("display 3:5:7 page 11 pending"));
+        uncertain.receipts[0].operations[0].display_publication = Some(
+            tidepool_runtime::session::WorkbenchDisplayPublication::Unconfirmed {
+                publication: page,
+                detail: "acknowledgement lost".into(),
+            },
+        );
+        let unknown_text = workbench_failure_transcript(&uncertain);
+        assert!(unknown_text.contains("display 3:5:7 page 11 unconfirmed (acknowledgement lost)"));
+        assert!(unknown_text.len() <= MODEL_OUTPUT_LIMIT);
         let response =
             CallResponse::failure(&HostToolFailure::Dispatch(ResidentToolError::Invocation(
                 exomonad_actor::KernelInvocationFailure::Workbench(failure),
