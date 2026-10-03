@@ -752,7 +752,7 @@ mod tests {
                 let owners = prepared
                     .records
                     .iter()
-                    .map(super::super::computed_owner)
+                    .map(|record| super::super::computed_owner(&record.data))
                     .collect::<Vec<_>>();
                 let fresh = owners
                     .iter()

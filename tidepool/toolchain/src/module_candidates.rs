@@ -3360,8 +3360,8 @@ mod tests {
         fs::write(&a.source, "module A where\nimport B\n").unwrap();
         a.source_sha256 = sha(&fs::read(&a.source).unwrap());
         for source in &mut a.evidence.make_mut().sources {
-            if source.path == a.source {
-                source.sha256 = a.source_sha256.clone();
+            if source.path == a.data.source {
+                source.sha256 = a.data.source_sha256.clone();
             }
         }
         import_candidate(&mut a, &b);
