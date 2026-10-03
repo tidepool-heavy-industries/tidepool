@@ -91,7 +91,7 @@ pub(super) fn embedded_notification_operation_id(
     )
 }
 
-async fn deliver_embedded_notifications(
+pub(super) async fn deliver_embedded_notifications(
     target: ActorRef,
     binding: embedded_harness::EmbeddedActorBinding,
 ) -> Result<(), String> {
