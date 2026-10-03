@@ -2671,7 +2671,14 @@ mod tests {
         )
     }
 
-    fn write_record(root: &Path, source: &Path, unit: &str, module: &str, products: Vec<u8>) {
+    fn write_record(
+        root: &Path,
+        source: &Path,
+        unit: &str,
+        module: &str,
+        interface: &[u8],
+        products: Vec<u8>,
+    ) {
         let source = fs::canonicalize(source).unwrap();
         let source_bytes = fs::read(&source).unwrap();
         let target_source = "target".to_owned();
@@ -2711,8 +2718,8 @@ mod tests {
             module: module.into(),
             source: source.clone(),
             source_sha256: digest(&source_bytes),
-            interface: vec![0x42],
-            package_imports: package_imports(unit, module, &[0x42]),
+            interface: interface.to_vec(),
+            package_imports: package_imports(unit, module, interface),
             target_source,
             version_origin: CandidateVersionOrigin::Ordinary,
             original_owner: OriginalOwner {
@@ -2772,12 +2779,17 @@ mod tests {
     pub(super) fn candidate_fixture(root: &Path, module: &str) -> Record {
         let source = root.join(format!("{module}.hs"));
         fs::write(&source, format!("module {module} where\n")).unwrap();
+        // Defining owners have distinct interface bytes. A real GHC interface
+        // contains its owner; sharing one marker across owners fabricates a
+        // package-sidecar conflict at the immutable interface-content path.
+        let interface = format!("u:{module}").into_bytes();
         write_record(
             root,
             &source,
             "u",
             module,
-            product_bytes("u", module, &[0x42]),
+            &interface,
+            product_bytes("u", module, &interface),
         );
         let mut record = fs::read_dir(fixture_record_dir(root))
             .unwrap()
@@ -3173,6 +3185,8 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let mut a = candidate_fixture(root.path(), "A");
         let b = candidate_fixture(root.path(), "B");
+        assert_ne!(a.interface, b.interface);
+        assert_ne!(a.module_interface, b.module_interface);
         import_candidate(&mut a, &b);
         let owners = vec![computed_owner(&a), computed_owner(&b)];
         let input = root.path().join("Input.hs");
@@ -3817,6 +3831,7 @@ mod tests {
             &source,
             "u",
             "CacheOdd",
+            &[0x42],
             product_bytes("u", "CacheOdd", &[0x42]),
         );
         let record_path = fs::read_dir(fixture_record_dir(root.path()))
@@ -3917,6 +3932,7 @@ mod tests {
             &source,
             "u",
             "Library",
+            &[0x42],
             product_bytes("u", "Library", &[0x42]),
         );
         fs::write(&source, "module Library where\nchanged").unwrap();
@@ -3936,6 +3952,7 @@ mod tests {
             &source,
             "u",
             "Library",
+            &[0x42],
             b"broken cbor".to_vec(),
         );
         assert!(select_in(root.path(), scratch.path())
@@ -3956,6 +3973,7 @@ mod tests {
             &source,
             "u",
             "Library",
+            &[0x42],
             product_bytes("u", "Library", &[0x42]),
         );
         unsafe {
@@ -3985,6 +4003,7 @@ mod tests {
             &source,
             "u",
             "Library",
+            &[0x42],
             product_bytes("u", "Library", &[0x42]),
         );
         let dir = fixture_record_dir(root.path());
@@ -4031,6 +4050,7 @@ mod tests {
             &source,
             "u",
             "Library",
+            &[0x42],
             product_bytes("u", "Library", &[0x42]),
         );
         let dir = fixture_record_dir(root.path());
