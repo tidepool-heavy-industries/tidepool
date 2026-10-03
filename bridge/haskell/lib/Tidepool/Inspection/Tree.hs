@@ -219,7 +219,7 @@ preview budget depth next label tree
   | otherwise = case tree of
       Constructor name [] -> ordinary (TextLeaf name)
       Constructor name fields
-        | budget <= T.length name + 5 ->
+        | budget <= 5 || T.length (T.take (budget - 5) name) >= budget - 5 ->
             constructorPrefix name fields
         | otherwise -> children (name <> " {") "}" fields
       Sequence opening closing items -> sequenceChildren opening closing (0 :: Int) items
@@ -250,7 +250,7 @@ preview budget depth next label tree
                   (shown, omitted, following, childUnavailable) = preview allowance (depth + 1) key (label <> "." <> field) child
                   marker = if null omitted then "" else "…"
                   piece = value <> prefix <> shown <> marker
-              in if T.length prefix > room value
+              in if T.length (T.take (room value + 1) prefix) > room value
                 then fieldPrefix value keys key unavailable prefix field child rest
                 else walk piece (keys ++ omitted) following (unavailable || childUnavailable) rest
         fieldPrefix value keys key unavailable prefix field child rest =
