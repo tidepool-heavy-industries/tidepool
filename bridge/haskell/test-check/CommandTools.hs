@@ -59,7 +59,10 @@ runCommands action =
       CommandCancelWith _ -> pure (Right ())
 
 largeOutput :: Cmd.CommandOutput
-largeOutput = Cmd.CommandOutput (page (T.replicate 3000 "λ") True) (page "" True)
+largeOutput =
+  let text = T.replicate 3000 "λ\n"
+      stdout = Cmd.CommandPage text 0 (utf8Bytes text) 90000 0 0 True False False False
+   in Cmd.CommandOutput stdout (page "" True)
 
 partialFinishedPage :: Cmd.CommandPage
 partialFinishedPage = Cmd.CommandPage "λ" 0 2 5 0 0 True False False False
@@ -110,12 +113,21 @@ main = do
       completePageFacts = case Tools.facts fullOutput of
         Tools.OutputPage _ Tools.OutputStdout 0 2 2 2 True 0 False 1 True -> True
         _ -> False
-      pageTextHasState = all (`T.isInfixOf` Tools.presentation output) ["available_end=5", "eof=false", "lost_bytes=0", "lossy_utf8=false"]
+      pageTextHasState =
+        "bytes 0..2 of 5 · more available" `T.isInfixOf` Tools.presentation output
+          && "next_offset: 2" `T.isInfixOf` Tools.presentation output
+          && not ("lost 0 bytes" `T.isInfixOf` Tools.presentation output)
+          && not ("lossy UTF-8" `T.isInfixOf` Tools.presentation output)
+          && not ("next_offset:" `T.isInfixOf` Tools.presentation fullOutput)
       acceptedCancelDespiteAwaitError = case Tools.facts cancelled of
         Tools.Cancellation _ Tools.Accepted Nothing Nothing Nothing Nothing -> "could not be confirmed" `T.isInfixOf` Tools.presentation cancelled
         _ -> False
       largeResultIncomplete = case Tools.facts immediate of
-        Tools.ObservedCommand {Tools.complete = False} -> True
+        Tools.ObservedCommand {Tools.complete = False, Tools.payload_lines = visibleLines} ->
+          visibleLines > 0
+            && visibleLines < 3000
+            && "stdout · bytes 0..9000 of 90000 · more available" `T.isInfixOf` Tools.presentation immediate
+            && "read_output(session_id=\"job-immediate\", stream=\"Stdout\", offset=0)" `T.isInfixOf` Tools.presentation immediate
         _ -> False
   check "named command routes never request host presentation" noPresented
   check "new command receipts introduce their session and binding" initialReferences
@@ -125,7 +137,7 @@ main = do
   check "closed facts round-trip without the presentation payload" (receiptWire && resultWireOmitsPresentation && schemaMatches)
   check "finished partial read is distinct from complete stream EOF" (pageFacts && pageTextHasState && completePageFacts)
   check "accepted cancellation survives a failed follow-up await" acceptedCancelDespiteAwaitError
-  check "output beyond the presentation budget is marked incomplete" largeResultIncomplete
+  check ("capped output from a larger finished stream remains incomplete with recovery: " <> T.unpack (Tools.presentation immediate)) largeResultIncomplete
   check "yield route detaches a still-running job" (Detached "job-immediate" `elem` events)
   putStrLn "passed: command tool receipt behavior (10 checks)"
   where

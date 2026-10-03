@@ -297,7 +297,7 @@ readOptions position limit = do
     else Right (offset, options)
 
 renderOptionError :: CommandOptionError -> Text
-renderOptionError issue = "Rejected · nothing started or sent · " <> detail
+renderOptionError issue = "nothing started or sent · " <> detail
   where
     detail = case issue of
       InvalidMemoryMiB _ -> "memory_mib must be positive and fit Int bytes"
@@ -464,15 +464,17 @@ readRetained ReadOutput {session_id = key, stream = selected, offset = position,
               start = Cmd.outputStart details
               end = Cmd.outputEnd details
               availableEnd = Cmd.outputAvailableEnd details
+              retainedStart = Cmd.outputRetainedStart details
               lost = Cmd.outputLostBytes details
               lossy = Cmd.outputLossy details
-              header = streamName selectedStream <> " · bytes " <> number start <> ".." <> number end <> " · available_end=" <> number availableEnd <> " · eof=" <> boolean eof <> " · lost_bytes=" <> number lost <> " · lossy_utf8=" <> boolean lossy <> "\n"
+              header = streamName selectedStream <> " · bytes " <> number start <> ".." <> number end <> " of " <> number availableEnd <> (if eof then " · EOF" else if end < availableEnd then " · more available" else " · current end") <> (if retainedStart > 0 then " · retained from " <> number retainedStart else "") <> (if lost > 0 then " · lost " <> number lost <> " bytes" else "") <> (if lossy then " · lossy UTF-8" else "") <> "\n"
               clipped = "\n[payload clipped by max_output_bytes]"
-              payloadBudget = max 0 (budget - utf8Bytes header)
+              pageTail = if eof then "" else "\nnext_offset: " <> number end
+              payloadBudget = max 0 (budget - utf8Bytes (header <> pageTail))
               didClip = utf8Bytes payload > payloadBudget
               shownPayload = if didClip then utf8Prefix (max 0 (payloadBudget - utf8Bytes clipped)) payload <> clipped else payload
-              text = header <> shownPayload
-              complete = start == 0 && eof && not lossy && lost == 0 && not didClip
+              text = header <> shownPayload <> pageTail
+              complete = start == 0 && retainedStart == 0 && eof && not lossy && lost == 0 && not didClip
               page = OutputPage key stream start end end availableEnd eof lost lossy (lineCount payload) complete
           pure (result page text)
 
@@ -484,20 +486,69 @@ defaultPresenter command _ _ options retained = do
     render observed = case Cmd.presentedOutput observed of
       Left issue -> pure (observedResult retained (Cmd.presentedStatus observed) Nothing Nothing 0 False (heading observed <> "\nOutput unavailable: " <> Cmd.renderCommandError issue))
       Right output -> do
-        let headingText = heading observed
-            payloadBudget = max 0 (Cmd.presentedByteBudget observed - utf8Bytes (headingText <> "\n"))
-            (firstBody, initiallyOmitted) = displayWith payloadBudget output
-            recovery = if initiallyOmitted then "\nRecover retained output with read_output(session_id=\"" <> jobKey retained <> "\", stream=\"Stdout\" or \"Stderr\", offset=<next_offset>)." else ""
-            body = if initiallyOmitted then fst (displayWith (max 0 (payloadBudget - utf8Bytes recovery)) output) else firstBody
-            omitted = initiallyOmitted
-            out = Cmd.commandStdout output
+        let out = Cmd.commandStdout output
             err = Cmd.commandStderr output
-            linesShown = lineCount (Cmd.outputText out) + lineCount (Cmd.outputText err)
-            text = headingText <> "\n" <> body <> recovery
-         in pure (observedResult retained (Cmd.presentedStatus observed) (Just (Cmd.outputAvailableEnd out)) (Just (Cmd.outputAvailableEnd err)) linesShown (not omitted) text)
+            pages = [(Cmd.Stdout, out), (Cmd.Stderr, err)]
+            included = filter (showPage . snd) pages
+            headingText = heading observed <> "\n"
+            metadataBytes = sum [utf8Bytes (pageHeader stream page <> "\n") + if T.null (Cmd.outputText page) then 0 else 1 | (stream, page) <- included]
+            incomplete = filter (not . pageComplete . snd) pages
+            outputBytes = sum [utf8Bytes (Cmd.outputText page) | (_, page) <- included]
+            maximumRecovery = recoveryText True included
+            availableWithMaximumRecovery = max 0 (Cmd.presentedByteBudget observed - utf8Bytes headingText - metadataBytes - utf8Bytes maximumRecovery)
+            clipNeeded = outputBytes > availableWithMaximumRecovery
+            recoveryPages = if clipNeeded then included else incomplete
+            recovery = recoveryText clipNeeded recoveryPages
+            availableForPayload = max 0 (Cmd.presentedByteBudget observed - utf8Bytes headingText - metadataBytes - utf8Bytes recovery)
+            willClip = outputBytes > availableForPayload
+            clippingMarker = "\n[payload clipped by max_output_bytes]"
+            payloadBudget = max 0 (availableForPayload - if willClip then utf8Bytes clippingMarker else 0)
+            shownPages = allocatePayload payloadBudget included
+            payload = T.concat [pageHeader stream page <> "\n" <> shown <> (if T.null shown then "" else "\n") | ((stream, page), shown) <- zip included shownPages]
+            text = headingText <> payload <> (if willClip then clippingMarker else "") <> recovery
+            linesShown = sum (map lineCount shownPages)
+            complete = null incomplete && not willClip
+         in pure (observedResult retained (Cmd.presentedStatus observed) (Just (Cmd.outputAvailableEnd out)) (Just (Cmd.outputAvailableEnd err)) linesShown complete text)
     heading observed =
       (if maybe False (const True) command then "session_id: " <> jobKey retained <> "\n" else "")
         <> statusText (Cmd.presentedStatus observed)
+
+    showPage page = Cmd.outputAvailableEnd page > 0 || not (T.null (Cmd.outputText page)) || not (Cmd.outputFinished page)
+
+    pageComplete page =
+      Cmd.outputFinished page
+        && Cmd.outputStart page == 0
+        && Cmd.outputRetainedStart page == 0
+        && Cmd.outputEnd page == Cmd.outputAvailableEnd page
+        && Cmd.outputLostBytes page == 0
+        && not (Cmd.outputLossy page)
+
+    pageHeader stream page =
+      streamName stream
+        <> " · bytes " <> number (Cmd.outputStart page) <> ".." <> number (Cmd.outputEnd page) <> " of " <> number (Cmd.outputAvailableEnd page)
+        <> (if Cmd.outputFinished page && Cmd.outputEnd page == Cmd.outputAvailableEnd page then " · EOF" else if Cmd.outputEnd page < Cmd.outputAvailableEnd page then " · more available" else " · current end")
+        <> (if Cmd.outputRetainedStart page > 0 then " · retained from " <> number (Cmd.outputRetainedStart page) else "")
+        <> (if Cmd.outputLostBytes page > 0 then " · lost " <> number (Cmd.outputLostBytes page) <> " bytes" else "")
+        <> (if Cmd.outputLossy page then " · lossy UTF-8" else "")
+
+    recoveryText clipped pages =
+      T.concat
+        [ "\nContinue with read_output(session_id=\"" <> jobKey retained <> "\", stream=\"" <> streamArgument stream <> "\", offset=" <> number offset <> ")."
+        | (stream, page) <- pages,
+          let offset = if clipped || pageComplete page then Cmd.outputStart page else Cmd.outputEnd page
+        ]
+
+    streamArgument Cmd.Stdout = "Stdout"
+    streamArgument Cmd.Stderr = "Stderr"
+
+    allocatePayload budget pages = allocate budget (sum [utf8Bytes (Cmd.outputText page) | (_, page) <- pages]) pages
+    allocate _ _ [] = []
+    allocate budget _ [(_, page)] = [utf8Prefix budget (Cmd.outputText page)]
+    allocate budget total ((_, page) : rest) =
+      let pageBytes = utf8Bytes (Cmd.outputText page)
+          share = if total <= 0 then 0 else fromInteger (toInteger budget * toInteger pageBytes `div` toInteger total)
+          shown = utf8Prefix share (Cmd.outputText page)
+       in shown : allocate (max 0 (budget - utf8Bytes shown)) (max 0 (total - pageBytes)) rest
 
 observedResult :: Cmd.Job -> Cmd.CommandStatus -> Maybe Int -> Maybe Int -> Int -> Bool -> Text -> CommandToolResult
 observedResult job status outEnd errEnd linesShown isComplete text =
@@ -574,10 +625,6 @@ outputStreamFact Cmd.Stderr = OutputStderr
 number :: Int -> Text
 number = T.pack . show
 
-boolean :: Bool -> Text
-boolean True = "true"
-boolean False = "false"
-
 lineCount :: Text -> Int
 lineCount text
   | T.null text = 0
@@ -590,7 +637,7 @@ boundedResult :: Int -> CommandToolResult -> CommandToolResult
 boundedResult budget CommandToolResult {facts = semantic, presentation = text}
   | utf8Bytes text <= budget = CommandToolResult semantic text
   | otherwise =
-      let suffix = "\n[presentation truncated; structured facts remain available]"
+      let suffix = "\n[presentation truncated]"
           bounded = utf8Prefix (max 0 (budget - utf8Bytes suffix)) text <> suffix
           boundedFacts = case semantic of
             ObservedCommand {session_id = key, state = currentState, successful = success, outcome = commandOutcome, cleanup = commandCleanup, stdout_end = stdoutEnd, stderr_end = stderrEnd, payload_lines = linesShown, retained_binding = binding} ->
