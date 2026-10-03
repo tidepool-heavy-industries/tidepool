@@ -432,14 +432,22 @@ pub(super) fn issue_interfaces(
                 node.product,
                 ProductAvailability::Ready | ProductAvailability::InterfaceOnly
             )
-            || module
-                .interface_requirements
-                .iter()
-                .any(|(required, seal)| required == key || available.get(required) != Some(seal))
         {
             return Err(CertificationError::Mismatch(
                 "finalized source/interface closure",
             ));
+        }
+        for (required, seal) in &module.interface_requirements {
+            if required == key || available.get(required) != Some(seal) {
+                return Err(CertificationError::FinalizedInterfaceRequirement {
+                    unit: module.unit.clone(),
+                    module: module.module.clone(),
+                    required_unit: required.0.clone(),
+                    required_module: required.1.clone(),
+                    expected_sha256: hex(seal),
+                    selected_sha256: available.get(required).map(|seal| hex(seal)),
+                });
+            }
         }
         let interface = capture(root, &module.interface, PACKAGE_INTERFACE_LIMIT, validation)?;
         let package_imports = capture(

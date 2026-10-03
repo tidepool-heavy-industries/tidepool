@@ -360,6 +360,15 @@ pub enum CertificationError {
     Receipt(&'static str),
     #[error("compiler product certificate disagrees with {0}")]
     Mismatch(&'static str),
+    #[error("finalized interface {unit}:{module} requires {required_unit}:{required_module} seal {expected_sha256}; selected seal {selected_sha256:?}")]
+    FinalizedInterfaceRequirement {
+        unit: String,
+        module: String,
+        required_unit: String,
+        required_module: String,
+        expected_sha256: String,
+        selected_sha256: Option<String>,
+    },
     #[error("compiler product evidence is no longer valid")]
     StaleEvidence,
     #[error("original candidate evidence for {unit}:{module} failed: {failure:?}")]
@@ -7287,9 +7296,11 @@ pub(crate) mod tests {
         missing.finalization.modules.remove(&types_key);
         assert!(matches!(
             certify(&missing),
-            Err(CertificationError::Mismatch(
-                "finalized source/interface closure"
-            ))
+            Err(CertificationError::FinalizedInterfaceRequirement {
+                unit, module, required_unit, required_module, expected_sha256,
+                selected_sha256: None,
+            }) if unit == "main" && module == "Fresh" && required_unit == "main"
+                && required_module == "Types" && expected_sha256 == hex(&sha(&[0x42]))
         ));
         let mut changed = receipt.clone();
         changed
@@ -7301,9 +7312,12 @@ pub(crate) mod tests {
             .sha256 = [9; 32];
         assert!(matches!(
             certify(&changed),
-            Err(CertificationError::Mismatch(
-                "finalized source/interface closure"
-            ))
+            Err(CertificationError::FinalizedInterfaceRequirement {
+                unit, module, required_unit, required_module, expected_sha256,
+                selected_sha256: Some(selected),
+            }) if unit == "main" && module == "Fresh" && required_unit == "main"
+                && required_module == "Types" && expected_sha256 == hex(&sha(&[0x42]))
+                && selected == hex(&[9; 32])
         ));
     }
 

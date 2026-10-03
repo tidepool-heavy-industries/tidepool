@@ -45,7 +45,7 @@ import Tidepool.ExecutionSchema
   , ResultContract(..), RuntimeRep(..), Signature(..), SignatureId(..)
   , SymbolIdentity(..), WireProgram(..) )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..) )
+  ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces )
 import Tidepool.ModuleCandidates
   ( CandidateGlobal(..), CandidateGroup(..), ModuleCandidate(..) )
 import Tidepool.PackageWitness
@@ -120,7 +120,9 @@ encodeCertifiedProducts env interfaces finalized cached exact fresh targets evid
         ++ [( (productUnit product, productModule product), Set.singleton (productIfaceSha product))
           | product <- unsealedProducts]
         ++ [((T.pack (exactUnit iface), T.pack (exactModule iface)), Set.singleton (T.pack (exactSha256 iface)))
-           | scope <- maybe [] pure exact, (iface, _, _) <- scopeInterfaces scope])
+           | scope <- maybe [] pure exact, (iface, _, _) <- scopeInterfaces scope]
+        ++ [((T.pack (exactUnit iface), T.pack (exactModule iface)), Set.singleton (T.pack (exactSha256 iface)))
+           | scope <- maybe [] pure exact, iface <- scopeValueInterfaces scope])
   sealedProducts <- forM unsealedProducts $ \product -> do
     let owner = mkModule (stringToUnit (T.unpack (productUnit product))) (mkModuleName (T.unpack (productModule product)))
     selected <- case Map.lookup (moduleName owner) interfaces of
@@ -132,7 +134,10 @@ encodeCertifiedProducts env interfaces finalized cached exact fresh targets evid
       requirements <- forM (homeInterfaceUsageOwners env iface) $ \(unit, name) ->
         case Map.lookup (T.pack unit, T.pack name) interfaceSeals of
           Just seals | [sha] <- Set.toAscList seals -> Right (T.pack unit, T.pack name, sha)
-          _ -> Left "original interface usage leaves the exact sealed owner closure"
+          selectedSeals -> Left ("original interface usage leaves the exact sealed owner closure: "
+            ++ show (productUnit product, productModule product)
+            ++ " requires " ++ show (unit,name)
+            ++ "; selected seals=" ++ show (maybe [] Set.toAscList selectedSeals))
       Right product { productInterfaces = requirements }
   let products = [product | Right product <- sealedProducts]
       expectedFresh = length fresh
@@ -151,7 +156,9 @@ encodeCertifiedProducts env interfaces finalized cached exact fresh targets evid
         [ (T.pack (dependencyModuleUnit node), T.pack (dependencyModuleName node))
         | node <- dependencyModules evidence, not (dependencyModuleBoot node) ]
         ++ [(T.pack (exactUnit iface), T.pack (exactModule iface))
-           | scope <- maybe [] pure exact, (iface, _, _) <- scopeInterfaces scope])
+           | scope <- maybe [] pure exact, (iface, _, _) <- scopeInterfaces scope]
+        ++ [(T.pack (exactUnit iface), T.pack (exactModule iface))
+           | scope <- maybe [] pure exact, iface <- scopeValueInterfaces scope])
       allGlobals =
         [ (product, group) | product <- products, group <- productGroups product ]
   if any ((/= 1) . Set.size) (Map.elems interfaceSeals)
