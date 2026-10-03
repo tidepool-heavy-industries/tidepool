@@ -51,6 +51,9 @@ import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..), SessionScope(..)
   , mkThinSessionIface, writeSessionIface, injectSessionIface, renderSessionModule )
 import Tidepool.PreparedStg (PreparedModule(..))
+import HarnessSourceTest (harnessSourceChecks)
+import InspectionRunnerTest (inspectionRunnerChecks)
+import WorkerDiagnosticsTest (runWorkerDiagnosticsTests)
 import CheckedAdmissionTest (checkedAdmissionChecks)
 import CellProgramStateTest (cellProgramStateChecks)
 import UnreachableCompileTimeTest (unreachableCompileTimeCompilation)
@@ -77,6 +80,7 @@ main = getArgs >>= \case
   ["--function-value-iface"] -> functionValueInterfaceCompilation >> putStrLn "function value interface: 1 passed"
   ["--session-fixities"] -> sessionFixitiesCompilation >> putStrLn "session fixities: 1 passed"
   ["--unreachable-compile-time"] -> unreachableCompileTimeCompilation >> putStrLn "unreachable compile-time: 1 passed"
+  ["--metadata-inspection"] -> metadataCompilation >> putStrLn "metadata inspection: mixed probes and dependency rejection passed"
   ["--checked-load-boundary"] -> checkedLoadBoundaryCompilation >> putStrLn "checked load boundary: 4 passed"
   ["--structural-display", effectsRoot] -> structuralDisplayCompilation OrdinaryDisplayTest effectsRoot >> putStrLn "structural display: 1 passed"
   ["--structural-display-exact", effectsRoot] -> structuralDisplayCompilation ExactDisplayTest effectsRoot >> putStrLn "exact structural display: 1 passed"
@@ -87,6 +91,9 @@ compilerBoundaryChecks = do
   requestValidationChecks
   cellProgramStateChecks
   checkedAdmissionChecks
+  harnessSourceChecks
+  inspectionRunnerChecks
+  runWorkerDiagnosticsTests
 
 runAllTests :: IO ()
 runAllTests = do
@@ -1275,6 +1282,7 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
     [ "module MetadataTarget where"
     , "import MetadataDependency"
     , "__tidepool_inspect_0 = value"
+    , "__tidepool_inspect_1 = True"
     ]
   evictions <- newIORef []
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
@@ -1288,9 +1296,10 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
         (crTargetTcGblEnv checked)
         (crTargetRdrEnv checked)
         (crInspectionProbes checked)
-        [InspectTypeOf "value", InspectModule "MetadataTarget" False]
+        [InspectTypeOf "value", InspectModule "MetadataTarget" False, InspectTypeOf "True"]
       case inspected of
-        [InspectionType "value" rendered _, InspectionBrowse "MetadataTarget" False entries] -> do
+        [InspectionType "value" rendered _, InspectionBrowse "MetadataTarget" False entries, InspectionType "True" secondRendered _] -> do
+          assertContains "non-type query does not advance the type probe ordinal" "Bool" secondRendered
           assertContains "inspection resolves a local probe without a target HPT interface"
             "Box Int" rendered
           unless (any ((== "__tidepool_inspect_0") . infoName) entries) $

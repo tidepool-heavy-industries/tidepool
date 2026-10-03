@@ -96,7 +96,7 @@ import Tidepool.DeclarationJoin
   , renderDeclarationInventoryOutcome )
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
-  ( Diag(..), SourceRejection(..), InputRejection(..) )
+  ( SourceRejection(..), InputRejection(..) )
 import Tidepool.CheckedAdmission
   ( validateCheckedCellAdmission, validateCheckedItemAdmission
   , checkedDisplayBinders, validateCheckedDisplayAdmission )

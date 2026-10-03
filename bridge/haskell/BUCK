@@ -18,6 +18,10 @@ _EXTRACTOR_SRCS = {
     "Tidepool/DependencyEvidence.hs": "src/Tidepool/DependencyEvidence.hs",
     "Tidepool/DeclarationJoin.hs": "src/Tidepool/DeclarationJoin.hs",
     "Tidepool/WorkerServer.hs": "src/Tidepool/WorkerServer.hs",
+    "Tidepool/HarnessSource.hs": "src/Tidepool/HarnessSource.hs",
+    "Tidepool/InspectionRunner.hs": "src/Tidepool/InspectionRunner.hs",
+    "Tidepool/WorkerDiagnostics.hs": "src/Tidepool/WorkerDiagnostics.hs",
+
     "Tidepool/DiagJson.hs": "src/Tidepool/DiagJson.hs",
     "Tidepool/EffectSchema.hs": "src/Tidepool/EffectSchema.hs",
     "Tidepool/ExtractUtil.hs": "src/Tidepool/ExtractUtil.hs",

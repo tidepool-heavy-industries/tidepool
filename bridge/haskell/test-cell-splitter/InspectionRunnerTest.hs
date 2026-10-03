@@ -58,6 +58,7 @@ inspectionRunnerChecks = do
     let batched = (request [Input "first", Input "second"] [InspectType "a", InspectType "b"])
           { requestInspectTypeBatch = Just batch }
         reset = writeIORef calls [] >> writeIORef inspected []
+        rejectBatch :: Exception exception => exception -> CompilePurpose -> FilePath -> IO FilePath
         rejectBatch exception purpose path = do
           value <- record purpose path
           if path == batch then throwIO exception else pure value
