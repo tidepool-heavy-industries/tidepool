@@ -21,6 +21,8 @@ data Tools mode = Tools
 
 data Narrow mode = Narrow { narrow :: mode :- HaskellCell '[] } deriving (Generic)
 
+data Unpresented mode = Unpresented { unpresented :: mode :- Call Text Text } deriving (Generic)
+
 data ContextNotebook mode = ContextNotebook
   { contextNotebook :: mode :- Sync (HaskellCell (SyncEffects '[]))
   } deriving (Generic)
@@ -33,10 +35,10 @@ narrowTools = Narrow (haskellTool "A pure notebook in a command-capable actor")
 
 tools :: Tools (AsServerT (Eff '[]))
 tools = Tools
-  { ordinary = tool "Echo" pure
-  , curate = syncTool "Select next model" $ \model -> send (SetNextModelWith model) >> pure model
-  , rawCurate = syncRawTool "Echo literal" pure
-  , notifyCurate = syncNotify "Select next model" (send . SetNextModelWith)
+  { ordinary = presentWith id (tool "Echo" pure)
+  , curate = presentWith id $ syncTool "Select next model" $ \model -> send (SetNextModelWith model) >> pure model
+  , rawCurate = presentWith id (syncRawTool "Echo literal" pure)
+  , notifyCurate = presentWith (const "") $ syncNotify "Select next model" (send . SetNextModelWith)
   , notebook = haskellTools
   }
 
@@ -53,6 +55,10 @@ installation _ = error "installation executed the retained handler"
 
 main :: IO ()
 main = do
+  let missing = compileInstalledTools
+        (Unpresented (tool "Echo" pure) :: Unpresented (AsServerT (Eff '[])))
+  require "installed named handlers require explicit presentation"
+    (case missing of Left MissingToolPresentation {} -> True; _ -> False)
   compiled <- either (error . show) pure (compileInstalledTools tools)
   let declared = declarations compiled
       runTool name = run $ runState [] $ reinterpret context $ dispatch compiled name (toJSON ("executor" :: Text))
@@ -69,11 +75,14 @@ main = do
   require "native endpoints cannot enter the handler dispatcher"
     (fst (runTool "haskell") == Left (NativeToolInvocation "haskell"))
   require "async compiled handler is lifted into shared dispatcher"
-    (runTool "ordinary" == (Right (toJSON ("executor" :: Text)), []))
+    (runTool "ordinary" == (Right (ToolDispatchSuccess (toJSON ("executor" :: Text)) "executor"), []))
+  require "dispatch reply keeps semantic output separate from selected presentation"
+    (toolDispatchReply (Right (ToolDispatchSuccess (toJSON ("payload" :: Text)) "model text"))
+      == object ["status" .= ("success" :: Text), "output" .= ("payload" :: Text), "presentation" .= ("model text" :: Text)])
   require "sync compiled handler emits context effect in shared dispatcher"
-    (runTool "curate" == (Right (toJSON ("executor" :: Text)), ["executor"]))
+    (runTool "curate" == (Right (ToolDispatchSuccess (toJSON ("executor" :: Text)) "executor"), ["executor"]))
   require "sync raw handler reuses compiled function"
-    (runTool "raw_curate" == (Right (toJSON ("executor" :: Text)), []))
+    (runTool "raw_curate" == (Right (ToolDispatchSuccess (toJSON ("executor" :: Text)) "executor"), []))
   require "sync notification runs context effect"
     (snd (runTool "notify_curate") == ["executor"])
   asyncDefault <- either (error . show) pure (compileInstalledTools (specTools (defaultAsyncWorkbenchSpec :: AgentSpec (AsyncHaskellTools '[]) '[])))

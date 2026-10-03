@@ -26,7 +26,7 @@ data Reply = Reply { count :: Int, optional :: Maybe Text }
 
 program :: Eff '[ModelCall, State [Text]] (ModelResult Reply)
 program = invokeModel (typedTurn @Reply (defaultSpec
-  { specTools = Tools (tool "Echo with a caller effect" (\text -> modify (<> [text]) >> pure text))
+  { specTools = Tools (presentWith id (tool "Echo with a caller effect" (\text -> modify (<> [text]) >> pure text)))
   , afterTool = Just (\_ result -> modify (<> [toolResultHandle result]) >> pure (Annotated "checked"))
   }) "Return a typed result after echoing") "hello"
 
@@ -34,8 +34,8 @@ handleModel :: ModelCall a -> Eff '[State [Text]] a
 handleModel (ModelStartWith _) = pure (Right (object
   ["kind" .= ("callback" :: Text), "invocation" .= ("i" :: Text), "call_id" .= ("c" :: Text), "name" .= ("echo" :: Text), "arguments" .= ("called" :: Text)]))
 handleModel (ModelResumeWith token call answer)
-  | token == "i" && call == "c" && answer == toolDispatchReply (Right (String "called")) = pure (Right (object
-      ["kind" .= ("hook" :: Text), "invocation" .= token, "operation" .= ("op" :: Text), "name" .= ("echo" :: Text), "arguments" .= ("called" :: Text), "handle" .= ("retained:1" :: Text), "ordinal" .= (1 :: Int), "output" .= ("called" :: Text)]))
+  | token == "i" && call == "c" && answer == toolDispatchReply (Right (ToolDispatchSuccess (String "called") "called")) = pure (Right (object
+      ["kind" .= ("hook" :: Text), "invocation" .= token, "operation" .= ("op" :: Text), "name" .= ("echo" :: Text), "arguments" .= ("called" :: Text), "handle" .= ("retained:1" :: Text), "ordinal" .= (1 :: Int), "value" .= ("called" :: Text), "output" .= ("called" :: Text)]))
   | otherwise = error "callback identity/output changed"
 handleModel (ModelAnnotateWith token op annotation)
   | token == "i" && op == "op" && annotation == annotationToJson (Annotated "checked") = pure (Right (object
