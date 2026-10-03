@@ -1992,6 +1992,12 @@ where
                     owned
                         .state
                         .cursor
+                        .unit
+                        .recovered_bindings
+                        .push(binding.clone());
+                    owned
+                        .state
+                        .cursor
                         .running
                         .as_mut()
                         .expect("retained command binding belongs to this effect fragment")

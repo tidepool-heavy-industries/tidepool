@@ -1342,6 +1342,10 @@ impl ResidentWorkbenchFragment {
         self.recovered_jobs.push(binding);
     }
 
+    pub(crate) fn recovered_bindings(&self) -> &[String] {
+        &self.recovered_jobs
+    }
+
     /// Record that a `Cmd.start` effect resolved to this job id while this
     /// item's computation was running. Only tagged onto a binding at
     /// completion when it is the item's sole started job and its sole
@@ -1376,14 +1380,13 @@ impl ResidentWorkbenchFragment {
     }
 }
 
-/// Matched-build envelope. The authored output stays inside `Success`;
-/// refusals never become values of a tool's advertised output schema.
+/// Programmatic actor tool response. It carries the authored semantic value
+/// without requiring a host presentation.
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ToolDispatchReply {
     Success {
         output: serde_json::Value,
-        presentation: String,
     },
     Refused {
         #[serde(flatten)]
@@ -1410,7 +1413,31 @@ pub enum ToolDispatchError {
 }
 
 impl ToolDispatchReply {
-    pub fn into_output(self) -> Result<(serde_json::Value, String), ToolDispatchError> {
+    pub fn into_output(self) -> Result<serde_json::Value, ToolDispatchError> {
+        match self {
+            Self::Success { output } => Ok(output),
+            Self::Refused { error } => Err(error),
+        }
+    }
+}
+
+/// Installed named-tool envelope. The host receives semantic output and a
+/// separately selected presentation; refusal remains a distinct variant.
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum InstalledToolDispatchReply {
+    Success {
+        output: serde_json::Value,
+        presentation: String,
+    },
+    Refused {
+        #[serde(flatten)]
+        error: ToolDispatchError,
+    },
+}
+
+impl InstalledToolDispatchReply {
+    fn into_parts(self) -> Result<(serde_json::Value, String), ToolDispatchError> {
         match self {
             Self::Success {
                 output,
@@ -1426,7 +1453,7 @@ impl ToolDispatchReply {
 /// typed refusal maps to the pre-execution refusal variant.
 fn decode_tool_dispatch_reply(
     text: &str,
-) -> Result<ToolDispatchReply, ResidentActorWorkbenchError> {
+) -> Result<InstalledToolDispatchReply, ResidentActorWorkbenchError> {
     serde_json::from_str(text).map_err(|error| {
         ResidentActorWorkbenchError::ActorProtocol(format!("invalid tool dispatch reply: {error}"))
     })
@@ -3112,6 +3139,11 @@ pub enum ResidentActorWorkbenchError {
     InputMount(String),
     #[error("could not inspect the saved value: {0}")]
     Inspection(String),
+    #[error("completed result observation failed: {detail}")]
+    CompletedResultObservation {
+        detail: String,
+        recovered_bindings: Vec<String>,
+    },
     #[error("actor protocol violation: {0}")]
     ActorProtocol(String),
     #[error(transparent)]
@@ -3142,6 +3174,15 @@ impl ResidentActorWorkbenchError {
         match self {
             Self::PrefixPublication { original, .. } => original.primary_failure(),
             original => original,
+        }
+    }
+
+    pub(crate) fn recovered_bindings(&self) -> &[String] {
+        match self.primary_failure() {
+            Self::CompletedResultObservation {
+                recovered_bindings, ..
+            } => recovered_bindings,
+            _ => &[],
         }
     }
 
@@ -5971,17 +6012,28 @@ where
                     // materialize. That is a size answer, so say so instead of
                     // letting the decoder call it a type mismatch.
                     if tidepool_codegen::observation::contains_oversize_sentinel(result.value()) {
-                        return Err(ResidentActorWorkbenchError::Inspection(
-                            "the tool's answer exceeded the observation budget; return a \
+                        return Err(ResidentActorWorkbenchError::CompletedResultObservation {
+                            detail: "the tool's answer exceeded the observation budget; return a \
                              smaller Text, or bind the whole value in a cell and select from it"
                                 .into(),
-                        ));
+                            recovered_bindings: installed_bindings.clone(),
+                        });
                     }
-                    let text = String::from_value(result.value(), result.table())?;
+                    let text = String::from_value(result.value(), result.table()).map_err(|error| {
+                        ResidentActorWorkbenchError::CompletedResultObservation {
+                            detail: error.to_string(),
+                            recovered_bindings: installed_bindings.clone(),
+                        }
+                    })?;
                     if matches!(&fragment.display, WorkbenchDisplay::ToolDispatch) {
-                        let reply = decode_tool_dispatch_reply(&text)?;
+                        let reply = decode_tool_dispatch_reply(&text).map_err(|error| {
+                            ResidentActorWorkbenchError::CompletedResultObservation {
+                                detail: error.to_string(),
+                                recovered_bindings: installed_bindings.clone(),
+                            }
+                        })?;
                         let (value, presentation) = reply
-                            .into_output()
+                            .into_parts()
                             .map_err(ResidentActorWorkbenchError::ToolDispatch)?;
                         semantic_value = Some(value);
                         presentation
@@ -10819,11 +10871,11 @@ mod tool_dispatch_tests {
     fn dispatch_envelope_preserves_authored_output_and_decodes_typed_refusals() {
         let output = serde_json::json!({"status": "refused", "output": [1, true, null]});
         let presentation = "presented independently";
-        let reply: ToolDispatchReply = serde_json::from_value(serde_json::json!({
+        let reply: InstalledToolDispatchReply = serde_json::from_value(serde_json::json!({
             "status": "success", "output": output, "presentation": presentation,
         }))
         .unwrap();
-        assert_eq!(reply.into_output().unwrap(), (output, presentation.into()));
+        assert_eq!(reply.into_parts().unwrap(), (output, presentation.into()));
         for (kind, unknown) in [("unknown_tool", true), ("invalid_input", false)] {
             let mut payload = serde_json::json!({
                 "status": "refused", "kind": kind, "error": "correct the call", "tool": "echo",
@@ -10831,8 +10883,8 @@ mod tool_dispatch_tests {
             if !unknown {
                 payload["detail"] = serde_json::json!("invalid argument");
             }
-            let reply: ToolDispatchReply = serde_json::from_value(payload).unwrap();
-            let error = reply.into_output().unwrap_err();
+            let reply: InstalledToolDispatchReply = serde_json::from_value(payload).unwrap();
+            let error = reply.into_parts().unwrap_err();
             assert_eq!(
                 matches!(error, ToolDispatchError::UnknownTool { .. }),
                 unknown
@@ -10854,23 +10906,34 @@ mod tool_dispatch_tests {
             serde_json::json!({"status": "refused", "kind": "unknown_tool", "error": "bad"}),
             serde_json::json!({"status": "refused", "kind": "invalid_input", "error": "bad", "tool": "echo"}),
         ] {
-            assert!(serde_json::from_value::<ToolDispatchReply>(payload).is_err());
+            assert!(serde_json::from_value::<InstalledToolDispatchReply>(payload).is_err());
         }
     }
 
     #[test]
     fn successful_dispatch_keeps_semantics_separate_from_presentation() {
         let semantic = serde_json::json!({"ok": true, "count": 3});
-        let reply: ToolDispatchReply = serde_json::from_value(serde_json::json!({
+        let reply: InstalledToolDispatchReply = serde_json::from_value(serde_json::json!({
             "status": "success",
             "output": semantic,
             "presentation": "three items were accepted",
         }))
         .unwrap();
 
-        let (value, presentation) = reply.into_output().unwrap();
+        let (value, presentation) = reply.into_parts().unwrap();
         assert_eq!(value, semantic);
         assert_eq!(presentation, "three items were accepted");
+    }
+
+    #[test]
+    fn programmatic_actor_reply_remains_semantic_without_host_presentation() {
+        let semantic = serde_json::json!({"accepted": true});
+        let reply: ToolDispatchReply = serde_json::from_value(serde_json::json!({
+            "status": "success",
+            "output": semantic,
+        }))
+        .unwrap();
+        assert_eq!(reply.into_output().unwrap(), semantic);
     }
 
     #[test]
@@ -10886,7 +10949,7 @@ mod tool_dispatch_tests {
             r#"{"status":"refused","kind":"invalid_input","error":"bad input","tool":"inspect","detail":"wrong type"}"#,
         )
         .unwrap()
-        .into_output()
+        .into_parts()
         .unwrap_err();
         assert!(matches!(error, ToolDispatchError::InvalidInput { .. }));
     }

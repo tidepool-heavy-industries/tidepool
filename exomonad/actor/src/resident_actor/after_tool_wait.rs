@@ -133,7 +133,10 @@ mod tests {
 
     #[test]
     fn after_tool_result_keeps_semantic_value_and_presentation_separate() {
-        let call = WorkbenchToolCall::for_tool("inspect".into(), serde_json::json!({}));
+        let call = WorkbenchToolCall {
+            name: "inspect".into(),
+            arguments: serde_json::json!({}),
+        };
         let value = serde_json::json!({"ready": true, "count": 4});
         let payload = result_payload(
             &call,

@@ -2305,15 +2305,20 @@ fn workbench_failure_after_operations(
 ) -> WorkbenchExecutionFailure {
     settle_prepared_operations(&mut operations, WorkbenchOperationDisposition::Unknown);
     let failure_layer = resident_actor_failure_layer(&source);
+    let recovered_bindings = source.recovered_bindings().to_vec();
     let mut receipts = completed.to_vec();
-    if !operations.is_empty() {
+    if !operations.is_empty() || failure_layer.is_some() || !recovered_bindings.is_empty() {
         receipts.push(WorkbenchItemReceipt {
             diagnostics: Vec::new(),
             index: failed_index,
             kind: None,
             span: None,
             source_items: Vec::new(),
-            status: WorkbenchItemStatus::Rejected,
+            status: if failure_layer == Some(WorkbenchFailureLayer::Observation) {
+                WorkbenchItemStatus::Diagnostic
+            } else {
+                WorkbenchItemStatus::Rejected
+            },
             // The failure's own diagnostic lives on `source`/`detail`
             // instead of here; this field otherwise stays empty. The one
             // exception is a short, human-facing framing sentence for the
@@ -2323,7 +2328,7 @@ fn workbench_failure_after_operations(
             output: failure_layer_output_hint(failure_layer),
             value: None,
             warnings: Vec::new(),
-            installed_bindings: Vec::new(),
+            installed_bindings: recovered_bindings,
             operations,
             terminal_transfer: None,
             failure_layer,
@@ -2338,6 +2343,72 @@ fn workbench_failure_after_operations(
         total,
         source,
     }
+}
+
+fn workbench_failure_after_unit(
+    completed: &[WorkbenchItemReceipt],
+    failed_index: usize,
+    total: usize,
+    source: ResidentActorWorkbenchError,
+    operations: Vec<WorkbenchOperationReceipt>,
+    unit_bindings: &[String],
+) -> WorkbenchExecutionFailure {
+    let mut failure =
+        workbench_failure_after_operations(completed, failed_index, total, source, operations);
+    let has_bindings = !unit_bindings.is_empty()
+        || failure
+            .receipts
+            .iter()
+            .any(|receipt| receipt.index == failed_index && !receipt.installed_bindings.is_empty());
+    if !has_bindings {
+        return failure;
+    }
+    let layer = resident_actor_failure_layer(&failure.source);
+    let Some(receipt) = failure
+        .receipts
+        .iter_mut()
+        .rev()
+        .find(|receipt| receipt.index == failed_index)
+    else {
+        failure.receipts.push(WorkbenchItemReceipt {
+            diagnostics: Vec::new(),
+            index: failed_index,
+            kind: None,
+            span: None,
+            source_items: Vec::new(),
+            status: WorkbenchItemStatus::Stopped,
+            output: failure_layer_output_hint(layer),
+            value: None,
+            warnings: Vec::new(),
+            installed_bindings: Vec::new(),
+            operations: Vec::new(),
+            terminal_transfer: None,
+            failure_layer: layer,
+        });
+        failure
+            .receipts
+            .last_mut()
+            .expect("recovery receipt was appended")
+    };
+    for binding in unit_bindings {
+        if !receipt.installed_bindings.contains(binding) {
+            receipt.installed_bindings.push(binding.clone());
+        }
+    }
+    let retained = format!(
+        "retained bindings: {}",
+        receipt.installed_bindings.join(", ")
+    );
+    if receipt.output.is_empty() {
+        receipt.output = retained;
+    } else {
+        receipt.output.push('\n');
+        receipt.output.push_str(&retained);
+    }
+    if layer == Some(WorkbenchFailureLayer::Effect) {
+        receipt.status = WorkbenchItemStatus::Stopped;
+    }
+    failure
 }
 
 /// A short, human-facing framing sentence for a failure layer — the tool
@@ -2389,6 +2460,9 @@ fn resident_actor_failure_layer(
             Some(WorkbenchFailureLayer::Compile)
         }
         ResidentActorWorkbenchError::Resident(inner) => inner.failure_layer(),
+        ResidentActorWorkbenchError::CompletedResultObservation { .. } => {
+            Some(WorkbenchFailureLayer::Observation)
+        }
         ResidentActorWorkbenchError::Delivered(inner) => Some(
             inner
                 .failure_layer()
@@ -2883,6 +2957,7 @@ struct WorkbenchUnitState {
     effect_ordinal: usize,
     operations: Vec<WorkbenchOperationReceipt>,
     command_output: Vec<String>,
+    recovered_bindings: Vec<String>,
     display_remaining: usize,
 }
 
@@ -10543,12 +10618,13 @@ where
                                     Some(effects.invocation_work.as_ref()),
                                 )
                                 .await;
-                                let mut failure = workbench_failure_after_operations(
+                                let mut failure = workbench_failure_after_unit(
                                     &cursor.receipts,
                                     cursor.index,
                                     request.items.len(),
                                     source,
                                     std::mem::take(&mut cursor.unit.operations),
+                                    &cursor.unit.recovered_bindings,
                                 );
                                 if let Some(receipt) = failure
                                     .receipts
@@ -16729,6 +16805,26 @@ mod tests {
             failure.receipts[0].operations[0].disposition,
             WorkbenchOperationDisposition::Unknown
         );
+    }
+
+    #[test]
+    fn completed_observation_failure_keeps_recovered_bindings_and_classification() {
+        let recovered = vec!["commandJob".to_owned()];
+        let source = ResidentActorWorkbenchError::CompletedResultObservation {
+            detail: "presenter result exceeded observation budget".into(),
+            recovered_bindings: recovered.clone(),
+        };
+        let failure = workbench_failure_after_unit(&[], 0, 1, source, Vec::new(), &recovered);
+
+        let receipt = failure
+            .receipts
+            .last()
+            .expect("completed observation failure has a receipt");
+        assert_eq!(receipt.status, WorkbenchItemStatus::Diagnostic);
+        assert_eq!(receipt.failure_layer, Some(WorkbenchFailureLayer::Observation));
+        assert_eq!(receipt.installed_bindings, recovered);
+        assert!(receipt.output.contains("effects committed"));
+        assert!(receipt.output.contains("retained bindings: commandJob"));
     }
 
     fn completed_context_operations() -> Vec<WorkbenchOperationReceipt> {
