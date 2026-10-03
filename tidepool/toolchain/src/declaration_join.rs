@@ -17,8 +17,8 @@ mod planned;
 pub(crate) use planned::certify_same_offer_planned_declaration;
 
 pub use crate::declaration_context::{
-    ExactDeclarationContext, ExactSourceWitness, MaterializedExactDeclarationContext,
-    RecoveredArtifactInventory, RecoveryInventoryError,
+    ExactCompileContext, ExactDeclarationContext, ExactSourceWitness,
+    MaterializedExactDeclarationContext, RecoveredArtifactInventory, RecoveryInventoryError,
 };
 
 mod recovery;
