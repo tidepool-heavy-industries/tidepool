@@ -1720,7 +1720,12 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
 async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    committed(root.as_ref(), include_str!("fixtures/route.hs")).await;
+    displayed(
+        &mut campaign,
+        root.as_ref(),
+        include_str!("fixtures/route.hs"),
+    )
+    .await;
     let mut children = Vec::new();
     let mut bindings = Vec::new();
     {
@@ -1828,7 +1833,12 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     };
     let review = dispatch_haskell_script(reviewer.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(review["status"], "replied", "{review}");
-    let state = committed(root.as_ref(), "pollRoute forwarding\npollRoute broken").await;
+    let state = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "_ <- pollRoute forwarding >>= display . show\n_ <- pollRoute broken >>= display . show",
+    )
+    .await;
     assert_eq!(state["items"][0]["output"], "RouteCompleted");
     assert!(
         state["items"][1]["output"]
@@ -1837,7 +1847,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
             .contains("deliberate route failure"),
         "{state}"
     );
-    let recovered = committed(root.as_ref(), "recovered <- listRoutes\ninspectFull (length recovered)\nstates <- traverse pollRoute recovered\ninspectFull states").await;
+    let recovered = displayed(&mut campaign, root.as_ref(), "recovered <- listRoutes\n_ <- display $ inspectFull (length recovered)\nstates <- traverse pollRoute recovered\n_ <- display (show states)").await;
     assert_eq!(recovered["items"][1]["output"], "3", "{recovered}");
     assert!(
         recovered["items"][3]["output"]
@@ -1846,32 +1856,44 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
             .contains("deliberate route failure"),
         "{recovered}"
     );
-    let foreign = committed(
+    let foreign = displayed(
+        &mut campaign,
         consumer.policy.as_ref(),
-        "owned <- listRoutes\ninspectFull (length owned)",
+        "owned <- listRoutes\n_ <- display $ inspectFull (length owned)",
     )
     .await;
     assert_eq!(foreign["items"][1]["output"], "0", "{foreign}");
     let reply = dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
-    committed(root.as_ref(), "stopAgent (responseActor producer)").await;
-    committed(root.as_ref(), "unavailable <- request @Text (responseActor producer) (assignment forwardedLabel (\"lost target\" :: Text))\nhandled <- route (awaitSettled unavailable) (\\settled -> case settled of { ReplyUnavailable _ -> pure (); ReplyAvailable _ -> error \"unexpected success\" })").await;
-    let handled = committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
-        "pollRoute handled\nforgetRoute forwarding\nforgetRoute broken",
+        "stopAgent (responseActor producer)",
+    )
+    .await;
+    displayed(&mut campaign, root.as_ref(), "unavailable <- request @Text (responseActor producer) (assignment forwardedLabel (\"lost target\" :: Text))\nhandled <- route (awaitSettled unavailable) (\\settled -> case settled of { ReplyUnavailable _ -> pure (); ReplyAvailable _ -> error \"unexpected success\" })").await;
+    let handled = displayed(
+        &mut campaign, root.as_ref(),
+        "_ <- pollRoute handled >>= display . show\n_ <- forgetRoute forwarding >>= display . show\n_ <- forgetRoute broken >>= display . show",
     )
     .await;
     assert_eq!(handled["items"][0]["output"], "RouteCompleted", "{handled}");
     assert_eq!(handled["items"][1]["output"], "WatchForgotten", "{handled}");
     assert_eq!(handled["items"][2]["output"], "WatchForgotten", "{handled}");
-    let forgotten = committed(root.as_ref(), "pollRoute broken").await;
+    let forgotten = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "_ <- pollRoute broken >>= display . show",
+    )
+    .await;
     assert_eq!(
         forgotten["items"][0]["output"], "RouteRejected ReplyStale",
         "{forgotten}"
     );
-    let retained = committed(
+    let retained = displayed(
+        &mut campaign,
         root.as_ref(),
-        "retained <- listRoutes\ninspectFull (length retained)",
+        "retained <- listRoutes\n_ <- display $ inspectFull (length retained)",
     )
     .await;
     assert_eq!(retained["items"][1]["output"], "2", "{retained}");
@@ -2812,30 +2834,39 @@ async fn route_reply_case(cancel: bool) {
         .commit_empty("workspace program")
         .unwrap();
     let root = campaign.root_installation.policy.clone();
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         "let routeCampaign = \"route-reply\" :: CampaignLabel",
     )
     .await;
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         &format!("let sourceHead = GitOid \"{}\"", source.as_str()),
     )
     .await;
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         include_str!("../../../../.exomonad/workspace/checks/route-reply-setup.hs"),
     )
     .await;
     let (lead, _lead_binding) = next_project_worker(&mut campaign).await;
-    committed(
+    displayed(
+        &mut campaign,
         lead.policy.as_ref(),
         include_str!("../../../../.exomonad/workspace/checks/route-reply-worker.hs"),
     )
     .await;
     let (worker, _worker_binding) = next_project_worker(&mut campaign).await;
     if cancel {
-        let result = committed(root.as_ref(), "cancelRequest lead").await;
+        let result = displayed(
+            &mut campaign,
+            root.as_ref(),
+            "_ <- cancelRequest lead >>= display . show",
+        )
+        .await;
         assert!(
             result.to_string().contains("CancellationRequested"),
             "{result}"
@@ -2851,11 +2882,17 @@ async fn route_reply_case(cancel: bool) {
     let outcome = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let result = if cancel {
-                committed(lead.policy.as_ref(), "pollRoute forwarding").await
+                displayed(
+                    &mut campaign,
+                    lead.policy.as_ref(),
+                    "_ <- pollRoute forwarding >>= display . show",
+                )
+                .await
             } else {
-                committed(
+                displayed(
+                    &mut campaign,
                     root.as_ref(),
-                    "answer <- pollResponse lead\ninspectFull answer",
+                    "answer <- pollResponse lead\n_ <- display $ inspectFull answer",
                 )
                 .await
             };
@@ -2873,9 +2910,9 @@ async fn route_reply_case(cancel: bool) {
             outcome.to_string().contains("CancellationRequested"),
             "{outcome}"
         );
-        let pending = committed(
-            lead.policy.as_ref(),
-            "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply",
+        let pending = displayed(
+            &mut campaign, lead.policy.as_ref(),
+            "import Tidepool.Agent.Reply (pollReply)\n_ <- pollReply sessionReply >>= display . show",
         )
         .await;
         assert!(
@@ -2884,7 +2921,12 @@ async fn route_reply_case(cancel: bool) {
         );
     } else {
         let response = outcome;
-        let route = committed(lead.policy.as_ref(), "pollRoute forwarding").await;
+        let route = displayed(
+            &mut campaign,
+            lead.policy.as_ref(),
+            "_ <- pollRoute forwarding >>= display . show",
+        )
+        .await;
         assert!(route.to_string().contains("RouteCompleted"), "{route}");
         assert!(
             response.to_string().contains("exact-candidate"),
@@ -3160,7 +3202,12 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     )
     .await;
     let root = campaign.root_installation.policy.clone();
-    committed(root.as_ref(), include_str!("work_notification.hs")).await;
+    displayed(
+        &mut campaign,
+        root.as_ref(),
+        include_str!("work_notification.hs"),
+    )
+    .await;
     let source = campaign
         .next_deployment(
             "the progress source",
@@ -3209,8 +3256,8 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     let key = "work-router-inbox";
     admit_notification(&message, key.into(), &inbox);
     publication.await.unwrap();
-    let wrong_owner = committed(root.as_ref(),
-        "view <- readWork collector\nlet [receipt] = [r | Notice _ (Right r) <- workNotices view]\npollNotification receipt"
+    let wrong_owner = displayed(&mut campaign, root.as_ref(),
+        "view <- readWork collector\nlet [receipt] = [r | Notice _ (Right r) <- workNotices view]\n_ <- pollNotification receipt >>= display . show"
     ).await;
     assert!(
         wrong_owner.to_string().contains("NotificationUnauthorized"),
@@ -3220,7 +3267,7 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     let query = tokio::spawn(async move {
         committed(
             policy.as_ref(),
-            "R.call (workNotification (R.client collector)) receipt",
+            "_ <- R.call (workNotification (R.client collector)) receipt >>= display . show",
         )
         .await
     });
@@ -3238,25 +3285,27 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     let observed = observe_notification_receipt(&poll, campaign.actor.identity(), key, &inbox);
     assert_eq!(observed, Ok(exomonad_actor::NotificationState::Accepted));
     poll.observed(observed);
-    let result = query.await.unwrap();
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let result = campaign.drive_actor_output(&store, query).await.unwrap();
     assert!(
         result.to_string().contains("NotificationAccepted"),
         "{result}"
     );
-    let replaced = committed(root.as_ref(),
-        "collector <- R.replace collector (workDefinition sources (notifyWork owner (workMessage id)))\nR.call (workNotification (R.client collector)) receipt"
+    let replaced = displayed(&mut campaign, root.as_ref(),
+        "collector <- R.replace collector (workDefinition sources (notifyWork owner (workMessage id)))\n_ <- R.call (workNotification (R.client collector)) receipt >>= display . show"
     ).await;
     assert!(
         replaced.to_string().contains("NotificationUnauthorized"),
         "{replaced}"
     );
-    let retained = committed(
+    let retained = displayed(
+        &mut campaign,
         root.as_ref(),
-        "inspectFull . length . workNotices <$> readWork collector",
+        "_ <- readWork collector >>= display . length . workNotices",
     )
     .await;
     assert_eq!(retained["items"][0]["output"], "1", "{retained}");
-    committed(root.as_ref(), "finishWork collector").await;
+    displayed(&mut campaign, root.as_ref(), "finishWork collector").await;
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
