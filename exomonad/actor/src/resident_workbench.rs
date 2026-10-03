@@ -4835,7 +4835,6 @@ where
                 };
                 let specification = Arc::new(WorkbenchCompilationSpec {
                     _authority: authority.clone(),
-                    source,
                     cell,
                     templates,
                     include: prepared.include,
@@ -10221,7 +10220,6 @@ impl From<tidepool_runtime::session::resident::BindingLease> for CellPreparation
 
 struct WorkbenchCompilationSpec {
     _authority: Arc<crate::resident_actor::WorkbenchCompilationAuthority>,
-    source: ActorWorkbenchSource,
     cell: tidepool_toolchain::checked_cell::CheckedCellSpecification,
     templates: Vec<tidepool_runtime::session::TurnTemplate>,
     include: Vec<PathBuf>,
