@@ -3633,22 +3633,19 @@ mod tests {
             )
             .unwrap();
         assert_ne!(extended.semantic_sha256(), expected);
-        let mut entries = context
-            .inventory
-            .entries()
-            .iter()
-            .map(|entry| entry.as_ref().clone())
+        let owners = context
+            .interface_owners()
+            .into_iter()
+            .map(|interface| interface.owner)
             .collect::<Vec<_>>();
-        entries
-            .iter_mut()
-            .find(|entry| entry.descriptor.owner.module == "Beta")
-            .unwrap()
-            .requirements
-            .clear();
-        let inventory = ArtifactInventory::default();
-        let mut changed = context.as_ref().clone();
-        changed.inventory = inventory.admit(&inventory.empty_view(), entries).unwrap();
-        assert_ne!(changed.semantic_sha256(), expected);
+        let mut type_only = context.as_ref().clone();
+        type_only.inventory = context.inventory.interface_projection(&owners).unwrap();
+        type_only.normalize().unwrap();
+        assert_eq!(type_only.interface_owners(), context.interface_owners());
+        assert_eq!(type_only.lexical, context.lexical);
+        assert!(type_only.recovery_products().is_empty());
+        assert!(!context.recovery_products().is_empty());
+        assert_ne!(type_only.semantic_sha256(), expected);
     }
 
     fn program_request(
