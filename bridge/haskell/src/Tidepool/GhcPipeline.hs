@@ -127,6 +127,7 @@ import Control.Exception
   ( finally, bracket, try, catch, throwIO, IOException )
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes)
 import Data.List (find, isPrefixOf, isInfixOf, nub, nubBy, sort, sortOn, intercalate)
+import Data.Containers.ListUtils (nubOrd)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
 import Numeric (showHex)
 import System.Environment (lookupEnv)
@@ -3887,7 +3888,7 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
         originalNegative resolution
           | (fst key,dependencyResolutionModule resolution) `Set.member` originalNames = []
           | otherwise = negative resolution
-    let negativePaths = nub (concatMap negative currentResolutions ++ concatMap originalNegative originalResolutions)
+    let negativePaths = nubOrd (concatMap negative currentResolutions ++ concatMap originalNegative originalResolutions)
     present <- liftIO (filterM doesFileExist negativePaths)
     unless (null present) $ liftIO (throwIO (ExecutionSourceSearchChanged key present))
     let proof = [(artifact,path',sha) | (artifact,path',sha) <- scopeInterfaces admitted
@@ -3926,7 +3927,7 @@ validateExactOriginalSources admitted interfaces sourceGraph nodes = do
       OutOfDateItem _ _ -> liftIO (throwIO (ExecutionSourceChanged key))
   setSession env {hsc_targets=hsc_targets initial}
   pure (ValidatedOriginalSources executionGraph extraTargets current
-    (nub (concatMap fst observations)) (Set.toAscList (Set.fromList (concatMap snd observations))))
+    (nubOrd (concatMap fst observations)) (Set.toAscList (Set.fromList (concatMap snd observations))))
 
 planExactExecutionLoad
   :: ExactScope -> [(ExactIfaceArtifact, ModIface)] -> [(ExactIfaceArtifact, ModIface)] -> ModuleName
