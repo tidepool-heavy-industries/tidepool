@@ -91,17 +91,20 @@ pub(super) async fn run_interactive_applications(
     let mut embedded_projection = embedded_projection::EmbeddedProjection::default();
     let embedded_run = runtime_namespace(&launch_context.run_root);
     if let Some(service) = embedded_service.as_ref() {
-        let forest = Arc::clone(&provider_forest);
+        let forest = Arc::downgrade(&provider_forest);
         let run = embedded_run.clone();
         service
             .control
             .install_actor_display_expander(Arc::new(move |input| {
-                let forest = Arc::clone(&forest);
+                let forest = forest.clone();
                 let run = run.clone();
                 Box::pin(async move {
                     if input.origin.run != run {
                         return Err("display belongs to a different run".into());
                     }
+                    let forest = forest
+                        .upgrade()
+                        .ok_or_else(|| "native display owner is unavailable".to_owned())?;
                     let actor = ActorRef {
                         id: exomonad_actor::ActorId(input.origin.native_actor),
                         incarnation: exomonad_actor::Incarnation(input.origin.incarnation),
