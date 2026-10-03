@@ -423,10 +423,10 @@ async fn resident_parked_cell_publishes_into_latest_environment() {
 type ResidentCellCall =
     tokio::task::JoinHandle<Result<serde_json::Value, exomonad_actor::ResidentToolError>>;
 
-async fn wait_for_armed_call(
+async fn wait_for_armed_call<T: std::fmt::Debug>(
     actor: &exomonad_actor::LocalActorRef,
     context: &ToolInvocationContext,
-    call: &mut ResidentCellCall,
+    call: &mut tokio::task::JoinHandle<Result<T, exomonad_actor::ResidentToolError>>,
 ) -> tidepool_runtime::session::WorkbenchExecutionId {
     tokio::time::timeout(std::time::Duration::from_secs(180), async {
         tokio::select! {

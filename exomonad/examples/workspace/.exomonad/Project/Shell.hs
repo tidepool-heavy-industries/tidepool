@@ -160,7 +160,6 @@ prepare introduceSession focus job observed = case Cmd.presentedOutput observed 
             let heading = statusHeading introduceSession observed
                 budget = Cmd.presentedByteBudget observed
                 bodyBudget = max 0 (budget - utf8Bytes (heading <> "\n"))
-                plain = stdoutText <> stderrText
                 labeled = labelStream Cmd.Stdout stdoutText <> labelStream Cmd.Stderr stderrText
             if utf8Bytes labeled <= bodyBudget
               then pure (reply (lineCount stdoutText + lineCount stderrText) True (heading <> "\n" <> labeled))
