@@ -66,9 +66,9 @@ six-field exact original references. The request owner captures distinct graph
 files beside the manifest; their unchanged `TPEXECUTIONSOURCE` bytes and digests
 remain independent of the metadata envelope. The worker reads each graph once,
 verifies its digest and validates its exact native owner and compiler producer.
-Both metadata and aggregate graph bytes retain separate four MiB limits; graphs
-retain the 4096-count limit. Metadata overflow rejects the request and never
-removes admitted execution authority.
+Metadata retains its four MiB limit; aggregate graph bytes use the certified
+graph inventory's 64 MiB limit, with at most 4096 graphs. Either envelope's
+overflow rejects the request and never removes admitted execution authority.
 
 This is a strict internal migration: version 5 execution-bearing scopes are
 rejected, and old workers reject version 6. Deploy the Rust frontend and Haskell

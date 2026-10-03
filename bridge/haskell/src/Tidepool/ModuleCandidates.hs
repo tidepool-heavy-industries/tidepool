@@ -27,7 +27,8 @@ import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), RuntimeRep(..), Signature(..), ResultContract(..) )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..)
-  , decodeExecutionSources, executionIdentityKey, executionSourceOriginalClosure )
+  , decodeExecutionSources, executionIdentityKey, executionSourceOriginalClosure
+  , executionSourceGraphBytesLimit )
 
 data ModuleCandidate = ModuleCandidate
   { candidateUnit :: String
@@ -144,7 +145,7 @@ decodeManifest exactGraphs = do
         byOwner = Map.fromList [(executionIdentityKey (executionRefIdentity reference),reference)
           | reference <- references]
     unless (Map.size available <= 4096
-        && sum (map (BS.length . executionGraphBytes) (Map.elems available)) <= fromInteger maxManifestBytes)
+        && sum (map (BS.length . executionGraphBytes) (Map.elems available)) <= executionSourceGraphBytesLimit)
       (fail "combined candidate execution graphs exceed bound")
     forM_ references $ \reference -> do
       unless (Map.member (executionRefIdentity reference) offered)

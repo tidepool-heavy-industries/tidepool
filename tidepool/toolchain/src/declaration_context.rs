@@ -35,18 +35,26 @@ pub struct ExactDeclarationContext {
 const EXACT_SCOPE_BYTES_LIMIT: usize = 4 << 20;
 const EXACT_SCOPE_GRAPHS_LIMIT: usize = 4096;
 
-fn execution_graphs_fit<'a>(
+fn validate_execution_graph_budget<'a>(
     graphs: impl IntoIterator<Item = &'a crate::execution_source::CertifiedExecutionSourceGraph>,
-) -> bool {
-    graphs
+) -> Result<(), CompileError> {
+    let fits = graphs
         .into_iter()
         .try_fold((0usize, 0usize), |(count, bytes), graph| {
             let count = count.checked_add(1)?;
             let bytes = bytes.checked_add(graph.bytes().len())?;
-            (count <= EXACT_SCOPE_GRAPHS_LIMIT && bytes <= EXACT_SCOPE_BYTES_LIMIT)
+            (count <= EXACT_SCOPE_GRAPHS_LIMIT
+                && bytes <= crate::execution_source::GRAPH_BYTES_LIMIT)
                 .then_some((count, bytes))
         })
-        .is_some()
+        .is_some();
+    if fits {
+        Ok(())
+    } else {
+        Err(failure(
+            "original execution graphs exceed their 64 MiB or 4096 graph bound",
+        ))
+    }
 }
 
 fn original_products(entries: &[Arc<ArtifactEntry>]) -> Vec<&CertifiedRecoveryProduct> {
@@ -101,9 +109,7 @@ fn execution_scope_value(
     if graphs.is_empty() {
         return Ok(None);
     }
-    if !execution_graphs_fit(graphs.values().map(|graph| graph.as_ref())) {
-        return Ok(None);
-    }
+    validate_execution_graph_budget(graphs.values().map(|graph| graph.as_ref()))?;
     let mut roots = Vec::new();
     let mut admitted_graphs = BTreeSet::new();
     for product in originals.values() {
@@ -4932,24 +4938,105 @@ mod tests {
         assert_eq!(roots[0].as_array().unwrap()[1], text("B"));
         let large =
             crate::execution_source::test_graph_with_large_origin(&graph, EXACT_SCOPE_BYTES_LIMIT);
-        assert!(
-            execution_scope_fixture(&[execution_entry(owners[0].clone(), large)], source.path())
-                .unwrap()
-                .is_none(),
-            "an oversized optional recipe cannot reject native/interface context preparation"
-        );
+        assert!(execution_scope_fixture(
+            &[execution_entry(owners[0].clone(), large)],
+            source.path()
+        )
+        .unwrap()
+        .is_some());
         let megabyte = crate::execution_source::test_graph_with_large_origin(&graph, 1 << 20);
         assert!(
-            !execution_graphs_fit(std::iter::repeat_n(megabyte.as_ref(), 5)),
-            "aggregate graph size is refused before any transport byte copies"
+            validate_execution_graph_budget(std::iter::repeat_n(megabyte.as_ref(), 64)).is_err(),
+            "graph budget overflow explicitly refuses preparation before transport copies"
         );
         assert!(
-            !execution_graphs_fit(std::iter::repeat_n(
+            validate_execution_graph_budget(std::iter::repeat_n(
                 graph.as_ref(),
                 EXACT_SCOPE_GRAPHS_LIMIT + 1
-            )),
+            ))
+            .is_err(),
             "graph count is bounded before transport allocation"
         );
+    }
+
+    #[test]
+    fn execution_scope_preserves_complete_retained_closure_above_four_mib() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::env::var_os("TIDEPOOL_EXECUTION_SOURCE_FIXTURE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| temporary.path().to_path_buf())
+            .join("large-closure");
+        std::fs::create_dir_all(&root).unwrap();
+        let (graph, owners) = crate::execution_source::test_graph(&root);
+        let retained = crate::execution_source::test_graph_with_large_origin(&graph, 2_300_000);
+        let graph = crate::execution_source::test_graph_requiring_original(
+            &retained,
+            &owners[1],
+            retained.digest(),
+        );
+        assert!(graph.bytes().len() + retained.bytes().len() > EXACT_SCOPE_BYTES_LIMIT);
+        let entries = [
+            execution_entry(owners[0].clone(), graph),
+            execution_entry(owners[1].clone(), retained),
+        ];
+        let execution = execution_scope_value(&entries, &root).unwrap().unwrap();
+        assert_eq!(
+            execution.as_array().unwrap()[0].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(
+            execution.as_array().unwrap()[1].as_array().unwrap().len(),
+            2
+        );
+        let interfaces = owners[..2]
+            .iter()
+            .map(|owner| {
+                Value::Array(vec![
+                    text(&owner.unit),
+                    text(&owner.module),
+                    path_value(&root.join(format!("{}.hi", owner.module))).unwrap(),
+                    text(hex(&owner.skinny_iface_sha256)),
+                    Value::Array(vec![]),
+                    path_value(&root.join(format!("{}.packages", owner.module))).unwrap(),
+                    text(hex(&[0; 32])),
+                ])
+            })
+            .collect();
+        let products = owners[..2]
+            .iter()
+            .map(|owner| {
+                Value::Array(vec![
+                    text(&owner.unit),
+                    text(&owner.module),
+                    text(hex(&owner.module_version.0)),
+                    text(hex(&owner.skinny_iface_sha256)),
+                    text(hex(&owner.product_sha256)),
+                    path_value(&root.join(format!("{}.tpmod", owner.module))).unwrap(),
+                    Value::Array(vec![]),
+                ])
+            })
+            .collect();
+        let fields = vec![
+            text("TPEXACTSCOPE"),
+            text("2"),
+            text(hex(&[8; 32])),
+            text(hex(&[7; 32])),
+            Value::Array(interfaces),
+            Value::Array(vec![]),
+            Value::Array(products),
+        ];
+        let manifest = encode_scope_manifest(fields, Some(execution), None).unwrap();
+        let decoded: Value = ciborium::de::from_reader(manifest.as_slice()).unwrap();
+        assert_eq!(decoded.as_array().unwrap()[1], text("6"));
+        std::fs::write(root.join("exact-declaration-scope.cbor"), manifest).unwrap();
+        let missing = execution_scope_fixture(&entries[..1], &root)
+            .unwrap()
+            .unwrap();
+        assert!(missing.as_array().unwrap()[1]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        println!("scope6 complete retained closure: two graphs above four MiB retained; missing original refused");
     }
 
     #[test]

@@ -43,7 +43,7 @@ import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
   , ExecutionSourceRef(..), ExecutionSourceNode(..), decodeExecutionSourceGraph, decodeExecutionSourceReferences
   , ExecutionSourceFailure(..), executionIdentityKey, executionSourceClosure, executionSourceOriginalNode
-  , executionSourceOriginalClosure )
+  , executionSourceOriginalClosure, executionSourceGraphBytesLimit )
 import Tidepool.PackageWitness
   ( revalidatePackageImports )
 import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
@@ -201,7 +201,7 @@ extendExactExecutionSourcesWithinBudget offeredGraphs offeredRefs scope = do
   let kept = Set.union (Set.map snd needed) (Set.fromList (map executionGraphSha256 (scopeExecutionGraphs scope)))
       graphs = [graph | (sha,graph) <- Map.toAscList graphMap, sha `Set.member` kept]
   if length graphs <= 4096 && Map.size references <= 4096
-      && sum (map (BS.length . executionGraphBytes) graphs) <= 4 * 1024 * 1024
+      && sum (map (BS.length . executionGraphBytes) graphs) <= executionSourceGraphBytesLimit
     then pure (Just scope {scopeExecutionGraphs=graphs,scopeExecutionOwners=Map.elems retainedReferences})
     else pure Nothing
   where
@@ -339,8 +339,8 @@ readExactScope path = do
         unless (takeDirectory graphPath == takeDirectory path)
           (fail "original execution graph is outside its request directory")
         getFileSize graphPath
-      when (sum sizes > 4 * 1024 * 1024)
-        (fail "original execution graphs exceed four MiB")
+      when (sum sizes > fromIntegral executionSourceGraphBytesLimit)
+        (fail "original execution graphs exceed 64 MiB")
       graphs <- forM (zip descriptors sizes) $ \((sha, graphPath), size) -> do
         graphBytes <- readBoundedFile graphPath (fromIntegral size)
         unless (toInteger (BS.length graphBytes) == size)

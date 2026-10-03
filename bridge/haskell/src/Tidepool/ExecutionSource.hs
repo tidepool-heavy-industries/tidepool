@@ -8,6 +8,7 @@ module Tidepool.ExecutionSource
   , ExecutionSourceNode(..), ExecutionSourceFailure(..), executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure
   , ExecutionSourceRecipe(..), issueExecutionSourceRecipe
   , executionSourceProspectiveReferences
+  , executionSourceGraphBytesLimit
   ) where
 
 import Codec.CBOR.Decoding
@@ -28,6 +29,11 @@ import Numeric (showHex)
 import System.FilePath (isAbsolute)
 import Tidepool.DependencyEvidence
 import Tidepool.Session (parseSessionModule)
+
+-- Match the certified graph inventory bound in tidepool-toolchain. Metadata
+-- and inline candidate manifests retain their separate four MiB envelopes.
+executionSourceGraphBytesLimit :: Int
+executionSourceGraphBytesLimit = 64 * 1024 * 1024
 
 data ExecutionSourceIdentity = ExecutionSourceIdentity
   { executionUnit :: String, executionModule :: String

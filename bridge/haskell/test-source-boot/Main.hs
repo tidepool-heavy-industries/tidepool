@@ -63,7 +63,7 @@ import System.Directory
 import System.Environment (getArgs, getExecutablePath, setEnv, lookupEnv, unsetEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeDirectory)
-import System.IO (hClose, hFlush, hPutStrLn, hSeek, SeekMode(AbsoluteSeek), openTempFile, stderr)
+import System.IO (hClose, hFlush, hPutStrLn, hSeek, hSetFileSize, withBinaryFile, IOMode(WriteMode), SeekMode(AbsoluteSeek), openTempFile, stderr)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
@@ -123,7 +123,8 @@ import Tidepool.Binders (BoundBinder(..))
 import Tidepool.ExecutionSource
   ( ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
   , executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure, executionIdentityKey
-  , ExecutionSourceFailure(..), ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences )
+  , ExecutionSourceFailure(..), ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences
+  , executionSourceGraphBytesLimit )
 
 counterValues :: String -> String -> [Integer]
 counterValues name diagnostics = map parseCount matching
@@ -188,6 +189,7 @@ main = getArgs >>= \case
   ["--candidate-execution-wire", path] -> candidateExecutionWire path
   ["--checked-value-type-closure", effects] -> checkedValueTypeClosure effects
   ["--execution-source-wire", path] -> executionSourceWire path
+  ["--execution-source-closure-wire", path] -> executionSourceClosureWire path
   ["--exact-retained-quoter"] -> exactRetainedQuoter
   ["--exact-reexport-quoter"] -> exactReexportQuoter
   ["--exact-execution-hidden-instance"] -> exactExecutionHiddenInstance
@@ -393,10 +395,11 @@ executionSourceWire path = do
   refuse "missing graph" "does not exist" (removeFile graphPath)
   refuse "truncated graph" "digest differs" (BS.writeFile graphPath (BS.take (BS.length originalBytes - 1) originalBytes))
   refuse "tampered graph" "digest differs" (BS.writeFile graphPath (BS.cons 0 (BS.drop 1 originalBytes)))
-  BS.writeFile graphPath (BS.replicate (4*1024*1024+1) 0)
+  withBinaryFile graphPath WriteMode $ \handle ->
+    hSetFileSize handle (fromIntegral executionSourceGraphBytesLimit + 1)
   oversizedResult <- readExactScope path
   BS.writeFile graphPath originalBytes
-  unless (case oversizedResult of Left reason -> "exceed four MiB" `isInfixOf` reason; Right _ -> False) $
+  unless (case oversizedResult of Left reason -> "exceed 64 MiB" `isInfixOf` reason; Right _ -> False) $
     fail "scope6 graph aggregate was not refused by its byte bound"
   let swapped = takeDirectory path </> "swapped-graph.cbor"
       swappedManifest = takeDirectory path </> "swapped-scope.cbor"
@@ -430,6 +433,44 @@ executionSourceWire path = do
         TList [TList [TList [TString (T.pack graphSha),TString (T.pack outsidePath)]],refs],purpose])
     _ -> fail "scope6 fixture changed path layout"
   putStrLn "Rust execution wire: scope6 closure, independent budgets, wrong native/missing/truncated/tampered/swapped/oversized/outside-request/v5 refusals passed (10 checks)"
+
+executionSourceClosureWire :: FilePath -> IO ()
+executionSourceClosureWire path = do
+  scope <- readExactScope path >>= either fail pure
+  let graphs = scopeExecutionGraphs scope
+      references = scopeExecutionOwners scope
+      native = scopeExecutionNativeOwners scope
+      closure inputs owners = executionSourceClosure inputs references owners [("main","A")]
+  unless (length graphs == 2 && length references == 2
+      && sum (map (BS.length . executionGraphBytes) graphs) > 4*1024*1024) $
+    fail "retained closure fixture lost its independently bounded graphs"
+  nodes <- either (fail . show) pure (closure graphs native)
+  unless (map (executionIdentityKey . executionNodeIdentity) nodes == [("main","A"),("main","B")]) $
+    fail "large retained original closure was truncated"
+  forM_ graphs $ \graph -> unless
+      (case closure (filter (/= graph) graphs) native of Left _ -> True; _ -> False) $
+    fail "large closure accepted a missing required original graph"
+  unless (case closure graphs (filter ((/= "B") . executionModule) native) of
+      Left _ -> True; _ -> False) $
+    fail "large closure accepted a missing native owner"
+  let candidates = takeDirectory path </> "empty-candidates.cbor"
+  BS.writeFile candidates (toStrictByteString (encodeTerm (TList
+    [TString "TPMCAN", TString "8", TList [], TList [], TList [], TList [TList [],TList []]])))
+  decoded <- readModuleCandidatesWithGraphs graphs candidates >>= either fail pure
+  unless (null decoded) $ fail "empty candidate manifest invented source candidates"
+  bytes <- BS.readFile path
+  term <- either (fail . show) (pure . snd) (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
+  graphPath <- case term of
+    TList [_,_,_,_,_,_,_,TList [TList (TList [_,TString file] : _),_],_] -> pure (T.unpack file)
+    _ -> fail "large closure descriptor layout differs"
+  original <- BS.readFile graphPath
+  withBinaryFile graphPath WriteMode $ \handle ->
+    hSetFileSize handle (fromIntegral executionSourceGraphBytesLimit + 1)
+  oversized <- readExactScope path
+  BS.writeFile graphPath original
+  unless (case oversized of Left reason -> "exceed 64 MiB" `isInfixOf` reason; Right _ -> False) $
+    fail "large closure lost its aggregate graph bound"
+  putStrLn "Rust execution closure wire: complete two-graph closure above four MiB, missing graphs/native owner, candidate join and above-64-MiB refusal passed (6 checks)"
 
 checkedValueTypeClosure :: FilePath -> IO ()
 checkedValueTypeClosure effects = withScratch $ \work -> do
@@ -1859,7 +1900,7 @@ freshExecutionRecipeTest = withScratch $ \work -> do
       scope = ExactScope "" sha sha sha
         [(ExactIfaceArtifact "main" "Support" "" sha [],"",sha)] [] [original]
         [] [] Nothing Nothing Nothing Nothing Set.empty
-      oversized = graph {executionGraphBytes=BS.replicate (4*1024*1024+1) 0}
+      oversized = graph {executionGraphBytes=BS.replicate (executionSourceGraphBytesLimit+1) 0}
   bounded <- either (fail . show) pure
     (extendExactExecutionSourcesWithinBudget [oversized] [reference] scope)
   unless (isNothing bounded && case extendExactExecutionSources [oversized] [reference] scope of
