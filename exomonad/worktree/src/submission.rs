@@ -33,21 +33,21 @@ impl HeadState {
         let lines = out.lines();
         match lines.as_slice() {
             [oid, "HEAD"] => Ok(Self::Detached {
-                oid: GitOid::from_raw(oid),
+                oid: GitOid::from_raw(*oid),
             }),
             [oid, branch] => Ok(Self::OnBranch {
-                branch: BranchName::from_raw(branch),
-                oid: GitOid::from_raw(oid),
+                branch: BranchName::from_raw(*branch),
+                oid: GitOid::from_raw(*oid),
             }),
             // Git can omit the symbolic result when a branch is named HEAD;
             // retain symbolic-ref's authoritative shortening in that case.
             [oid] => match git.read(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
                 Ok(out) => Ok(Self::OnBranch {
                     branch: BranchName::from_raw(out.trimmed()),
-                    oid: GitOid::from_raw(oid),
+                    oid: GitOid::from_raw(*oid),
                 }),
                 Err(receipt) if receipt.exit_code == Some(1) => Ok(Self::Detached {
-                    oid: GitOid::from_raw(oid),
+                    oid: GitOid::from_raw(*oid),
                 }),
                 Err(receipt) => Err(WorktreeError::GitFailure(receipt)),
             },
@@ -242,6 +242,17 @@ mod tests {
             HeadState::OnBranch {
                 branch: BranchName::from_raw("heads/HEAD"),
                 oid,
+            }
+        );
+
+        repo.git()
+            .try_run(repo.path(), &["config", "core.warnAmbiguousRefs", "false"])
+            .unwrap();
+        assert_eq!(
+            HeadState::read(repo.git(), repo.path()).unwrap(),
+            HeadState::OnBranch {
+                branch: BranchName::from_raw("heads/HEAD"),
+                oid: repo.writer().head().unwrap(),
             }
         );
     }
