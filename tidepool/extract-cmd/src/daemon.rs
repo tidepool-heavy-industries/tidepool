@@ -2479,7 +2479,19 @@ impl Worker {
             });
             loop {
                 match completed_rx.recv_timeout(Duration::from_millis(50)) {
-                    Ok(result) => return result,
+                    Ok(result) => {
+                        // A cancelled client can release request-local inputs
+                        // before the worker's reply reaches this monitor.
+                        // That reply does not make the abandoned request safe
+                        // to reuse or classify as a normal completion.
+                        if peer_disconnected(connection) {
+                            if let Err(error) = crate::process::kill_process(pid) {
+                                tracing::warn!(pid, %error, "failed to kill compiler worker after client disconnect");
+                            }
+                            return Err(FrontendError::WorkerClientDisconnected);
+                        }
+                        return result;
+                    }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         return Err(FrontendError::Daemon(
                             "compiler worker operation monitor disconnected".to_owned(),
@@ -3934,6 +3946,67 @@ tidepool-target phase=desugar module=Execute\n",
             "disconnect did not interrupt the worker promptly"
         );
         worker.abort();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn completed_worker_result_after_peer_shutdown_is_abandoned() {
+        for disconnected in [false, true] {
+            for code in [0, 1] {
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "test fixture: owns an idle worker and an unrelated live process"
+                )]
+                let mut children = (0..2)
+                    .map(|_| {
+                        std::process::Command::new("sleep")
+                            .arg("30")
+                            .stdin(Stdio::piped())
+                            .stdout(Stdio::piped())
+                            .spawn()
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                let mut other = children.pop().unwrap();
+                let mut child = children.pop().unwrap();
+                let mut worker = Worker {
+                    stdin: child.stdin.take(),
+                    stdout: child.stdout.take().unwrap(),
+                    child,
+                    build_products_namespace: BuildProductsNamespace::direct().unwrap(),
+                };
+                let (connection, client) = UnixStream::pair().unwrap();
+                let action_client = client.try_clone().unwrap();
+                let result = worker.operation_while_connected(
+                    &connection,
+                    DEFAULT_REQUEST_DEADLINE,
+                    WorkerOperation::Request,
+                    move |_| {
+                        // Shutdown precedes completion publication; either
+                        // monitor branch must classify it as abandonment.
+                        if disconnected {
+                            action_client.shutdown(std::net::Shutdown::Both).unwrap();
+                        }
+                        Ok((code, vec![1], vec![2]))
+                    },
+                );
+                if disconnected {
+                    assert!(matches!(
+                        result,
+                        Err(FrontendError::WorkerClientDisconnected)
+                    ));
+                    assert!(!worker.child.wait().unwrap().success());
+                } else {
+                    assert_eq!(result.unwrap(), (code, vec![1], vec![2]));
+                    assert!(worker.child.try_wait().unwrap().is_none());
+                }
+                assert!(other.try_wait().unwrap().is_none());
+                drop(client);
+                worker.abort();
+                other.kill().unwrap();
+                other.wait().unwrap();
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]
