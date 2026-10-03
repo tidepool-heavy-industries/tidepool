@@ -29,6 +29,7 @@ import GHC.Driver.Pipeline.Execute (runPhase)
 import GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..))
 import GHC.Driver.Hooks (hscCompileCoreExprHook, hscFrontendHook, runPhaseHook)
 import GHC.Data.StringBuffer (stringToStringBuffer)
+import qualified GHC.Data.Maybe as MaybeErr
 import GHC.Driver.Backend (backendGeneratesCode, backendWritesFiles, backendCanReuseLoadedCode, noBackend)
 import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit, hscSetFlags, runHsc')
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags, hsc_FC, hsc_targets, hsc_hooks))
@@ -560,7 +561,7 @@ withGeneratedInstanceRecovery recipe environment summary parsed action = do
       loaded <- initIfaceCheck (ppr importedName) environment $
         loadInterface (ppr importedName) owner (ImportByUser (ideclSource declaration))
       iface <- case loaded of
-        Succeeded found | mi_module found == owner -> pure found
+        MaybeErr.Succeeded found | mi_module found == owner -> pure found
         _ -> fail "generated Display companion import has no admitted interface"
       exports <- either fail pure (selectedImportNames (mi_exports iface) (ideclImportList declaration))
       case nub [name | name <- exports, isTcOcc (nameOccName name)
