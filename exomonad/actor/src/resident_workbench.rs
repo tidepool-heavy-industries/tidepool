@@ -1769,6 +1769,9 @@ pub(crate) enum AgentForgetProjection {
         watches: Vec<crate::WatchId>,
     },
     Unavailable,
+    OutputPending {
+        displays: usize,
+    },
 }
 
 #[derive(Clone)]
@@ -1812,6 +1815,10 @@ pub(crate) enum CleanupStepProjection {
         actor: crate::ActorRef,
         requests: Vec<crate::RequestId>,
         watches: Vec<crate::WatchId>,
+    },
+    ActorOutputPending {
+        actor: crate::ActorRef,
+        displays: usize,
     },
     GroupRetired(crate::ForkGroupId),
     Blocked(String),
@@ -14339,7 +14346,12 @@ mod request_tests {
     fn agent_forget_projection_collects_nested_retained_ids_and_rejects_overflow() {
         use tidepool_repr::{DataCon, DataConId};
         let mut table = tidepool_test_data::standard_datacon_table();
-        for (id, name, arity) in [(120, "AgentForgetRetained", 2), (121, "AgentForgotten", 0)] {
+        for (id, name, arity) in [
+            (120, "AgentForgetRetained", 2),
+            (121, "AgentForgotten", 0),
+            (122, "AgentForgetOutputPending", 1),
+            (123, "CleanupActorOutputPending", 3),
+        ] {
             table.insert(DataCon {
                 id: DataConId(id),
                 name: name.into(),
@@ -14363,6 +14375,19 @@ mod request_tests {
         assert!(matches!(
             AgentForgetProjection::Forgotten.to_value(&table).unwrap(),
             HaskellValue::Con(DataConId(121), ref fields) if fields.is_empty()
+        ));
+        assert!(matches!(
+            AgentForgetProjection::OutputPending { displays: 2 }.to_value(&table).unwrap(),
+            HaskellValue::Con(DataConId(122), ref fields) if fields.len() == 1
+                && <i64 as tidepool_bridge::FromHaskell>::from_value(&fields[0], &table).unwrap() == 2
+        ));
+        assert!(matches!(
+            CleanupStepProjection::ActorOutputPending {
+                actor: crate::ActorRef::first(crate::ActorId(37)), displays: 2,
+            }.to_value(&table).unwrap(),
+            HaskellValue::Con(DataConId(123), ref fields)
+                if fields.iter().map(|field| <i64 as tidepool_bridge::FromHaskell>::from_value(field, &table).unwrap())
+                    .collect::<Vec<_>>() == vec![37, 1, 2]
         ));
 
         let error = AgentForgetProjection::Retained {

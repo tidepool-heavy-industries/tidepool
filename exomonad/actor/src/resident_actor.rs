@@ -220,6 +220,7 @@ pub struct DisplayPublication {
     pub operation: Option<WorkbenchOperationId>,
     pub page: tidepool_runtime::session::WorkbenchDisplayPage,
     host_context: OnceLock<DisplayPublicationHostContext>,
+    was_unconfirmed: std::sync::atomic::AtomicBool,
     outcome: Mutex<Option<DisplayPublicationOutcome>>,
     reply: Mutex<Option<tokio::sync::oneshot::Sender<DisplayPublicationOutcome>>>,
 }
@@ -264,6 +265,7 @@ impl DisplayPublication {
                 operation,
                 page,
                 host_context: OnceLock::new(),
+                was_unconfirmed: std::sync::atomic::AtomicBool::new(false),
                 outcome: Mutex::new(None),
                 reply: Mutex::new(Some(reply)),
             }),
@@ -287,6 +289,10 @@ impl DisplayPublication {
         ) {
             return false;
         }
+        if matches!(&answer, DisplayPublicationOutcome::Unconfirmed(_)) {
+            self.was_unconfirmed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         *outcome = Some(answer.clone());
         if let Some(reply) = self.reply.lock().take() {
             let _ = reply.send(answer);
@@ -296,6 +302,12 @@ impl DisplayPublication {
 
     pub fn outcome(&self) -> Option<DisplayPublicationOutcome> {
         self.outcome.lock().clone()
+    }
+
+    /// Retrying never erases the possibility of an earlier durable commit.
+    pub fn was_unconfirmed(&self) -> bool {
+        self.was_unconfirmed
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// The first host admission freezes provenance for exact Store retries.
@@ -594,6 +606,15 @@ fn valid_display_reference(
 }
 
 impl ActorDisplays {
+    fn pending_count(&mut self) -> usize {
+        for slot in self.slots.keys().copied().collect::<Vec<_>>() {
+            let _ = self.reconcile(slot);
+        }
+        self.slots
+            .values()
+            .filter(|slot| slot.pending.is_some())
+            .count()
+    }
     fn retire(&mut self) {
         self.retired = true;
         for slot in self.slots.values_mut() {
@@ -976,8 +997,10 @@ mod display_tests {
                 &request
             ));
             assert!(owner.select(actor, request.page.identity, 1).is_err());
+            assert_eq!(owner.pending_count(), 1);
         }
         let retry = request.retry_channel().unwrap();
+        assert!(request.was_unconfirmed());
         drop(retry);
         assert!(request.answer(DisplayPublicationOutcome::Published(durable_reference())));
         drop(DisplayPublicationLease {
@@ -985,8 +1008,10 @@ mod display_tests {
             slot,
         });
         assert_eq!(displays.lock().slots[&slot].page_ordinal, 1);
+        assert_eq!(displays.lock().pending_count(), 0);
         assert_eq!(request.page_ordinal, 1);
         assert_eq!(request.host_context(), Some(&frozen));
+        assert!(request.was_unconfirmed());
     }
 
     #[test]
@@ -5795,6 +5820,15 @@ where
                             .flatten()
                     })
                 };
+                let pending_displays = if authorized_terminal.is_some() {
+                    self.environment
+                        .actors
+                        .lock()
+                        .get(&forget.target)
+                        .map_or(0, |record| record.displays.lock().pending_count())
+                } else {
+                    0
+                };
                 let outcome = if authorized_terminal.is_none() {
                     let records = self.environment.actors.lock();
                     if records.contains_key(&forget.target)
@@ -5803,6 +5837,10 @@ where
                         crate::resident_workbench::AgentForgetProjection::Running
                     } else {
                         crate::resident_workbench::AgentForgetProjection::Unavailable
+                    }
+                } else if pending_displays > 0 {
+                    crate::resident_workbench::AgentForgetProjection::OutputPending {
+                        displays: pending_displays,
                     }
                 } else {
                     match self
@@ -6075,6 +6113,20 @@ where
 
                 if !stop_failed {
                     for actor in plan.actors.iter().map(|actor| actor.actor) {
+                        let displays = self
+                            .environment
+                            .actors
+                            .lock()
+                            .get(&actor)
+                            .map_or(0, |record| record.displays.lock().pending_count());
+                        if displays > 0 {
+                            stop_failed = true;
+                            steps.push(CleanupStepProjection::ActorOutputPending {
+                                actor,
+                                displays,
+                            });
+                            continue;
+                        }
                         match self
                             .environment
                             .requests

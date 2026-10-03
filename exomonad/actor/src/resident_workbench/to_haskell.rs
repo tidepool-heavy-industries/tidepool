@@ -290,6 +290,12 @@ impl ToHaskell for AgentForgetProjection {
             Self::Forgotten => visit_core(table, visitor, "AgentForgotten", |_| Ok(())),
             Self::Running => visit_core(table, visitor, "AgentForgetRunning", |_| Ok(())),
             Self::Unavailable => visit_core(table, visitor, "AgentForgetUnavailable", |_| Ok(())),
+            Self::OutputPending { displays } => {
+                visit_core(table, visitor, "AgentForgetOutputPending", |visitor| {
+                    actor_haskell_int(*displays as u64, "pending display count")?
+                        .visit(table, visitor)
+                })
+            }
             Self::Retained { requests, watches } => {
                 visit_core(table, visitor, "AgentForgetRetained", |visitor| {
                     requests
@@ -460,6 +466,15 @@ impl ToHaskell for CleanupStepProjection {
             Self::GroupRetired(group) => {
                 visit_core(table, visitor, "CleanupGroupRetired", |visitor| {
                     actor_haskell_int(group.0, "fork group id")?.visit(table, visitor)
+                })
+            }
+            Self::ActorOutputPending { actor, displays } => {
+                visit_core(table, visitor, "CleanupActorOutputPending", |visitor| {
+                    actor_haskell_int(actor.id.0, "actor id")?.visit(table, visitor)?;
+                    actor_haskell_int(actor.incarnation.0, "actor incarnation")?
+                        .visit(table, visitor)?;
+                    actor_haskell_int(*displays as u64, "pending display count")?
+                        .visit(table, visitor)
                 })
             }
             Self::Blocked(detail) => visit_core(table, visitor, "CleanupBlocked", |visitor| {
