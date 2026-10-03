@@ -671,6 +671,7 @@ fn run_inspections_with_policy(
                 let root = PathBuf::from(root).join("inspection-receipts");
                 std::fs::create_dir_all(&root)?;
                 let retained = TempDir::new_in(root)?;
+                std::fs::copy(&output_path, retained.path().join("inspection.cbor"))?;
                 let directories = sources
                     .keys()
                     .filter_map(|path| path.parent())
@@ -1311,10 +1312,7 @@ mod tests {
         let results = run_admitted_inspections(
             InspectionRequest {
                 exact_context: None,
-                preamble: concat!(
-                    "module Expr where\nimport Prelude\n",
-                    "inspectionIdentity :: Int -> Int\ninspectionIdentity value = value\n"
-                ),
+                preamble: "module Expr where\nimport Prelude\n",
                 imports: "",
                 include: &[include.path()],
                 session_root: view.session_root(),
@@ -1328,7 +1326,10 @@ mod tests {
         .expect("fresh empty checked snapshot supports a valid type search");
         assert!(
             matches!(&results[..], [InspectionResult::TypeMatches { matches, .. }]
-            if matches.iter().any(|entry| entry.name == "inspectionIdentity"))
+            if matches.iter().any(|entry| entry.name == "id"
+                && entry.module.as_deref() == Some("GHC.Internal.Base")
+                && entry.quality == TypeMatchQuality::Usable)),
+            "imported Prelude.id must match concrete Int -> Int: {results:#?}"
         );
     }
 
