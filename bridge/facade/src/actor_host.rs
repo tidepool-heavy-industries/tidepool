@@ -22,10 +22,12 @@ mod commands;
 mod context_wire;
 mod effect_vocabulary;
 pub(crate) use effect_vocabulary::exomonad_effect_declarations;
+mod application_supervisor;
 #[cfg(test)]
 mod context_transaction_acceptance_tests;
 #[cfg(all(test, feature = "codex-compat"))]
 mod custody_tests;
+mod delivery;
 #[cfg(all(test, feature = "codex-compat"))]
 mod documentation_tests;
 #[cfg(test)]
@@ -49,29 +51,26 @@ mod embedded_recovery;
 mod embedded_recovery_tests;
 mod embedded_reflect;
 mod embedded_service;
-mod application_supervisor;
-mod delivery;
+#[cfg(all(test, feature = "codex-compat"))]
+use delivery::deliver_pending;
+#[cfg(test)]
+use delivery::embedded_notification_operation_id;
+#[cfg(feature = "codex-compat")]
+use delivery::{admit_notification, observe_notification_receipt, run_delivery_pump};
+#[cfg(all(test, feature = "codex-compat"))]
+use delivery::{
+    deliver_pending_checked, observe_inbound_delivery, remind_turn_ended_without_respond,
+};
 use delivery::{
     observe_embedded_notification, schedule_embedded_notification_drain,
     schedule_embedded_notification_send,
 };
 #[cfg(all(test, feature = "codex-compat"))]
-use delivery::deliver_pending;
-#[cfg(feature = "codex-compat")]
-use delivery::{
-    admit_notification, deliver_pending_checked, observe_inbound_delivery,
-    observe_notification_receipt, remind_turn_ended_without_respond, run_delivery_pump,
-};
-#[cfg(test)]
-use delivery::embedded_notification_operation_id;
-#[cfg(all(test, feature = "codex-compat"))]
 use delivery::{
     run_periodic_observation, supervise_delivery, turn_end_reminder, until_shutdown,
-    ActorObservation, PROVIDER_POLL_INTERVAL, POSSIBLY_SEEN_PREFIX, REDELIVERED_PREFIX,
-    WITHDRAW_WITHOUT_EVIDENCE_AFTER, WithoutEvidence,
+    ActorObservation, WithoutEvidence, POSSIBLY_SEEN_PREFIX, PROVIDER_POLL_INTERVAL,
+    REDELIVERED_PREFIX, WITHDRAW_WITHOUT_EVIDENCE_AFTER,
 };
-#[cfg(feature = "codex-compat")]
-mod native_launch;
 #[cfg(test)]
 mod embedded_shutdown_tests;
 mod host_incarnation;
@@ -87,6 +86,8 @@ mod jev_tests;
 mod lookup_availability_tests;
 #[cfg(test)]
 mod m1_host_tests;
+#[cfg(feature = "codex-compat")]
+mod native_launch;
 #[cfg(test)]
 mod native_prefix_publication_tests;
 #[cfg(all(test, feature = "codex-compat"))]
@@ -194,10 +195,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
 use self::application_supervisor::run_interactive_applications;
-#[cfg(feature = "codex-compat")]
-use self::native_launch::launch_prepared_interactive_application;
 use self::embedded_projection::LifecyclePublisher;
 pub(crate) use self::host_incarnation::HostIncarnationLease;
+#[cfg(feature = "codex-compat")]
+use self::native_launch::launch_prepared_interactive_application;
 use self::overlay_resource::{
     ArtifactInspection, OverlayResourceLease, OverlaySnapshot, SharedOverlayResource,
 };
@@ -2164,7 +2165,6 @@ fn embedded_actor_for_task(owners: &InteractiveOwners, task: tokio::task::Id) ->
             .map(|_| *actor)
     })
 }
-
 
 #[derive(Clone)]
 struct BoundWorkspace {
@@ -4823,7 +4823,6 @@ async fn retain_input_custody_and_bind(
         Err(error) => Err(format!("could not bind native input control: {error}")),
     }
 }
-
 
 fn embedded_resource_release(
     error: Option<&embedded_service::EmbeddedDriverError>,

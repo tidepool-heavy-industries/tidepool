@@ -391,11 +391,8 @@ mod tests {
         let path = directory.path().join("operations.jsonl");
         let request = request("effect-a");
         let response = CallResponse::text("retained result".into());
-        let boundary = super::super::external_operation(
-            "thread".into(),
-            "turn".into(),
-            "outer-call".into(),
-        );
+        let boundary =
+            super::super::external_operation("thread".into(), "turn".into(), "outer-call".into());
 
         let mut journal = OperationJournal::open(path.clone()).unwrap();
         journal.fail_next_append_after_write();
@@ -421,7 +418,10 @@ mod tests {
         drop(journal);
 
         let journal = OperationJournal::open_existing(path).unwrap();
-        assert_eq!(journal.settled_boundaries().collect::<Vec<_>>(), vec![&boundary]);
+        assert_eq!(
+            journal.settled_boundaries().collect::<Vec<_>>(),
+            vec![&boundary]
+        );
     }
 
     #[test]

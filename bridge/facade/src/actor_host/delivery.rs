@@ -322,7 +322,11 @@ pub(super) async fn observe_embedded_notification(
 }
 
 #[cfg(feature = "codex-compat")]
-pub(super) fn admit_notification(command: &exomonad_actor::NotificationSend, key: String, inbox: &ActorInbox) {
+pub(super) fn admit_notification(
+    command: &exomonad_actor::NotificationSend,
+    key: String,
+    inbox: &ActorInbox,
+) {
     match inbox.publish_tracked(
         DurableActorEvent::Text(command.message().to_owned()),
         DeliveryProvenance::Notification {
@@ -1406,7 +1410,10 @@ pub(super) async fn run_periodic_observation<F, Fut>(
 /// parked on. Shutdown is sent only by retirement, which joins the pump and
 /// its observation tasks within `APPLICATION_TASK_GRACE_TIMEOUT`.
 #[cfg(feature = "codex-compat")]
-pub(super) async fn until_shutdown(shutdown: &mut oneshot::Receiver<()>, work: impl std::future::Future) {
+pub(super) async fn until_shutdown(
+    shutdown: &mut oneshot::Receiver<()>,
+    work: impl std::future::Future,
+) {
     tokio::select! {
         biased;
         _ = shutdown => {}

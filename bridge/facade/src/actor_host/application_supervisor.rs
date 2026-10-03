@@ -487,7 +487,7 @@ pub(super) async fn run_interactive_applications(
                 let Ok(_admission) = local_actor.admit_transaction() else {
                     continue;
                 };
-                let Some(mut binding) = embedded_binding(&application_owners, actor) else {
+                let Some(binding) = embedded_binding(&application_owners, actor) else {
                     tracing::warn!(?actor, "embedded child attachment has no notification owner");
                     continue;
                 };
@@ -810,7 +810,7 @@ pub(super) async fn run_interactive_applications(
                                 break Some(format!("actor {actor:?} provider attachment became unavailable: {error}"));
                             }
                             let root_conversation = Arc::clone(&embedded.conversation);
-                            let Some(mut binding) = embedded_binding(&application_owners, actor) else {
+                            let Some(binding) = embedded_binding(&application_owners, actor) else {
                                 break Some(format!("embedded notification owner was not retained for {actor:?}"));
                             };
                             let Ok(attachment_admission) = local_actor.admit_transaction() else {
@@ -1953,7 +1953,9 @@ pub(super) async fn run_interactive_applications(
             .iter()
             .filter(|(actor, owner)| {
                 owner.should_retire_undeployed_native(
-                    deployments.iter().any(|deployment| deployment.actor == **actor),
+                    deployments
+                        .iter()
+                        .any(|deployment| deployment.actor == **actor),
                 )
             })
             .map(|(actor, _)| *actor)

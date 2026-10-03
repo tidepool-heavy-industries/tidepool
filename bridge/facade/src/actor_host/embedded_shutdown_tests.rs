@@ -163,9 +163,14 @@ async fn embedded_shutdown_settles_exact_waiters_and_preserves_timeout_uncertain
         )
     });
     tasks.spawn(std::future::pending());
-    let failure = drain_embedded_shutdown(&mut tasks, Duration::from_secs(1), |_| None, |actor, release| {
-        answer_release_waiters(&mut waiters, actor, release);
-    })
+    let failure = drain_embedded_shutdown(
+        &mut tasks,
+        Duration::from_secs(1),
+        |_| None,
+        |actor, release| {
+            answer_release_waiters(&mut waiters, actor, release);
+        },
+    )
     .await
     .unwrap();
     assert!(failure.contains("claim settlement failed"));
@@ -203,11 +208,16 @@ async fn shutdown_lost_driver_and_dropped_waiter_do_not_confirm_release() {
     )> = JoinSet::new();
     let task = tasks.spawn(async { panic!("driver lost before reporting cleanup") });
     let mut task_actors = HashMap::from([(task.id(), actor)]);
-    let failure = drain_embedded_shutdown(&mut tasks, Duration::from_secs(1), |task_id| task_actors.remove(&task_id), |actor, release| {
-        answer_release_waiters(&mut waiters, actor, release);
-    })
-        .await
-        .unwrap();
+    let failure = drain_embedded_shutdown(
+        &mut tasks,
+        Duration::from_secs(1),
+        |task_id| task_actors.remove(&task_id),
+        |actor, release| {
+            answer_release_waiters(&mut waiters, actor, release);
+        },
+    )
+    .await
+    .unwrap();
     assert!(failure.contains("driver lost before reporting cleanup"));
     assert!(failure.contains("42"), "{failure}");
     assert_eq!(waiters.len(), 1);

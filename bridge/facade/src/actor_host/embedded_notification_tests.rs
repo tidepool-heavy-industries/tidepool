@@ -1,5 +1,5 @@
-use super::test_campaign::TestCampaign;
 use super::delivery::deliver_embedded_notifications;
+use super::test_campaign::TestCampaign;
 use super::*;
 use async_trait::async_trait;
 use exomonad_node::{DeliveryPhase, ReceiptLookup};

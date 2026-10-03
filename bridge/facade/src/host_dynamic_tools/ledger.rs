@@ -85,9 +85,7 @@ impl HostedOperationLedger {
     pub(super) fn validate_recovery(path: PathBuf) -> Result<(), String> {
         operation_journal::OperationJournal::open_existing(path)
             .map(|_| ())
-            .map_err(|error| {
-                format!("hosted-operation recovery evidence is unavailable: {error}")
-            })
+            .map_err(|error| format!("hosted-operation recovery evidence is unavailable: {error}"))
     }
 
     /// Admission and journal acceptance share one lock so concurrent retries
@@ -111,9 +109,7 @@ impl HostedOperationLedger {
                     | BoundaryState::Recoverable,
                 ) => return CallAdmission::BoundaryActive,
                 None => {
-                    state
-                        .boundaries
-                        .insert(key.clone(), BoundaryState::Active);
+                    state.boundaries.insert(key.clone(), BoundaryState::Active);
                 }
             }
         }
@@ -166,10 +162,7 @@ impl HostedOperationLedger {
         result
     }
 
-    pub(super) async fn claim_interruption(
-        &self,
-        key: OriginalOperation,
-    ) -> InterruptionAdmission {
+    pub(super) async fn claim_interruption(&self, key: OriginalOperation) -> InterruptionAdmission {
         let mut state = self.state.lock().await;
         match state.boundaries.get(&key).copied() {
             Some(BoundaryState::Reconciling) => InterruptionAdmission::Pending,
@@ -190,16 +183,13 @@ impl HostedOperationLedger {
         }
     }
 
-    pub(super) async fn claim_completion(
-        &self,
-        key: OriginalOperation,
-    ) -> CompletionAdmission {
+    pub(super) async fn claim_completion(&self, key: OriginalOperation) -> CompletionAdmission {
         let mut state = self.state.lock().await;
         match state.boundaries.get(&key).copied() {
             Some(BoundaryState::Settled) => CompletionAdmission::Settled,
-            Some(
-                BoundaryState::Active | BoundaryState::Reconciling | BoundaryState::Pending,
-            ) => CompletionAdmission::Busy,
+            Some(BoundaryState::Active | BoundaryState::Reconciling | BoundaryState::Pending) => {
+                CompletionAdmission::Busy
+            }
             previous @ (None | Some(BoundaryState::Recoverable)) => {
                 state
                     .boundaries
@@ -280,10 +270,7 @@ fn restore_boundary(
 
 #[cfg(test)]
 impl HostedOperationLedger {
-    pub(super) async fn boundary_state(
-        &self,
-        key: &OriginalOperation,
-    ) -> Option<BoundaryState> {
+    pub(super) async fn boundary_state(&self, key: &OriginalOperation) -> Option<BoundaryState> {
         self.state.lock().await.boundaries.get(key).copied()
     }
 

@@ -32,8 +32,8 @@ use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
-mod operation_journal;
 mod ledger;
+mod operation_journal;
 
 pub(crate) fn validate_operation_recovery(path: PathBuf) -> Result<(), String> {
     ledger::HostedOperationLedger::validate_recovery(path)
@@ -1133,7 +1133,9 @@ async fn call(
             return Json(CallResponse::failure(&HostToolFailure::SettledBoundary));
         }
         ledger::CallAdmission::JournalError(error) => {
-            return Json(CallResponse::failure(&HostToolFailure::OperationJournal(error)));
+            return Json(CallResponse::failure(&HostToolFailure::OperationJournal(
+                error,
+            )));
         }
     }
     let invocation = ToolInvocation {
@@ -1162,12 +1164,14 @@ async fn call(
                 error = %failure,
                 "resident tool dispatch panicked before returning its future"
             );
-            return Json(record_operation_response(
-                &state,
-                &journal_request,
-                CallResponse::failure(&failure),
-            )
-            .await);
+            return Json(
+                record_operation_response(
+                    &state,
+                    &journal_request,
+                    CallResponse::failure(&failure),
+                )
+                .await,
+            );
         }
     };
     let response = match result {
@@ -2047,7 +2051,8 @@ pub(crate) mod tests {
         let request = call_request(serde_json::Value::String("effect".into()));
         let first_state = state.clone();
         let first_request = request.clone();
-        let first = tokio::spawn(async move { call(State(first_state), Json(first_request)).await.0 });
+        let first =
+            tokio::spawn(async move { call(State(first_state), Json(first_request)).await.0 });
 
         entered.notified().await;
         let duplicate = call(State(state.clone()), Json(request.clone())).await.0;
