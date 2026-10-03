@@ -3540,14 +3540,14 @@ pub fn assemble_checked_activation_module(
     fields(
         kind = req.verdict.as_ref().map_or("", |verdict| turn_kind_wire_name(verdict.kind)),
         checked = checked.is_some(),
-        display = display.is_some(),
+        display = display_admission.is_some(),
     )
 )]
 fn run_turn_with_admission(
     req: TurnRequest<'_>,
     activation_preview: bool,
     checked: Option<Arc<super::RuntimeCheckedItemAdmission>>,
-    display: Option<Arc<super::RuntimeCheckedDisplayAdmission>>,
+    display_admission: Option<Arc<super::RuntimeCheckedDisplayAdmission>>,
 ) -> Result<TurnResult, TurnFailure> {
     let verdict_arg = match &req.verdict {
         Some(TurnClassification { kind, binders, .. }) => {
@@ -3574,7 +3574,7 @@ fn run_turn_with_admission(
     let snapshot = checked
         .as_ref()
         .map(|admission| admission.snapshot())
-        .or_else(|| display.as_ref().map(|admission| admission.snapshot()));
+        .or_else(|| display_admission.as_ref().map(|admission| admission.snapshot()));
     let turn_path = temp.path().join("turn.txt");
     std::fs::write(&turn_path, req.turn_text)?;
     let turn_out_path = temp.path().join("turn.cbor");
@@ -3628,7 +3628,7 @@ fn run_turn_with_admission(
 
     let endpoint = bind_extract_cmd(&cmd)?;
     let include: Vec<_> = req.include.iter().map(|path| path.to_path_buf()).collect();
-    let offer = if let Some(admission) = &display {
+    let offer = if let Some(admission) = &display_admission {
         ModuleCandidateOffer::select_checked_display(
             endpoint.identity().producer_bytes(),
             &include,
