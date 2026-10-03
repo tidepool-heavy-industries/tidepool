@@ -184,6 +184,7 @@ exactCompilationCacheSafety expectedSource bytes = do
 main :: IO ()
 main = getArgs >>= \case
   ["--finalized-core"] -> finalizedCoreChecks
+  ["--finalized-frontend-once"] -> finalizedFrontendOnce
   ["--execution-source-decode"] -> executionSourceDecodeChecks
   "--execution-source-decode-benchmark" : iterations : files -> executionSourceDecodeBenchmark iterations files
   "--execution-source-decode-snapshots" : output : files -> executionSourceDecodeSnapshots output files
@@ -2560,6 +2561,65 @@ hasIntResultLiteral expected = any (\case
       Core.Tick _ body -> contains body
       _ -> False
 
+-- A real splice executes in both dependency and target. The recorded side
+-- effect rejects replay even if two frontend executions produce identical Core.
+finalizedFrontendOnce :: IO ()
+finalizedFrontendOnce = withTiming $ withScratch $ \work -> do
+  let fixture name = "test-source-boot/fixtures" </> name
+      counter = work </> "frontend-counts"
+      target = work </> "FinalizedSpliceTarget.hs"
+      owner = mkModuleName "FinalizedSpliceOwner"
+      unused = mkModuleName "FinalizedSpliceUnused"
+      executions expected = do
+        actual <- lines <$> readFile counter
+        unless (sort actual == sort expected) $
+          fail ("native splice executed another number of times: " ++ show actual)
+      capturedCount phase name diagnostics = length
+        [line | line <- lines diagnostics, line == "tidepool-canonical-" ++ phase
+          ++ " module=" ++ name]
+  forM_ ["FinalizedSpliceOwner.hs", "FinalizedSpliceUnused.hs", "FinalizedSpliceTarget.hs"] $ \name ->
+    copyFile (fixture name) (work </> name)
+  bracket (lookupEnv "TIDEPOOL_TEST_FINALIZATION_COUNTER")
+    (maybe (unsetEnv "TIDEPOOL_TEST_FINALIZATION_COUNTER")
+      (setEnv "TIDEPOOL_TEST_FINALIZATION_COUNTER")) $ \_ -> do
+    setEnv "TIDEPOOL_TEST_FINALIZATION_COUNTER" counter
+    withResidentPipelineSelected [work] $ \compile -> do
+      let run = captureDiagnostics $
+            compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] Nothing
+      (result, diagnostics) <- run
+      executions ["owner", "target"]
+      unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult result))
+          && not (null (prWarnings (pprPipelineResult result)))
+          && Map.member owner (pprFinalizedModules result)
+          && Map.member unused (pprFinalizedModules result)
+          && "FinalizedSpliceUnused" `notElem` preparedNames result) $
+        fail "one frontend lost native result, diagnostics, final owner or lazy STG selection"
+      forM_ ["FinalizedSpliceOwner", "FinalizedSpliceUnused", "FinalizedSpliceTarget"] $ \name ->
+        unless (capturedCount "frontend" name diagnostics == 1
+            && capturedCount "finalization" name diagnostics == 1) $
+          fail ("canonical phase did not execute exactly once for " ++ name)
+      writeFile counter ""
+      (checked, checkedDiagnostics) <- captureDiagnostics $
+        compile CheckedEnvironment Set.empty GeneralCompile Nothing target [work] Nothing
+      actual <- lines <$> readFile counter
+      unless (length (filter (== "target") actual) == 1
+          && length (filter (== "owner") actual) == capturedCount "frontend" "FinalizedSpliceOwner" checkedDiagnostics
+          && length (filter (== "owner") actual) <= 1
+          && all (`elem` ["owner", "target"]) actual
+          && isJust (crResultType checked) && not (null (crWarnings checked))) $
+        fail "checked frontend lost its captured type or warnings"
+      -- A changed provider forces a fresh authoritative native frontend; its
+      -- splice and the target splice must still each execute once.
+      source <- T.pack <$> readFile (fixture "FinalizedSpliceOwner.hs")
+      writeFile (work </> "FinalizedSpliceOwner.hs")
+        (T.unpack (T.replace "[| 42 :: Int |]" "[| 43 :: Int |]" source))
+      writeFile counter ""
+      (changed, _) <- run
+      executions ["owner", "target"]
+      unless (hasIntResultLiteral 43 (prBinds (pprPipelineResult changed))) $
+        fail "canonical native provider reused the previous source result"
+  putStrLn "finalized frontend: splice once, native bytecode, warnings and lazy STG passed"
+
 quasiQuoteCodegenTransition :: IO ()
 quasiQuoteCodegenTransition = withTiming $ withScratch $ \work -> do
   let fixture name = "test-source-boot/fixtures" </> name
@@ -2614,6 +2674,9 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       resultType = fmap renderType . crResultType
       loadedOwner = "tidepool-checked-loaded-source module=MetadataOwner"
       checkedOwner = "tidepool-checked module=MetadataOwner target=False"
+      frontendCount name diagnostics = length (filter (==
+          "tidepool-canonical-frontend module=" ++ name) (lines diagnostics))
+        + length (filter (== "tidepool-checked module=" ++ name ++ " target=False") (lines diagnostics))
   forM_ ["MetadataOwner.hs", "MetadataTarget.hs", "MetadataExtensionOnlyTarget.hs", "MetadataLoadedFamily.hs"
     , "MetadataFamilyTarget.hs", "MetadataHiddenFamily.hs", "MetadataUntracked.hs"
     , "MetadataUntrackedTarget.hs", "MetadataQuoter.hs", "MetadataQuotedTarget.hs", "MetadataQuoteSupport.hs"] install
@@ -2625,8 +2688,8 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       (work </> "MetadataTarget.hs") [work] Nothing
     (exact, diagnostics) <- captureDiagnostics (checked "MetadataTarget.hs")
     unless (resultType exact == Just "Int" && resultType ordinary == resultType exact
-        && length (filter (== loadedOwner) (lines diagnostics)) == 1
-        && checkedOwner `notElem` lines diagnostics
+        && frontendCount "MetadataOwner" diagnostics == 1
+        && not (loadedOwner `elem` lines diagnostics && checkedOwner `elem` lines diagnostics)
         && "tidepool-checked module=MetadataTarget target=True" `elem` lines diagnostics) $
       fail "exact metadata repeated the loaded source frontend or changed its instance result"
     (extensionOnly, extensionDiagnostics) <- captureDiagnostics
@@ -2658,7 +2721,7 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
     unless (resultType quoted == Just "Int"
         && null (counterValues "quasiquote_codegen_elided_modules" quoteDiagnostics)
         && "tidepool-checked-dependency-executable module=MetadataQuoter bytecode=True object=False" `elem` lines quoteDiagnostics
-        && "tidepool-checked-loaded-source module=MetadataQuoter" `elem` lines quoteDiagnostics) $
+        && frontendCount "MetadataQuoter" quoteDiagnostics == 1) $
       fail "exact metadata discarded the loaded quoter's executable linkable"
     quoterProducer <- compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
       (work </> "MetadataQuoter.hs") [work] Nothing
@@ -2669,7 +2732,7 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       compile (CheckedEnvironmentProducts (manifest work)) Set.empty GeneralCompile (Just scope)
         (work </> "MetadataQuotedTarget.hs") [work] Nothing
     unless (resultType quotedCandidate == Just "Int"
-        && "tidepool-checked-loaded-source module=MetadataQuoter" `elem` lines candidateQuoteDiagnostics
+        && frontendCount "MetadataQuoter" candidateQuoteDiagnostics == 1
         && "tidepool-checked-dependency-executable module=MetadataQuoteSupport bytecode=True object=False" `elem` lines candidateQuoteDiagnostics
         && counterValues "candidate_source_load_required" candidateQuoteDiagnostics == [1]) $
       fail "source candidate discarded a GHC-required quoter executable"
@@ -2704,9 +2767,9 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
       _ -> fail "loaded metadata lost the hidden original family conflict"
     writeExactMetadataScope scopePath []
     (_, untrackedDiagnostics) <- captureDiagnostics (checked "MetadataUntrackedTarget.hs")
-    unless ("tidepool-checked module=MetadataUntracked target=False" `elem` lines untrackedDiagnostics
-        && "tidepool-checked-loaded-source module=MetadataUntracked" `notElem` lines untrackedDiagnostics) $
-      fail "untracked compile-time input was promoted to loaded metadata evidence"
+    unless (frontendCount "MetadataUntracked" untrackedDiagnostics == 1
+        && "tidepool-checked-loaded-source module=MetadataUntracked" `elem` lines untrackedDiagnostics) $
+      fail "untracked compile-time input repeated its native frontend"
     receipts <- listDirectory (work </> ".exact-compilations")
     receiptSafety <- fmap catMaybes $ forM receipts $ \entry -> do
       bytes' <- BS.readFile (work </> ".exact-compilations" </> entry </> "receipt.cbor")

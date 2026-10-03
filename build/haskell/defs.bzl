@@ -14,6 +14,7 @@ EXTRACTOR_LIBRARY_PACKAGES = [
     "ghc-boot",
     "bytestring",
     "containers",
+    "deepseq",
     "filepath",
     "directory",
     "process",

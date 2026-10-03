@@ -98,6 +98,7 @@ library tidepool-extract-internal
     ghc-boot     >= 9.12 && < 9.13,
     bytestring,
     containers,
+    deepseq,
     filepath,
     directory,
     process,
