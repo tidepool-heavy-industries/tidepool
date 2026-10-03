@@ -2734,6 +2734,7 @@ mod tests {
             .sha256(),
         );
         let producer_dir = fixture_record_dir(root).parent().unwrap().to_path_buf();
+        fs::create_dir_all(&producer_dir).unwrap();
         record.module_interface = Some(
             crate::recovery_artifacts::materialize_module_interface(
                 &producer_dir,
