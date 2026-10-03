@@ -67,6 +67,7 @@ import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 
 main :: IO ()
 main = getArgs >>= \case
+  ["--compiler-boundaries"] -> compilerBoundaryChecks
   ["--checked-admission"] -> checkedAdmissionChecks
   ["--cell-accumulation"] -> cellProgramStateChecks
   ["--request-validation"] -> requestValidationChecks
@@ -81,9 +82,15 @@ main = getArgs >>= \case
   ["--structural-display-exact", effectsRoot] -> structuralDisplayCompilation ExactDisplayTest effectsRoot >> putStrLn "exact structural display: 1 passed"
   _ -> runAllTests
 
+compilerBoundaryChecks :: IO ()
+compilerBoundaryChecks = do
+  requestValidationChecks
+  cellProgramStateChecks
+  checkedAdmissionChecks
+
 runAllTests :: IO ()
 runAllTests = do
-  requestValidationChecks
+  compilerBoundaryChecks
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     flags <- getSessionDynFlags
