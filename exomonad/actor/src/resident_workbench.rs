@@ -4979,7 +4979,10 @@ where
         context: crate::ActorSessionContext,
         job: String,
     ) -> Result<String, ResidentActorWorkbenchError> {
-        let carrier = self.carrier_for(&context, HostCarrierKind::Job).await?;
+        let carrier = self
+            .carrier_for(&context, HostCarrierKind::Job)
+            .await
+            .map_err(|error| command_job_carrier_failure(&job, error))?;
         self.access
             .with_machine(context, move |session, context, _source| {
                 let scope = context.placement.lexical_scope;
@@ -5293,6 +5296,15 @@ where
             })
             .await
     }
+}
+
+fn command_job_carrier_failure(
+    job: &str,
+    error: ResidentActorWorkbenchError,
+) -> ResidentActorWorkbenchError {
+    ResidentActorWorkbenchError::InputMount(format!(
+        "command {job} remains owned; no retained output binding was created because its command-job carrier could not be prepared: {error}. Recover retained output with read_output session_id={job}, stream=Stdout (or Stderr), offset=0. Do not rerun."
+    ))
 }
 
 /// A fresh command output binding name among the scope's workbench bindings.
@@ -11476,6 +11488,26 @@ mod request_tests {
     }
 
     /// Named-tool command output bindings reuse one cached Job carrier.
+    #[test]
+    fn job_carrier_failure_keeps_the_owned_command_recoverable() {
+        let error = command_job_carrier_failure(
+            "job-session-123",
+            ResidentActorWorkbenchError::InputMount("typed completion input is unavailable".into()),
+        );
+        let ResidentActorWorkbenchError::InputMount(detail) = error else {
+            panic!("carrier preparation failure should be reported at the binding mount boundary")
+        };
+
+        assert!(detail.contains("command job-session-123 remains owned"));
+        assert!(detail.contains("no retained output binding was created"));
+        assert!(detail.contains("typed completion input is unavailable"));
+        assert!(detail.contains(
+            "read_output session_id=job-session-123, stream=Stdout (or Stderr), offset=0"
+        ));
+        assert!(detail.contains("Do not rerun"));
+        assert!(!detail.contains("retained as"));
+    }
+
     #[tokio::test]
     async fn two_bind_command_job_calls_on_one_workbench_compile_the_job_carrier_once() {
         let (machines, context, source, _root) = actor_registry_fixture();
