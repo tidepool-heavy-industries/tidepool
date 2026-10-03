@@ -143,7 +143,8 @@ import Data.Generics (everything, mkQ)
 import Data.Foldable (toList)
 import Data.Word (Word64)
 import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellDisplayTarget(..), CellGenericDeclaration(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations, omitCellDisplayDeclarations)
-import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType)
+import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType
+  , NativeParsedModule, unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModule)
 import Tidepool.HomeProducts (hydrateCandidateHomeProductsWithOriginals)
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
@@ -764,7 +765,7 @@ data PipelineVariant = PipelineVariant
     -- source-less @Val.G\<g\>@ ifaces). Empty on the normal path.
   , pvPlan :: Bool -> ModuleGraph -> Maybe ExactScope -> Ghc CompilePlan
     -- ^ @pvPlan timingEnabled downsweepGraph selectedExactScope@.
-  , pvTransformParsed :: HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
+  , pvTransformParsed :: HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
   }
 
 candidateManifestFor :: PipelineSelection result -> Maybe FilePath
@@ -823,13 +824,13 @@ originalPurpose (GeneratedScaffoldCompile _ inner) = originalPurpose inner
 originalPurpose (CellProgramCompile inner _) = originalPurpose inner
 originalPurpose purpose = purpose
 
-transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
-transformFor GeneralCompile _ _ _ = pure
-transformFor OriginalDeclarationCompile _ _ _ = pure
-transformFor CertifyHomeProductsCompile _ _ _ = pure
+transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
+transformFor GeneralCompile _ _ _ = pure . unannotatedModule
+transformFor OriginalDeclarationCompile _ _ _ = pure . unannotatedModule
+transformFor CertifyHomeProductsCompile _ _ _ = pure . unannotatedModule
 transformFor LookupTypeCompile target _ summary
-  | ms_mod_name summary == target = pure . normalizeLookupWildcards
-  | otherwise = pure
+  | ms_mod_name summary == target = pure . unannotatedModule . normalizeLookupWildcards
+  | otherwise = pure . unannotatedModule
 transformFor (CheckedItemCompile annotations original _) target env summary
   | ms_mod_name summary == target = \parsed -> do
       annotated <- rewriteCheckedAnnotations env annotations parsed
@@ -837,31 +838,31 @@ transformFor (CheckedItemCompile annotations original _) target env summary
         Nothing -> pure annotated
         Just (owner, fingerprint) -> do
           inventory <- hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure
-          transformPlannedDeclarationImports inventory env annotated
-  | otherwise = pure
+          mapNativeModule (transformPlannedDeclarationImports inventory env) annotated
+  | otherwise = pure . unannotatedModule
 transformFor (HostActivationCheck signature) target env summary
   | ms_mod_name summary == target = rewriteHostInputType env 1 signature
-  | otherwise = pure
+  | otherwise = pure . unannotatedModule
 transformFor (HostActivationInputCompile annotations original values) target env summary
   | ms_mod_name summary == target = \parsed -> do
       signature <- hostInputSignature annotations
       typed <- rewriteHostInputType env 2 signature parsed
-      transformFor (CheckedItemCompile annotations original values) target env summary typed
-  | otherwise = pure
+      thenNativeModule typed (transformFor (CheckedItemCompile annotations original values) target env summary)
+  | otherwise = pure . unannotatedModule
 transformFor (ProgramItemCompile _ annotations originals _) target env summary
   | ms_mod_name summary == target = \parsed -> do
       annotated <- rewriteCheckedAnnotations env annotations parsed
       inventories <- mapM (\(owner,fingerprint) -> hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure) originals
-      transformProgramDeclarationImports inventories Nothing env annotated
-  | otherwise = pure
+      mapNativeModule (transformProgramDeclarationImports inventories Nothing env) annotated
+  | otherwise = pure . unannotatedModule
 transformFor (PlannedDeclarationCheck inventory _) target env summary
-  | ms_mod_name summary == target = transformPlannedDeclarationImports inventory env
-  | otherwise = pure
+  | ms_mod_name summary == target = fmap unannotatedModule . transformPlannedDeclarationImports inventory env
+  | otherwise = pure . unannotatedModule
 transformFor (CellProgramCompile purpose _) target env summary = transformFor purpose target env summary
 transformFor (GeneratedScaffoldCompile _ purpose) target env summary = transformFor purpose target env summary
 
 transformWithCompletedValues :: Maybe CompletedValueImports -> CompilePurpose -> ModuleName
-  -> HscEnv -> ModSummary -> ParsedModule -> IO ParsedModule
+  -> HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
 transformWithCompletedValues captured purpose target env summary = case purpose of
   CellProgramCompile inner _ -> transformWithCompletedValues captured inner target env summary
   GeneratedScaffoldCompile _ inner -> transformWithCompletedValues captured inner target env summary
@@ -869,23 +870,23 @@ transformWithCompletedValues captured purpose target env summary = case purpose 
     | ms_mod_name summary == target -> \parsed -> do
         signature <- hostInputSignature annotations
         typed <- rewriteHostInputType env 2 signature parsed
-        transformWithCompletedValues captured (CheckedItemCompile annotations original requested) target env summary typed
+        thenNativeModule typed (transformWithCompletedValues captured (CheckedItemCompile annotations original requested) target env summary)
   CheckedItemCompile annotations original requested
     | ms_mod_name summary == target && not (null requested) -> \parsed -> do
         values <- maybe (fail "completed value interfaces were not installed in this request") pure captured
         annotated <- rewriteCheckedAnnotations env annotations parsed
         case original of
-          Nothing -> transformCompletedValueImports values env annotated
+          Nothing -> mapNativeModule (transformCompletedValueImports values env) annotated
           Just (owner, fingerprint) -> do
             inventory <- hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure
-            transformPlannedDeclarationImportsWithCompleted inventory values env annotated
+            mapNativeModule (transformPlannedDeclarationImportsWithCompleted inventory values env) annotated
   ProgramItemCompile _ annotations originals requested
     | ms_mod_name summary == target -> \parsed -> do
         values <- if null requested then pure Nothing else
           Just <$> maybe (fail "program completed interfaces were not installed") pure captured
         annotated <- rewriteCheckedAnnotations env annotations parsed
         inventories <- mapM (\(owner,fingerprint) -> hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure) originals
-        transformProgramDeclarationImports inventories values env annotated
+        mapNativeModule (transformProgramDeclarationImports inventories values env) annotated
   _ -> transformFor purpose target env summary
 
 hostInputSignature :: [(String, CheckedSignature)] -> IO CheckedSignature
@@ -1884,7 +1885,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     parsed <- parseModule modSum
                     origins <- liftIO (classifyQuasiQuoteOrigins classifyEnv parsed)
                     transformed <- liftIO (pvTransformParsed variant classifyEnv modSum parsed)
-                    typed <- typecheckModule transformed
+                    typed <- typecheckNativeModule transformed
                     familyEnvironment <- getSession
                     liftIO (validateCompilationFamilies familyEnvironment (fst (tm_internals_ typed)))
                     pure (typed, origins)
@@ -2635,7 +2636,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                       parsed <- parseModule summary
                       origins <- liftIO (classifyQuasiQuoteOrigins current parsed)
                       transformed <- liftIO (pvTransformParsed variant current summary parsed)
-                      typed <- typecheckModule transformed
+                      typed <- typecheckNativeModule transformed
                       familyEnvironment <- getSession
                       liftIO (validateCompilationFamilies familyEnvironment (fst (tm_internals_ typed)))
                       pure (typed, origins)

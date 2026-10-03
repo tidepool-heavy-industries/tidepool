@@ -15270,10 +15270,7 @@ mod request_tests {
         let PreparedCell {
             items,
             dependencies,
-        } = prepared
-        else {
-            panic!("a two-item bind cell should prepare as Ready");
-        };
+        } = prepared;
         assert_eq!(items.len(), 2);
         assert!(
             items.iter().all(|item| item.ready.item.kind()

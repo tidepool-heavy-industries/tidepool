@@ -19,7 +19,7 @@ import Data.Maybe (catMaybes, isJust, isNothing, maybeToList)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
-import GHC (runGhc, setSession, ms_mod_name, ms_hsc_src, ms_hspp_buf, ms_hspp_file, parseModule, typecheckModule, ParsedModule, TypecheckedModule(..), Target(..))
+import GHC (runGhc, getSession, setSession, SafeHaskellMode(Sf_None), ms_mod_name, ms_hsc_src, ms_hspp_buf, ms_hspp_file, parseModule, typecheckModule, TypecheckedModule(..), Target(..))
 import GHC.Core qualified as Core
 import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy)
 import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
@@ -45,17 +45,19 @@ import GHC.Unit.Module.Location (ml_hi_file)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Builtin.Names (gHC_PRIM)
 import GHC.Tc.Types (tcg_imports, tcg_type_env)
-import GHC.Unit.Module.Deps (imp_mods)
+import GHC.Unit.Module.Deps (imp_mods, Usage(..))
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
 import GHC.Types.SourceFile (HscSource(..))
 import Control.Monad.IO.Class (liftIO)
 import GHC.Driver.Session (targetProfile)
 import GHC.Driver.Hooks (hscCompileCoreExprHook)
+import GHC.Iface.Make (mkIfaceTc)
+import GHC.Iface.Tidy (mkBootModDetailsTc)
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports)
+import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports, mi_usages)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module (Module, mkModule, mkModuleName, moduleName, moduleNameString, moduleUnit)
-import GHC.Unit.Types (unitString, stringToUnit, GenWithIsBoot(..))
+import GHC.Unit.Types (unitString, unitIdString, stringToUnit, GenWithIsBoot(..))
 import Numeric (showHex)
 import System.Directory
   ( copyFile, createDirectory, createDirectoryIfMissing, getTemporaryDirectory, removeDirectoryRecursive
@@ -120,7 +122,7 @@ import Tidepool.Session (sessionHiPath)
 import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), captureCheckedSignature, encodeCheckedSignature
-  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, rewriteCheckedAnnotations, rewriteHostInputType)
+  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, rewriteCheckedAnnotations, rewriteHostInputType, NativeParsedModule, typecheckNativeModule)
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
 import Tidepool.Binders (BoundBinder(..))
 import Tidepool.ExecutionSource
@@ -1776,7 +1778,7 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
       setSession (crHscEnv checked)
       parsed <- parseModule summary
       rewritten <- liftIO (rewriteCheckedAnnotations (crHscEnv checked) signatures parsed)
-      rechecked <- typecheckModule rewritten
+      rechecked <- typecheckNativeModule rewritten
       let (environment, _) = tm_internals_ rechecked
           actual = Map.fromList [(getOccString identifier, idType identifier)
             | identifier <- typeEnvIds (tcg_type_env environment)]
@@ -1785,7 +1787,7 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
           (fail ("native signature changed exact type: " ++ key))
       let damaged = [(key, signature { signatureNames = [] }) | (key, signature) <- signatures]
       refused <- liftIO (try (rewriteCheckedAnnotations (crHscEnv checked) damaged parsed)
-        :: IO (Either SomeException ParsedModule))
+        :: IO (Either SomeException NativeParsedModule))
       liftIO $ unless (case refused of Left _ -> True; Right _ -> False)
         (fail "native signature admitted a substituted Name inventory")
       let inputSignature = lookup "__tidepool_cell_pin_0_nominal" signatures
@@ -1797,16 +1799,26 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
             parseModule (summary { ms_hspp_buf = Nothing, ms_hspp_file = target })
       slot <- parseSlot "__result :: TidepoolActivationInput\n__result = undefined\n"
       native <- liftIO (rewriteHostInputType (crHscEnv checked) 1 signature slot)
-      result <- typecheckModule native
+      result <- typecheckNativeModule native
       let (nativeEnvironment, _) = tm_internals_ result
           actualInput = [idType identifier | identifier <- typeEnvIds (tcg_type_env nativeEnvironment)
             , getOccString identifier == "__result"]
       liftIO $ unless (case actualInput of [ty] -> eqType expected ty; _ -> False)
         (fail "native host slot lost its nominal owner without a source import")
+      nativeEnvironmentOwner <- getSession
+      details <- liftIO (mkBootModDetailsTc (hsc_logger nativeEnvironmentOwner) nativeEnvironment)
+      interface <- liftIO (mkIfaceTc nativeEnvironmentOwner Sf_None details summary Nothing nativeEnvironment)
+      let ownerUsage UsageHomeModule { usg_mod_name = owner, usg_unit_id = unit } =
+            moduleNameString owner == "CheckedNativeTypeOwner" && unitIdString unit == "main"
+          ownerUsage _ = False
+          sourceImports = Map.keys (imp_mods (tcg_imports nativeEnvironment))
+      liftIO $ unless (any ownerUsage (mi_usages interface)
+          && all ((/= "CheckedNativeTypeOwner") . moduleNameString . moduleName) sourceImports)
+        (fail "native type owner lacks GHC usage evidence or acquired a source import")
       forM_ ["Int", "Missing.TidepoolActivationInput", "(TidepoolActivationInput, TidepoolActivationInput)"] $ \bad -> do
         malformed <- parseSlot ("__result :: " ++ bad ++ "\n__result = undefined\n")
         refusedSlot <- liftIO (try (rewriteHostInputType (crHscEnv checked) 1 signature malformed)
-          :: IO (Either SomeException ParsedModule))
+          :: IO (Either SomeException NativeParsedModule))
         liftIO $ unless (case refusedSlot of Left _ -> True; Right _ -> False)
           (fail "host input admitted a missing, qualified or duplicated native slot")
   putStrLn "native checked signatures: 7 shapes, source-free nominal slot and authority/slot refusals passed"
