@@ -1212,7 +1212,7 @@ originalPackageProjection = withScratch $ \work -> do
             then global {globalRequiredGeneration=Nothing} else global
           | global <- projectedGlobals (projectedBody group)]}}
       normalized = map (\(owner,groups) -> (owner,fmap (map normalize) groups)) executable
-  verifyMissingOriginalInterface env
+  verifyCertifiedGroupingOrder work original
   unless (not (null packages) && any (isJust . globalRequiredGeneration) (globals executable)
       && all (isNothing . globalRequiredGeneration) (globals sourceProducts)
       && [owner | (owner,_) <- executable] == [owner | (owner,_) <- sourceProducts]) $
@@ -1406,29 +1406,53 @@ verifyOriginalOnlyPackageRefusal work original outcomes certified = do
   restored <- certifyProjectedProducts work "restored" original outcomes [] env {hsc_FC=finder}
   either fail (const (pure ())) restored
 
-verifyMissingOriginalInterface :: HscEnv -> IO ()
-verifyMissingOriginalInterface env = do
-  let emptyEvidence = DependencyEvidence False False [] [] [] []
-      candidate = ModuleCandidate
-        { candidateUnit = "main"
-        , candidateModule = "CertifiedOrderFixture"
-        , candidateSource = "/fixture/CertifiedOrderFixture.hs"
-        , candidateSourceSha256 = replicate 64 '0'
-        , candidateInterface = "/fixture/CertifiedOrderFixture.hi"
-        , candidateInterfaceSha256 = replicate 64 '0'
-        , candidateModuleVersion = "fixture-v1"
-        , candidateProductSha256 = replicate 64 '0'
-        , candidateEvidenceSha256 = replicate 64 '0'
+verifyCertifiedGroupingOrder :: FilePath -> PreparedPipelineResult -> IO ()
+verifyCertifiedGroupingOrder work original = do
+  let env = prHscEnv (pprPipelineResult original)
+      emptyEvidence = DependencyEvidence False False [] [] [] []
+      name = "PackageOriginalHome"
+      path = work </> "certified-group-order.hi"
+      source = work </> name ++ ".hs"
+  iface <- maybe (fail "group ordering fixture lost its actual original interface") pure
+    (Map.lookup (mkModuleName name) (pprProductInterfaces original))
+  writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression path iface
+  interfaceBytes <- BS.readFile path
+  sourceBytes <- BS.readFile source
+  let candidate = ModuleCandidate
+        { candidateUnit = unitString (moduleUnit (mi_module iface))
+        , candidateModule = name
+        , candidateSource = source
+        , candidateSourceSha256 = digest sourceBytes
+        , candidateInterface = path
+        , candidateInterfaceSha256 = digest interfaceBytes
+        , candidateModuleVersion = replicate 64 '1'
+        , candidateProductSha256 = replicate 64 '2'
+        , candidateEvidenceSha256 = replicate 64 '3'
         , candidateImports = []
         , candidateGroups = [CandidateGroup 91 [] [], CandidateGroup 3 [] []]
-        , candidatePackageImports = "/fixture/CertifiedOrderFixture.packages"
-        , candidatePackageImportsSha256 = replicate 64 '0'
-        , candidateProductPath = "/fixture/CertifiedOrderFixture.products.cbor"
+        , candidatePackageImports = path ++ ".packages"
+        , candidatePackageImportsSha256 = replicate 64 '4'
+        , candidateProductPath = path ++ ".product.cbor"
         , candidateExecutionSource = Nothing
         }
-  encodeCertifiedProducts env Map.empty [candidate] Nothing [] [] emptyEvidence BS.empty BS.empty >>= \case
+  bytes <- encodeCertifiedProducts env (pprProductInterfaces original) [candidate] Nothing
+    [] [] emptyEvidence BS.empty BS.empty >>= either fail pure
+  term <- either (fail . show) (pure . snd)
+    (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
+  case term of
+    TList [TString "TPCERT", TInt 5, TList [TList fields], TList [], TList [], TList []]
+      | length fields == 10 -> case drop 8 fields of
+          [TList groups,TList []] -> unless (map ordinal groups == [91,3]) $
+            fail "certified module grouping changed nonmonotone encounter order"
+          _ -> fail "certified module grouping omitted its exact group or interface inventory"
+    _ -> fail "certified module grouping produced an unexpected certificate envelope"
+  let absent = candidate {candidateModule="MissingOriginalInterface"}
+  encodeCertifiedProducts env Map.empty [absent] Nothing [] [] emptyEvidence BS.empty BS.empty >>= \case
     Left _ -> pure ()
     Right _ -> fail "cached original without its exact interface acquired a certificate"
+  where
+    ordinal (TList [TInt value,TList []]) = value
+    ordinal _ = -1
 
 originalProjectionProducts :: IO ()
 originalProjectionProducts = withScratch $ \work -> do
