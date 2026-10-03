@@ -25,6 +25,7 @@ import GHC.Driver.Env
   ( HscEnv(..), hsc_HPT, hscUpdateHPT )
 import GHC.Driver.Backend (backendGeneratesCode)
 import GHC.Core.TyCo.Compare (eqType)
+import GHC.Core.InstEnv (instEnvElts)
 import GHC.Driver.Config.Diagnostic (initDiagOpts, initPrintConfig)
 import GHC.Driver.Errors (printOrThrowDiagnostics)
 import GHC.Driver.Errors.Types (GhcMessage(GhcTcRnMessage))
@@ -324,7 +325,7 @@ validateBootImplementation environment summary bootEnvironment iface = do
       checkingBoot = bootEnvironment
         {tcg_rdr_env = mkGlobalRdrEnv (gresFromAvails checkingEnvironment Nothing (md_exports details))}
   (messages, checked) <- initTcWithGbl checkingEnvironment checkingBoot (tcg_top_loc bootEnvironment)
-    (checkHiBootIface' (md_insts details) (md_types details) (md_exports details) bootDetails)
+    (checkHiBootIface' (instEnvElts (md_insts details)) (md_types details) (md_exports details) bootDetails)
   printOrThrowDiagnostics (hsc_logger environment) (initPrintConfig flags) (initDiagOpts flags)
     (fmap GhcTcRnMessage messages)
   case checked of
