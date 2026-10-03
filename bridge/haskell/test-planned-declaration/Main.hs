@@ -128,7 +128,7 @@ main = withScratch $ \work -> do
   unless ("Generic" `isInfixOf` plannedSource automaticOriginal
       && "displayTree" `isInfixOf` plannedSource automaticOriginal
       && null (cellPlanGenericDeclarations (plannedCheckPlan automaticOriginal))
-      && null (cellPlanDisplayTargets (plannedCheckPlan automaticOriginal))) $
+      && null (cellPlanStructuralDisplayTargets (plannedCheckPlan automaticOriginal))) $
     fail "generated helpers did not move with the original declaration group"
   imported <- readFile "test-planned-declaration/fixtures/imported-cell.hs"
   importedCheckWrapper <- readFile "test-planned-declaration/fixtures/import-check-wrapper.hs"

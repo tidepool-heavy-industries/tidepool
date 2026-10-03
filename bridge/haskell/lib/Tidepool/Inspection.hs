@@ -39,7 +39,6 @@ module Tidepool.Inspection
     compactDisplayPage,
     pageWithContinuation,
     emptyPage,
-    cellDisplay,
   )
 where
 
@@ -273,11 +272,6 @@ instance Display (DisplayPage effects) where
     , Concat [TextLeaf "hasMore = ", TextLeaf (if pageHasMore page then "True" else "False")]
     , Concat [TextLeaf "unavailable = ", TextLeaf (if pageUnavailable page then "True" else "False")]
     ]
-
--- | Before the first display, each actor starts with an empty page. A retained
--- actor-local value shadows this polymorphic default after a successful display.
-cellDisplay :: DisplayPage effects
-cellDisplay = emptyPage
 
 emptyPage :: DisplayPage effects
 emptyPage = DisplayPage (\() -> ("", pure emptyPage, False, False))
