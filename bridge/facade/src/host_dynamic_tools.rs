@@ -1066,6 +1066,7 @@ fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
     let items = response.get("items")?.as_array()?;
     let mut transcript = String::new();
     let mut unit_effects: Vec<(u64, String)> = Vec::new();
+    let mut displays = Vec::new();
     for item in items {
         let item = item.as_object()?;
         let index = item.get("index")?.as_u64()?;
@@ -1077,6 +1078,20 @@ fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
         transcript.push_str(output);
         if let Some(effect) = unit_effect_description(item) {
             unit_effects.push((index, effect));
+        }
+        if let Some(operations) = item.get("operations").and_then(serde_json::Value::as_array) {
+            for operation in operations {
+                let Some(publication) = operation.get("displayPublication") else {
+                    continue;
+                };
+                let mut display = serde_json::json!({"publication": publication});
+                if let Some(page) = operation.get("display") {
+                    display["identity"] = page["identity"].clone();
+                    display["expansions"] = page["expansions"].clone();
+                    display["unavailable"] = page["unavailable"].clone();
+                }
+                displays.push(display);
+            }
         }
     }
     let processed = match status {
@@ -1103,6 +1118,15 @@ fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
             )),
             _ => {}
         }
+    }
+    for display in displays {
+        let line = format!("\ndisplay {}", serialize(display));
+        if transcript.len() + line.len() + 128 > MODEL_OUTPUT_LIMIT {
+            transcript
+                .push_str("\n[additional display detail is retained in the execution receipt]");
+            break;
+        }
+        transcript.push_str(&line);
     }
     Some(transcript)
 }
@@ -2444,6 +2468,44 @@ pub(crate) mod tests {
         let unknown_text = workbench_failure_transcript(&uncertain);
         assert!(unknown_text.contains("display 3:5:7 page 11 unconfirmed (acknowledgement lost)"));
         assert!(unknown_text.len() <= MODEL_OUTPUT_LIMIT);
+        let mut cancelled = serde_json::to_value(WorkbenchResponse {
+            status: WorkbenchRunStatus::RequestCancelled,
+            summary: None,
+            items: uncertain.receipts.clone(),
+            next_index: 0,
+            total: 1,
+            publication: None,
+        })
+        .unwrap();
+        let cancelled_response = CallResponse::workbench(cancelled.clone());
+        let CallContent::InputText {
+            text: cancelled_text,
+        } = &cancelled_response.content_items[0];
+        assert!(cancelled_text.contains("\"status\":\"unconfirmed\""));
+        assert!(cancelled_text.contains("\"display\":[3,5,7]"));
+        assert!(cancelled_text.contains("\"pageOrdinal\":11"));
+        cancelled["items"][0]["output"] = "canonical preview".into();
+        cancelled["items"][0]["operations"][0]["displayPublication"] = serde_json::to_value(
+            tidepool_runtime::session::WorkbenchDisplayPublication::Published {
+                publication: page,
+                output: tidepool_runtime::session::ActorOutputReference {
+                    run: "run".into(),
+                    sequence: 17,
+                },
+            },
+        )
+        .unwrap();
+        cancelled["items"][0]["operations"][0]["display"] = serde_json::json!({
+            "identity": [3,5,7], "text": "canonical preview", "expansions": [[1,"line\n\"label"]], "unavailable": false,
+            "output": {"run":"run", "sequence":17}
+        });
+        let published_response = CallResponse::workbench(cancelled);
+        let CallContent::InputText {
+            text: published_text,
+        } = &published_response.content_items[0];
+        assert_eq!(published_text.matches("canonical preview").count(), 1);
+        assert!(published_text.contains("\"sequence\":17"));
+        assert!(published_text.contains("\"expansions\":[[1,\"line\\n\\\"label\"]]"));
         let cleanup_response =
             CallResponse::failure(&HostToolFailure::Dispatch(ResidentToolError::Invocation(
                 exomonad_actor::KernelInvocationFailure::CleanupUnconfirmed {
