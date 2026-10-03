@@ -138,8 +138,8 @@ preparePlannedDeclaration reserved wrapper plan = do
                 [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ reserved)] }
         , cellPlanDeclarationBase = ""
         , cellPlanGenericDeclarations = []
-        , cellPlanDisplayDeclarations = ""
-        , cellPlanDisplayTargets = []
+        , cellPlanStructuralDisplayDeclarations = ""
+        , cellPlanStructuralDisplayTargets = []
         }
   pure (PlannedDeclaration reserved source check heads)
   where

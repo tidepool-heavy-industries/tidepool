@@ -13,6 +13,7 @@ pub(super) async fn run_interactive_applications(
         root,
         config,
         run_root,
+        output_store,
         #[cfg(feature = "codex-compat")]
         tmux,
         #[cfg(feature = "codex-compat")]
@@ -89,6 +90,42 @@ pub(super) async fn run_interactive_applications(
         embedded_projection::LifecycleSender::channel();
     let mut embedded_projection = embedded_projection::EmbeddedProjection::default();
     let embedded_run = runtime_namespace(&launch_context.run_root);
+    if let Some(service) = embedded_service.as_ref() {
+        let forest = Arc::downgrade(&provider_forest);
+        let run = embedded_run.clone();
+        service
+            .control
+            .install_actor_display_expander(Arc::new(move |input| {
+                let forest = forest.clone();
+                let run = run.clone();
+                Box::pin(async move {
+                    if input.origin.run != run {
+                        return Err("display belongs to a different run".into());
+                    }
+                    let forest = forest
+                        .upgrade()
+                        .ok_or_else(|| "native display owner is unavailable".to_owned())?;
+                    let actor = ActorRef {
+                        id: exomonad_actor::ActorId(input.origin.native_actor),
+                        incarnation: exomonad_actor::Incarnation(input.origin.incarnation),
+                    };
+                    let response = forest
+                        .request_expansion(
+                            actor,
+                            (
+                                input.origin.native_actor as i64,
+                                input.origin.incarnation as i64,
+                                input.display_slot as i64,
+                            ),
+                            input.key as i64,
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    serde_json::to_value(response).map_err(|error| error.to_string())
+                })
+            }))
+            .map_err(str::to_owned)?;
+    }
     #[cfg(feature = "codex-compat")]
     let mut binding_discoveries = JoinSet::new();
     #[cfg(not(feature = "codex-compat"))]
@@ -539,6 +576,18 @@ pub(super) async fn run_interactive_applications(
             event = lifecycle.recv() => {
                 let Some(event) = event else { break None };
                 match event {
+                    LocalResidentDeployment::DisplayPublished(request) => {
+                        let conversation = embedded_binding(&application_owners, request.actor)
+                            .map(|binding| binding.identity().clone());
+                        display_output::publish(
+                            &provider_forest,
+                            &output_store,
+                            &embedded_run,
+                            conversation,
+                            embedded_service.as_ref().map(|service| &service.control),
+                            &request,
+                        );
+                    }
                     LocalResidentDeployment::PolicyInstalled(installation) => {
                         let provider_attachment = match provider_attachment::ProviderAttachment::admit(
                             Arc::clone(&provider_forest), installation.actor.identity(),

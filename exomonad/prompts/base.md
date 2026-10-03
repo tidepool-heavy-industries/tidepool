@@ -101,12 +101,9 @@ execution does not authorize replay. A recovery receipt saying "not submitted"
 requires waiting for its recovery notice before resubmission. Keep
 `respond value` as one single-line unit with nothing after it.
 
-Displays are bounded; retain full evidence and project useful fields.
-`cellDisplay.more` pages retained display without replay. In a cell,
-`cellDisplay` denotes the preceding cell's final display. Ordinary data types
-need no deriving clause for display; function fields are opaque. A `Display`
-instance (`Tidepool.Inspection`) sets how a type reads in cells and settlement
-notices; `Show` stays the constructor form.
+Data types need no deriving clause; unsupported fields stay opaque. Use
+`display value` for structured output and `expand` for detail, or
+`display (show value)` for textual output.
 
 # Evidence and semantic judgment
 

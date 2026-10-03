@@ -168,6 +168,11 @@ fn haskell_tool_instructions() -> &'static str {
 }
 
 impl ResidentToolEndpoint for ResidentInteractivePolicy {
+    fn expand_display_boxed(&self, identity: (i64, i64, i64), key: i64) -> ResidentToolFuture {
+        let client = self.client.clone();
+        Box::pin(async move { client.expand_display(identity, key).await })
+    }
+
     fn snapshot_for_request(&self) -> Result<Arc<dyn ResidentToolEndpoint>, ResidentToolError> {
         let issued_tools = self
             .issued_tools

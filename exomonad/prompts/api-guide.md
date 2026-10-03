@@ -6,6 +6,13 @@ text, maps, and sets. `bash`, `withMemory`, `MiB`, `GiB`, `:=`, and `:&` are in 
 Cells enable the usual extensions, including `TypeApplications`, `DataKinds`,
 `OverloadedLabels`, and `OverloadedRecordDot`; standalone modules declare theirs.
 
+Cell values retain their types without automatic rendering.
+Use `display value` for bounded structured output; it returns a
+`DisplayHandle value`. `expansions handle` gives opaque keys and field labels,
+and `expand handle key` displays one field independently. Use
+`display (show value)` when you want the textual `Show` form. Unsupported
+fields stay opaque.
+
 ## Choose the workflow
 
 Use pure functions for deterministic transforms, Haskell `do` for effects and
@@ -32,7 +39,7 @@ let task = "Remove the stale path and report the focused check." :: Text
   child @Text $ withLifetime ActorOwned $ withContext (selected id) $
     coding projectHead $
       assignment [label|remove-stale-path|] task
-ready
+display ready
 ```
 
 `spawnWatched` combines immediate `unfold` and a named settlement watch.
@@ -94,8 +101,8 @@ their creating cell. See `doc workbench` and the compiled
 `bridge/haskell/examples/model-turns/ContextWorkflow.hs`.
 
 The activation supplies typed `sessionInput`, its reply declaration, and the
-roster of siblings admitted with you; use `inspectFull sessionInput` only for
-omitted detail. `respond`, `sessionReply` and `sessionInput` exist only while
+roster of siblings admitted with you; use `display sessionInput` to inspect it.
+`respond`, `sessionReply` and `sessionInput` exist only while
 a request is pending; `lookup` shows them then. A root has none of them: use
 the project's task and review constructors instead of recipes written for a
 child. `request @Report (responseActor worker) (assignment [label|revision|] input)`

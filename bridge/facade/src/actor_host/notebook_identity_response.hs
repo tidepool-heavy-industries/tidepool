@@ -4,4 +4,4 @@ pending <- do { issued <- request reviewer (assignment [label|nominal-request|] 
 let pinned = pending :: Response CellReply
 pollResponse pinned
 let later = pollResponse pinned
-later
+later >>= display

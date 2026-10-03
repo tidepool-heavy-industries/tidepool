@@ -263,6 +263,7 @@ data AgentForgetOutcome
   | AgentForgetRunning
   | AgentForgetRetained [RequestId] [WatchId]
   | AgentForgetUnavailable
+  | AgentForgetOutputPending Int
   deriving (Show, Eq)
 
 forgetAgent :: Member AgentInspection effs => AgentRef -> Eff effs AgentForgetOutcome
@@ -274,6 +275,7 @@ forgetAgent (AgentRef target _) = do
     Core.AgentForgetRetained requests watches ->
       AgentForgetRetained (map RequestId requests) (map WatchId watches)
     Core.AgentForgetUnavailable -> AgentForgetUnavailable
+    Core.AgentForgetOutputPending displays -> AgentForgetOutputPending displays
 
 -- | Configure a coding agent around one managed worktree.
 codingAgent :: WorktreeHandle -> AgentLaunchSpec

@@ -202,6 +202,7 @@ where
                 self.environment.source_layers.as_ref(),
             ),
             None => Err(KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
                 actor: owned.state.effects.context.actor,
                 detail: "the active source installation vanished before spec preparation".into(),
             }),

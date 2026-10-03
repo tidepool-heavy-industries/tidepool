@@ -83,6 +83,7 @@ rust_filegroup(
         "src/resident_actor/command_presentation.rs": "exomonad/actor/src/resident_actor/command_presentation.rs",
         "src/resident_actor/command_settlement.rs": "exomonad/actor/src/resident_actor/command_settlement.rs",
         "src/resident_actor/commands.rs": "exomonad/actor/src/resident_actor/commands.rs",
+        "src/resident_actor/display_settlement.rs": "exomonad/actor/src/resident_actor/display_settlement.rs",
         "src/resident_actor/drain_wait.rs": "exomonad/actor/src/resident_actor/drain_wait.rs",
         "src/resident_actor/inherited_host_tests.rs": "exomonad/actor/src/resident_actor/inherited_host_tests.rs",
         "src/resident_actor/inspection_wait.rs": "exomonad/actor/src/resident_actor/inspection_wait.rs",
@@ -135,6 +136,8 @@ rust_filegroup(
         "//exomonad/prompts:doc_workbench": "exomonad/prompts/docs/workbench.md",
         "//exomonad/prompts:haskell_tool_description": "exomonad/prompts/haskell-tool-description.md",
         "//exomonad/prompts:haskell_tool_instructions": "exomonad/prompts/haskell-tool-instructions.md",
+        "//tidepool/runtime:activation_input_function_fixture": "tidepool/runtime/src/session/fixtures/activation-input-function.hs",
+        "//tidepool/runtime:activation_input_receiver_fixture": "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs",
     },
 )
 

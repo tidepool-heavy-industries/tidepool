@@ -715,7 +715,7 @@ mod tests {
                 visible_values: vec![old],
                 visible_value_names: vec![(
                     old,
-                    vec!["__tidepoolPage5".into(), "cellDisplay".into(), ".+".into()],
+                    vec!["retained".into(), "alias".into(), ".+".into()],
                 )],
                 reachable_values: Vec::new(),
                 shadowing: Vec::new(),
@@ -723,16 +723,16 @@ mod tests {
                 exact_context: None,
             }),
         }
-        .with_staged_values(SessionModule::val(Generation(6)), ["cellDisplay".into()]);
+        .with_staged_values(SessionModule::val(Generation(6)), ["alias".into()]);
 
         let imports = view.turn_imports(&SourceImports::default());
         assert_eq!(
             imports,
-            "Tidepool.Session.Val.G5 ((.+), __tidepoolPage5)\n\
-             qualified Tidepool.Session.Val.G5 (cellDisplay)\n\
-             Tidepool.Session.Val.G6 (cellDisplay)"
+            "Tidepool.Session.Val.G5 ((.+), retained)\n\
+             qualified Tidepool.Session.Val.G5 (alias)\n\
+             Tidepool.Session.Val.G6 (alias)"
         );
-        assert!(!imports.contains("__tidepoolDisplayMetadata5"));
+        assert!(!imports.contains("unpublishedHelper"));
     }
 
     #[test]

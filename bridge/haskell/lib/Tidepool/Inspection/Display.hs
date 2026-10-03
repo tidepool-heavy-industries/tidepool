@@ -1,4 +1,8 @@
 {-# LANGUAGE MonoLocalBinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -14,12 +18,17 @@
 module Tidepool.Inspection.Display
   ( Display (..),
     WorkbenchDisplay (..),
+    GDisplay,
+    Rep,
+    genericDisplayTree,
     application,
     displayRecord,
     opaqueHandle,
   )
 where
 
+import Data.Kind (Type)
+import GHC.Generics
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Inspection.Tree
@@ -79,21 +88,62 @@ application precedence constructor arguments =
 -- would name them: @displayRecord p "Candidate" [("candidateCommit", displayTree c)]@.
 displayRecord :: Int -> Text -> [(Text, DisplayTree)] -> DisplayTree
 displayRecord precedence constructor fields =
-  precedenceParens precedence $ treeParts (constructor <> " {") "}"
-    [Concat [TextLeaf (name <> " = "), value] | (name, value) <- fields]
+  precedenceParens precedence $ Constructor constructor fields
 
 -- | A runtime-issued handle: what it refers to, in a form no one mistakes for
 -- Haskell syntax to retype. Use the bound name to act on it.
 opaqueHandle :: Text -> DisplayTree
 opaqueHandle description = TextLeaf ("<" <> description <> ">")
 
-instance {-# OVERLAPPABLE #-} (Show a) => Display a where
-  displayTree = displayTreePrec 0
-  displayTreePrec precedence value = StringLeaf (showsPrec precedence value "")
-  displayWith budget value =
-    let limit = max 0 (min (maxBound - 1) budget)
-        prefix = take (limit + 1) (show value)
-     in (Text.pack (take limit prefix), length prefix > limit)
+-- | Unsupported values stay opaque without forcing their payload. String
+-- rendering is an explicit authored choice: @display (show value)@.
+instance {-# OVERLAPPABLE #-} Display a where
+  displayTree _ = TextLeaf "<opaque>"
+
+instance Display Int where displayTree = shownAtom
+instance Display Integer where displayTree = shownAtom
+instance Display Word where displayTree = shownAtom
+instance Display Float where displayTree = shownAtom
+instance Display Double where displayTree = shownAtom
+instance Display Bool where displayTree = shownAtom
+instance Display Char where displayTree = shownAtom
+instance Display Ordering where displayTree = shownAtom
+instance Display () where displayTree = shownAtom
+
+shownAtom :: Show a => a -> DisplayTree
+shownAtom value = StringLeaf (show value)
+
+-- | The compiler installs this renderer alongside each admitted automatic
+-- Generic instance. Field dictionaries select existing specialized renderers;
+-- the universal fallback leaves unsupported fields unevaluated.
+genericDisplayTree :: (Generic a, GDisplay (Rep a)) => a -> DisplayTree
+genericDisplayTree = genericTree . from
+
+class GDisplay (representation :: Type -> Type) where
+  genericTree :: representation p -> DisplayTree
+
+instance GDisplay f => GDisplay (M1 D metadata f) where
+  genericTree (M1 value) = genericTree value
+
+instance (GDisplay left, GDisplay right) => GDisplay (left :+: right) where
+  genericTree (L1 value) = genericTree value
+  genericTree (R1 value) = genericTree value
+
+instance (Constructor metadata, GFields f) => GDisplay (M1 C metadata f) where
+  genericTree value@(M1 fields) = Constructor (Text.pack (conName value))
+    [ (if Text.null name then Text.pack (show index) else name, tree)
+    | (index, (name, tree)) <- zip [1 :: Int ..] (genericFields fields) ]
+
+class GFields (representation :: Type -> Type) where
+  genericFields :: representation p -> [(Text, DisplayTree)]
+
+instance GFields U1 where genericFields _ = []
+instance Display value => GFields (K1 index value) where
+  genericFields (K1 value) = [("", displayTree value)]
+instance (Selector metadata, GFields f) => GFields (M1 S metadata f) where
+  genericFields value@(M1 fields) = [(Text.pack (selName value), tree) | (_, tree) <- genericFields fields]
+instance (GFields left, GFields right) => GFields (left :*: right) where
+  genericFields (left :*: right) = genericFields left ++ genericFields right
 
 -- | One text rule: nested (`displayTree`) text is a quoted, escaped literal;
 -- a standalone (`displayWith`) text renders raw, as 'WorkbenchDisplay' and a
@@ -107,9 +157,9 @@ instance Display Text where
 -- instance answers for @[Char]@ and the result of 'show' displays as a list of
 -- characters, one to a line.
 instance {-# OVERLAPPING #-} Display [Char] where
-  displayTree = displayTree . Text.pack
-  displayTreePrec precedence = displayTreePrec precedence . Text.pack
-  displayWith budget = displayWith budget . Text.pack
+  displayTree = literalString
+  displayTreePrec _ = literalString
+  displayWith = rawString
 
 instance Display (a -> b) where
   displayTree _ = TextLeaf "<function>"
@@ -133,7 +183,7 @@ instance (Display a, Display b) => Display (Either a b) where
   displayWith budget (Right value) = renderParts budget "Right " "" [\n -> displayWith n value]
 
 instance {-# OVERLAPPING #-} (Display a) => Display [a] where
-  displayTree = treeParts "[" "]" . map displayTree
+  displayTree = Sequence "[" "]" . map displayTree
   displayWithout keys budget values = renderParts budget "[" "]" (map (\value n -> displayWithout keys n value) values)
   displayWith budget values = renderParts budget "[" "]" (map (\value n -> displayWith n value) values)
 
@@ -177,6 +227,6 @@ instance WorkbenchDisplay Text where
 -- | A top-level 'String' renders raw, mirroring 'Text'. Without this the
 -- 'Display'-derived {-# OVERLAPPABLE #-} instance answers instead and quotes it.
 instance WorkbenchDisplay [Char] where
-  workbenchDisplay = workbenchDisplay . Text.pack
-  workbenchActivationDisplay limit = workbenchActivationDisplay limit . Text.pack
-  workbenchReplyDisplay limit = workbenchReplyDisplay limit . Text.pack
+  workbenchDisplay = rawString 512
+  workbenchActivationDisplay = rawString
+  workbenchReplyDisplay = rawString

@@ -16,21 +16,6 @@ fn examples(document: &str) -> impl Iterator<Item = &str> {
         .map(|block| block.split_once("```").unwrap().0)
 }
 
-/// The shown part of a paged cell display, with its trailing selection marker
-/// removed. The marker names the binding the rest stays in, so its exact text
-/// varies with the cell's generation; what every paged display must say is
-/// that the view is a selection and how to continue it.
-fn selection_page<'a>(output: &'a str, context: &str) -> &'a str {
-    let (page, marker) = output
-        .split_once("\n[selection of ")
-        .unwrap_or_else(|| panic!("a paged display must mark its selection: {context}"));
-    assert!(
-        marker.ends_with("; display continues: cellDisplay.more]"),
-        "{context}"
-    );
-    page
-}
-
 async fn committed(
     policy: &dyn exomonad_actor::ResidentToolEndpoint,
     source: &str,
@@ -38,6 +23,17 @@ async fn committed(
     let result = dispatch_haskell_script(policy, source).await;
     assert_eq!(result["status"], "committed", "{result:?}");
     result
+}
+
+async fn displayed(
+    campaign: &mut TestCampaign,
+    policy: &dyn exomonad_actor::ResidentToolEndpoint,
+    source: &str,
+) -> serde_json::Value {
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    campaign
+        .drive_actor_output(&store, committed(policy, source))
+        .await
 }
 
 #[tokio::test]
@@ -53,290 +49,83 @@ async fn colon_commands_and_ghci_groups_are_rejected_as_haskell_cells() {
 }
 
 #[tokio::test]
-async fn notebook_display_pages_large_text_and_exhausts_continuation() {
-    let campaign = TestCampaign::start().await;
-    let policy = campaign.root_installation.policy.as_ref();
-    let first = committed(policy, include_str!("notebook_display_large_text.hs")).await;
-    let output = first["items"].as_array().unwrap().last().unwrap()["output"]
-        .as_str()
-        .unwrap();
-    let page = selection_page(output, "{first}");
-    assert_eq!(page.len(), 8192, "{first}");
-    assert!(page.bytes().all(|byte| byte == b'x'), "{first}");
-    assert!(!output.contains("Display failed"), "{first}");
-
-    let second = committed(policy, "cellDisplay.more").await;
-    let remainder = second["items"][0]["output"].as_str().unwrap();
-    assert_eq!(remainder.len(), 1808, "{second}");
-    assert!(remainder.bytes().all(|byte| byte == b'x'), "{second}");
-    let exhausted = committed(policy, "TidepoolInspection.pageHasMore cellDisplay").await;
-    assert_eq!(exhausted["items"][0]["output"], "False", "{exhausted}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-#[tokio::test]
-async fn notebook_display_explains_resource_control_rejections() {
-    let campaign = TestCampaign::start().await;
-    let result = committed(
-        campaign.root_installation.policy.as_ref(),
-        include_str!("notebook_actor_scoped_handle.hs"),
-    )
-    .await;
-    assert!(
-        result["items"].as_array().unwrap().last().unwrap()["output"]
-            .as_str()
-            .unwrap()
-            .contains("resource control guidance rendered"),
-        "{result}"
-    );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-#[tokio::test]
-async fn notebook_display_compiles_one_expression_and_one_display_bundle() {
-    let campaign = TestCampaign::start().await;
-    let policy = campaign.root_installation.policy.as_ref();
-    // Put startup work behind the counter.  A displayed expression still has
-    // its whole-cell check and expression compilation, followed by exactly one
-    // generated page/metadata/alias bundle.
-    committed(policy, "0 :: Int").await;
-    tidepool_extract_cmd::reset_extract_spawn_count();
-
-    let shown = committed(policy, "sum [1 .. 10 :: Int]").await;
-    assert_eq!(shown["items"][0]["output"], "55", "{shown}");
-    assert_eq!(
-        tidepool_extract_cmd::extract_spawn_count(),
-        3,
-        "one cell check, one expression, and one display bundle: {shown}"
-    );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-#[tokio::test]
-async fn notebook_display_failure_keeps_the_value_but_not_the_new_alias() {
-    let campaign = TestCampaign::start().await;
-    let policy = campaign.root_installation.policy.as_ref();
-    let initial = committed(policy, "\"previous display\" :: Text").await;
-    assert_eq!(
-        initial["items"][0]["output"], "previous display",
-        "{initial}"
-    );
-
-    let failed = committed(
-        policy,
-        "import Tidepool.Inspection (Display (..))\n\
-         data FailingDisplay = FailingDisplay\n\
-         instance Display FailingDisplay where displayTree _ = error \"display bottom\"\n\
-         broken <- pure FailingDisplay\n\
-         broken",
-    )
-    .await;
-    let failure = failed["items"].as_array().unwrap().last().unwrap()["output"]
-        .as_str()
-        .unwrap();
-    assert!(failure.contains("Display failed"), "{failed}");
-    assert!(failure.contains("Value remains bound"), "{failed}");
-
-    let old_alias = committed(policy, "cellDisplay.text").await;
-    assert_eq!(
-        old_alias["items"][0]["output"], "previous display",
-        "a failed page must not publish its new alias: {old_alias}"
-    );
-    let recovered = committed(
-        policy,
-        "case broken of FailingDisplay -> \"still bound\" :: Text",
-    )
-    .await;
-    assert_eq!(
-        recovered["items"][0]["output"], "still bound",
-        "{recovered}"
-    );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-#[tokio::test]
-async fn notebook_display_shares_one_allowance_between_console_and_result() {
-    let campaign = TestCampaign::start().await;
-    let policy = campaign.root_installation.policy.as_ref();
-    let first = committed(policy, include_str!("notebook_display_console_budget.hs")).await;
-    assert_eq!(first["items"][0]["kind"], "declaration", "{first}");
-    let output = first["items"][1]["output"].as_str().unwrap();
-    assert!(!output.contains("Display failed"), "{first}");
-    let visible = selection_page(output, "{first}");
-    let printed = visible.bytes().filter(|byte| *byte == b'p').count();
-    let shown = visible.bytes().filter(|byte| *byte == b'v').count();
-    assert_eq!(printed, 6000, "{first}");
-    assert!(shown > 0 && printed + shown <= 8192, "{first}");
-
-    let continued = committed(policy, "cellDisplay.more").await;
-    let suffix = continued["items"][0]["output"].as_str().unwrap();
-    assert!(!suffix.contains('p'), "print ran again: {continued}");
-    assert_eq!(
-        suffix.bytes().filter(|byte| *byte == b'v').count(),
-        6000 - shown,
-        "{continued}"
-    );
-    assert!(suffix.bytes().all(|byte| byte == b'v'), "{continued}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-#[tokio::test]
-async fn notebook_display_keeps_previous_cell_display_lexical_and_publishes_prefix() {
-    let campaign = TestCampaign::start().await;
-    let policy = campaign.root_installation.policy.as_ref();
-    let initial = committed(policy, "\"old page\" :: Text").await;
-    assert_eq!(initial["items"][0]["output"], "old page", "{initial}");
-
-    let same_cell = committed(
-        policy,
-        include_str!("notebook_display_previous_cell_display.hs"),
-    )
-    .await;
-    assert_eq!(same_cell["items"][0]["output"], "new page", "{same_cell}");
-    assert_eq!(same_cell["items"][1]["output"], "old page", "{same_cell}");
-
-    let prefix =
-        dispatch_haskell_script(policy, include_str!("notebook_display_prefix_failure.hs")).await;
-    assert_eq!(prefix["status"], "rejected", "{prefix}");
-    assert_eq!(prefix["items"][0]["status"], "committed", "{prefix}");
-    assert_eq!(prefix["items"][0]["output"], "prefix page", "{prefix}");
-    assert_eq!(prefix["items"][1]["status"], "rejected", "{prefix}");
-    assert!(
-        prefix["items"][1]["output"]
-            .as_str()
-            .is_some_and(|output| output.contains("failed suffix")),
-        "{prefix}"
-    );
-    let after_prefix = committed(policy, "cellDisplay.text").await;
-    assert_eq!(
-        after_prefix["items"][0]["output"], "prefix page",
-        "{after_prefix}"
-    );
-
-    let invalid = dispatch_haskell_script(policy, "absentDisplayName").await;
-    assert_eq!(invalid["status"], "rejected", "{invalid}");
-    let after_rejection = committed(policy, "cellDisplay.text").await;
-    assert_eq!(
-        after_rejection["items"][0]["output"], "prefix page",
-        "{after_rejection}"
-    );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-#[tokio::test]
-async fn notebook_display_uses_generated_generic_and_explicit_custom_renderers() {
-    let campaign = TestCampaign::start().await;
-    let policy = campaign.root_installation.policy.as_ref();
-    let generic = committed(policy, include_str!("notebook_display_generic.hs")).await;
-    let output = generic["items"].as_array().unwrap().last().unwrap()["output"]
-        .as_str()
-        .unwrap();
-    assert!(output.contains("NotebookPlain"), "{generic}");
-    assert!(output.contains('3'), "{generic}");
-    assert!(output.contains("<function>"), "{generic}");
-    assert!(!output.contains("Display failed"), "{generic}");
-
-    let custom = committed(policy, include_str!("notebook_display_custom.hs")).await;
-    assert_eq!(
-        custom["items"].as_array().unwrap().last().unwrap()["output"],
-        "custom-display-wins",
-        "{custom}"
-    );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-#[tokio::test]
-async fn notebook_display_page_capture_survives_observation_window() {
-    let campaign = TestCampaign::start().await;
-    let policy = campaign.root_installation.policy.as_ref();
-    let first = committed(policy, include_str!("notebook_display_large_text.hs")).await;
-    assert!(
-        first["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("; display continues: cellDisplay.more]"),
-        "{first}"
-    );
-    committed(policy, "savedPage <- pure cellDisplay").await;
-    let window = committed(policy, include_str!("notebook_display_retention.hs")).await;
-    let items = window["items"].as_array().unwrap();
-    assert_eq!(items.len(), 9, "{window}");
-    for (index, item) in items.iter().enumerate() {
-        assert_eq!(item["output"], (index + 1).to_string(), "{window}");
-    }
-    let resumed = committed(policy, "savedPage.more").await;
-    let remainder = resumed["items"][0]["output"].as_str().unwrap();
-    assert_eq!(remainder.len(), 1808, "{resumed}");
-    assert!(remainder.bytes().all(|byte| byte == b'x'), "{resumed}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-#[tokio::test]
-async fn notebook_display_cell_display_is_child_local_but_parent_capture_remains_callable() {
+async fn explicit_display_preserves_resource_guidance_and_specialized_renderers() {
     let mut campaign = TestCampaign::start().await;
-    let root = campaign.root_installation.policy.clone();
-    let initial = committed(root.as_ref(), "\"parent page\" :: Text").await;
-    assert_eq!(initial["items"][0]["output"], "parent page", "{initial}");
-    committed(
-        root.as_ref(),
-        "capturedPageText <- pure (\\() -> cellDisplay.text)",
-    )
-    .await;
-    committed(
-        root.as_ref(),
-        include_str!("notebook_display_child_unfold.hs"),
-    )
-    .await;
-    let child = campaign
-        .next_deployment(
-            "child policy installation",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
-                other => Err(other),
-            },
+    let policy = campaign.root_installation.policy.clone();
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    for (source, expected) in [
+        (
+            include_str!("notebook_actor_scoped_handle.hs"),
+            "resource control guidance rendered",
+        ),
+        (
+            include_str!("notebook_display_generic.hs"),
+            "NotebookPlain {1 = 3, 2 = <function>}",
+        ),
+        (
+            include_str!("notebook_display_custom.hs"),
+            "custom-display-wins",
+        ),
+    ] {
+        let reply = campaign
+            .drive_actor_output(&store, committed(policy.as_ref(), source))
+            .await;
+        let text = explicit_display_output(&reply)["text"].as_str().unwrap();
+        assert_eq!(text, expected, "{reply}");
+    }
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_display_is_the_only_value_presentation() {
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let bare = committed(policy.as_ref(), "41 :: Int").await;
+    assert!(
+        bare["items"].as_array().unwrap().iter().all(|item| {
+            item["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|operation| operation.get("display").is_none())
+        }),
+        "bare expression must only retain its value: {bare}"
+    );
+    assert!(
+        !bare["items"][0]["installedBindings"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{bare}"
+    );
+    campaign.assert_no_deployment("bare expression must not publish a display", |event| {
+        matches!(event, LocalResidentDeployment::DisplayPublished(_))
+    });
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let shown = campaign
+        .drive_actor_output(
+            &store,
+            committed(policy.as_ref(), "display (show (41 :: Int))"),
         )
         .await;
-    let _binding = open_test_fork(&campaign, &child);
-    campaign
-        .next_deployment(
-            "child session readiness",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::SessionReady { .. } => Ok(()),
-                other => Err(other),
-            },
-        )
-        .await;
-    committed(
-        child.policy.as_ref(),
-        "initialPageText () = cellDisplay.text\nsetProbe = Set.size (Set.fromList [1 :: Int, 2])",
-    )
-    .await;
-    let local = committed(child.policy.as_ref(), "initialPageText ()").await;
-    assert_eq!(local["items"][0]["output"], "", "{local}");
-    let set = committed(child.policy.as_ref(), "setProbe").await;
-    assert_eq!(set["items"][0]["output"], "2", "{set}");
-    let capture = committed(child.policy.as_ref(), "capturedPageText ()").await;
-    assert_eq!(capture["items"][0]["output"], "parent page", "{capture}");
+    assert_eq!(explicit_display_output(&shown)["text"], "41", "{shown}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
 async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation() {
-    let campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start().await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     let root = campaign.root_installation.policy.clone();
 
-    let setup = committed(root.as_ref(), include_str!("notebook_nominal_setup.hs")).await;
+    let setup = campaign
+        .drive_actor_output(
+            &store,
+            committed(root.as_ref(), include_str!("notebook_nominal_setup.hs")),
+        )
+        .await;
     assert_eq!(
         setup["summary"], "3 declarations, 2 statements, 1 expression",
         "{setup:?}"
@@ -379,11 +168,10 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
     );
     assert_eq!(items[1]["sourceItems"][0]["ordinal"], 3, "{setup:?}");
     assert_eq!(items[3]["status"], "committed", "{setup:?}");
-    assert!(
-        items[3]["output"]
-            .as_str()
-            .is_some_and(|output| output.contains("Nothing")),
-        "{setup:?}"
+    assert_eq!(
+        explicit_display_output(&setup)["text"],
+        "Nothing",
+        "{setup}"
     );
 
     let rejected =
@@ -449,8 +237,20 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
     }
 
     committed(root.as_ref(), "shadowed <- pure (1 :: Int)\n").await;
-    let shadowed = committed(root.as_ref(), "shadowed <- pure (2 :: Int)\nshadowed\n").await;
-    assert_eq!(shadowed["items"][1]["output"], "2", "{shadowed:?}");
+    let shadowed = campaign
+        .drive_actor_output(
+            &store,
+            committed(
+                root.as_ref(),
+                "shadowed <- pure (2 :: Int)\n_ <- display shadowed\n",
+            ),
+        )
+        .await;
+    assert_eq!(
+        explicit_display_output(&shadowed)["text"],
+        "2",
+        "{shadowed}"
+    );
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -458,22 +258,26 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
 
 #[tokio::test]
 async fn notebook_cell_prologue_applies_to_check_stage_and_execution() {
-    let campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start().await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     let root = campaign.root_installation.policy.clone();
-    let result = committed(root.as_ref(), include_str!("notebook_prologue.hs")).await;
-    assert!(
-        result["items"].as_array().unwrap().last().unwrap()["output"]
-            .as_str()
-            .unwrap()
-            .contains("True"),
-        "{result}"
-    );
-    let later = committed(
-        root.as_ref(),
-        "later <- pure (Imported.reverse [answer, 10])\nlater == [10, 7]\n",
-    )
-    .await;
-    assert!(later.to_string().contains("True"), "{later}");
+    let result = campaign
+        .drive_actor_output(
+            &store,
+            committed(root.as_ref(), include_str!("notebook_prologue.hs")),
+        )
+        .await;
+    assert_eq!(explicit_display_output(&result)["text"], "True", "{result}");
+    let later = campaign
+        .drive_actor_output(
+            &store,
+            committed(
+                root.as_ref(),
+                "later <- pure (Imported.reverse [answer, 10])\n_ <- display (later == [10, 7])\n",
+            ),
+        )
+        .await;
+    assert_eq!(explicit_display_output(&later)["text"], "True", "{later}");
     let disabled = dispatch_haskell_script(
         root.as_ref(),
         "notInstalled <- pure (let ?offset = 5 in implicitTotal 2)\nnotInstalled\n",
@@ -536,16 +340,20 @@ async fn notebook_cell_rejection_retains_its_source_plan() {
 
 #[tokio::test]
 async fn notebook_cell_preserves_old_types() {
-    let campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start().await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     let root = campaign.root_installation.policy.clone();
     committed(root.as_ref(), include_str!("notebook_identity_original.hs")).await;
-    let shadowed = committed(root.as_ref(), include_str!("notebook_identity_shadowed.hs")).await;
-    let output = shadowed["items"].as_array().unwrap().last().unwrap()["output"]
-        .as_str()
-        .unwrap();
+    let shadowed = campaign
+        .drive_actor_output(
+            &store,
+            committed(root.as_ref(), include_str!("notebook_identity_shadowed.hs")),
+        )
+        .await;
+    let output = explicit_display_output(&shadowed)["text"].as_str().unwrap();
     assert!(
         output.contains("OldVersion 1") && output.contains("NewVersion True"),
-        "{shadowed:?}"
+        "{shadowed}"
     );
 
     campaign.forest.shutdown().await;
@@ -554,31 +362,33 @@ async fn notebook_cell_preserves_old_types() {
 
 #[tokio::test]
 async fn notebook_cell_retains_observations_needed_by_its_suffix() {
-    let campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start().await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     let root = campaign.root_installation.policy.clone();
     let initial = committed(root.as_ref(), "(42 :: Int)\n").await;
     let saved = initial["items"][0]["installedBindings"][0]
         .as_str()
         .unwrap();
     let source = include_str!("notebook_lease_suffix.hs").replace("__SAVED__", saved);
-    let result = committed(root.as_ref(), &source).await;
-    assert_eq!(
-        result["items"].as_array().unwrap().last().unwrap()["output"],
-        "42",
-        "{result:?}"
-    );
+    let result = campaign
+        .drive_actor_output(&store, committed(root.as_ref(), &source))
+        .await;
+    assert_eq!(explicit_display_output(&result)["text"], "42", "{result}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
 async fn notebook_cell_infers_response_results() {
-    let campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let response = committed(root.as_ref(), include_str!("notebook_identity_response.hs")).await;
-    let output = response["items"].as_array().unwrap().last().unwrap()["output"]
-        .as_str()
-        .unwrap();
+    let response = displayed(
+        &mut campaign,
+        root.as_ref(),
+        include_str!("notebook_identity_response.hs"),
+    )
+    .await;
+    let output = explicit_display_output(&response)["text"].as_str().unwrap();
     assert!(output.contains("Pending"), "{response:?}");
     committed(root.as_ref(), "later\npollResponse pending\n").await;
     campaign.forest.shutdown().await;
@@ -776,7 +586,12 @@ launcher <- R.start (R.withWorktree (worktreeId launcherTree) launchDefinition)"
         .await
         .unwrap();
     assert_eq!(reply["status"], "replied", "{reply}");
-    let result = committed(root.as_ref(), "R.call (readReply (R.client launcher)) ()").await;
+    let result = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "R.call (readReply (R.client launcher)) () >>= display",
+    )
+    .await;
     assert!(result.to_string().contains("review complete"), "{result}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -786,10 +601,15 @@ launcher <- R.start (R.withWorktree (worktreeId launcherTree) launchDefinition)"
 async fn invalid_label_literals_fail_before_actor_side_effects() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let me = committed(root.as_ref(), "inspectFull (agentIdentity me)").await;
+    let me = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "display (inspectFull (agentIdentity me))",
+    )
+    .await;
     let identity = campaign.root_installation.actor.identity();
     assert_eq!(
-        me["items"][0]["output"]
+        explicit_display_output(&me)["text"]
             .as_str()
             .unwrap()
             .split_whitespace()
@@ -872,8 +692,8 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
         "let beforeRequests = requestCount (agentIdentity (responseActor worker)) before",
     )
     .await;
-    let rendered = committed(root.as_ref(), "inspectFull worker").await;
-    let rendered = rendered["items"][0]["output"].as_str().unwrap();
+    let rendered = displayed(&mut campaign, root.as_ref(), "display (inspectFull worker)").await;
+    let rendered = explicit_display_output(&rendered)["text"].as_str().unwrap();
     assert!(rendered.starts_with("<response to request "), "{rendered}");
     assert!(rendered.contains(" from agent "), "{rendered}");
     assert!(rendered.contains(", path "), "{rendered}");
@@ -891,12 +711,17 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
         "{invalid_request}"
     );
     committed(root.as_ref(), "after <- listAgents").await;
-    let unchanged = committed(
+    let unchanged = displayed(
+        &mut campaign,
         root.as_ref(),
-        "requestCount (agentIdentity (responseActor worker)) after == beforeRequests",
+        "display (requestCount (agentIdentity (responseActor worker)) after == beforeRequests)",
     )
     .await;
-    assert_eq!(unchanged["items"][0]["output"], "True", "{unchanged}");
+    assert_eq!(
+        explicit_display_output(&unchanged)["text"],
+        "True",
+        "{unchanged}"
+    );
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -915,7 +740,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     let root = campaign.root_installation.policy.clone();
     let guide = include_str!("../../../../exomonad/prompts/api-guide.md");
     let mut guide_examples = examples(guide);
-    committed(root.as_ref(), guide_examples.next().unwrap()).await;
+    displayed(&mut campaign, root.as_ref(), guide_examples.next().unwrap()).await;
     let child = campaign
         .next_deployment(
             "guide example child policy installation",
@@ -940,8 +765,13 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
             },
         )
         .await;
-    let pending = committed(root.as_ref(), "state <- pollWatch ready\ninspectFull state").await;
-    let rendered = pending["items"][1]["output"].as_str().unwrap();
+    let pending = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "state <- pollWatch ready\ndisplay (inspectFull state)",
+    )
+    .await;
+    let rendered = explicit_display_output(&pending)["text"].as_str().unwrap();
     // A pending watch observation is itself the registered wake: its
     // `PendingProgress` carries the dependency's lifecycle/provider evidence
     // and `pendingWatched = True`, so `inspectFull` shows there is nothing a
@@ -954,15 +784,17 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
     campaign.await_watch_ready().await;
-    let success = committed(
+    let success = displayed(
+        &mut campaign,
         root.as_ref(),
-        "state <- pollWatch ready\ninspectFull (fmap settledValue state)",
+        "state <- pollWatch ready\ndisplay (inspectFull (fmap settledValue state))",
     )
     .await;
-    committed(root.as_ref(), guide_examples.next().unwrap()).await;
-    committed(root.as_ref(), guide_examples.next().unwrap()).await;
+    displayed(&mut campaign, root.as_ref(), guide_examples.next().unwrap()).await;
+    displayed(&mut campaign, root.as_ref(), guide_examples.next().unwrap()).await;
     assert!(guide_examples.next().is_none(), "untested guide example");
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         example(include_str!(
             "../../../../.exomonad/workspace/skills/exomonad-jev/references/recent-changes.md"
@@ -972,7 +804,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     // Exercise the canonical command/Jev composition and workbench examples.
     // The host requests a backend for each command in a cell.
     let command_examples = [
-        "inspectRecentChanges \"inspect changed documentation\"",
+        "inspectRecentChanges \"inspect changed documentation\" >>= display",
         examples(include_str!(
             "../../../../.exomonad/workspace/skills/exomonad-workbench/SKILL.md"
         ))
@@ -987,6 +819,8 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
             "../../../../.exomonad/workspace/skills/exomonad-jev/SKILL.md"
         )),
     ];
+    let output_store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let output_run = super::runtime_namespace(campaign.session_root.path());
     for (index, source) in command_examples.into_iter().enumerate() {
         let mut running = tokio::spawn({
             let root = root.clone();
@@ -1002,10 +836,18 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
                     "guide example command backend",
                     Duration::from_secs(180),
                     |event| match event {
-                        LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                        LocalResidentDeployment::CommandBackend(_) | LocalResidentDeployment::DisplayPublished(_) => Ok(event),
                         other => Err(other),
                     },
                 ) => {
+                    let request = match request {
+                        LocalResidentDeployment::CommandBackend(request) => request,
+                        LocalResidentDeployment::DisplayPublished(request) => {
+                            super::display_output::publish(&campaign.forest, &output_store, &output_run, None, None, &request);
+                            continue;
+                        }
+                        _ => unreachable!(),
+                    };
                     if request.purpose
                         == exomonad_actor::command_jobs::CommandBackendPurpose::SourceProbe
                     {
@@ -1023,46 +865,53 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
             assert!(result.to_string().contains("Jev unavailable:"), "{result}");
         }
     }
-    let layout = committed(root.as_ref(), include_str!("notebook_let_layout.hs")).await;
+    let layout = displayed(
+        &mut campaign,
+        root.as_ref(),
+        include_str!("notebook_let_layout.hs"),
+    )
+    .await;
+    assert_eq!(explicit_display_output(&layout)["text"], "42", "{layout}");
     assert_eq!(
-        layout["items"].as_array().unwrap().last().unwrap()["output"],
-        "42",
-        "{layout}"
-    );
-    assert_eq!(
-        success["items"][1]["output"],
+        explicit_display_output(&success)["text"],
         "WatchReady (Right \"Remove the stale path and report the focused check.\")"
     );
 
-    committed(
+    displayed(
+        &mut campaign,
         root.as_ref(),
         include_str!("shared_api_guide_unavailable.hs"),
     )
     .await;
     campaign.await_watch_ready().await;
-    let unavailable = committed(
-        root.as_ref(),
-        "state <- pollWatch retainedFailureReady\ninspectFull (fmap (either (const True) (const False) . settledValue) state)",
+    let unavailable = displayed(
+        &mut campaign, root.as_ref(),
+        "state <- pollWatch retainedFailureReady\ndisplay (inspectFull (fmap (either (const True) (const False) . settledValue) state))",
     )
     .await;
-    assert_eq!(unavailable["items"][1]["output"], "WatchReady True");
-    let outer_unavailable = committed(
+    assert_eq!(
+        explicit_display_output(&unavailable)["text"],
+        "WatchReady True"
+    );
+    let outer_unavailable = displayed(
+        &mut campaign,
         root.as_ref(),
-        "state <- pollWatch outerFailureReady\ninspectFull (guideIsUnavailable state)",
+        "state <- pollWatch outerFailureReady\ndisplay (inspectFull (guideIsUnavailable state))",
     )
     .await;
-    assert_eq!(outer_unavailable["items"][1]["output"], "True");
+    assert_eq!(explicit_display_output(&outer_unavailable)["text"], "True");
 
     // The guide's companion `doc reflect` example, on this same campaign so it
     // needs no compile of its own. This root has no conversation reader, which
     // is the unbound case the example is written to survive: it continues with
     // no history rather than being handed somebody else's.
-    let reflect = committed(
+    let reflect = displayed(
+        &mut campaign,
         root.as_ref(),
         example(include_str!("../../../../exomonad/prompts/docs/reflect.md")),
     )
     .await;
-    assert_eq!(reflect["items"][2]["output"], "[]", "{reflect}");
+    assert_eq!(explicit_display_output(&reflect)["text"], "[]", "{reflect}");
     assert_eq!(
         reflect["items"][1]["operations"][0]["effect"], "reflect",
         "{reflect}"
@@ -1291,13 +1140,27 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
     campaign.await_watch_ready().await;
     let first = committed(root.as_ref(), "pollWatch ready").await;
     let saved = first["items"][0]["installedBindings"][0].as_str().unwrap();
-    let output = first["items"][0]["output"].as_str().unwrap();
-    assert!(output.starts_with("WatchReady"), "{first}");
-    assert!(!output.contains("candidate-9828"), "{first}");
-    assert!(!output.contains("Display failed"), "{first}");
-    let expanded = committed(root.as_ref(), "cellDisplay.more").await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let shown = campaign
+        .drive_actor_output(
+            &store,
+            committed(root.as_ref(), &format!("display ({saved} ())")),
+        )
+        .await;
+    let output = explicit_display_output(&shown)["text"].as_str().unwrap();
+    assert!(output.starts_with("WatchReady"), "{shown}");
+    assert!(!output.contains("candidate-9828"), "{shown}");
+    let expanded = campaign
+        .drive_actor_output(
+            &store,
+            committed(
+                root.as_ref(),
+                &format!("display (inspectFull ({saved} ()))"),
+            ),
+        )
+        .await;
     assert!(
-        expanded["items"][0]["output"]
+        explicit_display_output(&expanded)["text"]
             .as_str()
             .unwrap()
             .contains("candidate-9828"),
@@ -1327,7 +1190,9 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
     assert_eq!(expired["status"], "rejected", "{expired}");
     for name in ["retained", "declaredEvidence"] {
         let source = include_str!("quiet_observation_exact_probe.hs").replace("__NAME__", name);
-        let exact = committed(root.as_ref(), &source).await;
+        let exact = campaign
+            .drive_actor_output(&store, committed(root.as_ref(), &source))
+            .await;
         assert_eq!(exact["items"][0]["output"], "True", "{exact}");
     }
     let before = campaign
@@ -1343,9 +1208,13 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
     let spawned_name = spawned["items"][0]["installedBindings"][0]
         .as_str()
         .unwrap();
-    let inspect = format!("inspectFull (agentIdentity ({spawned_name} ()))");
-    let one = committed(root.as_ref(), &inspect).await;
-    let two = committed(root.as_ref(), &inspect).await;
+    let inspect = format!("display (inspectFull (agentIdentity ({spawned_name} ())))");
+    let one = campaign
+        .drive_actor_output(&store, committed(root.as_ref(), &inspect))
+        .await;
+    let two = campaign
+        .drive_actor_output(&store, committed(root.as_ref(), &inspect))
+        .await;
     assert_eq!(one["items"][0]["output"], two["items"][0]["output"]);
     assert_eq!(
         campaign
@@ -2057,15 +1926,15 @@ async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign 
 
 #[tokio::test]
 async fn usage_comparisons_deduplicate_resumes_and_preserve_unknown_intervals() {
-    let campaign = workspace_campaign().await;
-    let result = committed(
-        campaign.root_installation.policy.as_ref(),
+    let mut campaign = workspace_campaign().await;
+    let policy = campaign.root_installation.policy.clone();
+    let result = displayed(
+        &mut campaign,
+        policy.as_ref(),
         include_str!("fixtures/usage_comparisons.hs"),
     )
     .await;
-    let output = result["items"].as_array().unwrap().last().unwrap()["output"]
-        .as_str()
-        .unwrap();
+    let output = explicit_display_output(&result)["text"].as_str().unwrap();
     assert!(output.contains("True"), "{result}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -2073,15 +1942,16 @@ async fn usage_comparisons_deduplicate_resumes_and_preserve_unknown_intervals() 
 
 #[tokio::test]
 async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
-    let campaign = workspace_campaign().await;
-    let policy = campaign.root_installation.policy.as_ref();
-    let result = committed(
-        policy,
-        "observed <- snapshot\ninspectFull (swarmUsage observed)",
+    let mut campaign = workspace_campaign().await;
+    let policy = campaign.root_installation.policy.clone();
+    let result = displayed(
+        &mut campaign,
+        policy.as_ref(),
+        "observed <- snapshot\ndisplay (inspectFull (swarmUsage observed))",
     )
     .await;
     assert!(
-        result["items"][1]["output"]
+        explicit_display_output(&result)["text"]
             .as_str()
             .unwrap()
             .contains("unknownActors = [("),
@@ -2089,12 +1959,15 @@ async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
     );
     // Authored Display instances render workspace records with the harness's
     // own model-facing forms nested inside; Show keeps the constructor dump.
-    let candidate = committed(
-        policy,
-        "inspectFull (Candidate (GitOid \"3f2a9c\") [\"cargo test\"] [])",
+    let candidate = displayed(
+        &mut campaign,
+        policy.as_ref(),
+        "display (inspectFull (Candidate (GitOid \"3f2a9c\") [\"cargo test\"] []))",
     )
     .await;
-    let candidate = candidate["items"][0]["output"].as_str().unwrap();
+    let candidate = explicit_display_output(&candidate)["text"]
+        .as_str()
+        .unwrap();
     assert!(candidate.starts_with("Candidate {"), "{candidate}");
     assert!(
         candidate.contains("candidateCommit = 3f2a9c"),
@@ -2102,7 +1975,7 @@ async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
     );
     assert!(!candidate.contains("GitOid"), "{candidate}");
     let lookup = dispatch_lookup(
-        policy,
+        policy.as_ref(),
         &[
             "implement",
             "reviewCandidate",
@@ -3318,6 +3191,231 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     .await;
     assert_eq!(retained["items"][0]["output"], "1", "{retained}");
     committed(root.as_ref(), "finishWork collector").await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+fn explicit_display_output(reply: &serde_json::Value) -> &serde_json::Value {
+    reply["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["operations"].as_array().unwrap())
+        .find_map(|operation| operation.get("display"))
+        .unwrap_or_else(|| panic!("structured display metadata missing: {reply}"))
+}
+
+fn explicit_display_identity(display: &serde_json::Value) -> (i64, i64, i64) {
+    let identity = display["identity"].as_array().unwrap();
+    (
+        identity[0].as_i64().unwrap(),
+        identity[1].as_i64().unwrap(),
+        identity[2].as_i64().unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn explicit_display_expands_siblings_without_compilation_or_repeated_effects() {
+    use super::command_jobs_tests::backend_request;
+    use super::command_test_support::TestCommands;
+
+    let mut campaign = TestCampaign::start().await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let policy = campaign.root_installation.policy.clone();
+    let invoking_policy = policy.clone();
+    let mut running = tokio::spawn(async move {
+        dispatch_haskell_script(
+            invoking_policy.as_ref(),
+            include_str!("notebook_explicit_display_siblings.hs"),
+        )
+        .await
+    });
+    let backend = TestCommands::completed(&"x".repeat(4000));
+    tokio::select! {
+        request = backend_request(&mut campaign) => request.supply(Ok(backend.clone())),
+        result = &mut running => panic!("display ended before its authored command: {result:?}"),
+    }
+    let first = campaign.drive_actor_output(&store, running).await.unwrap();
+    assert_eq!(first["status"], "committed", "{first}");
+    let display = explicit_display_output(&first);
+    let identity = explicit_display_identity(display);
+    let origin = harness::store::actor_output::ActorOutputOrigin {
+        run: super::runtime_namespace(campaign.session_root.path()),
+        native_actor: identity.0 as u64,
+        incarnation: identity.1 as u64,
+    };
+    let initial_history = store.actor_output_page(&origin, 0, 10).unwrap();
+    assert_eq!(initial_history.outputs.len(), 1);
+    assert!(initial_history.outputs[0].emission().conversation.is_none());
+    assert_eq!(
+        display["output"]["sequence"],
+        initial_history.outputs[0].reference().sequence
+    );
+    let keys = display["expansions"].as_array().unwrap();
+    assert_eq!(
+        keys.len(),
+        2,
+        "both fields are independently addressable: {first}"
+    );
+    let left = keys[0][0].as_i64().unwrap();
+    let right = keys[1][0].as_i64().unwrap();
+    assert!(display["text"].as_str().unwrap().contains("DisplayPair"));
+
+    tidepool_extract_cmd::reset_extract_spawn_count();
+    let expanded = campaign
+        .drive_actor_output(&store, policy.expand_display_boxed(identity, left))
+        .await
+        .unwrap();
+    assert_eq!(expanded["status"], "committed", "{expanded}");
+    let next = explicit_display_output(&expanded);
+    assert_eq!(explicit_display_identity(next), identity);
+    assert_eq!(next["expansions"][0][0], right, "sibling key stays stable");
+    assert_eq!(next["expansions"].as_array().unwrap().len(), 1);
+    assert!(policy.expand_display_boxed(identity, left).await.is_err());
+    assert!(policy
+        .expand_display_boxed((identity.0, identity.1 + 1, identity.2), right)
+        .await
+        .is_err());
+    let final_page = campaign
+        .drive_actor_output(&store, policy.expand_display_boxed(identity, right))
+        .await
+        .unwrap();
+    assert!(explicit_display_output(&final_page)["expansions"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        0,
+        "native expansion must not invoke the source compiler"
+    );
+    assert_eq!(backend.executions(), 1, "authored effects execute once");
+    let history = store.actor_output_page(&origin, 0, 10).unwrap();
+    assert_eq!(
+        history.outputs.len(),
+        3,
+        "one durable row per displayed page"
+    );
+    assert_eq!(
+        history
+            .outputs
+            .iter()
+            .map(|output| output.emission().id.page_ordinal)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+    assert!(policy.expand_display_boxed(identity, right).await.is_err());
+    assert_eq!(
+        store
+            .actor_output_page(&origin, 0, 10)
+            .unwrap()
+            .outputs
+            .len(),
+        3
+    );
+    assert!(
+        explicit_display_output(&first)["text"]
+            .as_str()
+            .unwrap()
+            .contains("DisplayPair"),
+        "historical output stays readable after retirement"
+    );
+}
+
+#[tokio::test]
+async fn explicit_display_rejects_callback_effect_before_authority_input() {
+    let mut campaign = TestCampaign::start().await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let policy = campaign.root_installation.policy.clone();
+    let published = campaign
+        .drive_actor_output(
+            &store,
+            committed(
+                policy.as_ref(),
+                include_str!("notebook_explicit_display_untrusted_callback.hs"),
+            ),
+        )
+        .await;
+    let identity = explicit_display_identity(explicit_display_output(&published));
+    tidepool_extract_cmd::reset_extract_spawn_count();
+    assert!(policy.expand_display_boxed(identity, 1).await.is_err());
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), 0);
+    assert_eq!(
+        explicit_display_output(&published)["text"],
+        "forged preview"
+    );
+    let origin = harness::store::actor_output::ActorOutputOrigin {
+        run: super::runtime_namespace(campaign.session_root.path()),
+        native_actor: identity.0 as u64,
+        incarnation: identity.1 as u64,
+    };
+    assert_eq!(
+        store
+            .actor_output_page(&origin, 0, 10)
+            .unwrap()
+            .outputs
+            .len(),
+        1
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_display_respects_shared_budget_and_handles_survive_cell_failure() {
+    let mut campaign = TestCampaign::start().await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let policy = campaign.root_installation.policy.clone();
+    let failed = campaign
+        .drive_actor_output(
+            &store,
+            super::test_campaign::dispatch_haskell_script_result(
+                policy.as_ref(),
+                include_str!("notebook_explicit_display_budget_failure.hs"),
+            ),
+        )
+        .await;
+    let Err(exomonad_actor::ResidentToolError::Invocation(
+        exomonad_actor::KernelInvocationFailure::Workbench(failure),
+    )) = failed
+    else {
+        panic!("authored display failure must preserve native failure receipts: {failed:?}")
+    };
+    let receipts = serde_json::to_value(&failure.receipts).unwrap();
+    let displays: Vec<_> = receipts
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["operations"].as_array().unwrap())
+        .filter_map(|operation| operation.get("display"))
+        .collect();
+    assert_eq!(
+        displays.len(),
+        2,
+        "both publications survive the later failure"
+    );
+    assert_eq!(displays[1]["text"], "second");
+    let first = displays[0];
+    let prefix = first["text"].as_str().unwrap();
+    assert!(
+        prefix.len() < 5000,
+        "the prior console output consumes this page's budget"
+    );
+    let identity = explicit_display_identity(first);
+    let keys = first["expansions"].as_array().unwrap();
+    assert_eq!(keys.len(), 1, "the unrendered prefix remains addressable");
+    let key = keys[0][0].as_i64().unwrap();
+    tidepool_extract_cmd::reset_extract_spawn_count();
+    let expanded = campaign
+        .drive_actor_output(&store, policy.expand_display_boxed(identity, key))
+        .await
+        .unwrap();
+    let suffix = explicit_display_output(&expanded)["text"].as_str().unwrap();
+    assert_eq!(format!("{prefix}{suffix}"), "v".repeat(5000));
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), 0);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

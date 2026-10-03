@@ -128,6 +128,44 @@ pub(super) struct TestCampaign {
 }
 
 impl TestCampaign {
+    /// Drive the production durable output sink without creating a provider turn.
+    /// Other deployments remain available to the campaign's existing consumers.
+    pub async fn drive_actor_output<F: std::future::Future>(
+        &mut self,
+        store: &harness::store::Store,
+        future: F,
+    ) -> F::Output {
+        let run = super::runtime_namespace(self.session_root.path());
+        let mut index = 0;
+        while index < self.pending.len() {
+            if matches!(
+                self.pending[index],
+                LocalResidentDeployment::DisplayPublished(_)
+            ) {
+                let LocalResidentDeployment::DisplayPublished(request) =
+                    self.pending.remove(index).unwrap()
+                else {
+                    unreachable!()
+                };
+                super::display_output::publish(&self.forest, store, &run, None, None, &request);
+            } else {
+                index += 1;
+            }
+        }
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                result = &mut future => return result,
+                event = self.deployments.recv() => match event.expect("campaign deployment channel closed while awaiting output") {
+                    LocalResidentDeployment::DisplayPublished(request) => {
+                        super::display_output::publish(&self.forest, store, &run, None, None, &request);
+                    }
+                    event => self.pending.push_back(event),
+                }
+            }
+        }
+    }
+
     /// Attach the browser service to the resident campaign's existing run owner.
     pub async fn prepare_embedded_service(
         &self,

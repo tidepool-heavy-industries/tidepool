@@ -835,6 +835,14 @@ impl CallResponse {
             HostToolFailure::Dispatch(ResidentToolError::Invocation(
                 exomonad_actor::KernelInvocationFailure::Workbench(failure),
             )) => workbench_failure_transcript(failure),
+            HostToolFailure::Dispatch(ResidentToolError::Invocation(failure))
+                if !failure.receipts().is_empty() =>
+            {
+                let mut text = exomonad_actor::bound_workbench_display(&failure.to_string(), 2048);
+                text.push('\n');
+                append_workbench_receipts(&mut text, failure.receipts());
+                text
+            }
             _ => exomonad_actor::bound_workbench_display(&error.to_string(), MODEL_OUTPUT_LIMIT),
         };
         Self {
@@ -872,9 +880,17 @@ fn workbench_failure_transcript(failure: &exomonad_actor::KernelWorkbenchFailure
             failure.actor
         ),
     };
+    append_workbench_receipts(&mut text, &failure.receipts);
+    text
+}
+
+fn append_workbench_receipts(
+    text: &mut String,
+    receipts: &[tidepool_runtime::session::WorkbenchItemReceipt],
+) {
     // Command observations reserve 4 KiB for diagnostics. Present those
     // observations before optional operation metadata, without repeating detail.
-    for receipt in &failure.receipts {
+    for receipt in receipts {
         if receipt.output.is_empty() {
             continue;
         }
@@ -889,14 +905,58 @@ fn workbench_failure_transcript(failure: &exomonad_actor::KernelWorkbenchFailure
         ));
         text.push('\n');
     }
-    for operation in failure
-        .receipts
-        .iter()
-        .flat_map(|receipt| &receipt.operations)
-    {
+    for operation in receipts.iter().flat_map(|receipt| &receipt.operations) {
         let effect = exomonad_actor::bound_workbench_display(&operation.effect, 256);
+        let publication =
+            operation
+                .display_publication
+                .as_ref()
+                .map_or_else(String::new, |state| {
+                    use tidepool_runtime::session::WorkbenchDisplayPublication;
+                    let (identity, detail) = match state {
+                        WorkbenchDisplayPublication::Pending { publication } => {
+                            (publication, "pending".to_owned())
+                        }
+                        WorkbenchDisplayPublication::Unconfirmed {
+                            publication,
+                            detail,
+                        } => (
+                            publication,
+                            format!(
+                                "unconfirmed ({})",
+                                exomonad_actor::bound_workbench_display(detail, 256)
+                            ),
+                        ),
+                        WorkbenchDisplayPublication::Published {
+                            publication,
+                            output,
+                        } => (
+                            publication,
+                            format!(
+                                "committed at {}:{}",
+                                exomonad_actor::bound_workbench_display(&output.run, 256),
+                                output.sequence
+                            ),
+                        ),
+                        WorkbenchDisplayPublication::Refused {
+                            publication,
+                            detail,
+                        } => (
+                            publication,
+                            format!(
+                                "refused ({})",
+                                exomonad_actor::bound_workbench_display(detail, 256)
+                            ),
+                        ),
+                    };
+                    let (actor, incarnation, slot) = identity.display;
+                    format!(
+                        "; display {actor}:{incarnation}:{slot} page {} {detail}",
+                        identity.page_ordinal
+                    )
+                });
         let line = format!(
-            "operation {}:{}:{} {:?} ({effect})\n",
+            "operation {}:{}:{} {:?} ({effect}){publication}\n",
             operation.id.execution,
             operation.id.input_unit_index + 1,
             operation.id.effect_ordinal + 1,
@@ -908,7 +968,6 @@ fn workbench_failure_transcript(failure: &exomonad_actor::KernelWorkbenchFailure
         }
         text.push_str(&line);
     }
-    text
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1007,6 +1066,7 @@ fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
     let items = response.get("items")?.as_array()?;
     let mut transcript = String::new();
     let mut unit_effects: Vec<(u64, String)> = Vec::new();
+    let mut displays = Vec::new();
     for item in items {
         let item = item.as_object()?;
         let index = item.get("index")?.as_u64()?;
@@ -1018,6 +1078,20 @@ fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
         transcript.push_str(output);
         if let Some(effect) = unit_effect_description(item) {
             unit_effects.push((index, effect));
+        }
+        if let Some(operations) = item.get("operations").and_then(serde_json::Value::as_array) {
+            for operation in operations {
+                let Some(publication) = operation.get("displayPublication") else {
+                    continue;
+                };
+                let mut display = serde_json::json!({"publication": publication});
+                if let Some(page) = operation.get("display") {
+                    display["identity"] = page["identity"].clone();
+                    display["expansions"] = page["expansions"].clone();
+                    display["unavailable"] = page["unavailable"].clone();
+                }
+                displays.push(display);
+            }
         }
     }
     let processed = match status {
@@ -1044,6 +1118,15 @@ fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
             )),
             _ => {}
         }
+    }
+    for display in displays {
+        let line = format!("\ndisplay {}", serialize(display));
+        if transcript.len() + line.len() + 128 > MODEL_OUTPUT_LIMIT {
+            transcript
+                .push_str("\n[additional display detail is retained in the execution receipt]");
+            break;
+        }
+        transcript.push_str(&line);
     }
     Some(transcript)
 }
@@ -2341,6 +2424,8 @@ pub(crate) mod tests {
                 failure_layer: None,
                 operations: (0..1000)
                     .map(|effect_ordinal| WorkbenchOperationReceipt {
+                        display: None,
+                        display_publication: None,
                         id: WorkbenchOperationId {
                             execution: WorkbenchExecutionId::from_digest([1; 16]),
                             input_unit_index: 1,
@@ -2365,6 +2450,75 @@ pub(crate) mod tests {
         let uncertain_text = workbench_failure_transcript(&uncertain);
         assert!(uncertain_text.contains("publication durability remains unconfirmed"));
         assert!(!uncertain_text.contains("publication rejected"));
+        let page = tidepool_runtime::session::WorkbenchDisplayPublicationIdentity {
+            display: (3, 5, 7),
+            page_ordinal: 11,
+        };
+        uncertain.receipts[0].operations[0].display_publication = Some(
+            tidepool_runtime::session::WorkbenchDisplayPublication::Pending { publication: page },
+        );
+        let pending_text = workbench_failure_transcript(&uncertain);
+        assert!(pending_text.contains("display 3:5:7 page 11 pending"));
+        uncertain.receipts[0].operations[0].display_publication = Some(
+            tidepool_runtime::session::WorkbenchDisplayPublication::Unconfirmed {
+                publication: page,
+                detail: "acknowledgement lost".into(),
+            },
+        );
+        let unknown_text = workbench_failure_transcript(&uncertain);
+        assert!(unknown_text.contains("display 3:5:7 page 11 unconfirmed (acknowledgement lost)"));
+        assert!(unknown_text.len() <= MODEL_OUTPUT_LIMIT);
+        let mut cancelled = serde_json::to_value(WorkbenchResponse {
+            status: WorkbenchRunStatus::RequestCancelled,
+            summary: None,
+            items: uncertain.receipts.clone(),
+            next_index: 0,
+            total: 1,
+            publication: None,
+        })
+        .unwrap();
+        let cancelled_response = CallResponse::workbench(cancelled.clone());
+        let CallContent::InputText {
+            text: cancelled_text,
+        } = &cancelled_response.content_items[0];
+        assert!(cancelled_text.contains("\"status\":\"unconfirmed\""));
+        assert!(cancelled_text.contains("\"display\":[3,5,7]"));
+        assert!(cancelled_text.contains("\"pageOrdinal\":11"));
+        cancelled["items"][0]["output"] = "canonical preview".into();
+        cancelled["items"][0]["operations"][0]["displayPublication"] = serde_json::to_value(
+            tidepool_runtime::session::WorkbenchDisplayPublication::Published {
+                publication: page,
+                output: tidepool_runtime::session::ActorOutputReference {
+                    run: "run".into(),
+                    sequence: 17,
+                },
+            },
+        )
+        .unwrap();
+        cancelled["items"][0]["operations"][0]["display"] = serde_json::json!({
+            "identity": [3,5,7], "text": "canonical preview", "expansions": [[1,"line\n\"label"]], "unavailable": false,
+            "output": {"run":"run", "sequence":17}
+        });
+        let published_response = CallResponse::workbench(cancelled);
+        let CallContent::InputText {
+            text: published_text,
+        } = &published_response.content_items[0];
+        assert_eq!(published_text.matches("canonical preview").count(), 1);
+        assert!(published_text.contains("\"sequence\":17"));
+        assert!(published_text.contains("\"expansions\":[[1,\"line\\n\\\"label\"]]"));
+        let cleanup_response =
+            CallResponse::failure(&HostToolFailure::Dispatch(ResidentToolError::Invocation(
+                exomonad_actor::KernelInvocationFailure::CleanupUnconfirmed {
+                    actor: uncertain.actor,
+                    detail: "cleanup remains unconfirmed".into(),
+                    receipts: uncertain.receipts,
+                },
+            )));
+        let CallContent::InputText { text: cleanup_text } = &cleanup_response.content_items[0];
+        assert!(!cleanup_response.success);
+        assert!(cleanup_text.contains("display 3:5:7 page 11 unconfirmed (acknowledgement lost)"));
+        assert!(cleanup_text.contains(&output));
+        assert!(cleanup_text.len() <= MODEL_OUTPUT_LIMIT);
         let response =
             CallResponse::failure(&HostToolFailure::Dispatch(ResidentToolError::Invocation(
                 exomonad_actor::KernelInvocationFailure::Workbench(failure),

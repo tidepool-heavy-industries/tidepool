@@ -1669,7 +1669,6 @@ pub struct TurnCertification {
         Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledActivationInput>>,
     pub(crate) checked_prefix: Option<Arc<super::RuntimeCheckedPrefix>>,
     pub(crate) checked_display: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>>,
-    pub(crate) checked_display_admission: Option<Arc<super::RuntimeCheckedDisplayAdmission>>,
 }
 
 impl TurnCertification {
@@ -1677,9 +1676,6 @@ impl TurnCertification {
         &self,
     ) -> Option<&Arc<tidepool_toolchain::checked_cell::ExactCompiledDisplay>> {
         self.checked_display.as_ref()
-    }
-    pub fn checked_display_admission(&self) -> Option<&Arc<super::RuntimeCheckedDisplayAdmission>> {
-        self.checked_display_admission.as_ref()
     }
     pub fn checked_item(&self) -> Option<&ExactCheckedItem> {
         self.checked_item.as_ref()
@@ -1704,37 +1700,6 @@ impl TurnCertification {
         Ok(())
     }
 
-    pub(crate) fn validate_checked_display(
-        &self,
-        target: &PreparedProgram,
-        generation: u64,
-        bound: &[BoundBinder],
-    ) -> Result<(), CompileError> {
-        let (Some(display), Some(admission)) =
-            (&self.checked_display, &self.checked_display_admission)
-        else {
-            return Err(CompileError::ExtractFailed(
-                "checked display lacks its owning runtime admission".into(),
-            ));
-        };
-        if !display.matches_target(target)
-            || generation != display.generation()
-            || generation != admission.generation().0
-            || !admission.matches_compiled_display(display)
-            || !Arc::ptr_eq(display.capture(), admission.execution())
-        {
-            return Err(CompileError::ExtractFailed(
-                "checked display target or runtime owner was edited".into(),
-            ));
-        }
-        display.validate_bound_binders(
-            &bound
-                .iter()
-                .map(encode_bound_binder_authority)
-                .collect::<Vec<_>>(),
-        )
-    }
-
     pub(crate) fn validate_checked_bind(
         &self,
         target: &PreparedProgram,
@@ -1748,7 +1713,7 @@ impl TurnCertification {
         }
         if self.checked_display.is_some() {
             return Err(CompileError::ExtractFailed(
-                "checked display requires its dedicated owning consumer".into(),
+                "legacy checked display has no execution route".into(),
             ));
         }
         let Some(execution) = self.checked_execution.as_ref() else {
@@ -2043,8 +2008,7 @@ pub fn assemble_expression_module(
 #[derive(Clone, Copy)]
 enum ExpressionResult {
     Raw,
-    HaskellDisplay,
-    OpaqueDisplay,
+    OpaqueToken,
     Observation,
 }
 
@@ -2106,16 +2070,10 @@ fn assemble_expression_module_with_result(
     let body = match (lift, result) {
         (ExpressionLift::Effectful, ExpressionResult::Raw) => "__workbenchValue",
         (ExpressionLift::Pure, ExpressionResult::Raw) => "pure __workbenchValue",
-        (ExpressionLift::Effectful, ExpressionResult::HaskellDisplay) => {
-            "do { __value <- __workbenchValue ; pure (__value, T.pack (show __value)) }"
-        }
-        (ExpressionLift::Pure, ExpressionResult::HaskellDisplay) => {
-            "pure (__workbenchValue, T.pack (show __workbenchValue))"
-        }
-        (ExpressionLift::Effectful, ExpressionResult::OpaqueDisplay) => {
+        (ExpressionLift::Effectful, ExpressionResult::OpaqueToken) => {
             "do { _ <- __workbenchValue ; pure (T.pack \"<opaque value>\") }"
         }
-        (ExpressionLift::Pure, ExpressionResult::OpaqueDisplay) => {
+        (ExpressionLift::Pure, ExpressionResult::OpaqueToken) => {
             "pure (__workbenchValue `seq` T.pack \"<opaque value>\")"
         }
         (ExpressionLift::Effectful, ExpressionResult::Observation) => {
@@ -2152,31 +2110,9 @@ pub fn assemble_observation_module(
     )
 }
 
-/// Assemble the display-capable sibling of [`assemble_expression_module`].
-/// The authored expression runs once and returns both its original value and
-/// its Haskell rendering, so Rust never needs to interpret a Haskell value or
-/// re-run an effect merely to print its result.
-pub fn assemble_display_expression_module(
-    preamble_with_imports: &str,
-    target: &str,
-    effect_stack: &str,
-    expression: &str,
-    lift: ExpressionLift,
-) -> String {
-    assemble_expression_module_with_result(
-        preamble_with_imports,
-        target,
-        effect_stack,
-        expression,
-        lift,
-        ExpressionResult::HaskellDisplay,
-        None,
-    )
-}
-
-/// Assemble an expression fallback for values with no rendering instance.
+/// Assemble an expression result without requiring a rendering instance.
 /// Effectful values still run exactly once; pure values are evaluated to weak
-/// head normal form. Only the fixed display token crosses into Rust, so
+/// head normal form. Only the fixed opaque token crosses into Rust, so
 /// closures and opaque references never enter the value serializer.
 pub fn assemble_opaque_expression_module(
     preamble_with_imports: &str,
@@ -2191,7 +2127,7 @@ pub fn assemble_opaque_expression_module(
         effect_stack,
         expression,
         lift,
-        ExpressionResult::OpaqueDisplay,
+        ExpressionResult::OpaqueToken,
         None,
     )
 }
@@ -2488,7 +2424,6 @@ pub fn compile_activation_input(
         },
         true,
         Some(admission.clone()),
-        None,
     )?;
     let TurnResult::Bind {
         bound, compiled, ..
@@ -2582,7 +2517,7 @@ fn validate_cell_admitted_request(
     Ok(())
 }
 
-/// Prepare every authored item and display before the caller can execute the
+/// Prepare every authored item before the caller can execute the
 /// first native effect. The compiler owns and seals the complete immutable
 /// program, including original declaration and Val interface identities.
 pub fn compile_cell_program_admitted(
@@ -2874,7 +2809,7 @@ fn check_cell_impl(
 /// When `req.verdict` is supplied, a missing template for the verdict's
 /// selector is caught here, before any process is spawned.
 pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
-    run_turn_with_admission(req, false, None, None)
+    run_turn_with_admission(req, false, None)
 }
 
 /// Select the precompiled native item from the complete immutable program.
@@ -2901,7 +2836,7 @@ pub fn consume_cell_program_item(
         )
         .into());
     }
-    let mut result = decode_cell_program_turn(item, false)?;
+    let mut result = decode_cell_program_turn(item)?;
     let certification = match &mut result {
         TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
             compiled.certification.as_mut()
@@ -2916,69 +2851,15 @@ pub fn consume_cell_program_item(
     Ok(result)
 }
 
-/// Select the prepared generic display for an actually completed capture.
-/// Budget and seen-job inputs enter the native runner through runtime admission.
-pub fn consume_cell_program_display(
-    admission: Arc<super::RuntimeCheckedDisplayAdmission>,
-) -> Result<TurnResult, TurnFailure> {
-    let program = admission.prefix().cell_program().ok_or_else(|| {
-        CompileError::ExtractFailed("display admission has no complete cell program".into())
-    })?;
-    let item = program
-        .items()
-        .get(admission.execution().item().index())
-        .ok_or_else(|| {
-            CompileError::ExtractFailed("capture is outside its complete cell program".into())
-        })?;
-    let proof = item.display().ok_or_else(|| {
-        CompileError::ExtractFailed("complete cell capture has no prepared display".into())
-    })?;
-    if !admission.matches_compiled_display(proof)
-        || !Arc::ptr_eq(proof.capture(), admission.execution())
-        || proof.generation() != admission.generation().0
-    {
-        return Err(CompileError::ExtractFailed(
-            "prepared display differs from its completed capture".into(),
-        )
-        .into());
-    }
-    let mut result = decode_cell_program_turn(item, true)?;
-    let TurnResult::Bind {
-        compiled, bound, ..
-    } = &mut result
-    else {
-        return Err(CompileError::ExtractFailed(
-            "prepared display is not its binding bundle".into(),
-        )
-        .into());
-    };
-    let certification = compiled.certification.as_mut().ok_or_else(|| {
-        CompileError::ExtractFailed("prepared display lacks certified products".into())
-    })?;
-    certification.checked_display_admission = Some(admission.clone());
-    certification.validate_checked_display(&compiled.prepared, admission.generation().0, bound)?;
-    Ok(result)
-}
-
 fn decode_cell_program_turn(
     item: &tidepool_toolchain::checked_cell::CellProgramItem,
-    display: bool,
 ) -> Result<TurnResult, CompileError> {
-    let (turn_bytes, metadata_bytes, products, prepared) = if display {
-        (
-            item.display_turn_bytes(),
-            item.display_metadata_bytes(),
-            item.display_products(),
-            item.display().map(|proof| proof.target_owned()),
-        )
-    } else {
-        (
-            item.native_turn_bytes(),
-            item.native_metadata_bytes(),
-            item.native_products(),
-            item.native().map(|proof| proof.target_owned()),
-        )
-    };
+    let (turn_bytes, metadata_bytes, products, prepared) = (
+        item.native_turn_bytes(),
+        item.native_metadata_bytes(),
+        item.native_products(),
+        item.native().map(|proof| proof.target_owned()),
+    );
     let missing =
         || CompileError::ExtractFailed("complete cell lacks its sealed output observations".into());
     let turn = decode_turn_out(turn_bytes.ok_or_else(missing)?)?;
@@ -2991,17 +2872,11 @@ fn decode_cell_program_turn(
         target_owners: products.pending_imports.clone(),
         package_interfaces: products.package_interfaces.clone(),
         recovery_products: products.recovery_products.clone(),
-        checked_item: (!display).then(|| item.checked_item().clone()),
-        checked_execution: (!display)
-            .then(|| item.native().expect("native products preflighted").clone()),
+        checked_item: Some(item.checked_item().clone()),
+        checked_execution: Some(item.native().expect("native products preflighted").clone()),
         checked_activation_input: None,
         checked_prefix: None,
-        checked_display: display.then(|| {
-            item.display()
-                .expect("display products preflighted")
-                .clone()
-        }),
-        checked_display_admission: None,
+        checked_display: None,
     };
     certification.validate_checked_table(&table)?;
     match turn {
@@ -3028,7 +2903,7 @@ fn decode_cell_program_turn(
             variant,
             asks,
             wrapped_source,
-        } if !display => Ok(TurnResult::Expr {
+        } => Ok(TurnResult::Expr {
             variant,
             wrapped_source,
             compiled: CompiledTurn {
@@ -3089,79 +2964,7 @@ pub fn run_checked_item(
     if prefix.cell_program().is_some() {
         return consume_cell_program_item(item_admission);
     }
-    run_turn_with_admission(req, false, Some(item_admission), None)
-}
-
-/// Compile the closed deferred display recipe for the actual completed native
-/// observation. All source, alias, page inputs and native owner come from its
-/// immutable runtime admission and original checked cell.
-pub fn run_checked_display(
-    admission: Arc<super::RuntimeCheckedDisplayAdmission>,
-    include: &[&Path],
-) -> Result<TurnResult, TurnFailure> {
-    if admission.prefix().cell_program().is_some() {
-        return consume_cell_program_display(admission);
-    }
-    let snapshot = admission.snapshot();
-    let view = snapshot.view();
-    let templates = admission
-        .execution()
-        .item()
-        .turn_templates()
-        .iter()
-        .map(|(kind, source)| {
-            let kind = match kind.as_str() {
-                "decl" => TemplateSelector::Decl,
-                "bind" => TemplateSelector::Bind,
-                "binddiscard" => TemplateSelector::BindDiscard,
-                "expr" => TemplateSelector::Expr,
-                _ => {
-                    return Err(CompileError::ExtractFailed(
-                        "checked display template kind is unknown".into(),
-                    ))
-                }
-            };
-            Ok(TurnTemplate {
-                kind,
-                source: source.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, CompileError>>()?;
-    let injected = snapshot.compiler_prefix().injected_modules();
-    let binder = admission.captured_binding();
-    let retained = [(
-        SymbolIdentity {
-            unit: "main".into(),
-            module: binder.module.clone(),
-            namespace: "value".into(),
-            occurrence: binder.name.clone(),
-            record_parent: None,
-        },
-        admission.execution().generation(),
-    )];
-    let generation = admission.generation().0;
-    let req = TurnRequest {
-        exact_context: view.exact_declaration_context().cloned(),
-        session_id: Some(view.session()),
-        turn_text: "",
-        templates: &templates,
-        include,
-        session_root: view.session_root(),
-        inject_modules: &injected,
-        gen: generation,
-        verdict: Some(TurnClassification {
-            kind: TurnKind::Bind,
-            binders: vec![
-                format!("__tidepoolPage{generation}"),
-                format!("__tidepoolMetadata{generation}"),
-                "cellDisplay".into(),
-            ],
-            items: Vec::new(),
-        }),
-        target: None,
-        retained_imports: &retained,
-    };
-    run_turn_with_admission(req, false, None, Some(admission.clone()))
+    run_turn_with_admission(req, false, Some(item_admission))
 }
 
 /// Protected host-input recipe: the checked bind supplies the exact interface
@@ -3211,14 +3014,12 @@ pub fn assemble_checked_activation_module(
     fields(
         kind = req.verdict.as_ref().map_or("", |verdict| turn_kind_wire_name(verdict.kind)),
         checked = checked.is_some(),
-        display = display_admission.is_some(),
     )
 )]
 fn run_turn_with_admission(
     req: TurnRequest<'_>,
     activation_preview: bool,
     checked: Option<Arc<super::RuntimeCheckedItemAdmission>>,
-    display_admission: Option<Arc<super::RuntimeCheckedDisplayAdmission>>,
 ) -> Result<TurnResult, TurnFailure> {
     let verdict_arg = match &req.verdict {
         Some(TurnClassification { kind, binders, .. }) => {
@@ -3242,14 +3043,7 @@ fn run_turn_with_admission(
     };
 
     let temp = TempDir::new()?;
-    let snapshot = checked
-        .as_ref()
-        .map(|admission| admission.snapshot())
-        .or_else(|| {
-            display_admission
-                .as_ref()
-                .map(|admission| admission.snapshot())
-        });
+    let snapshot = checked.as_ref().map(|admission| admission.snapshot());
     let turn_path = temp.path().join("turn.txt");
     std::fs::write(&turn_path, req.turn_text)?;
     let turn_out_path = temp.path().join("turn.cbor");
@@ -3303,21 +3097,7 @@ fn run_turn_with_admission(
 
     let endpoint = bind_extract_cmd(&cmd)?;
     let include: Vec<_> = req.include.iter().map(|path| path.to_path_buf()).collect();
-    let offer = if let Some(admission) = &display_admission {
-        ModuleCandidateOffer::select_checked_display(
-            endpoint.identity().producer_bytes(),
-            &include,
-            temp.path(),
-            req.exact_context.clone(),
-            admission.execution().clone(),
-            admission.snapshot().compiler_prefix().clone(),
-            admission.generation().0,
-            admission.digest(),
-            admission.budget() as u64,
-            admission.presented().to_vec(),
-            settled_bindings,
-        )?
-    } else if let Some(admission) = &checked {
+    let offer = if let Some(admission) = &checked {
         let templates = req
             .templates
             .iter()
@@ -3372,8 +3152,7 @@ fn run_turn_with_admission(
     }
     offer.apply_to(&mut cmd)?;
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
-    let ordinary_admitted =
-        req.exact_context.is_none() && checked.is_none() && display_admission.is_none();
+    let ordinary_admitted = req.exact_context.is_none() && checked.is_none();
     enum TurnCompilerOutput {
         Admitted(tidepool_toolchain::artifacts::AdmittedTurnOutput),
         Direct(tidepool_extract_cmd::ExtractRun),
@@ -3484,34 +3263,6 @@ fn run_turn_with_admission(
             .into());
         }
         certification.compile_input_identity = Some(Arc::clone(identity));
-    }
-    if let Some(admission) = display_admission {
-        let TurnResult::Bind {
-            compiled, bound, ..
-        } = &mut result
-        else {
-            return Err(CompileError::ExtractFailed(
-                "checked display is not its binding bundle".into(),
-            )
-            .into());
-        };
-        let certification = compiled.certification.as_mut().ok_or_else(|| {
-            CompileError::ExtractFailed("checked display lacks sealed products".into())
-        })?;
-        certification.checked_display_admission = Some(admission.clone());
-        certification.validate_checked_display(&compiled.prepared, req.gen, bound)?;
-        let display = certification
-            .checked_display
-            .as_ref()
-            .expect("validated display proof");
-        let (_, bytes) = display.value_interface_owned();
-        let output = req
-            .session_root
-            .join(tidepool_repr::SessionModule::val(admission.generation()).relative_hi_path());
-        if let Some(parent) = output.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(output, bytes)?;
     }
     if let Some(admission) = checked {
         let compiled = match &mut result {
@@ -3665,7 +3416,6 @@ fn retained_compiled_turn(
             checked_activation_input: products.checked_activation_input.clone(),
             checked_prefix: None,
             checked_display: products.checked_display.clone(),
-            checked_display_admission: None,
         }),
     };
     if let Some(certification) = &compiled.certification {
@@ -3791,7 +3541,6 @@ fn read_compiled_turn(
             checked_activation_input: sealed.checked_activation_input,
             checked_prefix: None,
             checked_display: sealed.checked_display,
-            checked_display_admission: None,
         }),
     };
     if let Some(certification) = &compiled.certification {
@@ -6108,257 +5857,6 @@ mod tests {
     }
 
     #[test]
-    fn failed_checked_display_keeps_only_actual_page_and_allows_next_item() {
-        use crate::session::{
-            resident_cell_check_template, resident_workbench_templates, CheckedDisplaySettlement,
-            ModuleEnv, PersistentSession, SessionLib,
-        };
-        use tidepool_codegen::scope::ScopeId;
-        use tidepool_repr::SessionId;
-        use tidepool_testing::effect_surface::TestEffectSurface;
-        tidepool_testing::eval_harness::require_extract();
-        let root = tempfile::tempdir().unwrap();
-        let effects = TestEffectSurface::minimal(&[]).unwrap();
-        let lib = SessionLib::open(SessionId(998), root.path(), ModuleEnv::standalone_default())
-            .unwrap()
-            .with_validation_include(effects.include_paths().to_vec());
-        let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = state.mint_scope(ScopeId::ROOT).unwrap();
-        let execution = Arc::new(state.begin_private_execution(public).unwrap());
-        let view = state.compile_view_for_execution(&execution).unwrap();
-        let imports = view.turn_imports(&crate::session::SourceImports::from_specs([
-            "qualified Prelude as P",
-        ]));
-        let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
-        let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
-        let source = include_str!("fixtures/checked-failed-display-cell.hs");
-        let specification = CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: source.into(),
-            template_source: template.clone(),
-            turn_templates: templates
-                .iter()
-                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
-                .collect(),
-            injected_modules: view.injected_module_names(),
-            reserved_declaration_modules: Vec::new(),
-        };
-        let admitted_include = view.include_paths(effects.include_paths());
-        let admission = state
-            .admit_cell_for_execution(
-                execution.clone(),
-                0,
-                Arc::new(specification.clone()),
-                specification.specification_digest(),
-                [1; 32],
-                admitted_include,
-            )
-            .unwrap();
-        let view = admission.view();
-        let include = view.include_paths(effects.include_paths());
-        let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let injected = view.injected_module_names();
-        let checked = check_cell_admitted(
-            CellCheckRequest {
-                exact_context: view.exact_declaration_context().cloned(),
-                session_id: Some(view.session()),
-                cell_text: source,
-                template: &template,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                compile_generation: admission.initial_value_generation().0,
-                compile_view_evidence: "",
-            },
-            admission.clone(),
-            &templates,
-        )
-        .unwrap();
-        assert_eq!(checked.items.len(), 2);
-        let first = checked.checked_item(0).unwrap();
-        let prefix = state
-            .begin_checked_prefix(admission, first.clone())
-            .unwrap();
-        #[derive(Clone)]
-        struct QuietOutput;
-        impl crate::session::OutputSink for QuietOutput {
-            fn drain(&self) -> Vec<String> {
-                Vec::new()
-            }
-            fn snapshot(&self) -> Vec<String> {
-                Vec::new()
-            }
-        }
-        let mut resident = crate::session::ResidentSession::from_persistent_for_test(
-            frunk::HNil,
-            QuietOutput,
-            state,
-        );
-        resident
-            .set_run_context(crate::session::SessionRunContext {
-                lexical_scope: execution.private_scope(),
-                ..Default::default()
-            })
-            .unwrap();
-        let reservation = resident
-            .admit_checked_item(prefix.clone(), first.clone())
-            .unwrap();
-        let snapshot = reservation.snapshot();
-        let view = snapshot.view();
-        let injected = snapshot.compiler_prefix().injected_modules();
-        let TurnResult::Bind {
-            bound, compiled, ..
-        } = run_checked_item(
-            TurnRequest {
-                exact_context: view.exact_declaration_context().cloned(),
-                session_id: Some(view.session()),
-                turn_text: first.source(),
-                templates: &templates,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                gen: reservation.generation().0,
-                verdict: Some(checked.items[0].verdict.clone()),
-                target: None,
-                retained_imports: &[],
-            },
-            reservation.clone(),
-        )
-        .unwrap()
-        else {
-            panic!("expression requires its capture recipe")
-        };
-        resident
-            .run_observation_with_sites(compiled.code(), &bound[0], reservation.generation(), false)
-            .unwrap();
-        let observation_id = bound[0].var_id;
-        let display = resident
-            .admit_checked_display(
-                prefix.clone(),
-                compiled
-                    .certification
-                    .as_ref()
-                    .unwrap()
-                    .checked_execution()
-                    .unwrap()
-                    .clone(),
-                &bound[0],
-                256,
-                Vec::new(),
-            )
-            .unwrap();
-        let TurnResult::Bind {
-            bound: display_bound,
-            compiled: display_compiled,
-            ..
-        } = run_checked_display(display.clone(), &include).unwrap()
-        else {
-            panic!("display requires its sealed bundle")
-        };
-        let [page, metadata, alias] = display_bound.as_slice() else {
-            panic!("canonical display rows")
-        };
-        let display_code = display_compiled.into_code();
-        let mut substituted_alias = alias.clone();
-        substituted_alias.var_id += 1;
-        let residency = resident.residency();
-        assert!(resident
-            .snapshot_checked_display_bundle(
-                display_code.clone(),
-                page,
-                metadata,
-                &substituted_alias,
-                display.generation(),
-                display.clone(),
-            )
-            .is_err());
-        assert_eq!(resident.residency(), residency);
-        assert_eq!(prefix.snapshot().display_settlement(), None);
-        let pending = resident
-            .snapshot_checked_display_bundle(
-                display_code,
-                page,
-                metadata,
-                alias,
-                display.generation(),
-                display,
-            )
-            .unwrap();
-        let ready = pending.compile_off_checkout().unwrap();
-        let failure = resident
-            .revalidate_and_run_display_bundle(ready)
-            .unwrap_err();
-        assert!(
-            failure.to_string().contains("checked-display-sentinel"),
-            "{failure}"
-        );
-        let snapshot = prefix.snapshot();
-        assert_eq!(
-            snapshot.display_settlement(),
-            Some(CheckedDisplaySettlement::Failed)
-        );
-        assert_eq!(snapshot.compiler_prefix().next_item(), 1);
-        let actual = snapshot
-            .settled_native_bindings()
-            .map(|(name, _, _, _)| name.to_owned())
-            .collect::<Vec<_>>();
-        assert!(actual.contains(&page.name));
-        assert!(!actual.contains(&metadata.name));
-        assert!(!actual.contains(&alias.name));
-        let visibility = resident
-            .public_visibility_snapshot_in(execution.private_scope())
-            .unwrap();
-        assert!(visibility
-            .bindings
-            .iter()
-            .any(|(name, id)| name == &bound[0].name && id.raw() == observation_id));
-        let next = checked.checked_item(1).unwrap();
-        let next_reservation = resident
-            .admit_checked_item(prefix.clone(), next.clone())
-            .unwrap();
-        let snapshot = next_reservation.snapshot();
-        let view = snapshot.view();
-        let injected = snapshot.compiler_prefix().injected_modules();
-        let TurnResult::Bind {
-            bound, compiled, ..
-        } = run_checked_item(
-            TurnRequest {
-                exact_context: view.exact_declaration_context().cloned(),
-                session_id: Some(view.session()),
-                turn_text: next.source(),
-                templates: &templates,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                gen: next_reservation.generation().0,
-                verdict: Some(checked.items[1].verdict.clone()),
-                target: None,
-                retained_imports: &[],
-            },
-            next_reservation.clone(),
-        )
-        .unwrap()
-        else {
-            panic!("next checked bind recipe")
-        };
-        resident
-            .run_bind_with_sites(
-                &bound[0].name,
-                compiled.code(),
-                &bound[0],
-                next_reservation.generation(),
-            )
-            .unwrap();
-        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 2);
-        assert!(resident
-            .public_visibility_snapshot_in(execution.private_scope())
-            .unwrap()
-            .bindings
-            .iter()
-            .any(|(name, id)| name == "afterFailedDisplay" && id.raw() == bound[0].var_id));
-    }
-
-    #[test]
     fn unsupported_declaration_order_is_a_source_contract_rejection() {
         use crate::session::{
             resident_cell_check_template, ModuleEnv, PersistentSession, SessionLib,
@@ -6665,49 +6163,6 @@ mod tests {
                         false,
                     )
                     .unwrap();
-                let display = resident
-                    .admit_checked_display(
-                        protected.clone(),
-                        compiled
-                            .certification
-                            .as_ref()
-                            .unwrap()
-                            .checked_execution()
-                            .unwrap()
-                            .clone(),
-                        &bound[0],
-                        256,
-                        Vec::new(),
-                    )
-                    .unwrap();
-                let TurnResult::Bind {
-                    bound, compiled, ..
-                } = run_checked_display(display.clone(), &include).unwrap()
-                else {
-                    panic!("ordered checked display must compile its bundle")
-                };
-                let [page, metadata, alias] = bound.as_slice() else {
-                    panic!("display bundle must have three rows")
-                };
-                let rendered = resident
-                    .run_checked_display_bundle_with_sites(
-                        compiled.code(),
-                        page,
-                        metadata,
-                        alias,
-                        display.generation(),
-                        display,
-                    )
-                    .unwrap();
-                assert_eq!(
-                    rendered.result().to_json(),
-                    serde_json::json!([
-                        "(41,40,True,\"LocalBox {localNumber = 41}\")",
-                        false,
-                        false
-                    ]),
-                    "private replacement or qualified historical declaration changed"
-                );
             }
             assert_eq!(
                 protected.snapshot().compiler_prefix().next_item(),
@@ -7233,97 +6688,6 @@ mod tests {
                 .next_item(),
             1
         );
-        let display_admission = resident
-            .admit_checked_display(
-                expression_reservation.prefix().clone(),
-                expression_compiled
-                    .certification
-                    .as_ref()
-                    .unwrap()
-                    .checked_execution()
-                    .unwrap()
-                    .clone(),
-                &expression_bound[0],
-                256,
-                Vec::new(),
-            )
-            .unwrap();
-        let TurnResult::Bind {
-            bound: display_bound,
-            compiled: display_compiled,
-            ..
-        } = run_checked_display(display_admission.clone(), &include).unwrap()
-        else {
-            panic!("checked display must compile its closed binding bundle");
-        };
-        let [page, metadata, alias] = display_bound.as_slice() else {
-            panic!("display must have exactly three bound rows");
-        };
-        let display_snapshot = expression_reservation.prefix().snapshot();
-        let mut edited_table = display_compiled.code();
-        edited_table.table = std::borrow::Cow::Owned(DataConTable::new());
-        assert!(resident
-            .run_checked_display_bundle_with_sites(
-                edited_table,
-                page,
-                metadata,
-                alias,
-                display_admission.generation(),
-                display_admission.clone()
-            )
-            .is_err());
-        let mut edited_page = page.clone();
-        edited_page.var_id ^= 1;
-        assert!(resident
-            .run_checked_display_bundle_with_sites(
-                display_compiled.code(),
-                &edited_page,
-                metadata,
-                alias,
-                display_admission.generation(),
-                display_admission.clone()
-            )
-            .is_err());
-        assert!(resident
-            .run_display_bundle_with_sites(
-                display_compiled.code(),
-                page,
-                metadata,
-                alias,
-                display_admission.generation()
-            )
-            .is_err());
-        assert!(Arc::ptr_eq(
-            &display_snapshot,
-            &expression_reservation.prefix().snapshot()
-        ));
-        let displayed = resident
-            .run_checked_display_bundle_with_sites(
-                display_compiled.code(),
-                page,
-                metadata,
-                alias,
-                display_admission.generation(),
-                display_admission.clone(),
-            )
-            .unwrap();
-        assert!(
-            displayed.result().to_string_pretty().contains("43"),
-            "hidden original result was not rendered: {}",
-            displayed.result().to_string_pretty()
-        );
-        assert_eq!(
-            expression_reservation
-                .prefix()
-                .snapshot()
-                .compiler_prefix()
-                .next_item(),
-            1
-        );
-        assert!(!Arc::ptr_eq(
-            &display_snapshot,
-            &expression_reservation.prefix().snapshot()
-        ));
         resident
             .set_run_context(crate::session::SessionRunContext {
                 lexical_scope: binding_scope,
@@ -7495,8 +6859,6 @@ mod tests {
             "__tidepoolCellExpression _ = pure ()\n",
             "__tidepoolInEffectRow :: IO value -> IO value\n",
             "__tidepoolInEffectRow = id\n",
-            "__tidepoolCellDisplayConstraint :: Show value => value -> ()\n",
-            "__tidepoolCellDisplayConstraint _ = ()\n",
             "{{CELL_DECLS}}\n",
             "__cell = do {\n",
             "{{CELL_BODY}}\n",
@@ -7552,8 +6914,6 @@ mod tests {
             "__tidepoolCellExpression _ = pure ()\n",
             "__tidepoolInEffectRow :: IO value -> IO value\n",
             "__tidepoolInEffectRow = id\n",
-            "__tidepoolCellDisplayConstraint :: Show value => value -> ()\n",
-            "__tidepoolCellDisplayConstraint _ = ()\n",
             "{{CELL_DECLS}}\n",
             "__cell = do {\n",
             "{{CELL_BODY}}\n",
@@ -7723,12 +7083,10 @@ mod tests {
         );
     }
 
-    /// The checked plan owns both independent choices for every expression:
-    /// whether to execute an `Eff` action and whether to invoke `PageDisplay`.
-    /// These are four successful whole-cell checks; no executable-wrapper
-    /// failure participates in either decision.
+    /// The checked plan classifies pure values and actions in the owned effect
+    /// row, retaining quantified result types without defaulting their binders.
     #[test]
-    fn checked_expression_plans_cover_all_execution_and_presentation_quadrants() {
+    fn checked_expression_plans_cover_pure_and_effectful_values() {
         let extract = required_cell_test_worker();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
@@ -7745,42 +7103,17 @@ mod tests {
             EFF_ROW,
             "",
         );
-        for (cell, lift, presentation) in [
-            (
-                "1 :: Int\n",
-                ExpressionLift::Pure,
-                ExpressionPresentation::Rendered,
-            ),
-            (
-                "(pure (1 :: Int) :: IO Int)\n",
-                ExpressionLift::Pure,
-                ExpressionPresentation::Opaque,
-            ),
-            (
-                "pure (1 :: Int)\n",
-                ExpressionLift::Effectful,
-                ExpressionPresentation::Rendered,
-            ),
+        for (cell, lift) in [
+            ("1 :: Int\n", ExpressionLift::Pure),
+            ("(pure (1 :: Int) :: IO Int)\n", ExpressionLift::Pure),
+            ("pure (1 :: Int)\n", ExpressionLift::Effectful),
             (
                 "pure (pure (1 :: Int) :: Eff '[] Int)\n",
                 ExpressionLift::Effectful,
-                ExpressionPresentation::Opaque,
             ),
-            (
-                "pure Proxy\n",
-                ExpressionLift::Effectful,
-                ExpressionPresentation::Rendered,
-            ),
-            (
-                "pure (Proxy @3)\n",
-                ExpressionLift::Effectful,
-                ExpressionPresentation::Rendered,
-            ),
-            (
-                "pure const\n",
-                ExpressionLift::Effectful,
-                ExpressionPresentation::Rendered,
-            ),
+            ("pure Proxy\n", ExpressionLift::Effectful),
+            ("pure (Proxy @3)\n", ExpressionLift::Effectful),
+            ("pure const\n", ExpressionLift::Effectful),
         ] {
             let evidence = "compile-view-a";
             let checked = check_cell(CellCheckRequest {
@@ -7801,7 +7134,7 @@ mod tests {
                 .iter()
                 .find(|plan| plan.key == format!("__tidepool_cell_expr_{index}"))
                 .expect("checked expression observation");
-            assert_eq!((plan.lift, plan.presentation), (lift, presentation));
+            assert_eq!(plan.lift, lift);
             assert!(
                 !plan.type_display.contains("ZonkAny"),
                 "{}",
@@ -7871,7 +7204,6 @@ mod tests {
         // local stand-in is still the exact constructor selected by its own
         // cell template.
         assert_eq!(plan.lift, ExpressionLift::Effectful);
-        assert_eq!(plan.presentation, ExpressionPresentation::Rendered);
     }
 
     /// A genuinely pure final expression (no `Applicative`/`Monad` ambiguity
@@ -7916,7 +7248,6 @@ mod tests {
             .last()
             .expect("checked expression observation");
         assert_eq!(plan.lift, ExpressionLift::Pure);
-        assert_eq!(plan.presentation, ExpressionPresentation::Rendered);
         assert_eq!(final_item.verdict.kind, TurnKind::Expr);
         assert_eq!(final_item.source, "1 + 1 :: Int\n");
 
@@ -7968,55 +7299,6 @@ mod tests {
             ExpressionLift::Pure,
         );
         assert!(!pure.contains(&format!("Eff {row} _")));
-    }
-
-    #[test]
-    fn display_expression_keeps_value_and_uses_qualified_private_rendering() {
-        let row = "ActorEffects";
-        let source = assemble_display_expression_module(
-            "module Expr where\n",
-            "__result",
-            row,
-            "effectfulValue",
-            ExpressionLift::Effectful,
-        );
-
-        assert!(source.contains("__value <- __workbenchValue"));
-        assert!(source.contains("pure (__value, T.pack (show __value))"));
-        assert!(!source.contains("pure (__value, pack (show __value))"));
-        assert_eq!(source.matches("effectfulValue").count(), 1);
-        let (start, end) = turn_user_code_line_range(&source, "effectfulValue")
-            .expect("the generated module should locate the submitted expression");
-        assert_eq!(start, end);
-        assert_eq!(source.lines().nth(start - 1), Some("effectfulValue"));
-
-        let pure = assemble_display_expression_module(
-            "module Expr where\n",
-            "__result",
-            row,
-            "pureValue",
-            ExpressionLift::Pure,
-        );
-        let opaque = assemble_opaque_expression_module(
-            "module Expr where\n",
-            "__result",
-            row,
-            "opaqueValue",
-            ExpressionLift::Effectful,
-        );
-        let pure_opaque = assemble_opaque_expression_module(
-            "module Expr where\n",
-            "__result",
-            row,
-            "pureOpaqueValue",
-            ExpressionLift::Pure,
-        );
-        assert!(pure.contains("T.pack (show __workbenchValue)"));
-        assert!(opaque.contains("T.pack \"<opaque value>\""));
-        assert!(pure_opaque.contains("T.pack \"<opaque value>\""));
-        assert!(!pure.contains(" pack "));
-        assert!(!opaque.contains(" pack "));
-        assert!(!pure_opaque.contains(" pack "));
     }
 
     #[test]
@@ -8357,18 +7639,18 @@ mod tests {
     }
 
     #[test]
-    fn run_turn_retries_opaque_template_after_render_source_rejection() {
+    fn run_turn_retries_expression_template_after_source_rejection() {
         tidepool_testing::eval_harness::require_extract();
         let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
         let session_root = TempDir::new().unwrap();
         let templates = [
             TurnTemplate {
                 kind: TemplateSelector::Expr,
-                source: assemble_display_expression_module(
+                source: assemble_expression_module(
                     effects.preamble(),
                     "__result",
                     effects.row(),
-                    "{{TURN}}",
+                    "({{TURN}} :: Bool)",
                     ExpressionLift::Pure,
                 ),
             },

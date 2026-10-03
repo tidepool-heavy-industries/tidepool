@@ -25,6 +25,7 @@ workers <- unfold (batch "corpus" "fanout") $
   (,) <$> child @(Outcome Candidate) (fromScaffold (coding currentCheckout (assignment [label|domain|] domainPlan)))
       <*> child @(Outcome Candidate) (fromScaffold (withEffort Medium (coding currentCheckout (assignment [label|consumer-tests|] consumerPlan))))
 joined <- waitFor ((,) <$> awaitSettled (fst workers) <*> awaitSettled (snd workers))
+display joined
 ```
 
 `waitFor` suspends this continuation and returns `Either WatchFailure result`.
@@ -66,7 +67,7 @@ through an inherited handle while its checkout remains available:
 let launch = launchedWorktree <$> responseAdmission worker
 let seedOid = maybe "" (renderGitOid . sourceHead) launch
 let onBranch = maybe "" (\receipt -> case branch receipt of BranchName b -> b) launch
-(seedOid, onBranch)
+display (seedOid, onBranch)
 ```
 
 After settlement the typed result carries the submitted commit and a typed
@@ -75,9 +76,9 @@ observation of it. Read those instead of the filesystem:
 ```haskell
 state <- pollResponse worker
 let evidence = case state of { ResponseReady result -> Just (responseWorktree result); _ -> Nothing }
-case evidence of
+display (case evidence of
   Just (WorktreeObserved _ submitted observation) -> (renderGitOid submitted, committedPaths observation)
-  _ -> ("no submission observed yet" :: Text, [])
+  _ -> ("no submission observed yet" :: Text, []))
 ```
 
 `committedPaths` answers "what did it change" without opening a single file.
@@ -88,7 +89,7 @@ reads the content — `git show <oid> -- <path>` for one file's change,
 ```haskell
 let oid = "abc123" :: Text
 statOut <- Cmd.stdout <$> Cmd.run (Cmd.withArguments [oid] [bash|git show --stat --oneline "$1"|])
-either (const "submission not visible from here") (T.take 2000) statOut
+display (either (const "submission not visible from here") (T.take 2000) statOut)
 ```
 
 A commit the parent cannot resolve means the child has not checkpointed it yet,

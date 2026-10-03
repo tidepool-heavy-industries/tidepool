@@ -150,7 +150,6 @@ fn execute_cell(
     label: &str,
     source: &str,
     declarations: usize,
-    expected_display: Option<&str>,
     publication_target: &ScalePublication,
 ) -> Duration {
     execute_cell_with_authority_checks(
@@ -162,7 +161,6 @@ fn execute_cell(
         label,
         source,
         declarations,
-        expected_display,
         publication_target,
         AuthorityChecks::Configured,
     )
@@ -183,7 +181,6 @@ fn execute_cell_with_authority_checks(
     label: &str,
     source: &str,
     declarations: usize,
-    expected_display: Option<&str>,
     publication_target: &ScalePublication,
     authority_checks: AuthorityChecks,
 ) -> Duration {
@@ -196,7 +193,6 @@ fn execute_cell_with_authority_checks(
         label,
         source,
         declarations,
-        expected_display,
         publication_target,
         authority_checks,
     )
@@ -212,7 +208,6 @@ fn try_execute_cell_with_authority_checks(
     label: &str,
     source: &str,
     declarations: usize,
-    expected_display: Option<&str>,
     publication_target: &ScalePublication,
     authority_checks: AuthorityChecks,
 ) -> Result<Duration, ResidentError> {
@@ -225,7 +220,6 @@ fn try_execute_cell_with_authority_checks(
         label,
         source,
         declarations,
-        expected_display,
         publication_target,
         authority_checks,
         &SourceImports::new(),
@@ -241,7 +235,6 @@ fn try_execute_cell_with_template_imports(
     label: &str,
     source: &str,
     declarations: usize,
-    expected_display: Option<&str>,
     publication_target: &ScalePublication,
     authority_checks: AuthorityChecks,
     template_imports: &SourceImports,
@@ -387,7 +380,6 @@ fn try_execute_cell_with_template_imports(
             ..Default::default()
         })
         .unwrap();
-    let mut rendered_count = 0;
     for index in 0..checked.items.len() {
         let item = checked.checked_item(index).unwrap();
         let reservation = resident
@@ -480,70 +472,15 @@ fn try_execute_cell_with_template_imports(
                     submissions_before_effects
                 );
                 observed?;
-                let display = resident
-                    .admit_checked_display(
-                        prefix.clone(),
-                        compiled
-                            .certification
-                            .as_ref()
-                            .unwrap()
-                            .checked_execution()
-                            .unwrap()
-                            .clone(),
-                        &bound[0],
-                        256,
-                        Vec::new(),
-                    )
-                    .unwrap();
-                let TurnResult::Bind {
-                    bound, compiled, ..
-                } = measured(
-                    resident,
-                    images,
-                    scenario,
-                    &format!("{label}.display_materialize"),
-                    Some(index),
-                    |_| consume_cell_program_display(display.clone()).unwrap(),
-                )
-                else {
-                    panic!("checked display did not return its binding recipe")
-                };
-                let [page, metadata, alias] = bound.as_slice() else {
-                    panic!("display requires three rows")
-                };
-                let rendered = measured(
-                    resident,
-                    images,
-                    scenario,
-                    &format!("{label}.native_display"),
-                    Some(index),
-                    |resident| {
-                        resident
-                            .run_checked_display_bundle_with_sites(
-                                compiled.code(),
-                                page,
-                                metadata,
-                                alias,
-                                display.generation(),
-                                display,
-                            )
-                            .unwrap()
-                    },
-                );
-                assert_eq!(
-                    rendered.result().to_json(),
-                    serde_json::json!([expected_display.unwrap(), false, false])
-                );
-                rendered_count += 1;
             }
         }
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
         assert_eq!(
-            tidepool_extract_cmd::extract_spawn_count(), submissions_before_effects,
-            "native execution and display must consume the immutable cell without compiler requests"
+            tidepool_extract_cmd::extract_spawn_count(),
+            submissions_before_effects,
+            "native execution must consume the immutable cell without compiler requests"
         );
     }
-    assert_eq!(rendered_count, usize::from(expected_display.is_some()));
     let work = checked.checked_item(0).unwrap().input_work();
     eprintln!(
         "protected-scale {}",
@@ -766,7 +703,6 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
         "foundation",
         include_str!("fixtures/protected-scale-foundation.hs"),
         1,
-        None,
         &publication,
     );
     let original = resident
@@ -805,7 +741,6 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
             "baseline",
             &source,
             0,
-            None,
             &publication,
         );
     }
@@ -840,7 +775,6 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
         "prefix",
         &source,
         0,
-        Some(&prefix.to_string()),
         &publication,
     );
     let visible = resident.binding_names_in(public);
@@ -943,7 +877,7 @@ fn protected_growing_prefix_100_baseline_100() {
 }
 
 /// Compiler/native attribution only; the packaged Engine/Store gate is separate.
-fn resident_display_cells(count: usize, durable: bool) {
+fn resident_capture_cells(count: usize, durable: bool) {
     tidepool_testing::eval_harness::require_extract();
     assert_ne!(
         std::env::var("TIDEPOOL_EXTRACT_NO_DAEMON").as_deref(),
@@ -1006,7 +940,6 @@ fn resident_display_cells(count: usize, durable: bool) {
             "foundation",
             include_str!("fixtures/protected-scale-foundation.hs"),
             1,
-            None,
             &publication,
         );
     }
@@ -1021,7 +954,6 @@ fn resident_display_cells(count: usize, durable: bool) {
         "warmup",
         "(42 :: Int)",
         0,
-        Some("42"),
         &publication,
     );
     for index in 0..count {
@@ -1042,7 +974,6 @@ fn resident_display_cells(count: usize, durable: bool) {
             &format!("resident_cell_{index}"),
             &source,
             0,
-            Some("42"),
             &publication,
         );
         assert_eq!(
@@ -1054,7 +985,7 @@ fn resident_display_cells(count: usize, durable: bool) {
             serde_json::json!({
                 "schema": 1, "composition": "private-session", "kind": "warm_cell",
                 "index": index, "elapsed_ns": elapsed.as_nanos(),
-                "completed": true, "displayed": true, "workload": "integer-addition",
+                "completed": true, "captured": true, "workload": "integer-addition",
                 "source_blake3": blake3::hash(source.as_bytes()).to_hex().to_string(),
                 "endpoint": identity.to_hex(), "producer": identity.producer_hex(),
             })
@@ -1065,28 +996,27 @@ fn resident_display_cells(count: usize, durable: bool) {
 }
 
 #[test]
-#[ignore = "requires an admitted real resident compiler and 50 compiled display cells"]
-fn resident_warm_display_cells_50() {
-    resident_display_cells(50, false);
+#[ignore = "requires an admitted real resident compiler and 50 compiled capture cells"]
+fn resident_warm_capture_cells_50() {
+    resident_capture_cells(50, false);
 }
 
 #[test]
 #[ignore = "requires an admitted real resident compiler for a bounded baseline"]
-fn resident_display_cells_2_baseline() {
-    resident_display_cells(2, false);
+fn resident_capture_cells_2_baseline() {
+    resident_capture_cells(2, false);
 }
 
 #[test]
 #[ignore = "requires an admitted real resident compiler and retains its durable workspace"]
-fn resident_durable_display_cells_2_baseline() {
-    resident_display_cells(2, true);
+fn resident_durable_capture_cells_2_baseline() {
+    resident_capture_cells(2, true);
 }
 
 fn simple_cell_vertical(
     label: &str,
     source: &str,
     declarations: usize,
-    expected: &str,
     authority_checks: AuthorityChecks,
 ) -> Vec<String> {
     tidepool_testing::eval_harness::require_extract();
@@ -1114,7 +1044,6 @@ fn simple_cell_vertical(
         label,
         source,
         declarations,
-        Some(expected),
         &ScalePublication::Ephemeral,
         authority_checks,
     );
@@ -1122,12 +1051,11 @@ fn simple_cell_vertical(
 }
 
 #[test]
-fn complete_cell_consumes_item_and_display_without_compiler_requests() {
+fn complete_cell_consumes_native_items_without_compiler_requests() {
     simple_cell_vertical(
         "complete_cell",
         include_str!("fixtures/compiled-cell-simple.hs"),
         0,
-        "42",
         AuthorityChecks::RefusalBranches,
     );
 }
@@ -1159,7 +1087,6 @@ fn following_declaration_retains_original_native_binding_inventory() {
         "original_binding",
         "x <- pure (1 :: Int)",
         0,
-        None,
         &ScalePublication::Ephemeral,
     );
     let original = resident.current_binding_in(public, "x").unwrap();
@@ -1176,7 +1103,6 @@ fn following_declaration_retains_original_native_binding_inventory() {
         "following_declaration",
         include_str!("fixtures/compiled-cell-native-binding-declaration.hs"),
         1,
-        Some("1"),
         &ScalePublication::Ephemeral,
     );
     assert_eq!(resident.current_binding_in(public, "x").unwrap(), original);
@@ -1194,7 +1120,6 @@ fn following_declaration_retains_original_native_binding_inventory() {
         "following_support_declaration",
         include_str!("fixtures/compiled-cell-native-binding-support.hs"),
         2,
-        Some("1"),
         &ScalePublication::Ephemeral,
     );
     assert_eq!(resident.current_binding_in(public, "x").unwrap(), original);
@@ -1220,7 +1145,6 @@ fn following_declaration_retains_original_native_binding_inventory() {
         "following_support_consumer",
         "dependentThroughSupport",
         0,
-        Some("1"),
         &ScalePublication::Ephemeral,
     );
     assert_eq!(resident.current_binding_in(public, "x").unwrap(), original);
@@ -1233,7 +1157,6 @@ fn following_declaration_retains_original_native_binding_inventory() {
         "support_rebind_x",
         "let x = (2 :: Int)",
         0,
-        None,
         &ScalePublication::Ephemeral,
     );
     assert_ne!(resident.current_binding_in(public, "x").unwrap(), original);
@@ -1246,7 +1169,6 @@ fn following_declaration_retains_original_native_binding_inventory() {
         "support_original_after_rebind",
         "dependentThroughSupport",
         0,
-        Some("1"),
         &ScalePublication::Ephemeral,
     );
 }
@@ -1295,7 +1217,6 @@ fn following_declaration_publishes_current_source_selected_originals() {
         "retained_hidden_home",
         "let home = CheckedHomeValue.homeValue",
         0,
-        None,
         &ScalePublication::Ephemeral,
         AuthorityChecks::Configured,
         &SourceImports::from_specs(["qualified CheckedHomeValue"]),
@@ -1310,7 +1231,6 @@ fn following_declaration_publishes_current_source_selected_originals() {
         "retained_unrelated_home",
         "let unrelated = UnrelatedHomeValue.unrelatedValue",
         0,
-        None,
         &ScalePublication::Ephemeral,
         AuthorityChecks::Configured,
         &SourceImports::from_specs(["qualified UnrelatedHomeValue"]),
@@ -1333,7 +1253,6 @@ fn following_declaration_publishes_current_source_selected_originals() {
         "source_selected_declaration",
         include_str!("fixtures/compiled-cell-source-selected-declaration.hs"),
         2,
-        Some("41"),
         &ScalePublication::Ephemeral,
     );
     let view = resident.compile_view_in(public).unwrap();
@@ -1355,7 +1274,6 @@ fn following_declaration_publishes_current_source_selected_originals() {
         "source_selected_consumer",
         "sourceSelected home",
         0,
-        Some("41"),
         &ScalePublication::Ephemeral,
     );
     assert!(!resident
@@ -1433,7 +1351,6 @@ fn following_cells_reprove_template_imports_of_retained_rich_originals() {
         "following_without_rich_import",
         "let independent = 42",
         0,
-        None,
         &ScalePublication::Ephemeral,
         AuthorityChecks::Configured,
         &SourceImports::default(),
@@ -1455,7 +1372,6 @@ fn late_record_selector_replaces_earlier_cell_value() {
         "record_selector",
         include_str!("fixtures/compiled-cell-record-selector.hs"),
         1,
-        "2",
         AuthorityChecks::Configured,
     );
     assert!(
@@ -1471,7 +1387,6 @@ fn complete_cell_preserves_exact_local_fixity() {
         "local_fixity",
         include_str!("fixtures/compiled-cell-local-fixity.hs"),
         0,
-        "8",
         AuthorityChecks::Configured,
     );
 }
@@ -1555,7 +1470,6 @@ fn durable_mixed_originals_recover_independent_native_entry() {
             "recovered_independent",
             "independent",
             0,
-            Some("42"),
             &publication,
         );
         let missing_before = demand_missing_retained(
@@ -1575,7 +1489,6 @@ fn durable_mixed_originals_recover_independent_native_entry() {
             "rebind_x",
             "let x = (2 :: Int)",
             0,
-            None,
             &publication,
         );
         assert!(resident
@@ -1611,7 +1524,6 @@ fn durable_mixed_originals_recover_independent_native_entry() {
         "live_x",
         "x <- pure (1 :: Int)",
         0,
-        None,
         &publication,
     );
     execute_cell(
@@ -1623,7 +1535,6 @@ fn durable_mixed_originals_recover_independent_native_entry() {
         "independent_original",
         include_str!("fixtures/compiled-cell-independent-original.hs"),
         1,
-        None,
         &publication,
     );
     assert!(matches!(
@@ -1639,7 +1550,6 @@ fn durable_mixed_originals_recover_independent_native_entry() {
         "mixed_original",
         include_str!("fixtures/compiled-cell-mixed-original.hs"),
         1,
-        None,
         &publication,
     );
     assert!(matches!(
@@ -1684,7 +1594,6 @@ fn demand_missing_retained(
         label,
         "dependent",
         0,
-        Some("1"),
         publication,
         AuthorityChecks::Configured,
     )

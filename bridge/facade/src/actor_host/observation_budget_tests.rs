@@ -5,19 +5,9 @@
 //! node AND per copied payload byte (`prepared_program/observe.rs`'s
 //! `ObservationBudget::charge_bytes`), so it is really a ~100 KB ceiling.
 //!
-//! It used to reject the whole cell unit. That is the wrong layer: the
-//! binding a cell installs is the retained handle, which
-//! `run_entry_retained` produces without consulting any budget, and a bind's
-//! receipt renders binder names rather than the value. So an exhausted
-//! budget discarded a sound binding — along with every effect already
-//! committed to produce it.
-//!
-//! A bare expression — a cell with no `x <-` of its own — is displayed, so
-//! unlike a bind it really does need a host `Value`. It still must not be
-//! rejected for size: the cell is bound under its automatic `observationN`
-//! name and shown through the ordinary `cellDisplay` paging, with the view
-//! marked as a selection that names the binding holding the rest.
-//!
+//! Persistent bindings and bare observations retain the original heap handle.
+//! Neither path materializes an authored value for presentation; `display`
+//! publishes a bounded page separately through the durable output owner.
 
 use super::command_jobs_tests::backend_request;
 use super::command_test_support::TestCommands;
@@ -76,13 +66,8 @@ async fn an_effectful_result_past_the_observation_budget_still_binds() {
     // The point of the binding: Haskell can still use it. Reading its length
     // forces the whole value the budget refused to materialize.
     let policy = campaign.root_installation.policy.clone();
-    let used = dispatch_haskell_script(policy.as_ref(), "T.length transcript").await;
+    let used = dispatch_haskell_script(policy.as_ref(), "if T.length transcript == 400000 then pure () else error \"retained transcript was truncated\"").await;
     assert_eq!(used["status"], "committed", "{used}");
-    assert_eq!(
-        used["items"][0]["output"],
-        OVERSIZED_BYTES.to_string(),
-        "the retained binding must be the complete value, not a truncation: {used}"
-    );
 
     // And the committed effect was not replayed to get it back.
     assert_eq!(
@@ -96,12 +81,10 @@ async fn an_effectful_result_past_the_observation_budget_still_binds() {
 }
 
 #[tokio::test]
-async fn an_oversized_bare_expression_is_bound_and_shown_as_a_selection() {
+async fn an_oversized_bare_expression_retains_the_whole_value_without_presentation() {
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
-    // The same committed-effect shape as the bind case above: one command job
-    // whose output is past the budget. The difference is the cell that DISPLAYS
-    // it — a bare expression, with no binder the author wrote.
+    // Capture a bare expression after its producing command has committed.
     const CELL: &str = "transcript <- do\n  \
         job <- Cmd.quiet (Cmd.run (Cmd.argv [\"cat\", \"sources.txt\"]))\n  \
         pure (either (const \"\") id (Cmd.stdout job))";
@@ -118,50 +101,26 @@ async fn an_oversized_bare_expression_is_bound_and_shown_as_a_selection() {
     let shown = dispatch_haskell_script(policy.as_ref(), "transcript").await;
     assert_eq!(
         shown["status"], "committed",
-        "an oversized bare expression must be shown, not rejected: {shown}"
+        "an oversized bare expression must retain its value: {shown}"
     );
     let item = &shown["items"][0];
-    let output = item["output"].as_str().unwrap();
-    assert!(!output.contains("Display failed"), "{shown}");
-    // It is bound under the automatic name a bare expression always gets.
     let name = item["installedBindings"][0]
         .as_str()
         .unwrap_or_else(|| panic!("a bare expression must leave a binding: {shown}"))
         .to_owned();
-    // What the model sees says it is a selection and names the binding that
-    // holds the rest — a bounded view must never read as the whole value.
     assert!(
-        output.ends_with(&format!(
-            "\n[selection of {name} (); display continues: cellDisplay.more]"
-        )),
+        item["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|operation| operation.get("display").is_none()),
         "{shown}"
     );
-    assert!(
-        output.len() < OVERSIZED_BYTES,
-        "the shown part must be bounded: {} characters",
-        output.len()
-    );
-
-    // The rest of the display continues through the existing paging. This is
-    // the next cell on purpose: every displayed cell republishes `cellDisplay`.
-    let more = dispatch_haskell_script(policy.as_ref(), "cellDisplay.more").await;
-    assert_eq!(more["status"], "committed", "{more}");
-    assert!(
-        more["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .starts_with('x'),
-        "the continuation must carry the rest of the value: {more}"
-    );
-
-    // The binding is a real one, and it is the expression the marker named: a
-    // later cell uses it and gets the WHOLE value, not the shown selection.
-    let used = dispatch_haskell_script(policy.as_ref(), &format!("T.length ({name} ())")).await;
-    assert_eq!(
-        used["items"][0]["output"],
-        OVERSIZED_BYTES.to_string(),
-        "the binding behind a selection must hold the complete value: {used}"
-    );
+    campaign.assert_no_deployment("retaining a bare value must not publish output", |event| {
+        matches!(event, LocalResidentDeployment::DisplayPublished(_))
+    });
+    let used = dispatch_haskell_script(policy.as_ref(), &format!("if T.length ({name} ()) == 400000 then pure () else error \"bare value was truncated\"")).await;
+    assert_eq!(used["status"], "committed", "{used}");
 
     // None of that re-ran the command whose output is being shown.
     assert_eq!(
@@ -200,13 +159,8 @@ async fn reflect_binds_history_larger_than_the_observation_budget() {
     // the value as the context argument for the questions that follow."
     // `reflect` answers `Either ReflectError [ConversationTurn]`; a `Left`
     // counts as zero turns so it fails the assertion below rather than this one.
-    let used =
-        dispatch_haskell_script(policy.as_ref(), "either (const 0) length editorialContext").await;
+    let used = dispatch_haskell_script(policy.as_ref(), "if either (const 0) length editorialContext == 3 then pure () else error \"reflect lost requested turns\"").await;
     assert_eq!(used["status"], "committed", "{used}");
-    assert_eq!(
-        used["items"][0]["output"], "3",
-        "all three requested turns must survive the bind: {used}"
-    );
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -342,36 +296,9 @@ async fn accepted_stdin_is_acknowledged_even_when_presentation_would_exhaust_obs
     campaign.hosted.await.unwrap();
 }
 
-/// A `focus`ed bash call whose command output is large enough that the Jev
-/// request built to SCORE it -- not the command's own retained job binding --
-/// exceeds the observation budget while it sits parked for dispatch.
-///
-/// Live defect (wave 4, run 535e56ca, actor 5): a bash call with
-/// `max_output_bytes` and `focus` set printed ~30 KB, and the whole unit was
-/// reported failed with "observation budget 100000 exhausted" even though
-/// the command's own effect had already committed -- the receipt read
-/// "effects committed; observing the result failed". The site was
-/// `PreparedEngine::park_suspension` (`tidepool_runtime::session::prepared`):
-/// it observes a newly suspended request under `BudgetPolicy::Complete` to
-/// classify and dispatch it (here, the section-scoring `Jev` request the
-/// focused-bash template builds around the command's own output), and an
-/// exhausted budget there propagated as a hard failure.
-///
-/// Every other observation after a commit (`finish_prepared`'s `SettlePlan`
-/// arms, `observe_display_metadata`) already tolerated this by degrading to
-/// `BudgetPolicy::Bounded` -- a cut, sentinel-marked walk. That degradation
-/// is wrong HERE: this observation feeds a typed decode
-/// (`handlers.dispatch` reconstructs a concrete request type, e.g.
-/// `JevAskWith`, from the value field by field), and a `Bounded` cut can
-/// land on any field, swapping in the oversize sentinel in place of an
-/// `Int` or a map entry just as readily as a `Text` -- decode then rejects
-/// it with a confusing type mismatch instead of a clean, budget-attributed
-/// failure (confirmed while developing this fix: a `Bounded` retry here
-/// turned the clean budget error into `expected LitInt or I#, got
-/// Con(DataConId(...))`). The fix instead re-observes under `Complete` with
-/// no display-sized ceiling: the request already exists in full on the
-/// heap, so the real constraint on rematerializing it is memory, not the
-/// 100_000-unit display budget.
+/// A focused command retains its output even when the typed Jev section-scoring
+/// request exceeds the ordinary heap-observation budget. Request decoding must
+/// preserve every field rather than replacing one with an observation sentinel.
 #[tokio::test]
 async fn a_focused_bash_calls_jev_request_exceeding_the_budget_still_commits() {
     let backend = Arc::new(SectionScoreJev {

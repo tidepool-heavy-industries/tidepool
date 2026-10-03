@@ -1,6 +1,6 @@
 Raw Haskell only; no GHCi commands or `:{` groups. Batch known work; split at
 decisions. Inspect rejection/runtime receipts before resubmitting effects. Use
-`cellDisplay.more`, `lookup`, or `doc` for omitted display or APIs.
+`display value` for bounded structured output; use `lookup` or `doc` for missing APIs.
 
 `haskell` is asynchronous by default; `haskell_sync` uses the same effects and
 waits before the next inference. Only an explicit synchronous profile can add

@@ -8,4 +8,4 @@ h <- pure Nothing
 
 let fixed = h :: Maybe CellNominal
 
-fixed
+display fixed

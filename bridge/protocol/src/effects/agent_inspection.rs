@@ -210,6 +210,7 @@ pub fn agent_inspection() -> Effect {
                             ],
                         ),
                         variant("AgentForgetUnavailable", vec![]),
+                        variant("AgentForgetOutputPending", vec![HsType::Int]),
                     ],
                 },
                 json: JsonInstance::None,

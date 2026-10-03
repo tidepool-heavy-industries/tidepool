@@ -449,6 +449,8 @@ def source_inputs(package, target, features=(), test_target=False):
         "bridge/haskell/test-prepared-stg/fixtures/m3-vertical.cbor": "//bridge/haskell:m3_vertical_fixture",
         "bridge/haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor": "//bridge/haskell:schema6_intrinsic_fixture",
         "bridge/atomic-write/tests/fixtures/directory_fault.c": "//bridge/atomic-write:directory_fault_fixture",
+        "tidepool/runtime/src/session/fixtures/activation-input-function.hs": "//tidepool/runtime:activation_input_function_fixture",
+        "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs": "//tidepool/runtime:activation_input_receiver_fixture",
         "bridge/haskell/test-prepared-stg/fixtures/freer-resume.cbor": "//bridge/haskell:freer_resume_fixture",
         "bridge/haskell/test-prepared-stg/fixtures/freer-retention.cbor": "//bridge/haskell:freer_retention_fixture",
         "bridge/haskell/src/Tidepool/ExtractRequest.hs": "//bridge/haskell:extract_request_source",
@@ -625,7 +627,7 @@ def runtime_test_cases(binary):
         "whole_cell_check_harvests_same_cell_nominal_type",
         "checked_handler_pin_carries_qualified_type_imports",
         "whole_cell_check_reports_missing_record_fields_without_rejecting_declaration",
-        "checked_expression_plans_cover_all_execution_and_presentation_quadrants",
+        "checked_expression_plans_cover_pure_and_effectful_values",
         "a_final_pure_cell_is_accepted_as_effectful",
         "a_genuinely_pure_final_expression_still_takes_the_pure_path",
     )]
@@ -894,6 +896,14 @@ tidepool_buildscript_run(
                 package_features,
             )
         )
+    if package["name"] == "tidepool-runtime":
+        for fixture in ("function", "receiver"):
+            rules.append(f'''export_file(
+    name = "activation_input_{fixture}_fixture",
+    src = "src/session/fixtures/activation-input-{fixture}.hs",
+    visibility = ["PUBLIC"],
+)
+''')
     if package["name"] == "tidepool-atomic-write":
         rules.append('''export_file(
     name = "directory_fault_fixture",

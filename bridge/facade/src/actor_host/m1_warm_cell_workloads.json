@@ -1,362 +1,362 @@
 [
   {
     "workload": "integer-addition",
-    "source": "40 + 6 :: Int",
+    "source": "_ <- display (40 + 6 :: Int)",
     "expected": "46",
-    "source_digest": "e7cd04947845a34a0459b08acbc663d8eb1dd6403502685f2d0ed2248a06ece9"
+    "source_digest": "d42c1306c912ee0ebcd9008615635a8378aff597d177acd8a3bbbc445fd3d1d0"
   },
   {
     "workload": "integer-subtraction",
-    "source": "100 - 6 :: Int",
+    "source": "_ <- display (100 - 6 :: Int)",
     "expected": "94",
-    "source_digest": "80533d55fa1d6b50cf6fdc17ecc041a8e838ddf7232db67871af60fe468beab5"
+    "source_digest": "8341b6a4084887417627d85ae62925817f24f15a2f94f8b094b7666a6a6fa945"
   },
   {
     "workload": "integer-multiplication",
-    "source": "6 * 3 :: Int",
+    "source": "_ <- display (6 * 3 :: Int)",
     "expected": "18",
-    "source_digest": "a2eca64d0fb4d622c12ccc797175219d9b189acf79d73aaa3db631e62724b265"
+    "source_digest": "cc41b42ae68d553bde568ad8bb9cc65150f505d57befbdf7b54877378beffad3"
   },
   {
     "workload": "integer-quotient",
-    "source": "div (100 + 6) 3 :: Int",
+    "source": "_ <- display (div (100 + 6) 3 :: Int)",
     "expected": "35",
-    "source_digest": "b5c7bcbff1a72ff2766e02bc65d498593be1445cac56c9eaeeabbb58d3351f1b"
+    "source_digest": "a7550bdc6fd1e095effab691135bc5dc6fbcca1db8d8e5acd0e9d73e1d32831a"
   },
   {
     "workload": "integer-remainder",
-    "source": "mod (10 + 6) 4 :: Int",
+    "source": "_ <- display (mod (10 + 6) 4 :: Int)",
     "expected": "0",
-    "source_digest": "820ed0f426e2f1c50cd324111351818e3bfbe0552fc0b2a2ed82d9eeb99f6089"
+    "source_digest": "6adf66f9a320bf2466b5dddcd5a2a7f8e58a1b2630a1659b9615d311fa769ba1"
   },
   {
     "workload": "integer-comparison",
-    "source": "(6 :: Int) > 3",
+    "source": "_ <- display ((6 :: Int) > 3)",
     "expected": "True",
-    "source_digest": "f710e148aa37cee108881e64a1952e6521863da24ec7eecf27de04a03c201389"
+    "source_digest": "fa528e1d7905a088cb9d36aef3eea5b0ba895878e9cab0dcefe12b00a89bb2d2"
   },
   {
     "workload": "conditional-branch",
-    "source": "if (6 :: Int) > 3 then (100 :: Int) else 200",
+    "source": "_ <- display (if (6 :: Int) > 3 then (100 :: Int) else 200)",
     "expected": "100",
-    "source_digest": "435460889cc6f86e4e7efe8516328844bd2025f6d8bae8e4986d99cc2f25c5df"
+    "source_digest": "a9b01d603f963cbd1083ddd1bcfe74c13e495fc73dc3a9570d0e95507c0d085d"
   },
   {
     "workload": "tuple-projection",
-    "source": "fst (6 :: Int, True)",
+    "source": "_ <- display (fst (6 :: Int, True))",
     "expected": "6",
-    "source_digest": "2d259d91c853c80bd7bb8259b51048bc56ae25c3562dd992d16a5314ea7e5859"
+    "source_digest": "19d9c0ff94c5553267da1b34ca31a6d321ab19433e847e98cf7bf949044c5aa4"
   },
   {
     "workload": "list-sum",
-    "source": "sum [6, 2, 3] :: Int",
+    "source": "_ <- display (sum [6, 2, 3] :: Int)",
     "expected": "11",
-    "source_digest": "b20aff127b14b45c02ba9971fefc94508f034dc7972bf7c5370f920758c675a3"
+    "source_digest": "55a9bee0d8cf1cb8b2d9658f8d67d4598fc1f4354fc19c6991bc3bbc1c18111b"
   },
   {
     "workload": "list-length",
-    "source": "length (replicate 6 True) :: Int",
+    "source": "_ <- display (length (replicate 6 True) :: Int)",
     "expected": "6",
-    "source_digest": "2e78bfd35e1ad6ce8e701760ef3d6c685b39f1815a62f903181892afe9383ce0"
+    "source_digest": "89967c1da798f8e35db7ca2a83688e1e75986f689af9a5d74b2c6cead80eff1e"
   },
   {
     "workload": "integer-addition",
-    "source": "40 + 1 :: Int",
+    "source": "_ <- display (40 + 1 :: Int)",
     "expected": "41",
-    "source_digest": "d657bef4b2acfd78402b10140fbffe5f5f0737ce78799ecdb3f54ae8d8dd7daa"
+    "source_digest": "edae23cf5d3e7523338560420e71aadcd89caea93084ba15127c725b6fbb98d2"
   },
   {
     "workload": "integer-subtraction",
-    "source": "100 - 1 :: Int",
+    "source": "_ <- display (100 - 1 :: Int)",
     "expected": "99",
-    "source_digest": "f62d6595eb29d6572d957fb4e3dccf4cc7988d495c5f78248e7d6a58f52e2d55"
+    "source_digest": "253192b7ed90cb0130423adabd44411a6e4695646511ff2122e916472838cb8c"
   },
   {
     "workload": "integer-multiplication",
-    "source": "1 * 3 :: Int",
+    "source": "_ <- display (1 * 3 :: Int)",
     "expected": "3",
-    "source_digest": "de57cf5879ea3061727ed5a1e3c31a5db9831e6e747d50900655aa785732855d"
+    "source_digest": "afc514849c97d1a901ec845c9f65111badf01b4b336cbd83d9c72f9e981da7a0"
   },
   {
     "workload": "integer-quotient",
-    "source": "div (100 + 1) 3 :: Int",
+    "source": "_ <- display (div (100 + 1) 3 :: Int)",
     "expected": "33",
-    "source_digest": "f9f0906f06ce8274e4a23397e736dfd99401a301499bcbec1927513886b8ddcf"
+    "source_digest": "07e4e1df243ee407daf2133cf12793d46f4c2433fbdecaf471baa390fa944f0f"
   },
   {
     "workload": "integer-remainder",
-    "source": "mod (10 + 1) 4 :: Int",
+    "source": "_ <- display (mod (10 + 1) 4 :: Int)",
     "expected": "3",
-    "source_digest": "f39c0961334d068b4dce530a5679764fa58d2a879b1e312f8839540c31e9285a"
+    "source_digest": "5e70af703955647135a8f47be0c1e9c6809a5ef93eb04ad1ac443c4f1a61857b"
   },
   {
     "workload": "integer-comparison",
-    "source": "(1 :: Int) > 3",
+    "source": "_ <- display ((1 :: Int) > 3)",
     "expected": "False",
-    "source_digest": "c9a877b598679a12df111a3542fbf2a9d36940b2d6c406ad3836bb13a7bf0ed0"
+    "source_digest": "b7471fb062ed920476b56c9852b315a5e66c59caa60926477dee7a99d62a7859"
   },
   {
     "workload": "conditional-branch",
-    "source": "if (1 :: Int) > 3 then (100 :: Int) else 200",
+    "source": "_ <- display (if (1 :: Int) > 3 then (100 :: Int) else 200)",
     "expected": "200",
-    "source_digest": "bccf202cdc0fb8ee8fa792a44a7f5f68aeb7433fb2c31faf26fc205a2b43cd68"
+    "source_digest": "20771443d6e88bf44e84e7ddabda99a7fcc780e07302fa64333530010fdafa27"
   },
   {
     "workload": "tuple-projection",
-    "source": "fst (1 :: Int, True)",
+    "source": "_ <- display (fst (1 :: Int, True))",
     "expected": "1",
-    "source_digest": "4ab300e1108c0444e2fe2ca141e2d74353ab09ed1fa0f0c1c017e02095bcd643"
+    "source_digest": "220790e5c7f865931e9fdb4ebacc9f8e04a098b3aaaf20ecabed0c74baf88449"
   },
   {
     "workload": "list-sum",
-    "source": "sum [1, 2, 3] :: Int",
+    "source": "_ <- display (sum [1, 2, 3] :: Int)",
     "expected": "6",
-    "source_digest": "3752b8a64d29ea4163765444df1ae19396fd9cd57fe8fadf5dc0430dffea4261"
+    "source_digest": "8cdac521132f0c8a506012c3f8b0f791999fc87bd2bdf686f3c3641c21eb5bb1"
   },
   {
     "workload": "list-length",
-    "source": "length (replicate 1 True) :: Int",
+    "source": "_ <- display (length (replicate 1 True) :: Int)",
     "expected": "1",
-    "source_digest": "3da322abae88bed9923cae5c4be64f8eedf51a99f0ea93de1cecd91edcd51a70"
+    "source_digest": "3a8ef29782ef56441fd967585184c8421a76f306d43d68775b1f8f7d42c20471"
   },
   {
     "workload": "integer-addition",
-    "source": "40 + 2 :: Int",
+    "source": "_ <- display (40 + 2 :: Int)",
     "expected": "42",
-    "source_digest": "21b855fb143fef3c43097d19c06af0e483aa43886b9d0af586892a91e55c3706"
+    "source_digest": "2908d391070b00e9271dcca6c2c2fa2201b441c20135d6ba5d39e7a610169a40"
   },
   {
     "workload": "integer-subtraction",
-    "source": "100 - 2 :: Int",
+    "source": "_ <- display (100 - 2 :: Int)",
     "expected": "98",
-    "source_digest": "fc8d5ae0e56a6ec3313f9c78328ba860e88019ab1e0a480645f3b7d7ba6de07b"
+    "source_digest": "6e42bd5ff37bc6d35e674a8c172bb5666686a59c99d29bd1ba525ed4c9d9387e"
   },
   {
     "workload": "integer-multiplication",
-    "source": "2 * 3 :: Int",
+    "source": "_ <- display (2 * 3 :: Int)",
     "expected": "6",
-    "source_digest": "45c290aa4d683d96732dcf8374fec25cb167f5c63ee5c6af6a27fe38aa6ea078"
+    "source_digest": "a9ac5327c7cdd0a67f9c8d366d9914a2a1f57dbb1f9d16b46522f3967527837e"
   },
   {
     "workload": "integer-quotient",
-    "source": "div (100 + 2) 3 :: Int",
+    "source": "_ <- display (div (100 + 2) 3 :: Int)",
     "expected": "34",
-    "source_digest": "8c3fd08b8f007fee47ce981d7e85e3eadce40a549b5bafa50e90d4344b0a10d5"
+    "source_digest": "410ac986d5ba5d5e153295e72da2978a2d0496e6bd12a992f6056cdeb1de019a"
   },
   {
     "workload": "integer-remainder",
-    "source": "mod (10 + 2) 4 :: Int",
+    "source": "_ <- display (mod (10 + 2) 4 :: Int)",
     "expected": "0",
-    "source_digest": "05c85b4445b6aa4e453d0a4a0fb7ca34b23202995739106be0a6d05712323ca7"
+    "source_digest": "dbb1504e61900aadddafe65642591990aa1f9b0ca863647ce9f9e062305664ad"
   },
   {
     "workload": "integer-comparison",
-    "source": "(2 :: Int) > 3",
+    "source": "_ <- display ((2 :: Int) > 3)",
     "expected": "False",
-    "source_digest": "f1f334bbeceabc5db496e1481976da3249c8e16b4a0985527f5c43a6a169a883"
+    "source_digest": "d11ad6b39e5be8ebc85f1e339c353038872db49d7a630ae483e36b3faf7d8cd7"
   },
   {
     "workload": "conditional-branch",
-    "source": "if (2 :: Int) > 3 then (100 :: Int) else 200",
+    "source": "_ <- display (if (2 :: Int) > 3 then (100 :: Int) else 200)",
     "expected": "200",
-    "source_digest": "c36dafcaf01adfc142eb7ad3d4a3402a231928cdc1a14c5991743a469333920d"
+    "source_digest": "c3d68f1ab0a5fdd8a3d922343c83635c108d778ef11d9191c4c8dd7b735ebdbd"
   },
   {
     "workload": "tuple-projection",
-    "source": "fst (2 :: Int, True)",
+    "source": "_ <- display (fst (2 :: Int, True))",
     "expected": "2",
-    "source_digest": "31ad6e55615a5246a438d435d697981c87a0adfc7ab926bf888beedd117e2e07"
+    "source_digest": "4746cbaf3b1004de5bbaaaf0906c7150300f659c27c8aa342ede42bfa3880a6d"
   },
   {
     "workload": "list-sum",
-    "source": "sum [2, 2, 3] :: Int",
+    "source": "_ <- display (sum [2, 2, 3] :: Int)",
     "expected": "7",
-    "source_digest": "945640ec8c647fbd30c1427e7d832dcf236ef3e42da1ae0a6f95f0cf333ef61f"
+    "source_digest": "2fe3b82bb6db21b57817500d0c6515087f4a7c8b326e94707e9ca2c4c92b1dbd"
   },
   {
     "workload": "list-length",
-    "source": "length (replicate 2 True) :: Int",
+    "source": "_ <- display (length (replicate 2 True) :: Int)",
     "expected": "2",
-    "source_digest": "b44dada592b9b4818503186184056551b3147625542468148366a2aada0dc266"
+    "source_digest": "d01285e5d8f39ce8f6b0c8b7d0280a74e86169061058cc1afc6055964c4778c6"
   },
   {
     "workload": "integer-addition",
-    "source": "40 + 3 :: Int",
+    "source": "_ <- display (40 + 3 :: Int)",
     "expected": "43",
-    "source_digest": "f495bfe12c8aae0dedaf9441e49758e424b3681e3393aa0619f52645b1be3960"
+    "source_digest": "f1c5c4445361c2a60249716ced5dace369900ab1919ae24d80b643c1758c8aea"
   },
   {
     "workload": "integer-subtraction",
-    "source": "100 - 3 :: Int",
+    "source": "_ <- display (100 - 3 :: Int)",
     "expected": "97",
-    "source_digest": "099b967231823dd8ac981587b5f05c4b25b82bd3f89582cf7d5c2ba0a4010048"
+    "source_digest": "ae09d057d6603a1993599717f7bd97e151030210ee916e3b237f2fc21f7bb3ee"
   },
   {
     "workload": "integer-multiplication",
-    "source": "3 * 3 :: Int",
+    "source": "_ <- display (3 * 3 :: Int)",
     "expected": "9",
-    "source_digest": "a2a8a20d19e50578d529b23830cb1f6ad9206f9b10f61445d2b23aa2aa288eac"
+    "source_digest": "906fa79e8851cd9be0d7f669f86aa3dcd9eaa2bdfac2d7bf1514ee0b648363a7"
   },
   {
     "workload": "integer-quotient",
-    "source": "div (100 + 3) 3 :: Int",
+    "source": "_ <- display (div (100 + 3) 3 :: Int)",
     "expected": "34",
-    "source_digest": "66dea558a1cb266d1b23adcf4656dc1a705c72ed02c5c493497b10dcc4770ec9"
+    "source_digest": "928eb4e8a281a41672fb9507aa1fefcb28374fcc71f0b46a06afb3db5814c4fe"
   },
   {
     "workload": "integer-remainder",
-    "source": "mod (10 + 3) 4 :: Int",
+    "source": "_ <- display (mod (10 + 3) 4 :: Int)",
     "expected": "1",
-    "source_digest": "1ff97de51d2089d2f2846ff17efa7a4cd91dde22f4485262759da851d1a33cfc"
+    "source_digest": "85beb901b5f477e17e53984b30bb6ebfa37e2978324e29f5affd5cadfd7b7fd9"
   },
   {
     "workload": "integer-comparison",
-    "source": "(3 :: Int) > 3",
+    "source": "_ <- display ((3 :: Int) > 3)",
     "expected": "False",
-    "source_digest": "babe7d03e49a9963de8c34aba71eca64160309283b4788a997436835e88f0e24"
+    "source_digest": "43626838b606be94cc6a6a8e0488469148ade9225d8a00327696ae63ebc70451"
   },
   {
     "workload": "conditional-branch",
-    "source": "if (3 :: Int) > 3 then (100 :: Int) else 200",
+    "source": "_ <- display (if (3 :: Int) > 3 then (100 :: Int) else 200)",
     "expected": "200",
-    "source_digest": "e1ad44807aae528500b2edd9f602f22ee1e4da4ce8be187177d50515f7612fdc"
+    "source_digest": "88ed5c4eae693bf24191c3e976e3d2d229a0557e34493939c76c8c056c0020e4"
   },
   {
     "workload": "tuple-projection",
-    "source": "fst (3 :: Int, True)",
+    "source": "_ <- display (fst (3 :: Int, True))",
     "expected": "3",
-    "source_digest": "0ed50ef98846e550473f65bf4e90aac8e46b38e71ad46416dd3587b192cae3c8"
+    "source_digest": "045917b3114352b1c3f0eb2cad298bcd678d3cddd487e5ed8e6132a7cb4b2451"
   },
   {
     "workload": "list-sum",
-    "source": "sum [3, 2, 3] :: Int",
+    "source": "_ <- display (sum [3, 2, 3] :: Int)",
     "expected": "8",
-    "source_digest": "affaf628b1b455176266651579e5065c7c464376d286fca8e99f6878a6f01f19"
+    "source_digest": "d75d9c38211dce0eb39f559f1fbaefe36c1572d4eb5aa096057d2c59556d5e01"
   },
   {
     "workload": "list-length",
-    "source": "length (replicate 3 True) :: Int",
+    "source": "_ <- display (length (replicate 3 True) :: Int)",
     "expected": "3",
-    "source_digest": "84d76bef16ae8a3975f526b7480bfa1483bd2931dc344188273b01af4a544553"
+    "source_digest": "b344cccffd075ce8d4ae55e2990b1e944938a36540213ba08b796d9349dbda21"
   },
   {
     "workload": "integer-addition",
-    "source": "40 + 4 :: Int",
+    "source": "_ <- display (40 + 4 :: Int)",
     "expected": "44",
-    "source_digest": "1509c9d34f8366acaaa47176152dcf8ca91790a43207b02ad780e584344138de"
+    "source_digest": "0f134aee7e9b9602bd71d449123a1ac6ddc7b19d9d0892799354907d92c0d2f6"
   },
   {
     "workload": "integer-subtraction",
-    "source": "100 - 4 :: Int",
+    "source": "_ <- display (100 - 4 :: Int)",
     "expected": "96",
-    "source_digest": "89ed996c9eaf5a5cbd2eb976c985f2663b793406137971f94187589ec24724a1"
+    "source_digest": "505bd4d7462f6e68145df9acc18520811ac3f578b909d622106f6ed8c235d1d8"
   },
   {
     "workload": "integer-multiplication",
-    "source": "4 * 3 :: Int",
+    "source": "_ <- display (4 * 3 :: Int)",
     "expected": "12",
-    "source_digest": "0e041eddf54da2946d85aa4ab260719c900416c2600275c38156fcc4974d0797"
+    "source_digest": "2fc8b032f12f27cca8bb9058b25e1c4456104347c32d8674b5a551760181c2fb"
   },
   {
     "workload": "integer-quotient",
-    "source": "div (100 + 4) 3 :: Int",
+    "source": "_ <- display (div (100 + 4) 3 :: Int)",
     "expected": "34",
-    "source_digest": "1388844b2c56ac38b4d0c07f1647cd068510fc5f01eb1fb71ee0ffa659e2b302"
+    "source_digest": "0197eb442dcd42a0570e5b0d6373fd9f31c11aa7e37a3c36ed112e311a5ec645"
   },
   {
     "workload": "integer-remainder",
-    "source": "mod (10 + 4) 4 :: Int",
+    "source": "_ <- display (mod (10 + 4) 4 :: Int)",
     "expected": "2",
-    "source_digest": "4a2608a510d644a0863dd923e14aa4ada9c457d4c53a4b8ab405c21ec71e8394"
+    "source_digest": "642199e2626c48d4c238c3acc2f798289f4acb50a01445990f23afe1f1f86cdd"
   },
   {
     "workload": "integer-comparison",
-    "source": "(4 :: Int) > 3",
+    "source": "_ <- display ((4 :: Int) > 3)",
     "expected": "True",
-    "source_digest": "542aee01f5df7adb3d1007da799ca4f65bde00a8c7d7eedcd011041c7e4ed649"
+    "source_digest": "9e73f8b0df30b99dcd0a576adefbe4fcd88557b63f4a4cb7dadf16ce91290bef"
   },
   {
     "workload": "conditional-branch",
-    "source": "if (4 :: Int) > 3 then (100 :: Int) else 200",
+    "source": "_ <- display (if (4 :: Int) > 3 then (100 :: Int) else 200)",
     "expected": "100",
-    "source_digest": "ec66a349678cae67ff7e675d1bfd6420402a93ae0f12cda53a936e9deba1259e"
+    "source_digest": "47f890d1d435f4a38a6a59d5d56b96df0478349986c0dd0240c80e6acf46114f"
   },
   {
     "workload": "tuple-projection",
-    "source": "fst (4 :: Int, True)",
+    "source": "_ <- display (fst (4 :: Int, True))",
     "expected": "4",
-    "source_digest": "46179fb05600485da40856d77fb209b46ff8efef42fabadc238adc9b362eb0d6"
+    "source_digest": "32bae0a280d37af66b2a34b569c85225d31b48788cee746967a665b434e7e31a"
   },
   {
     "workload": "list-sum",
-    "source": "sum [4, 2, 3] :: Int",
+    "source": "_ <- display (sum [4, 2, 3] :: Int)",
     "expected": "9",
-    "source_digest": "2c8b89be049678cc0f7aeb2d995f3985acf4e50414af476417bed9c68b60fc65"
+    "source_digest": "bec54412fec2af4e944805d811494d934c600452d316f27d6c0460bdf7b1550b"
   },
   {
     "workload": "list-length",
-    "source": "length (replicate 4 True) :: Int",
+    "source": "_ <- display (length (replicate 4 True) :: Int)",
     "expected": "4",
-    "source_digest": "bb7a742e1b01f903466cf74d0175c2331438934c9b399eb9da8ec18955d8b739"
+    "source_digest": "fb05390cf9c5e62cc9d4b13fa694ebd66689ca1f27db92988f6e95ac41611c3d"
   },
   {
     "workload": "integer-addition",
-    "source": "40 + 5 :: Int",
+    "source": "_ <- display (40 + 5 :: Int)",
     "expected": "45",
-    "source_digest": "14105212657436efe6cf5bf2a4c4b9f2811b61443a9ab4f1a20aee34e1abe6d7"
+    "source_digest": "587109c29fe0df461632801046bcf915bba1d5f4a4ce13ce952d47f32197529a"
   },
   {
     "workload": "integer-subtraction",
-    "source": "100 - 5 :: Int",
+    "source": "_ <- display (100 - 5 :: Int)",
     "expected": "95",
-    "source_digest": "a6f7b6ec4ecc5fbf74311fb59325432883921b440787212604a373ba1973d377"
+    "source_digest": "e6e01bd9a0081b06af24198ff0b100eba597515e6ba139007a97559b1bfcab63"
   },
   {
     "workload": "integer-multiplication",
-    "source": "5 * 3 :: Int",
+    "source": "_ <- display (5 * 3 :: Int)",
     "expected": "15",
-    "source_digest": "6db0123a3ee6e1ee1383c2baaf8ef33fb621dff31be5a40a79c36cd650ba029e"
+    "source_digest": "0cf23bd0f323843017c689899f64d917d68c5c17c590db15a2972dc73820c1e4"
   },
   {
     "workload": "integer-quotient",
-    "source": "div (100 + 5) 3 :: Int",
+    "source": "_ <- display (div (100 + 5) 3 :: Int)",
     "expected": "35",
-    "source_digest": "7cf2e94792128cec54e290308cc5ba51ab2464aa46e0d78ffc2ab4eedbb02a3d"
+    "source_digest": "c547d4c41f8a312085ead37748c381d2d00da146b92417a2d3b9649a8fb72d89"
   },
   {
     "workload": "integer-remainder",
-    "source": "mod (10 + 5) 4 :: Int",
+    "source": "_ <- display (mod (10 + 5) 4 :: Int)",
     "expected": "3",
-    "source_digest": "d1b276138e4b025c57e0d92e3899123f7828b7a5e3d9bd1ada5fa353fd04b21d"
+    "source_digest": "afb98e27efc25efecc76a86786ec809d44569a4b44360385973ff8d742e164ab"
   },
   {
     "workload": "integer-comparison",
-    "source": "(5 :: Int) > 3",
+    "source": "_ <- display ((5 :: Int) > 3)",
     "expected": "True",
-    "source_digest": "aa99f838726c1feb20c0eacd1f1303b4e25c99bc1ed25666853cf4d97b6563c0"
+    "source_digest": "aa1d8d805906745cdbda7f9ac4e90fe7bd7573002f767fc518d007e319dc47a9"
   },
   {
     "workload": "conditional-branch",
-    "source": "if (5 :: Int) > 3 then (100 :: Int) else 200",
+    "source": "_ <- display (if (5 :: Int) > 3 then (100 :: Int) else 200)",
     "expected": "100",
-    "source_digest": "0d8967b7ec56a51e882817a825e8279c10d79cb23faa6dbf418c9aa4c1652258"
+    "source_digest": "a0158953c6e5a18d259233bc073adb1c52aab3fd4abf15732e6e8fbb878106b8"
   },
   {
     "workload": "tuple-projection",
-    "source": "fst (5 :: Int, True)",
+    "source": "_ <- display (fst (5 :: Int, True))",
     "expected": "5",
-    "source_digest": "6b434ce633c5f2331d7e611644a8486714c5082547c46769d9773682c334084e"
+    "source_digest": "ca7c13ca3b5c81af47f4171b2d83e09063fca11083fa05b562855300a399290d"
   },
   {
     "workload": "list-sum",
-    "source": "sum [5, 2, 3] :: Int",
+    "source": "_ <- display (sum [5, 2, 3] :: Int)",
     "expected": "10",
-    "source_digest": "6999b8a3e6d00cf0792d2a85a831a517169ebcf733825b8c6e943115b12272ca"
+    "source_digest": "a6c51e0b83ecccee1614891d165329fb4cf5c81d42b393ac3cec01c4442a2a64"
   },
   {
     "workload": "list-length",
-    "source": "length (replicate 5 True) :: Int",
+    "source": "_ <- display (length (replicate 5 True) :: Int)",
     "expected": "5",
-    "source_digest": "2dd5ea30978185b2124eef56f33b106a9cac0842790fb349f43b5b4ff59343e2"
+    "source_digest": "1734b142515dee1a24e89defdc6fec24a7e7b748244d6a51485cd25538947c27"
   }
 ]

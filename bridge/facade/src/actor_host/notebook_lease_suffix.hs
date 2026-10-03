@@ -7,4 +7,4 @@
 (7 :: Int)
 (8 :: Int)
 (9 :: Int)
-__SAVED__ ()
+_ <- display (__SAVED__ ())

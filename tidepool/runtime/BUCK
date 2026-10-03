@@ -105,7 +105,6 @@ rust_filegroup(
         "src/session/fixtures/activation-input-original.hs": "tidepool/runtime/src/session/fixtures/activation-input-original.hs",
         "src/session/fixtures/activation-input-receiver.hs": "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs",
         "src/session/fixtures/activation-input-replacement.hs": "tidepool/runtime/src/session/fixtures/activation-input-replacement.hs",
-        "src/session/fixtures/checked-failed-display-cell.hs": "tidepool/runtime/src/session/fixtures/checked-failed-display-cell.hs",
         "src/session/fixtures/checked-cell-template.hs": "tidepool/runtime/src/session/fixtures/checked-cell-template.hs",
         "src/session/fixtures/checked-home-relay.hs": "tidepool/runtime/src/session/fixtures/checked-home-relay.hs",
         "src/session/fixtures/checked-home-value.hs": "tidepool/runtime/src/session/fixtures/checked-home-value.hs",
@@ -274,7 +273,7 @@ tidepool_rust_test_cases(
         "session::turn::tests::whole_cell_check_harvests_same_cell_nominal_type",
         "session::turn::tests::checked_handler_pin_carries_qualified_type_imports",
         "session::turn::tests::whole_cell_check_reports_missing_record_fields_without_rejecting_declaration",
-        "session::turn::tests::checked_expression_plans_cover_all_execution_and_presentation_quadrants",
+        "session::turn::tests::checked_expression_plans_cover_pure_and_effectful_values",
         "session::turn::tests::a_final_pure_cell_is_accepted_as_effectful",
         "session::turn::tests::a_genuinely_pure_final_expression_still_takes_the_pure_path",
     ],
@@ -295,5 +294,17 @@ tidepool_rust_test_cases(
         "//bridge/haskell:facade_embedded_sources",
         "//build/package:compiler_deployment",
     ],
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "activation_input_function_fixture",
+    src = "src/session/fixtures/activation-input-function.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "activation_input_receiver_fixture",
+    src = "src/session/fixtures/activation-input-receiver.hs",
     visibility = ["PUBLIC"],
 )

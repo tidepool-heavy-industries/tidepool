@@ -30,12 +30,12 @@ module Tidepool.Binders
   , SourcePrologue(..)
   , DeclarationSource(..)
   , CellSourcePlan(..)
-  , CellDisplayTarget(..)
+  , CellStructuralDisplayTarget(..)
   , CellGenericDeclaration(..)
-  , installCellDisplayDeclarations
+  , installCellStructuralDisplayDeclarations
   , cellInferenceSegments
   , omitCellGenericDeclarations
-  , omitCellDisplayDeclarations
+  , omitCellStructuralDisplayDeclarations
   , declarationSourceWithTemplate
   , declarationSourceWithTemplateFlags
   , renderDeclarationForTemplate
@@ -305,11 +305,11 @@ data DeclarationSource = DeclarationSource
 data CellSourcePlan = CellSourcePlan
   { cellPlanPrologue :: SourcePrologue
   , cellPlanItems :: [CellAnalysisItem]
-  , cellPlanDisplayTargets :: [CellDisplayTarget]
-  , cellPlanDisplayAlias :: String
+  , cellPlanStructuralDisplayTargets :: [CellStructuralDisplayTarget]
+  , cellPlanStructuralDisplayAlias :: String
   , cellPlanDeclarationBase :: String
   , cellPlanGenericDeclarations :: [CellGenericDeclaration]
-  , cellPlanDisplayDeclarations :: String
+  , cellPlanStructuralDisplayDeclarations :: String
   } deriving (Eq, Show)
 
 data CellGenericDeclaration = CellGenericDeclaration
@@ -317,16 +317,16 @@ data CellGenericDeclaration = CellGenericDeclaration
   , genericDeclarationSource :: String
   } deriving (Eq, Show)
 
-data CellDisplayTarget = CellDisplayTarget
-  { displayTargetName :: String
-  , displayTargetApplication :: String
+data CellStructuralDisplayTarget = CellStructuralDisplayTarget
+  { structuralDisplayTargetName :: String
+  , structuralDisplayTargetApplication :: String
   } deriving (Eq, Show)
 
 -- Generated instances do not introduce authored source items or receipt ordinals.
-installCellDisplayDeclarations :: String -> CellSourcePlan -> CellSourcePlan
-installCellDisplayDeclarations generated plan = plan
+installCellStructuralDisplayDeclarations :: String -> CellSourcePlan -> CellSourcePlan
+installCellStructuralDisplayDeclarations generated plan = plan
   { cellPlanItems = map replaceDeclaration (cellPlanItems plan)
-  , cellPlanDisplayDeclarations = generated }
+  , cellPlanStructuralDisplayDeclarations = generated }
   where
     replaceDeclaration item
       | sbKind (cellAnalysisVerdict item) == KDecl = item
@@ -377,38 +377,43 @@ cellInferenceSegments plan = map makeSegment (runs (cellPlanItems plan))
           ownSource = concatMap cellAnalysisSource declarationItems
           ownGeneric = filter ((`elem` ownTypes) . genericDeclarationTarget)
             (cellPlanGenericDeclarations plan)
-          ownTargets = filter ((`elem` ownTypes) . displayTargetName)
-            (cellPlanDisplayTargets plan)
+          ownTargets = filter ((`elem` ownTypes) . structuralDisplayTargetName)
+            (cellPlanStructuralDisplayTargets plan)
           generatedSource = concatMap genericDeclarationSource ownGeneric
-          opaqueDisplays = concatMap (opaqueDisplayInstance (cellPlanDisplayAlias plan)) ownTargets
+          structuralDisplays = concatMap (structuralDisplayInstance (cellPlanStructuralDisplayAlias plan)) ownTargets
           segmentedItems = if declarations
-            then map (\item -> item { cellAnalysisSource = ownSource ++ generatedSource ++ opaqueDisplays }) items
+            then map (\item -> item { cellAnalysisSource = ownSource ++ generatedSource ++ structuralDisplays }) items
             else items
        in plan
           { cellPlanItems = segmentedItems
-          , cellPlanDisplayTargets = ownTargets
+          , cellPlanStructuralDisplayTargets = ownTargets
           , cellPlanGenericDeclarations = ownGeneric
           , cellPlanDeclarationBase = ownSource
-          , cellPlanDisplayDeclarations = opaqueDisplays
+          , cellPlanStructuralDisplayDeclarations = structuralDisplays
           }
 
 omitCellGenericDeclarations :: [String] -> CellSourcePlan -> CellSourcePlan
 omitCellGenericDeclarations targets plan =
-  installCellDisplayDeclarations (cellPlanDisplayDeclarations plan) plan
-    { cellPlanGenericDeclarations = filter ((`notElem` targets) . genericDeclarationTarget)
-        (cellPlanGenericDeclarations plan) }
+  let retained = plan
+        { cellPlanGenericDeclarations = filter ((`notElem` targets) . genericDeclarationTarget)
+            (cellPlanGenericDeclarations plan)
+        }
+  in installCellStructuralDisplayDeclarations
+       (concatMap (structuralDisplayInstance (cellPlanStructuralDisplayAlias retained)) (cellPlanStructuralDisplayTargets retained)) retained
 
-omitCellDisplayDeclarations :: [String] -> CellSourcePlan -> CellSourcePlan
-omitCellDisplayDeclarations targets plan =
-  let retained = plan { cellPlanDisplayTargets = filter ((`notElem` targets) . displayTargetName)
-                         (cellPlanDisplayTargets plan) }
-   in installCellDisplayDeclarations
-        (concatMap (opaqueDisplayInstance (cellPlanDisplayAlias retained)) (cellPlanDisplayTargets retained)) retained
+omitCellStructuralDisplayDeclarations :: [String] -> CellSourcePlan -> CellSourcePlan
+omitCellStructuralDisplayDeclarations targets plan =
+  let retained = plan { cellPlanStructuralDisplayTargets = filter ((`notElem` targets) . structuralDisplayTargetName)
+                         (cellPlanStructuralDisplayTargets plan) }
+   in installCellStructuralDisplayDeclarations
+        (concatMap (structuralDisplayInstance (cellPlanStructuralDisplayAlias retained)) (cellPlanStructuralDisplayTargets retained)) retained
 
-opaqueDisplayInstance :: String -> CellDisplayTarget -> String
-opaqueDisplayInstance qualifier target = "\ninstance {-# OVERLAPPABLE #-} " ++ qualifier ++ ".Display "
-  ++ displayTargetApplication target ++ " where\n  displayTree _ = "
-  ++ qualifier ++ ".TextLeaf (" ++ qualifier ++ "Text.pack \"<opaque>\")\n"
+structuralDisplayInstance :: String -> CellStructuralDisplayTarget -> String
+structuralDisplayInstance qualifier target =
+  let applied = structuralDisplayTargetApplication target
+  in "\ninstance {-# OVERLAPPABLE #-} " ++ qualifier ++ ".GDisplay (" ++ qualifier ++ ".Rep "
+    ++ applied ++ ") => " ++ qualifier ++ ".Display " ++ applied
+    ++ " where\n  displayTree = " ++ qualifier ++ ".genericDisplayTree\n"
 
 emptyPrologue :: SourcePrologue
 emptyPrologue = SourcePrologue [] []
@@ -596,26 +601,25 @@ analyzeCellWithGrouping ordered dflags template source = do
         displayAlias = freshAlias "TidepoolCompilerDisplay" source
         generated = automaticGenericDeclarations effective genericAlias classified
         grouped = groupDeclarations headerItems classified ""
-        targets = automaticDisplayTargets effective classified
+        targets = filter ((`elem` map genericDeclarationTarget generated) . structuralDisplayTargetName)
+          (structuralDisplayTargets effective classified)
         generatedImports =
           [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified GHC.Generics as " ++ genericAlias)
           | not (null generated) ] ++
           [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified Tidepool.Inspection as " ++ displayAlias)
-          | not (null targets) ] ++
-          [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified Data.Text as " ++ displayAlias ++ "Text")
           | not (null targets) ]
         plan = CellSourcePlan
           { cellPlanPrologue = prologue { prologueImports = prologueImports prologue ++ generatedImports }
           , cellPlanItems = grouped
-          , cellPlanDisplayTargets = targets
-          , cellPlanDisplayAlias = displayAlias
+          , cellPlanStructuralDisplayTargets = targets
+          , cellPlanStructuralDisplayAlias = displayAlias
           , cellPlanDeclarationBase = concat
               [ cellAnalysisSource item | item <- grouped, sbKind (cellAnalysisVerdict item) == KDecl ]
           , cellPlanGenericDeclarations = generated
-          , cellPlanDisplayDeclarations = ""
+          , cellPlanStructuralDisplayDeclarations = ""
           }
     pure (if ordered then plan
-      else installCellDisplayDeclarations (concatMap (opaqueDisplayInstance displayAlias) targets) plan)
+      else installCellStructuralDisplayDeclarations (concatMap (structuralDisplayInstance displayAlias) targets) plan)
   where
     freshAlias candidate authoredSource
       | candidate `isInfixOf` authoredSource = freshAlias (candidate ++ "X") authoredSource
@@ -716,35 +720,19 @@ automaticGenericDeclarations flags qualifier declarations =
     renderTarget target = CellGenericDeclaration (targetName target)
       ("deriving instance " ++ qualifier ++ ".Generic " ++ targetApplication target ++ "\n")
 
--- | A type whose cell authors its own 'Show' instance keeps that presentation:
--- the generated structural 'Display' would outrank the 'Show'-backed one and
--- never call the authored 'show', so no instance is generated for it.
-automaticDisplayTargets :: DynFlags -> [CellAnalysisItem] -> [CellDisplayTarget]
-automaticDisplayTargets flags declarations = case unP GHC.Parser.parseModule parserState of
+-- | Structural companions are deterministic. GHC resolves class identities
+-- and rejects only generated duplicates, so qualified unrelated classes never
+-- suppress a companion merely because their occurrence names match.
+structuralDisplayTargets :: DynFlags -> [CellAnalysisItem] -> [CellStructuralDisplayTarget]
+structuralDisplayTargets flags declarations = case unP GHC.Parser.parseModule parserState of
   PFailed _ -> []
   POk _ parsed ->
-    let decls = hsmodDecls (unLoc parsed)
-        authoredShow = mapMaybe authoredShowTarget decls
-     in [ CellDisplayTarget (targetName target) (targetApplication target)
-        | target <- mapMaybe genericTarget decls
-        , targetName target `notElem` authoredShow ]
+    [ CellStructuralDisplayTarget (targetName target) (targetApplication target)
+    | target <- mapMaybe genericTarget (hsmodDecls (unLoc parsed)) ]
   where
     source = concatMap cellAnalysisSource (filter ((== KDecl) . sbKind . cellAnalysisVerdict) declarations)
     parserState = initParserState (initParserOpts flags)
       (stringToStringBuffer source) (mkRealSrcLoc (mkFastString "<cell>") 1 1)
-
--- | The type constructor an authored @instance Show T@ names, qualified or not.
--- A @deriving@ clause or standalone @deriving instance@ is not authored: its
--- 'show' is the structure the generated 'Display' renders anyway.
-authoredShowTarget :: LHsDecl GhcPs -> Maybe String
-authoredShowTarget declaration = case unLoc declaration of
-  InstD _ ClsInstD { cid_inst = ClsInstDecl { cid_poly_ty = instanceType } }
-    | Just cls <- getLHsInstDeclClass_maybe instanceType
-    , occStr (unLoc cls) == "Show"
-    , HsAppTy _ _ argument <- unLoc (getLHsInstDeclHead instanceType)
-    , Just constructor <- hsTyGetAppHead_maybe argument ->
-        Just (occStr (unLoc constructor))
-  _ -> Nothing
 
 data GenericTarget = GenericTarget
   { targetName :: String

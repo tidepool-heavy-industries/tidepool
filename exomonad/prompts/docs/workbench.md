@@ -3,14 +3,15 @@ declarations, bindings, and expressions. GHC splits declarations from statements
 and checks the entire cell before any effect runs. Declarations are mutually
 recursive and visible to all statements; a declaration cannot depend on a binding
 introduced by a statement in that same cell. Later statements can use earlier
-bindings, and every expression displays its value.
+bindings. Expressions and bindings retain typed values without rendering them;
+use `display value` when you want bounded structured output.
 
 ```haskell
 data Candidate = Candidate { candidateScore :: Int }
 score candidate = candidateScore candidate
 let candidates = [Candidate 7, Candidate 3]
 let approved = filter ((>= 5) . score) candidates
-map score approved
+display (map score approved)
 ```
 
 The cell summary counts declarations, statements, and expressions. Typecheck rejection
@@ -97,17 +98,15 @@ The hosted `lookup` tool is not a Haskell function. From a cell, use
 `lookupRaw (lookupRequest ["Cmd.quiet"])`; `lookupRequest` supplies the shipped
 hosted tool's defaults. Use `LookupRequest` directly for custom lookup options.
 
-Expressions share a bounded display allowance per cell. A truncated display
-offers `cellDisplay.more`, which reads its next retained page without repeating the
-original effect. Throughout a cell, `cellDisplay` refers to the previous cell's final
-display; a cell with no display leaves it unchanged. A runtime failure retains
-the last completed display in its prefix. Bind evidence you need to keep.
-
-Ordinary `data` and `newtype` declarations get structural displays automatically.
-Fields with a `Display` instance use it; unsupported fields are opaque, and
-function fields show `<function>`. Explicit instances are preserved. GADT and
-existential declarations require an authored instance when structural display
-is needed.
+`display value` emits bounded structured output and returns an opaque
+`DisplayHandle value`. `expansions handle` lists the available field keys and
+their labels; `expand handle key` emits that field's bounded detail and returns
+an updated handle. Keys belong to one display and are opaque values. Use
+`display (show value)` when you want Haskell's textual `Show` form. Ordinary
+`data` and `newtype` declarations get structural displays automatically. Fields
+with a `Display` instance use it; unsupported fields stay opaque, and function
+fields show `<function>`. Explicit instances are preserved. GADT and existential
+declarations require an authored instance when structural display is needed.
 Declarations and bindings persist between cells. Earlier closures retain the
 definitions they captured; rebinding a name does not rewrite them.
 

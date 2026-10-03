@@ -58,7 +58,7 @@ let packet =
       #enough := J.noul "Is a 20-line preview enough to judge each file, or does judging need the whole file?"
         :& #worth_reading := J.each fst (\(n, p) -> #keep := J.noul ("Worth reading " <> n <> " in full for this review? Its first 20 lines are:\n" <> p)) previews
 answer <- J.ask (J.state (#task := ("triage files before a focused review" :: Text))) packet
-fmap (\r -> (r.enough.yes, [(n, s.keep.yes) | ((n, _), s) <- r.worth_reading])) answer
+display (fmap (\r -> (r.enough.yes, [(n, s.keep.yes) | ((n, _), s) <- r.worth_reading])) answer)
 ```
 
 `J.state` takes a field packet written exactly as a question packet is, each
@@ -71,9 +71,10 @@ given, for a shape the field packet leaves out; its fields cannot be named.
 
 Use previews when they contain the evidence the question needs; label their scope
 and retain paths for expansion. Keep complete values or recoverable references.
-Bound command results show a compact summary. Use Cmd.quiet for unbound command
-observations and small display projections to avoid flooding the conversation;
-do not discard deciding evidence merely to shorten its display.
+Bound command results retain their complete observation without rendering the
+payload automatically. Use `Cmd.quiet` for unbound command observations and
+`display` on small projections when you need to inspect them; do not discard
+deciding evidence merely to shorten its display.
 
 ## Reading the answer
 
@@ -177,11 +178,11 @@ let gate = J.choice "Which of these describes the candidate?"
         J..| J.alt #contradicts "All three are present, but the diff and the test output disagree about what was checked" "escalate: the artifacts contradict each other"
         J..| J.alt #insufficient_evidence "The state does not carry what the checklist needs to be decided: a path named in `owned_paths` appears in no line of `diff_stat`, or `test_output` names none of the checks" "ask again: name the missing field and re-ask")
 answer <- J.ask1 (J.state (#owned_paths := (["src/Retry.hs", "tests/RetrySpec.hs"] :: [Text]) :& #diff_stat := diffStat :& #test_output := testOutput :& #review_scope := ("retry bounds only" :: Text))) gate
-case answer of
+display (case answer of
   Left err -> "jev unavailable: " <> T.pack (show err)
   Right a -> case J.takenUnder J.careful a of
     Left doubt -> "hold: " <> doubt.why
-    Right (J.Settled verdict) -> a.key <> " -> " <> verdict <> "; " <> J.explain J.careful a
+    Right (J.Settled verdict) -> a.key <> " -> " <> verdict <> "; " <> J.explain J.careful a)
 ```
 
 `J.careful` is the policy for a reviewed, test-passing diff. Use `J.strict` for
@@ -215,7 +216,7 @@ answer <- J.ask1 (J.state (#test_output := ("FAIL [ 0.2s] tidepool-runtime sessi
     (J.alt #inspect_by_hand "The output names neither a single test nor a target" (pure ("reading the failure by hand" :: Text))
       J..| J.many #rerun (\(k, _, _) -> k) (\(_, w, _) -> w) runners))
 next <- either (const (pure "jev unavailable; inspecting by hand")) (\a -> J.handle a (#inspect_by_hand id J..| #rerun (\_ (_, _, action) -> action))) answer
-next
+display next
 ```
 
 Handlers are found by their label, not by position, so they may be written in
@@ -235,7 +236,7 @@ let packet =
         :& #per := J.each fst (\(k, d) -> #relevant := J.noul ("Is " <> k <> " (" <> d <> ") on the path the timeout takes?")) candidates
         :& #fixed := J.noul "Given that the retry loop changed yesterday, is the timeout already fixed?"
 answer <- J.ask (J.state (#failure := ("fetch times out after 3 retries" :: Text))) packet
-fmap (\r -> (either (.why) (\(J.Settled (k, _)) -> k) (J.takenUnder J.lenient r.best), [(k, s.relevant.yes) | ((k, _), s) <- r.per], r.fixed.yes)) answer
+display (fmap (\r -> (either (.why) (\(J.Settled (k, _)) -> k) (J.takenUnder J.lenient r.best), [(k, s.relevant.yes) | ((k, _), s) <- r.per], r.fixed.yes)) answer)
 ```
 
 When several items may each qualify, ask one `noul` per item with `J.each`, not
