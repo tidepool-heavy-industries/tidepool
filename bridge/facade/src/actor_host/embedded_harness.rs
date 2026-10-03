@@ -1090,6 +1090,7 @@ mod round_control_tests {
                 reply: Err(exomonad_actor::KernelInvocationFailure::Failed {
                     actor: ActorRef::first(exomonad_actor::ActorId(1)),
                     detail: "native abort with retained prefix".into(),
+                    receipts: Vec::new(),
                 }),
             }),
         );

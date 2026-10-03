@@ -46,7 +46,7 @@ pub enum Outcome {
     Completed,
     Rejected,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Receipt {
     pub display: String,
     pub structured: Option<serde_json::Value>,
@@ -55,4 +55,7 @@ pub struct Receipt {
 pub struct ApiError {
     pub code: String,
     pub message: String,
+    /// Frozen effect receipts survive invocation or cleanup failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<Receipt>,
 }

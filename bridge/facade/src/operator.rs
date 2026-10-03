@@ -212,6 +212,7 @@ fn error(status: StatusCode, code: &str, message: impl Into<String>) -> Response
         Json(ApiError {
             code: code.into(),
             message: message.into(),
+            receipt: None,
         }),
     )
         .into_response()
@@ -522,17 +523,43 @@ async fn submit_invocation(
         Ok(Err(KernelInvocationFailure::Workbench(failure))) => {
             bounded_response(map_failure(failure))
         }
-        Ok(Err(e)) => error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "unavailable",
-            e.to_string(),
-        ),
+        Ok(Err(e)) => invocation_error(e),
         Err(e) => error(
             StatusCode::SERVICE_UNAVAILABLE,
             "unavailable",
             e.to_string(),
         ),
     }
+}
+
+fn invocation_error(failure: KernelInvocationFailure) -> Response {
+    let receipts = failure.receipts();
+    if receipts.is_empty() {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            failure.to_string(),
+        );
+    }
+    let response = ApiError {
+        code: "unavailable".into(),
+        message: failure.to_string(),
+        receipt: Some(Receipt {
+            display: exomonad_actor::bound_workbench_display(&failure.to_string(), 2048),
+            structured: Some(serde_json::json!({"items": receipts})),
+        }),
+    };
+    let bytes = match serde_json::to_vec(&response) {
+        Ok(bytes) if bytes.len() <= MAX_RESPONSE_BYTES => bytes,
+        Ok(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "Execution ended but its required receipt exceeds the response budget; execution is unknown to this connection"),
+        Err(error_value) => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", error_value.to_string()),
+    };
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        bytes,
+    )
+        .into_response()
 }
 
 fn map_failure(failure: exomonad_actor::KernelWorkbenchFailure) -> SubmitResponse {
@@ -709,8 +736,8 @@ mod artifact_tests {
     use exomonad_actor::{ActorId, ActorRef};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[test]
-    fn publication_rejection_keeps_completed_items_without_claiming_public_bindings() {
+    #[tokio::test]
+    async fn publication_rejection_keeps_completed_items_without_claiming_public_bindings() {
         use tidepool_runtime::session::{
             WorkbenchExecutionId, WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
             WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
@@ -754,6 +781,51 @@ mod artifact_tests {
             detail: "staged environment changed".into(),
             diagnostic: None,
         };
+        let mut cleanup_receipts = failure.receipts.clone();
+        let reference = tidepool_runtime::session::ActorOutputReference {
+            run: "run".into(),
+            sequence: 17,
+        };
+        cleanup_receipts[0].operations[0].display_publication = Some(
+            tidepool_runtime::session::WorkbenchDisplayPublication::Published {
+                publication: tidepool_runtime::session::WorkbenchDisplayPublicationIdentity {
+                    display: (3, 5, 7),
+                    page_ordinal: 11,
+                },
+                output: reference.clone(),
+            },
+        );
+        cleanup_receipts[0].operations[0].display =
+            Some(tidepool_runtime::session::WorkbenchDisplayOutput {
+                page: tidepool_runtime::session::WorkbenchDisplayPage {
+                    identity: (3, 5, 7),
+                    text: "emitted before cleanup".into(),
+                    expansions: Vec::new(),
+                    unavailable: false,
+                },
+                output: reference,
+            });
+        let cleanup = invocation_error(KernelInvocationFailure::CleanupUnconfirmed {
+            actor: failure.actor,
+            detail: "cleanup remains unconfirmed".into(),
+            receipts: cleanup_receipts,
+        });
+        assert_eq!(cleanup.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(cleanup.into_body(), MAX_RESPONSE_BYTES)
+            .await
+            .unwrap();
+        let error: ApiError = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.code, "unavailable");
+        let frozen = error.receipt.unwrap().structured.unwrap();
+        let operation = &frozen["items"][0]["operations"][0];
+        assert_eq!(operation["displayPublication"]["status"], "published");
+        assert_eq!(operation["display"]["output"]["sequence"], 17);
+        assert_eq!(operation["display"]["text"], "emitted before cleanup");
+        let legacy: ApiError =
+            serde_json::from_value(serde_json::json!({"code":"unavailable","message":"old error"}))
+                .unwrap();
+        assert!(legacy.receipt.is_none());
+
         let response = map_failure(failure);
         let receipt = response.receipt.unwrap();
         assert_eq!(

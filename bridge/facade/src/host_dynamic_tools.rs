@@ -835,6 +835,14 @@ impl CallResponse {
             HostToolFailure::Dispatch(ResidentToolError::Invocation(
                 exomonad_actor::KernelInvocationFailure::Workbench(failure),
             )) => workbench_failure_transcript(failure),
+            HostToolFailure::Dispatch(ResidentToolError::Invocation(failure))
+                if !failure.receipts().is_empty() =>
+            {
+                let mut text = exomonad_actor::bound_workbench_display(&failure.to_string(), 2048);
+                text.push('\n');
+                append_workbench_receipts(&mut text, failure.receipts());
+                text
+            }
             _ => exomonad_actor::bound_workbench_display(&error.to_string(), MODEL_OUTPUT_LIMIT),
         };
         Self {
@@ -872,9 +880,17 @@ fn workbench_failure_transcript(failure: &exomonad_actor::KernelWorkbenchFailure
             failure.actor
         ),
     };
+    append_workbench_receipts(&mut text, &failure.receipts);
+    text
+}
+
+fn append_workbench_receipts(
+    text: &mut String,
+    receipts: &[tidepool_runtime::session::WorkbenchItemReceipt],
+) {
     // Command observations reserve 4 KiB for diagnostics. Present those
     // observations before optional operation metadata, without repeating detail.
-    for receipt in &failure.receipts {
+    for receipt in receipts {
         if receipt.output.is_empty() {
             continue;
         }
@@ -889,11 +905,7 @@ fn workbench_failure_transcript(failure: &exomonad_actor::KernelWorkbenchFailure
         ));
         text.push('\n');
     }
-    for operation in failure
-        .receipts
-        .iter()
-        .flat_map(|receipt| &receipt.operations)
-    {
+    for operation in receipts.iter().flat_map(|receipt| &receipt.operations) {
         let effect = exomonad_actor::bound_workbench_display(&operation.effect, 256);
         let publication =
             operation
@@ -956,7 +968,6 @@ fn workbench_failure_transcript(failure: &exomonad_actor::KernelWorkbenchFailure
         }
         text.push_str(&line);
     }
-    text
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2433,6 +2444,19 @@ pub(crate) mod tests {
         let unknown_text = workbench_failure_transcript(&uncertain);
         assert!(unknown_text.contains("display 3:5:7 page 11 unconfirmed (acknowledgement lost)"));
         assert!(unknown_text.len() <= MODEL_OUTPUT_LIMIT);
+        let cleanup_response =
+            CallResponse::failure(&HostToolFailure::Dispatch(ResidentToolError::Invocation(
+                exomonad_actor::KernelInvocationFailure::CleanupUnconfirmed {
+                    actor: uncertain.actor,
+                    detail: "cleanup remains unconfirmed".into(),
+                    receipts: uncertain.receipts,
+                },
+            )));
+        let CallContent::InputText { text: cleanup_text } = &cleanup_response.content_items[0];
+        assert!(!cleanup_response.success);
+        assert!(cleanup_text.contains("display 3:5:7 page 11 unconfirmed (acknowledgement lost)"));
+        assert!(cleanup_text.contains(&output));
+        assert!(cleanup_text.len() <= MODEL_OUTPUT_LIMIT);
         let response =
             CallResponse::failure(&HostToolFailure::Dispatch(ResidentToolError::Invocation(
                 exomonad_actor::KernelInvocationFailure::Workbench(failure),
