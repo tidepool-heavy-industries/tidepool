@@ -117,6 +117,14 @@ pub struct YieldSite {
     pub input_type_witnesses: Vec<Option<crate::checked_cell::CanonicalInputTypeWitness>>,
     #[serde(default)]
     pub reply_declaration: Option<String>,
+    #[serde(deserialize_with = "deserialize_request_type_signatures")]
+    pub request_type_signatures: Option<crate::checked_cell::RequestTypeSignatures>,
+}
+
+fn deserialize_request_type_signatures<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<crate::checked_cell::RequestTypeSignatures>, D::Error> {
+    Option::deserialize(deserializer)
 }
 
 impl YieldSite {
@@ -162,6 +170,10 @@ impl YieldSite {
             if let Some(witness) = witness {
                 hasher.update(witness.metadata_digest());
             }
+        }
+        hasher.update([u8::from(self.request_type_signatures.is_some())]);
+        if let Some(signatures) = &self.request_type_signatures {
+            hasher.update(signatures.metadata_digest());
         }
         hasher.finalize().into()
     }
@@ -236,6 +248,7 @@ impl YieldSites {
                         site,
                         YieldSite {
                             reply_declaration: None,
+                            request_type_signatures: None,
                             site,
                             origin: "<test>".into(),
                             ordinal: site,
@@ -262,6 +275,7 @@ impl YieldSites {
                         site,
                         YieldSite {
                             reply_declaration: None,
+                            request_type_signatures: None,
                             site,
                             origin: "<test>".into(),
                             ordinal: site,
@@ -4131,6 +4145,7 @@ mod typed_site_tests {
     fn site(id: u64, ty: &str) -> YieldSite {
         YieldSite {
             reply_declaration: None,
+            request_type_signatures: None,
             site: id,
             origin: "M.program".into(),
             ordinal: 0,

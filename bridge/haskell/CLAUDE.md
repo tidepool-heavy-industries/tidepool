@@ -132,6 +132,23 @@ certified interface edge. Earlier product and Home certificate versions are
 rejected. Deploy the matched worker and frontend and regenerate artifacts
 through their owning producers.
 
+## Native request types
+
+Request-site result types use `TPREQUESTTYPESIGNATURES1` version 1, containing
+one native `request-reply` signature and an optional `request-progress`
+signature. The complete bundle is limited to four MiB and belongs to the
+original site's metadata seal. Progress signatures issue only for the known
+progress request/child verbs with their declared input and answer positions;
+canonical input witnesses remain separate.
+
+This is a strict sidecar migration: inline typed-site rows now have ten fields,
+and JSON rows must include `request_type_signatures` (null for nonrequest or
+synthetic sites). Seven-, eight- and nine-field inline rows and JSON rows missing
+the new field are rejected. Deploy matched worker/frontend binaries and
+regenerate retained compiler artifacts through their producers. Request
+authority consumers must additionally require original-site native signatures;
+decoding an observation alone does not grant that authority.
+
 ## Regenerate fixtures
 
 After changing translation or serialization, regenerate through the canonical

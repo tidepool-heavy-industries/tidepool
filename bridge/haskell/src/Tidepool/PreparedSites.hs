@@ -62,7 +62,7 @@ import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Unit.External (ExternalPackageState(eps_inst_env))
 import GHC.Tc.Utils.Monad (initIfaceLoad)
 import GHC.Types.Unique (getKey)
-import Tidepool.CheckedCell (captureCheckedTypeWitness)
+import Tidepool.CheckedCell (captureCheckedTypeWitness, captureRequestTypeSignatures)
 import Tidepool.SiteClassifier
 import Tidepool.EffectSchema
 import Tidepool.Identity (binderQualName)
@@ -251,19 +251,26 @@ elaboratePreparedSites env authority siblings bindings = do
                     inputType : _ -> (:[]) <$> siteWireType authority
                       (spec { vsWireSource = source }) inputType
                     [] -> Left "derived site input names a missing type argument"
-                Right (wire, spInputs plan ++ derived) of
+                requestTypes <- case (vsWireSource spec, vsDelivery spec) of
+                  (ResponseResultEvidence, DeliverExitCellFill) -> do
+                    progress <- requestProgressType spec (spInputs plan)
+                    Right (Just (spAnswer plan, progress))
+                  _ -> Right Nothing
+                Right (wire, spInputs plan ++ derived, requestTypes) of
                 Left detail -> do
                   modify' (\current -> current
                     { esRejections = SiteRejection topBinder
                         (vsName spec ++ " site in " ++ T.unpack originName ++ ": " ++ detail)
                         : esRejections current })
                   pure (mkApps headExpr rewrittenArguments)
-                Right (wireType, siteInputs) -> do
+                Right (wireType, siteInputs, requestTypes) -> do
                   missing <- traverse freshEvidence (spMissingEvidence plan)
                   ordinal <- nextOrdinal originName
                   witnesses <- liftIO (traverse (captureCheckedTypeWitness env) siteInputs)
+                  signatures <- liftIO (traverse (\(reply, progress) ->
+                    captureRequestTypeSignatures env reply progress) requestTypes)
                   let site = (buildYieldSite spec originName ordinal (spAnswer plan) siteInputs)
-                        { ysInputTypeWitnesses = witnesses }
+                        { ysInputTypeWitnesses = witnesses, ysRequestTypeSignatures = signatures }
                       literal = mkCoreConApps intDataCon
                         [Lit (LitNumber LitNumInt (fromIntegral (ysSite site)))]
                   current <- get
@@ -316,6 +323,25 @@ siteWireType authority spec answer = case vsWireSource spec of
     response <- maybe (Left "missing ResponseResult type authority") Right
       (responseResultTyCon authority)
     Right (mkTyConApp response [answer])
+
+-- Only the known progress verbs expose a progress type. The shared verb table
+-- must retain their exact input and answer positions before a signature issues.
+requestProgressType :: VerbSpec -> [Type] -> Either String (Maybe Type)
+requestProgressType spec inputs = do
+  (indices, answer, progress) <- case (vsModule spec, vsName spec) of
+    ("Tidepool.Actors.Internal.Agent", "request") -> Right ([1], FirstTypeArgument, False)
+    ("Tidepool.Actors.Internal.Agent", "requestWithProgress") -> Right ([2, 0], TypeArgument 1, True)
+    ("Tidepool.Actors.Internal.Agent", "requestWithProgressInto") -> Right ([2, 0], TypeArgument 1, True)
+    ("Tidepool.Actors.Unfold", "child") -> Right ([2], TypeArgument 0, False)
+    ("Tidepool.Actors.Unfold", "childWithProgress") -> Right ([3, 0], TypeArgument 1, True)
+    _ -> Left "request site lacks known reply/progress semantics"
+  if vsInputTypeArgs spec /= indices || vsAnswerSource spec /= answer
+      || vsDerivedInput spec /= Nothing || vsListAnswer spec
+    then Left "request site has another input or answer type shape"
+    else case (progress, inputs) of
+      (False, [_]) -> Right Nothing
+      (True, [_, progressType]) -> Right (Just progressType)
+      _ -> Left "request site has another live input arity"
 
 -- | Exact generated siblings present in one tidied home module. Merging these
 -- maps in dependency order gives later modules the real imported Ids without
@@ -399,7 +425,7 @@ buildYieldSite spec origin ordinal answer inputs =
       inputSites = map (siteType False) inputs
       identity = siteIdentity spec origin ordinal answerSite inputSites
   in YieldSite identity origin ordinal answerSite inputSites (replicate (length inputSites) Nothing)
-      (replyDeclaration answer)
+      (replyDeclaration answer) Nothing
 
 siteIdentity :: VerbSpec -> T.Text -> Word64 -> SiteType -> [SiteType] -> Word64
 siteIdentity spec origin ordinal answer inputs =

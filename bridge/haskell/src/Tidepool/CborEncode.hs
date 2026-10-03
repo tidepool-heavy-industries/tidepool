@@ -18,7 +18,7 @@ import Tidepool.Binders
   , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
   , LocatedPragma(..), LocatedImport(..), PragmaKind(..), DeclarationSource(..)
   , StmtBinders(..), turnKindWireName )
-import Tidepool.CheckedCell (encodeCheckedTypeWitness)
+import Tidepool.CheckedCell (encodeCheckedTypeWitness, encodeRequestTypeSignatures)
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 
 -- | 8-byte version header: magic 'TPLR' + version 4.0.
@@ -295,8 +295,8 @@ encodeAsks :: [YieldSite] -> Encoding
 encodeAsks xs = encodeListLen (fromIntegral (length xs)) <> foldMap encodeAsk xs
 
 encodeAsk :: YieldSite -> Encoding
-encodeAsk (YieldSite site origin ordinal (SiteType ty modules heads) inputs witnesses declaration) =
-  encodeListLen 9
+encodeAsk (YieldSite site origin ordinal (SiteType ty modules heads) inputs witnesses declaration signatures) =
+  encodeListLen 10
   <> encodeWord64 site
   <> encodeString origin
   <> encodeWord64 ordinal
@@ -308,6 +308,7 @@ encodeAsk (YieldSite site origin ordinal (SiteType ty modules heads) inputs witn
   <> maybe encodeNull encodeString declaration
   <> encodeListLen (fromIntegral (length witnesses))
   <> foldMap (maybe encodeNull (maybe encodeNull (encodeBytes . toStrictByteString) . encodeCheckedTypeWitness)) witnesses
+  <> maybe encodeNull (encodeBytes . toStrictByteString . encodeRequestTypeSignatures) signatures
 
 encodeSiteType :: SiteType -> Encoding
 encodeSiteType (SiteType ty modules heads) =

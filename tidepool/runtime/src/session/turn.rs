@@ -9083,6 +9083,9 @@ mod tests {
                     CborValue::Array(vec![]),
                     CborValue::Array(vec![]),
                     CborValue::Array(vec![]),
+                    CborValue::Null,
+                    CborValue::Array(vec![]),
+                    CborValue::Null,
                 ])]),
                 CborValue::Text("module M where\nresult = x <- pure 1\n".into()),
             ]),
@@ -9114,6 +9117,7 @@ mod tests {
                     asks,
                     vec![YieldSite {
                         reply_declaration: None,
+                        request_type_signatures: None,
                         site: 7,
                         origin: "M.result".into(),
                         ordinal: 0,
@@ -9157,7 +9161,7 @@ mod tests {
     }
 
     #[test]
-    fn yield_site_preserves_captured_reply_declaration_and_reads_legacy_sites() {
+    fn yield_site_preserves_captured_reply_declaration_and_refuses_legacy_sites() {
         let mut fields = vec![
             CborValue::Integer(7.into()),
             CborValue::Text("M.request".into()),
@@ -9167,14 +9171,12 @@ mod tests {
             CborValue::Array(vec![]),
             CborValue::Array(vec![]),
         ];
-        assert_eq!(
-            decode_asks(&CborValue::Array(vec![CborValue::Array(fields.clone())]))
-                .unwrap()
-                .remove(0)
-                .reply_declaration,
-            None
-        );
+        assert!(decode_asks(&CborValue::Array(vec![CborValue::Array(fields.clone())])).is_err());
         fields.push(CborValue::Text("data Report = Report Int".into()));
+        assert!(decode_asks(&CborValue::Array(vec![CborValue::Array(fields.clone())])).is_err());
+        fields.push(CborValue::Array(vec![]));
+        assert!(decode_asks(&CborValue::Array(vec![CborValue::Array(fields.clone())])).is_err());
+        fields.push(CborValue::Null);
         assert_eq!(
             decode_asks(&CborValue::Array(vec![CborValue::Array(fields.clone())]))
                 .unwrap()
@@ -9183,7 +9185,7 @@ mod tests {
                 .as_deref(),
             Some("data Report = Report Int")
         );
-        *fields.last_mut().unwrap() = CborValue::Integer(1.into());
+        fields[7] = CborValue::Integer(1.into());
         assert!(decode_asks(&CborValue::Array(vec![CborValue::Array(fields)])).is_err());
     }
 

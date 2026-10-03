@@ -187,29 +187,33 @@ impl CanonicalInputTypeWitness {
 
 impl<'de> serde::Deserialize<'de> for CanonicalInputTypeWitness {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let encoded = <String as serde::Deserialize>::deserialize(deserializer)?;
-        if encoded.len() > 8 * 1024 * 1024 || encoded.len() % 2 != 0 {
-            return Err(serde::de::Error::custom(
-                "canonical input witness hex bound",
-            ));
-        }
-        let bytes = encoded
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                let digit = |byte: u8| match byte {
-                    b'0'..=b'9' => Some(byte - b'0'),
-                    b'a'..=b'f' => Some(byte - b'a' + 10),
-                    _ => None,
-                };
-                digit(pair[0])
-                    .zip(digit(pair[1]))
-                    .map(|(high, low)| high * 16 + low)
-                    .ok_or_else(|| serde::de::Error::custom("canonical input witness hex"))
-            })
-            .collect::<Result<Vec<_>, D::Error>>()?;
-        Self::from_bytes(&bytes).map_err(serde::de::Error::custom)
+        Self::from_bytes(&deserialize_type_evidence_bytes(deserializer)?)
+            .map_err(serde::de::Error::custom)
     }
+}
+
+fn deserialize_type_evidence_bytes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<u8>, D::Error> {
+    let encoded = <String as serde::Deserialize>::deserialize(deserializer)?;
+    if encoded.len() > 8 * 1024 * 1024 || encoded.len() % 2 != 0 {
+        return Err(serde::de::Error::custom("native type evidence hex bound"));
+    }
+    encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let digit = |byte: u8| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                _ => None,
+            };
+            digit(pair[0])
+                .zip(digit(pair[1]))
+                .map(|(high, low)| high * 16 + low)
+                .ok_or_else(|| serde::de::Error::custom("native type evidence hex"))
+        })
+        .collect::<Result<Vec<_>, D::Error>>()
 }
 
 fn validate_input_type_shape(
@@ -311,6 +315,69 @@ impl ExactCheckedSignature {
     }
     pub fn names(&self) -> &[ExactSignatureName] {
         &self.names
+    }
+}
+
+/// Native result types captured at one original request site. The complete
+/// payload belongs to the site's metadata seal; presentation never issues it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestTypeSignatures {
+    reply: ExactCheckedSignature,
+    progress: Option<ExactCheckedSignature>,
+    metadata_digest: [u8; 32],
+}
+
+impl RequestTypeSignatures {
+    pub fn reply(&self) -> &ExactCheckedSignature {
+        &self.reply
+    }
+    pub fn progress(&self) -> Option<&ExactCheckedSignature> {
+        self.progress.as_ref()
+    }
+    pub fn metadata_digest(&self) -> [u8; 32] {
+        self.metadata_digest
+    }
+    pub fn authorization_value(&self) -> Value {
+        array([
+            text("TPREQUESTTYPESIGNATURES1"),
+            text("1"),
+            encode_signature(&self.reply),
+            self.progress.as_ref().map_or(Value::Null, encode_signature),
+        ])
+    }
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, CompileError> {
+        if bytes.len() > 4 * 1024 * 1024 {
+            return Err(failure("request type signatures byte bound"));
+        }
+        let value = decode(bytes)?;
+        let fields = row(&value, 4)?;
+        if string(&fields[0])? != "TPREQUESTTYPESIGNATURES1" || string(&fields[1])? != "1" {
+            return Err(failure("request type signatures version"));
+        }
+        let reply = decode_signature(&fields[2])?;
+        let progress = match &fields[3] {
+            Value::Null => None,
+            value => Some(decode_signature(value)?),
+        };
+        if reply.key() != "request-reply"
+            || progress
+                .as_ref()
+                .is_some_and(|signature| signature.key() != "request-progress")
+        {
+            return Err(failure("request type signatures purpose"));
+        }
+        Ok(Self {
+            reply,
+            progress,
+            metadata_digest: Sha256::digest(bytes).into(),
+        })
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RequestTypeSignatures {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::from_bytes(&deserialize_type_evidence_bytes(deserializer)?)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -3047,6 +3114,101 @@ mod tests {
         ])
     }
 
+    fn request_signature_codec_fixture(progress: bool) -> ciborium::Value {
+        use super::*;
+        let signature = |key: &str| {
+            let mut value = signature_codec_fixture();
+            value.as_array_mut().unwrap()[1] = text(key);
+            value
+        };
+        array([
+            text("TPREQUESTTYPESIGNATURES1"),
+            text("1"),
+            signature("request-reply"),
+            if progress {
+                signature("request-progress")
+            } else {
+                Value::Null
+            },
+        ])
+    }
+
+    #[test]
+    fn request_type_signatures_native_codec_preserves_payload_and_progress() {
+        use super::*;
+        for progress in [false, true] {
+            let wire = request_signature_codec_fixture(progress);
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&wire, &mut bytes).unwrap();
+            let signatures = RequestTypeSignatures::from_bytes(&bytes).unwrap();
+            assert_eq!(signatures.reply().key(), "request-reply");
+            assert_eq!(
+                signatures.progress().map(ExactCheckedSignature::key),
+                progress.then_some("request-progress")
+            );
+            assert_eq!(signatures.authorization_value(), wire);
+            assert_eq!(
+                signatures.metadata_digest(),
+                <[u8; 32]>::from(Sha256::digest(&bytes))
+            );
+            let hex = bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            assert_eq!(
+                serde_json::from_value::<RequestTypeSignatures>(serde_json::Value::String(hex))
+                    .unwrap(),
+                signatures
+            );
+            let mut changed = wire;
+            changed.as_array_mut().unwrap()[2].as_array_mut().unwrap()[3] =
+                Value::Bytes(vec![3, 2, 1]);
+            let mut changed_bytes = Vec::new();
+            ciborium::into_writer(&changed, &mut changed_bytes).unwrap();
+            assert_ne!(
+                signatures.metadata_digest(),
+                RequestTypeSignatures::from_bytes(&changed_bytes)
+                    .unwrap()
+                    .metadata_digest()
+            );
+        }
+    }
+
+    #[test]
+    fn request_type_signatures_native_codec_refuses_legacy_purpose_and_envelope_substitution() {
+        use super::*;
+        let valid = request_signature_codec_fixture(true);
+        for field in [0, 1] {
+            let mut invalid = valid.clone();
+            invalid.as_array_mut().unwrap()[field] = text("legacy");
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&invalid, &mut bytes).unwrap();
+            assert!(RequestTypeSignatures::from_bytes(&bytes).is_err());
+        }
+        for field in [2, 3] {
+            let mut invalid = valid.clone();
+            invalid.as_array_mut().unwrap()[field]
+                .as_array_mut()
+                .unwrap()[1] = text("activation-input");
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&invalid, &mut bytes).unwrap();
+            assert!(RequestTypeSignatures::from_bytes(&bytes).is_err());
+        }
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&valid, &mut bytes).unwrap();
+        bytes.push(0);
+        assert!(RequestTypeSignatures::from_bytes(&bytes).is_err());
+        assert!(RequestTypeSignatures::from_bytes(&vec![0; 4 * 1024 * 1024 + 1]).is_err());
+        for invalid in ["0", "FF", "gg"] {
+            assert!(
+                serde_json::from_value::<RequestTypeSignatures>(serde_json::Value::String(
+                    invalid.into()
+                ))
+                .is_err()
+            );
+        }
+    }
+
     #[test]
     fn checked_signature_native_codec_preserves_opaque_payload_and_original_names() {
         use super::*;
@@ -3406,6 +3568,7 @@ mod tests {
             }],
             input_type_witnesses: vec![Some(forward.clone())],
             reply_declaration: None,
+            request_type_signatures: None,
         };
         let mut edited = site.clone();
         edited.input_type_witnesses[0] = Some(presentation);

@@ -2,14 +2,19 @@
 
 module Tidepool.CheckedCell
   ( CheckedSignature(..), CheckedSignatureName(..)
-  , captureCheckedSignature, encodeCheckedSignature
+  , captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature
+  , RequestTypeSignatures(..), captureRequestTypeSignatures
+  , encodeRequestTypeSignatures, decodeRequestTypeSignatures, renderRequestTypeSignatures
   , CheckedTypeWitness, captureCheckedTypeWitness, sealCheckedTypeWitness
   , encodeCheckedTypeWitness, renderCheckedTypeWitness
   , NativeParsedModule(..), unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModule
   , rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
   ) where
 
-import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeString, encodeBytes, encodeInt)
+import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeString, encodeBytes, encodeInt, encodeNull)
+import Codec.CBOR.Decoding
+  ( Decoder, TokenType(TypeNull), decodeListLen, decodeString, decodeBytes
+  , decodeNull, peekTokenType, peekByteOffset )
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Monad.State.Strict (StateT, evalStateT, get, put, lift)
 import qualified Data.ByteString as BS
@@ -17,7 +22,7 @@ import qualified Data.Map.Strict as Map
 import Tidepool.ExactHydration (OriginalInterfaceArtifacts, originalInterfaceSha256)
 import Data.Maybe (catMaybes)
 import Numeric (showHex)
-import Control.Monad (forM, forM_, unless)
+import Control.Monad (forM, forM_, unless, replicateM)
 import Data.IORef
 import Data.List (elemIndex, sortOn)
 import qualified Data.Text as T
@@ -69,6 +74,90 @@ data CheckedSignatureName = CheckedSignatureName
   , signatureNamespace :: String
   , signatureOccurrence :: String
   } deriving (Eq, Ord, Show)
+
+data RequestTypeSignatures = RequestTypeSignatures
+  { requestReplySignature :: CheckedSignature
+  , requestProgressSignature :: Maybe CheckedSignature
+  } deriving (Eq, Show)
+
+captureRequestTypeSignatures :: HscEnv -> Type -> Maybe Type -> IO RequestTypeSignatures
+captureRequestTypeSignatures env reply progress = do
+  replySignature <- captureCheckedSignature env "request-reply" reply
+  progressSignature <- traverse (captureCheckedSignature env "request-progress") progress
+  let signatures = RequestTypeSignatures replySignature progressSignature
+  unless (BS.length (toStrictByteString (encodeRequestTypeSignatures signatures)) <= 4 * 1024 * 1024)
+    (fail "request type signatures exceed four MiB")
+  pure signatures
+
+encodeRequestTypeSignatures :: RequestTypeSignatures -> Encoding
+encodeRequestTypeSignatures signatures = encodeListLen 4
+  <> encodeString (T.pack "TPREQUESTTYPESIGNATURES1") <> encodeString (T.pack "1")
+  <> encodeCheckedSignature (requestReplySignature signatures)
+  <> maybe encodeNull encodeCheckedSignature (requestProgressSignature signatures)
+
+decodeRequestTypeSignatures :: Decoder s RequestTypeSignatures
+decodeRequestTypeSignatures = boundedTypeEvidence $ do
+  typeEvidenceRow 4
+  magic <- typeEvidenceText
+  version <- typeEvidenceText
+  unless (magic == "TPREQUESTTYPESIGNATURES1" && version == "1")
+    (fail "request type signatures version")
+  reply <- decodeCheckedSignature
+  token <- peekTokenType
+  progress <- if token == TypeNull
+    then decodeNull >> pure Nothing
+    else Just <$> decodeCheckedSignature
+  unless (signatureKey reply == "request-reply"
+      && maybe True ((== "request-progress") . signatureKey) progress)
+    (fail "request type signature purpose")
+  pure (RequestTypeSignatures reply progress)
+
+renderRequestTypeSignatures :: RequestTypeSignatures -> String
+renderRequestTypeSignatures = hexBytes . toStrictByteString . encodeRequestTypeSignatures
+
+decodeCheckedSignature :: Decoder s CheckedSignature
+decodeCheckedSignature = boundedTypeEvidence $ do
+  typeEvidenceRow 5
+  magic <- typeEvidenceText
+  unless (magic == "TPCHECKEDSIGNATURE2") (fail "checked signature version")
+  key <- typeEvidenceText
+  presentation <- typeEvidenceText
+  interface <- decodeBytes
+  unless (not (BS.null interface) && BS.length interface <= 4 * 1024 * 1024)
+    (fail "checked signature interface bound")
+  count <- decodeListLen
+  unless (count <= 65536) (fail "checked signature Name bound")
+  names <- replicateM count $ do
+    typeEvidenceRow 4
+    name <- CheckedSignatureName <$> typeEvidenceText <*> typeEvidenceText
+      <*> typeEvidenceText <*> typeEvidenceText
+    unless (signatureNamespace name `elem` ["type", "data", "var"])
+      (fail "checked signature Name namespace")
+    pure name
+  unless (and (zipWith (<) names (drop 1 names)))
+    (fail "checked signature Names are unsorted or duplicated")
+  pure (CheckedSignature key presentation interface names)
+
+-- Count the original wire span, including all Names and presentation, rather
+-- than trusting the native interface bound or a smaller re-encoding.
+boundedTypeEvidence :: Decoder s a -> Decoder s a
+boundedTypeEvidence decoder = do
+  before <- peekByteOffset
+  value <- decoder
+  after <- peekByteOffset
+  unless (after - before <= 4 * 1024 * 1024) (fail "native type evidence exceeds four MiB")
+  pure value
+
+typeEvidenceRow :: Int -> Decoder s ()
+typeEvidenceRow count = do
+  actual <- decodeListLen
+  unless (actual == count) (fail "invalid native type evidence row")
+
+typeEvidenceText :: Decoder s String
+typeEvidenceText = do
+  value <- T.unpack <$> decodeString
+  unless (not (null value)) (fail "empty native type evidence field")
+  pure value
 
 interfaceNames :: IfaceDecl -> [CheckedSignatureName]
 interfaceNames = sortOn id . map identity . nonDetEltsUniqSet . freeNamesIfDecl
@@ -371,6 +460,7 @@ encodeCheckedTypeWitness witness = do
       <> text (moduleNameString (moduleName owner)) <> text digest
 
 renderCheckedTypeWitness :: CheckedTypeWitness -> Maybe String
-renderCheckedTypeWitness witness = hex . toStrictByteString <$> encodeCheckedTypeWitness witness
-  where
-    hex = concatMap (\byte -> let value = showHex byte "" in if length value == 1 then '0' : value else value) . BS.unpack
+renderCheckedTypeWitness witness = hexBytes . toStrictByteString <$> encodeCheckedTypeWitness witness
+
+hexBytes :: BS.ByteString -> String
+hexBytes = concatMap (\byte -> let value = showHex byte "" in if length value == 1 then '0' : value else value) . BS.unpack

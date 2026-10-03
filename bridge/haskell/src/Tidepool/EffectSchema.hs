@@ -13,7 +13,7 @@ module Tidepool.EffectSchema
 
 import Data.Text (Text)
 import Data.Word (Word64)
-import Tidepool.CheckedCell (CheckedTypeWitness)
+import Tidepool.CheckedCell (CheckedTypeWitness, RequestTypeSignatures)
 import Tidepool.TypePolicy (NominalHead(..))
 
 -- | One GHC-rendered, monomorphic type crossing a suspension boundary.
@@ -36,6 +36,7 @@ data YieldSite = YieldSite
   , ysInputTypeWitnesses :: [Maybe CheckedTypeWitness]
   -- Presentation captured from the concrete answer TyCon; no downstream lookup.
   , ysReplyDeclaration :: Maybe Text
+  , ysRequestTypeSignatures :: Maybe RequestTypeSignatures
   }
   deriving (Eq, Show)
 
