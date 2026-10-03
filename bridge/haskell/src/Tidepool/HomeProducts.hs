@@ -4,7 +4,7 @@
 module Tidepool.HomeProducts
   ( hydrateCandidateHomeProducts, hydrateCandidateHomeProductsWithOriginals
   , CandidateCoreFailure(..), validateCandidateInterfaceRequirements
-  , hydrateCandidateExecutable, materializeCandidateCompilerView ) where
+  , materializeCandidateCompilerView ) where
 
 import Control.Exception
   ( Exception, SomeException, SomeAsyncException, displayException, fromException, throwIO, try )
@@ -15,8 +15,6 @@ import Data.Set qualified as Set
 import Data.IORef (readIORef)
 import Data.ByteString qualified as BS
 import Crypto.Hash.SHA256 qualified as SHA256
-import Data.List.NonEmpty (NonEmpty(..))
-import Data.Time.Clock (getCurrentTime)
 import Numeric (showHex)
 import System.IO (IOMode(ReadMode), withBinaryFile)
 import GHC
@@ -24,17 +22,16 @@ import GHC
   , tm_internals_, ms_mod_name, LoadHowMuch(LoadAllTargets), SuccessFlag(..)
   , topSortModuleGraph )
 import GHC.Driver.Env
-  ( HscEnv(..), hsc_HPT, hscUpdateHPT, hscSetFlags )
-import GHC.Driver.Main (hscInteractive, mkCgInteractiveGuts)
-import GHC.Linker.Types (Linkable(..), LinkablePart(BCOs))
+  ( HscEnv(..), hsc_HPT, hscUpdateHPT )
+import GHC.Driver.Backend (backendGeneratesCode)
 import GHC.Driver.Monad (reflectGhc, reifyGhc)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
-import GHC.Driver.Session (GeneralFlag(Opt_Pp, Opt_BuildDynamicToo), gopt, xopt, dynamicNow, targetProfile)
+import GHC.Driver.Session (GeneralFlag(Opt_Pp, Opt_BuildDynamicToo), backend, gopt, xopt, dynamicNow, targetProfile)
 import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Tc.Types (tcg_dependent_files)
 import GHC.Types.SourceFile (HscSource(..))
 import GHC.Unit.Home.ModInfo
-  ( HomeModInfo(..), HomeModLinkable(..), addToHpt, eltsHpt, lookupHpt )
+  ( HomeModInfo(..), addToHpt, eltsHpt, lookupHpt )
 import GHC.Unit.Module.Graph
   ( ModuleGraph, ModuleGraphNode(..), NodeKey(..), mgModSummaries', mkModuleGraph
   , mgTransDeps, mkNodeKey, nodeDependencies )
@@ -57,10 +54,9 @@ import Tidepool.Timing (emitCount, readTimingEnabled, timeDetailPhase)
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, canonicalCoreArtifact, canonicalCorePath
   , canonicalCoreSha256, canonicalHomeUnits, canonicalRequirements )
-import Tidepool.FinalizedCore (FinalizedCoreFailure, decodeFinalizedCore, attachFinalizedCore)
+import Tidepool.FinalizedCore (FinalizedCoreFailure, attachFinalizedCore)
 import System.Directory (getModificationTime)
 import System.FilePath ((</>))
-import Tidepool.FinalizedModule (FinalizedModule(..))
 
 data CandidateCoreFailure
   = CandidateInterfaceRequirementsMismatch
@@ -68,7 +64,6 @@ data CandidateCoreFailure
   | CandidateCoreTooLarge
   | CandidateCoreBytesMismatch
   | CandidateCoreDecodeFailure FinalizedCoreFailure
-  | CandidateCoreForeignObject FilePath
   | CandidateCoreHomeMissing
   | CandidateCompilerViewUnsupportedProfile
   deriving (Eq, Show)
@@ -95,32 +90,13 @@ validateCandidateInterfaceRequirements proof iface =
           [(unitString (moduleUnit required), moduleNameString (moduleName required))]
     owner _ = []
 
--- GHC executable demand consumes the authenticated finalized Core pair,
--- never runtime prepared STG. No source frontend or splice runs here.
-hydrateCandidateExecutable
-  :: HscEnv -> CanonicalInterfaceProof -> ModSummary -> IO HomeModInfo
-hydrateCandidateExecutable env proof summary = do
-  home <- maybe (throwIO CandidateCoreHomeMissing) pure
-    (lookupHpt (hsc_HPT env) (ms_mod_name summary))
-  either throwIO pure (validateCandidateInterfaceRequirements proof (hm_iface home))
-  bytes <- readCandidateCore proof
-  let current = hscSetFlags (ms_hspp_opts summary) env
-  finalized <- decodeFinalizedCore current home (ms_location summary) bytes
-    >>= either (throwIO . CandidateCoreDecodeFailure) pure
-  (foreignObject, bytecode) <- hscInteractive current
-    (mkCgInteractiveGuts (finalizedTidyGuts finalized)) (ms_location summary)
-  forM_ foreignObject (throwIO . CandidateCoreForeignObject)
-  now <- getCurrentTime
-  let executable = Linkable now (ms_mod summary) (BCOs bytecode :| [])
-  pure home {hm_linkable = HomeModLinkable (Just executable) Nothing}
-
 -- A request-local make view preserves source selection while giving GHC its
 -- own supported interface-to-bytecode handoff. Durable artifact paths are
 -- never handed to make, which may delete its input interface during cleanup.
 materializeCandidateCompilerView
-  :: FilePath -> Int -> Bool -> HscEnv -> CanonicalInterfaceProof -> ModSummary
+  :: FilePath -> Int -> HscEnv -> CanonicalInterfaceProof -> ModSummary
   -> IO ModSummary
-materializeCandidateCompilerView directory index executable env proof summary = do
+materializeCandidateCompilerView directory index env proof summary = do
   let flags = ms_hspp_opts summary
   unless (not (gopt Opt_BuildDynamicToo flags) && not (dynamicNow flags))
     (throwIO CandidateCompilerViewUnsupportedProfile)
@@ -128,7 +104,7 @@ materializeCandidateCompilerView directory index executable env proof summary = 
     (lookupHpt (hsc_HPT env) (ms_mod_name summary))
   unless (mi_module (hm_iface home) == ms_mod summary) (throwIO CandidateCoreHomeMissing)
   either throwIO pure (validateCandidateInterfaceRequirements proof (hm_iface home))
-  interface <- if executable
+  interface <- if backendGeneratesCode (backend flags)
     then do
       bytes <- readCandidateCore proof
       attachFinalizedCore env home bytes >>= either (throwIO . CandidateCoreDecodeFailure) pure

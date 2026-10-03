@@ -3213,7 +3213,7 @@ certifyModuleCandidates compilerViewDirectory expectedProducer exactScope source
                                     (canonicalizeDFlags originalFlags)
                                       {backend = backend originalFlags, ghcLink = ghcLink originalFlags}}
                               view <- liftIO $ materializeCandidateCompilerView compilerViewDirectory
-                                index executable currentEnvironment (proofs Map.! name) canonicalSummary'
+                                index currentEnvironment (proofs Map.! name) canonicalSummary'
                               when executable $ liftIO $
                                 emitCount timing "candidate_finalized_core_make_view" 1
                               pure (name,view)

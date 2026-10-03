@@ -30,7 +30,7 @@ import GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..))
 import GHC.Driver.Hooks (runPhaseHook)
 import GHC.ByteCode.Types (CompiledByteCode(..))
 import GHC.Data.FlatBag (elemsFlatBag)
-import GHC.Linker.Types (linkableBCOs, linkableModule, linkableParts, linkablePartAllBCOs)
+import GHC.Linker.Types (linkableModule, linkableParts, linkablePartAllBCOs)
 import GHC.Driver.Session (targetProfile, updOptLevel)
 import GHC.Fingerprint.Type (Fingerprint(..))
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
@@ -67,7 +67,7 @@ import Tidepool.ExactScope (CanonicalInterfaceProof, validateCandidateCanonicalI
 import Tidepool.ModuleCandidates (readModuleCandidates)
 import Tidepool.PackageWitness (emptyPackageImports, encodePackageImports)
 import Tidepool.HomeProducts
-  ( CandidateCoreFailure(..), hydrateCandidateExecutable, materializeCandidateCompilerView
+  ( CandidateCoreFailure(..), materializeCandidateCompilerView
   , validateCandidateInterfaceRequirements )
 import Tidepool.PreparedStg (PreparedModule(..), prepareModule, unelaboratedModule)
 
@@ -147,15 +147,6 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       Just home -> pure home
       Nothing -> fail "cold exact HPT has no original owner"
     liftIO $ do
-      let executableSummary = summary {ms_hspp_opts =
-            (ms_hspp_opts summary) {backend = interpreterBackend}}
-      executable <- hydrateCandidateExecutable env proof executableSummary
-      assert (case homeMod_bytecode (hm_linkable executable) of
-          Just linkable -> linkableModule linkable == ms_mod summary
-            && any (not . null . elemsFlatBag . bc_bcos) (linkableBCOs linkable)
-          Nothing -> False) "cold finalized Core did not supply real GHC bytecode"
-      assert (case homeMod_object (hm_linkable executable) of Nothing -> True; _ -> False)
-        "cold finalized Core unexpectedly supplied native object code"
       let missing = mkModuleName "MissingCanonicalDependency"
           homeUsage = UsageHomeModuleInterface missing (toUnitId (moduleUnit (ms_mod summary))) (Fingerprint 0 0)
           packageUsage = UsagePackageModule (mkModule (moduleUnit (ms_mod summary)) missing) (Fingerprint 0 0) False
@@ -164,13 +155,6 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
           (set_mi_usages (usage : mi_usages (hm_iface home)) (hm_iface home))
             == Left CandidateInterfaceRequirementsMismatch)
           "native home interface usage escaped canonical requirement checks"
-      let corePath = work </> "captured.core"
-      BS.writeFile corePath (BS.take 1 bytes)
-      refusal <- try (hydrateCandidateExecutable env proof executableSummary)
-        :: IO (Either CandidateCoreFailure HomeModInfo)
-      assert (case refusal of Left CandidateCoreBytesMismatch -> True; _ -> False)
-        "changed candidate Core did not produce a typed refusal"
-      BS.writeFile corePath bytes
       finalized <- requireRight =<< decodeFinalizedCore env home (ms_location summary) bytes
       let guts = finalizedTidyGuts finalized
       assert (bindingGroups guts == groups) "canonical binding order or recursive groups changed"
@@ -212,7 +196,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       assert (case malformed of Left FinalizedCoreDecodeFailure{} -> True; _ -> False)
         "truncated canonical companion did not fail closed"
   makeViewChecks libdir work artifact bytes summary proof
-  putStrLn "finalized Core: executed one case; source-free STG, direct bytecode and GHC make execution with zero module frontends; staged type-only/Core views, durable interface, native requirements, Core seal and unsupported metadata checked"
+  putStrLn "finalized Core: executed one case; source-free STG and GHC make execution with zero module frontends; staged type-only/Core views, durable interface, native requirements, Core seal and unsupported metadata checked"
   where
     configure work = do
       flags <- getSessionDynFlags
@@ -249,7 +233,7 @@ makeViewChecks libdir work artifact bytes summary proof = runGhc (Just libdir) $
     createDirectory typeDirectory
     createDirectory executableDirectory
     removeFile corePath
-  typeView <- liftIO (materializeCandidateCompilerView typeDirectory 0 False admitted proof summary)
+  typeView <- liftIO (materializeCandidateCompilerView typeDirectory 0 admitted proof summary)
   liftIO $ do
     typeBytes <- BS.readFile (ml_hi_file (ms_location typeView))
     typeInterfaces <- requireRight =<< readExactIfaceArtifacts admitted
@@ -259,7 +243,7 @@ makeViewChecks libdir work artifact bytes summary proof = runGhc (Just libdir) $
         [(_,iface)] -> case mi_extra_decls iface of Nothing -> True; _ -> False
         _ -> False) "type-only make view loaded defining Core"
     BS.writeFile corePath (BS.take 1 bytes)
-    refused <- try (materializeCandidateCompilerView executableDirectory 0 True
+    refused <- try (materializeCandidateCompilerView executableDirectory 0
       admitted proof executableSummary) :: IO (Either CandidateCoreFailure ModSummary)
     assert (case refused of Left CandidateCoreBytesMismatch -> True; _ -> False)
       "make executable view accepted changed Core bytes"
@@ -267,12 +251,14 @@ makeViewChecks libdir work artifact bytes summary proof = runGhc (Just libdir) $
   (typeHome, _) <- loadView admitted typeView
   liftIO $ assert (case homeMod_bytecode (hm_linkable typeHome) of Nothing -> True; _ -> False)
     "type-only make handoff unnecessarily generated bytecode"
-  executableView <- liftIO (materializeCandidateCompilerView executableDirectory 1 True
+  executableView <- liftIO (materializeCandidateCompilerView executableDirectory 1
     admitted proof executableSummary)
   (executableHome, frontends) <- loadView admitted executableView
   liftIO $ assert (case homeMod_bytecode (hm_linkable executableHome) of
       Just linkable -> linkableModule linkable == ms_mod summary
       Nothing -> False) "source-free make handoff did not retain its executable input"
+  liftIO $ assert (case homeMod_object (hm_linkable executableHome) of Nothing -> True; _ -> False)
+    "source-free make handoff unexpectedly supplied native object code"
   loadedEnvironment <- getSession
   _ <- liftIO $ addHomeModuleToFinder (hsc_FC loadedEnvironment)
     (hsc_home_unit loadedEnvironment) (GWIB (ms_mod_name summary) NotBoot)
