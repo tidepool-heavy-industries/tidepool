@@ -3010,7 +3010,10 @@ verifyRetainedPackageWitness producer evidence = do
           ++ [global (package { symbolOccurrence = "id" }) 0]
         certify = do
           started <- getMonotonicTimeNSec
-          certified <- captureDiagnostics (encode repeated >>= either fail pure)
+          certified <- captureDiagnostics $ do
+            bytes <- encode repeated >>= either fail pure
+            _ <- evaluate (BS.length bytes)
+            pure bytes
           finished <- getMonotonicTimeNSec
           putStrLn ("package certification requests=1001 wall_ms="
             ++ show ((finished - started) `div` 1000000))
@@ -3081,10 +3084,15 @@ verifyRetainedPackageWitness producer evidence = do
   let wired = preparedRootIdentity (dataConWorkId intDataCon)
       identities = [package, package { symbolOccurrence = "id" },
         package { symbolOccurrence = "fmap" }, constructor, wired]
+  lookupStarted <- getMonotonicTimeNSec
   forM_ identities $ \identity -> do
     (identifier, _) <- resolvePackageGlobal producer identity >>= either fail pure
+    _ <- evaluate (idName identifier)
     unless (preparedRootIdentity identifier == identity) $
       fail "package catalog selected a noncanonical defining Name"
+  lookupFinished <- getMonotonicTimeNSec
+  putStrLn ("standalone package lookups requests=5 wall_ms="
+    ++ show ((lookupFinished - lookupStarted) `div` 1000000))
   let baseOwner = mkModule (stringToUnit "ghc-internal") (mkModuleName "GHC.Internal.Base")
       implicit = package { symbolOccurrence = "fmap" }
   (baseInterface, _) <- readExactInterface producer baseOwner >>= either (fail . show) pure
@@ -3099,6 +3107,7 @@ verifyRetainedPackageWitness producer evidence = do
   forM_ [identities, reverse identities] $ \ordered -> do
     forM_ ordered $ \identity -> do
       (identifier, _) <- resolvePackageGlobal producer identity >>= either fail pure
+      _ <- evaluate (idName identifier)
       when (identity == implicit) $ unless (idName identifier == implicitName) $
         fail "package catalog minted another Unique for an implicit class binder"
       when (identity == wired) $ unless (idName identifier == idName (dataConWorkId intDataCon)) $
