@@ -27,7 +27,7 @@ import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding
 import qualified System.Info as SystemInfo
 
 import GHC.Types.SourceError (SourceError)
-import GHC (Module, ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName)
+import GHC (ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName)
 import GHC.Driver.Env (HscEnv)
 import GHC.Unit.Module.ModIface (ModIface, mi_module)
 import GHC.Unit.Types (unitString)
