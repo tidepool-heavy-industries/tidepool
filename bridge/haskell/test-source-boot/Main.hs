@@ -126,6 +126,7 @@ import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule)
 import Tidepool.Session (sessionHiPath)
 import Tidepool.ExactScope (ExactScope(..), ExactProduct(..), ExactOriginalGroup(..), CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
+import ProgressBoundaryTest (progressBoundaryChecks)
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, encodeRequestTypeSignatures
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate)
@@ -202,6 +203,7 @@ main = getArgs >>= \case
   ["--candidate-execution-sources"] -> candidateExecutionSourcesTest
   ["--candidate-execution-wire", path] -> candidateExecutionWire path
   ["--checked-value-type-closure", effects] -> checkedValueTypeClosure effects
+  ["--progress-boundary", effects] -> progressBoundaryChecks effects
   ["--execution-source-wire", path] -> executionSourceWire path
   ["--execution-source-closure-wire", path] -> executionSourceClosureWire path
   ["--exact-retained-quoter"] -> exactRetainedQuoter
