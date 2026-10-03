@@ -15,7 +15,7 @@ import qualified Data.ByteString as BS
 import qualified Data.Text as Text
 import Codec.CBOR.Encoding (encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
-import GHC
+import GHC hiding (Target)
 import GHC.Builtin.Types (intTy)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
