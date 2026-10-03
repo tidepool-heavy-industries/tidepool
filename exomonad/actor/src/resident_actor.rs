@@ -153,6 +153,7 @@ pub struct LocalResidentInstallation {
 
 #[derive(Clone)]
 pub enum LocalResidentDeployment {
+    DisplayPublished(Arc<DisplayPublication>),
     CommandBackend(Arc<crate::command_jobs::CommandBackendRequest>),
     NotificationSend(Arc<crate::NotificationSend>),
     NotificationPoll(Arc<crate::NotificationPoll>),
@@ -194,6 +195,7 @@ impl LocalResidentDeployment {
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::DisplayPublished(_) => "DisplayPublished",
             Self::CommandBackend(_) => "CommandBackend",
             Self::NotificationSend(_) => "NotificationSend",
             Self::NotificationPoll(_) => "NotificationPoll",
@@ -207,6 +209,66 @@ impl LocalResidentDeployment {
             Self::Retired { .. } => "Retired",
             Self::ReleaseAwait(_) => "ReleaseAwait",
         }
+    }
+}
+
+/// Publication uses the actor's issued slot and page counter, independent of
+/// expansion keys, which may recur across pages.
+pub struct DisplayPublication {
+    pub actor: ActorRef,
+    pub page_ordinal: u64,
+    pub operation: Option<WorkbenchOperationId>,
+    pub page: tidepool_runtime::session::WorkbenchDisplayPage,
+    outcome: Mutex<Option<DisplayPublicationOutcome>>,
+    reply: Mutex<Option<tokio::sync::oneshot::Sender<DisplayPublicationOutcome>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisplayPublicationOutcome {
+    Published(tidepool_runtime::session::ActorOutputReference),
+    /// The host confirms no output row was committed.
+    Refused(String),
+    /// The exact emission remains retained until its durability is resolved.
+    Unconfirmed(String),
+}
+
+impl DisplayPublication {
+    fn channel(
+        actor: ActorRef,
+        page_ordinal: u64,
+        operation: Option<WorkbenchOperationId>,
+        page: tidepool_runtime::session::WorkbenchDisplayPage,
+    ) -> (Arc<Self>, tokio::sync::oneshot::Receiver<DisplayPublicationOutcome>) {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        (
+            Arc::new(Self {
+                actor,
+                page_ordinal,
+                operation,
+                page,
+                outcome: Mutex::new(None),
+                reply: Mutex::new(Some(reply)),
+            }),
+            answer,
+        )
+    }
+
+    /// Retain the answer before waking its original execution. Losing that
+    /// waiter cannot lose a committed page's callback authority.
+    pub fn answer(&self, answer: DisplayPublicationOutcome) -> bool {
+        let mut outcome = self.outcome.lock();
+        if outcome.is_some() {
+            return false;
+        }
+        *outcome = Some(answer.clone());
+        if let Some(reply) = self.reply.lock().take() {
+            let _ = reply.send(answer);
+        }
+        true
+    }
+
+    pub fn outcome(&self) -> Option<DisplayPublicationOutcome> {
+        self.outcome.lock().clone()
     }
 }
 

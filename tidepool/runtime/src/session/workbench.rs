@@ -289,13 +289,38 @@ pub enum WorkbenchFailureLayer {
 /// Actor-issued display identity and currently available expansion keys.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkbenchDisplayOutput {
+pub struct WorkbenchDisplayPage {
     pub identity: (i64, i64, i64),
     pub text: String,
     pub expansions: Vec<(i64, String)>,
     /// A legacy custom renderer omitted detail that cannot be expanded.
     #[serde(default)]
     pub unavailable: bool,
+}
+
+/// A reference to the one durable actor-output row committed by the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ActorOutputReference {
+    pub run: String,
+    pub sequence: i64,
+}
+
+/// A published page always refers to the same durable row as actor history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchDisplayOutput {
+    #[serde(flatten)]
+    pub page: WorkbenchDisplayPage,
+    pub output: ActorOutputReference,
+}
+
+impl std::ops::Deref for WorkbenchDisplayOutput {
+    type Target = WorkbenchDisplayPage;
+
+    fn deref(&self) -> &Self::Target {
+        &self.page
+    }
 }
 
 /// One effect boundary observed while evaluating an input unit.

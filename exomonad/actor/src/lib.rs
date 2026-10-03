@@ -140,7 +140,8 @@ pub use request::{
 pub use resident_actor::{
     spawn_resident_root, spawn_resident_root_in_incarnation,
     spawn_resident_root_with_fork_admission, ActorGraphNode, ActorProviderAdmission,
-    ForkChildRelease, LocalResidentDeployment, LocalResidentInstallation, ReleaseAwait,
+    DisplayPublication, DisplayPublicationOutcome, ForkChildRelease, LocalResidentDeployment,
+    LocalResidentInstallation, ReleaseAwait,
     ResidentActorRoot, ResidentForest, ResidentKernelBehavior, ResidentRootEntry, ResourceRelease,
     RootStartupRelease,
 };
