@@ -141,6 +141,7 @@ import Data.Word (Word64)
 import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellGenericDeclaration(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations)
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
   , NativeParsedModule, unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModule)
+import Tidepool.FinalizedModule (FinalizedModule(..))
 import Tidepool.HomeProducts (hydrateCandidateHomeProductsWithOriginals)
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
@@ -236,14 +237,6 @@ homeInterfaceConsumers summaries = drop 1 (scanr addConsumer Map.empty summaries
       where
         addImport (_, imported) = Map.insertWith keepNearest (unLoc imported) (ms_mod_name summary)
         keepNearest new _ = new
-
--- | The interface and Core have one finalization owner. Retaining this pair
--- permits later preparation from the exact result that supplied its interface,
--- without replaying source or retaining a mutable compiler session.
-data FinalizedModule = FinalizedModule
-  { finalizedHomeModInfo :: HomeModInfo
-  , finalizedTidyGuts :: CgGuts
-  }
 
 -- | Prepared mode keeps the ordinary typed pipeline observations alongside
 -- the unflattened per-module STG handoff.

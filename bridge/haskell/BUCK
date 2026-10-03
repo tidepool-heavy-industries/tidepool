@@ -27,6 +27,7 @@ _EXTRACTOR_SRCS = {
     "Tidepool/ExtractUtil.hs": "src/Tidepool/ExtractUtil.hs",
     "Tidepool/ExtractRequest.hs": "src/Tidepool/ExtractRequest.hs",
     "Tidepool/FatIface.hs": "src/Tidepool/FatIface.hs",
+    "Tidepool/FinalizedModule.hs": "src/Tidepool/FinalizedModule.hs",
     "Tidepool/GhcPipeline.hs": "src/Tidepool/GhcPipeline.hs",
     "Tidepool/QuasiQuoteOccurrences.hs": "src/Tidepool/QuasiQuoteOccurrences.hs",
     "Tidepool/ExactHydration.hs": "src/Tidepool/ExactHydration.hs",
