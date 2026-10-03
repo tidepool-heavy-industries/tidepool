@@ -20,7 +20,7 @@ import Control.Exception (Exception)
 import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
-import Data.List (nub, sort)
+import Data.List (sort)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as Map
@@ -512,20 +512,23 @@ bounded limit item = do
   when (count > limit) (fail "original execution inventory exceeds bound")
   replicateM count item
 
-unique :: Eq a => String -> [a] -> Decoder s ()
-unique label values = unless (length (nub values) == length values) (fail ("duplicate " ++ label))
+unique :: Ord a => String -> [a] -> Decoder s ()
+unique label values = unless (Set.size (Set.fromList values) == length values) (fail ("duplicate " ++ label))
 
 text :: Decoder s String
-text = do
+text = T.unpack <$> decodedText
+
+decodedText :: Decoder s T.Text
+decodedText = do
   value <- decodeString
   when (T.length value > 4 * 1024 * 1024) (fail "original execution text exceeds bound")
-  pure (T.unpack value)
+  pure value
 
 nonempty :: Decoder s String
 nonempty = do
-  value <- text
-  unless (not (null value) && length value <= 65536) (fail "invalid original execution owner")
-  pure value
+  value <- decodedText
+  unless (not (T.null value) && T.length value <= 65536) (fail "invalid original execution owner")
+  pure (T.unpack value)
 
 absolute :: Decoder s FilePath
 absolute = do
