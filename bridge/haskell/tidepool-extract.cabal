@@ -342,6 +342,7 @@ test-suite source-boot-product-reuse-test
   build-depends:
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,
+    ghc-boot >= 9.12 && < 9.13,
     containers,
     bytestring,
     cborg,

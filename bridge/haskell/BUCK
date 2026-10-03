@@ -235,8 +235,8 @@ haskell_binary(
         "FinalizedCoreTest.hs": "test-source-boot/FinalizedCoreTest.hs",
     },
     deps = [":tidepool_extract_internal"],
-    compiler_flags = extractor_binary_flags("-XOverloadedStrings", "-package", "process"),
-    linker_flags = extractor_binary_link_flags() + ["-package", "process"],
+    compiler_flags = extractor_binary_flags("-XOverloadedStrings", "-package", "process", "-package", "ghc-boot"),
+    linker_flags = extractor_binary_link_flags() + ["-package", "process", "-package", "ghc-boot"],
     visibility = ["PUBLIC"],
 )
 

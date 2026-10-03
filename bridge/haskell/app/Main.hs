@@ -80,7 +80,9 @@ import Tidepool.PreparedRecovery
 import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
 import Tidepool.CompileInput (writeCompileInputProof)
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal, homeInterfaceUsageOwners)
-import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts)
+import Tidepool.FinalizedModuleArtifacts
+  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, finalizedLocalAdmissions
+  , localFinalizedInterface, localFinalizedSourceSha256, localFinalizedCore )
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), OriginalInterfaceArtifacts
   , newOriginalInterfaceArtifacts, originalInterfaceBytes)
@@ -114,6 +116,7 @@ import Tidepool.ExactScope
   ( ExactCompilation(..), ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
   , originalGroupFromProjected, originalGroupFromCandidate
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..), PlannedCellAdmission(..), PlannedCellSlot(..)
+  , ExactInterfaceEvidence(..)
   , readExactScope, revalidateExactScope, writeExactCompilation, extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CellProgramState
@@ -414,6 +417,7 @@ writeCertifiedProducts originalInterfaces outDir hscEnv prepared productContext 
 data CertifiedOriginalProducts = CertifiedOriginalProducts
   { certifiedOriginalDependencies :: DependencyEvidence
   , certifiedOriginalProducts :: [ModuleProductEncoding]
+  , certifiedFinalizedArtifacts :: FinalizedModuleArtifacts
   }
 
 -- These captures were admitted by the request's exact-scope/candidate owner.
@@ -460,7 +464,7 @@ writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productC
       productBytes <- BS.readFile (outDir </> "module-products.cbor")
       evidenceBytes <- BS.readFile (outDir </> "dependencies.json")
       pure (productBytes, evidenceBytes)
-    timeDetailPhase timing "module_products" "certify" $ do
+    finalized <- timeDetailPhase timing "module_products" "certify" $ do
       finalized <- captureFinalizedModuleArtifacts originalInterfaces hscEnv
         (pprFinalizedModules prepared) (pprPackageImports prepared) finalDependencies outDir
       certified <- encodeCertifiedProducts hscEnv (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
@@ -472,7 +476,9 @@ writeCertifiedProductsKeeping originalInterfaces outDir hscEnv prepared productC
         Left reason -> do
           hPutStrLn stderr ("product certification unavailable: " ++ reason)
           BS.writeFile (outDir </> "certified-products.cbor") BS.empty
-    pure (CertifiedOriginalProducts freshDependencies freshProducts)
+          unless (null freshProducts) $ fail ("native product certification failed: " ++ reason)
+      pure finalized
+    pure (CertifiedOriginalProducts freshDependencies freshProducts finalized)
 
 data PreparedArtifact = PreparedArtifact
   { paTarget :: String
@@ -1456,6 +1462,8 @@ addProgramValue root generation binders@(firstBinder:_) state = do
       extended = exact { scopeCheckedCell = Just admission
             { checkedValueInterfaces = checkedValueInterfaces admission ++ [artifact] }
         , scopeInterfaces = scopeInterfaces exact ++ [(artifact,path ++ ".packages",shaHex packages)]
+        , scopeInterfaceEvidence = Map.insert ("main",bbModule firstBinder)
+            CheckedValueEvidence (scopeInterfaceEvidence exact)
         , scopeLexical = scopeLexical exact ++ [(("main",bbModule firstBinder),lexicalRequirements)] }
       retained = foldr (\binder -> Map.insert
           (SymbolIdentity "main" (T.pack (bbModule binder)) "value" (T.pack (bbName binder)) Nothing) generation)
@@ -1517,29 +1525,32 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
       originalBytes = moduleProductBytes originalProductEncoding
       productPath = directory </> "original.product.cbor"
   BS.writeFile productPath originalBytes
-  requirements <- programInterfaceRequirements prepared unit reserved
+  localProof <- maybe (fail "planned original declaration lacks captured finalization") pure
+    (Map.lookup (unit,reserved) (finalizedLocalAdmissions (certifiedFinalizedArtifacts certified)))
+  when (isNothing (localFinalizedCore localProof))
+    (fail "planned original declaration lacks its finalized Core")
   lexicalRequirements <- programSourceRequirements prepared unit reserved >>= programLexicalRequirements supportScope []
-  let interfacePath = directory </> "original.hi"
-      packagesPath = directory </> "original.hi.packages"
-      interface = ExactIfaceArtifact unit reserved interfacePath (shaHex interfaceBytes) requirements
-  roots <- maybe (fail "planned original declaration has no package interface witness") pure
-    (Map.lookup (mkModuleName reserved) (pprPackageImports prepared))
-  let packageBytes = encodePackageImports interface roots
-      originalProduct = ExactProduct unit reserved
+  let (interface,packagesPath,packagesSha) = localFinalizedInterface localProof
+  unless (exactSha256 interface == shaHex interfaceBytes)
+    (fail "planned native product differs from its finalized interface")
+  packageBytes <- BS.readFile packagesPath
+  unless (shaHex packageBytes == packagesSha)
+    (fail "planned original declaration package capture changed")
+  let originalProduct = ExactProduct unit reserved
         (exactProgramProductVersion exact unit reserved (plannedSource original) interfaceBytes originalBytes packageBytes)
         (shaHex interfaceBytes) (shaHex originalBytes) productPath
         (map originalGroupFromProjected originalGroups')
       extended = supportScope
         { scopeProducts = scopeProducts supportScope ++ [originalProduct]
-        , scopeInterfaces = scopeInterfaces supportScope ++ [(interface, packagesPath, shaHex packageBytes)]
+        , scopeInterfaces = scopeInterfaces supportScope ++ [(interface, packagesPath, packagesSha)]
+        , scopeInterfaceEvidence = Map.insert (unit,reserved) (LocalModuleInterfaceEvidence localProof)
+            (scopeInterfaceEvidence supportScope)
         , scopeLexical = scopeLexical supportScope ++ [((unit,reserved), lexicalRequirements)] }
       text = encodeString . T.pack
       receipt = encodeListLen 8 <> text "TPEXACTDECL" <> text "1"
         <> text (scopeRequestSha256 exact) <> text reserved <> text (plannedSource original)
         <> text (shaHex interfaceBytes) <> text (renderPlannedDeclarationInventory inventory)
         <> text "planned-declaration"
-  BS.writeFile interfacePath interfaceBytes
-  BS.writeFile packagesPath packageBytes
   BS.writeFile (outDir </> "planned-declaration.cbor") (toStrictByteString receipt)
   pure (finalized, original, inventory, extended)
   where
@@ -1559,19 +1570,39 @@ retainProgramProducts
 retainProgramProducts includes directory prepared certified target initial = do
   selected <- either fail pure (extendSourceSelectedOriginals
     (pprExactCompilation prepared >>= compilationSourceSelection) initial)
-  cached <- foldM retainCached selected (zip [0::Int ..] (pprAcceptedCandidates prepared))
+  finalized <- foldM retainInterface selected (Map.toAscList localInterfaces)
+  cached <- foldM retainCached finalized (zip [0::Int ..] (pprAcceptedCandidates prepared))
   promoted <- foldM retain cached (zip [0::Int ..] products)
   let parcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates prepared)
   inherited <- either throwIO pure
     (extendExactExecutionSources (concatMap fst parcels) (map snd parcels) promoted)
   retainFreshExecutionSources includes prepared certified target inherited
   where
+    localInterfaces = Map.filterWithKey (\(_,owner) _ -> owner /= target)
+      (finalizedLocalAdmissions (certifiedFinalizedArtifacts certified))
     products = [product' | product' <- certifiedOriginalProducts certified
       , let (_, owner, _, _) = moduleProductInput product', T.unpack owner /= target]
     supportOwners = [(candidateUnit candidate,candidateModule candidate)
       | candidate <- pprAcceptedCandidates prepared]
-      ++ [(T.unpack unit,T.unpack owner) | product' <- products
-          , let (unit,owner,_,_) = moduleProductInput product']
+      ++ Map.keys localInterfaces
+    retainInterface scope (key,proof) = do
+      let row@(interface,_,packagesSha) = localFinalizedInterface proof
+          existing = [current | current@(artifact,_,_) <- scopeInterfaces scope
+            , (exactUnit artifact,exactModule artifact) == key]
+      lexicalRequirements <- programSourceRequirements prepared (fst key) (snd key)
+        >>= programLexicalRequirements scope supportOwners
+      case existing of
+        [] -> pure scope
+          { scopeInterfaces = scopeInterfaces scope ++ [row]
+          , scopeInterfaceEvidence = Map.insert key (LocalModuleInterfaceEvidence proof)
+              (scopeInterfaceEvidence scope)
+          , scopeLexical = scopeLexical scope ++ [(key,lexicalRequirements)] }
+        [(old,_,oldPackagesSha)]
+          | exactSha256 old == exactSha256 interface
+          , exactRequirements old == exactRequirements interface
+          , oldPackagesSha == packagesSha
+          , lookup key (scopeLexical scope) == Just lexicalRequirements -> pure scope
+        _ -> fail "fresh finalization conflicts with an admitted original owner"
     retainCached scope (index, candidate) = do
       let unit = candidateUnit candidate
           owner = candidateModule candidate
@@ -1630,36 +1661,29 @@ retainProgramProducts includes directory prepared certified target initial = do
       let (unitText,ownerText,interfaceBytes,groups) = moduleProductInput originalProduct
           unit = T.unpack unitText
           owner = T.unpack ownerText
-          admitted = [(exactUnit artifact,exactModule artifact) | (artifact,_,_) <- scopeInterfaces scope]
-      when ((unit,owner) `elem` admitted) (fail "fresh source product replaces an admitted original owner")
-      sourceDigest <- case
-          [dependencySourceSha256 source | node <- dependencyModules (pprDependencies prepared)
-            , dependencyModuleUnit node == unit, dependencyModuleName node == owner
-            , source <- dependencySources (pprDependencies prepared)
-            , dependencySourcePath source == dependencyModuleSource node] of
-        [digest] -> pure digest
-        _ -> fail "supporting original lacks one validated source witness"
-      roots <- maybe (fail "supporting original lacks package interface witness") pure
-        (Map.lookup (mkModuleName owner) (pprPackageImports prepared))
-      requirements <- programInterfaceRequirements prepared unit owner
-      lexicalRequirements <- programSourceRequirements prepared unit owner >>= programLexicalRequirements scope supportOwners
+          key = (unit,owner)
+      when (any (\original -> (originalUnit original,originalModule original) == key)
+          (scopeProducts scope)) (fail "fresh native product replaces an admitted original owner")
+      proof <- maybe (fail "supporting native product lacks captured finalization") pure
+        (Map.lookup key localInterfaces)
+      when (isNothing (localFinalizedCore proof))
+        (fail "supporting native product lacks finalized Core")
+      let sourceDigest = localFinalizedSourceSha256 proof
+          (interface,packagesPath,packagesSha) = localFinalizedInterface proof
+      unless (exactSha256 interface == shaHex interfaceBytes)
+        (fail "supporting native product differs from finalized interface")
+      packageBytes <- BS.readFile packagesPath
+      unless (shaHex packageBytes == packagesSha)
+        (fail "supporting native package capture changed")
       let stem = directory </> "retained-original-" ++ show index
-          interfacePath = stem ++ ".hi"
-          packagesPath = stem ++ ".hi.packages"
           productPath = stem ++ ".product.cbor"
-          interface = ExactIfaceArtifact unit owner interfacePath (shaHex interfaceBytes) requirements
-          packageBytes = encodePackageImports interface roots
           productBytes = moduleProductBytes originalProduct
           original = ExactProduct unit owner
             (exactProgramProductVersionFromDigest scope unit owner sourceDigest interfaceBytes productBytes packageBytes)
             (shaHex interfaceBytes) (shaHex productBytes) productPath
             (map originalGroupFromProjected groups)
-      BS.writeFile interfacePath interfaceBytes
-      BS.writeFile packagesPath packageBytes
       BS.writeFile productPath productBytes
-      pure scope { scopeProducts = scopeProducts scope ++ [original]
-        , scopeInterfaces = scopeInterfaces scope ++ [(interface,packagesPath,shaHex packageBytes)]
-        , scopeLexical = scopeLexical scope ++ [((unit,owner),lexicalRequirements)] }
+      pure scope { scopeProducts = scopeProducts scope ++ [original] }
 
 -- A later item can execute a quoter defined by an original retained here.
 -- Keep its consumed source recipe at the same boundary as its native product,

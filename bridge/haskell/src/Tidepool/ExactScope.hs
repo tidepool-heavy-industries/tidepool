@@ -5,7 +5,9 @@ module Tidepool.ExactScope
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), CheckedDisplayAdmission(..)
   , PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), CanonicalInterfaceProof, CanonicalCoreArtifact
-  , scopeCanonicalInterfaces
+  , CanonicalInterfaceAdmission(..), scopeCanonicalInterfaces, scopeDurableInterfaces
+  , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256
+  , admittedInterfaceRequirements, admittedInterfaceCore
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
   , canonicalRequirements
@@ -27,6 +29,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (isHexDigit)
 import Data.List (isPrefixOf)
+import Data.Maybe (isJust)
 import qualified Data.Text as T
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -52,6 +55,10 @@ import Tidepool.ExecutionSource
   , executionSourceOriginalClosure, executionSourceGraphBytesLimit )
 import Tidepool.PackageWitness
   ( revalidatePackageImports )
+import Tidepool.FinalizedModuleArtifacts
+  ( LocalFinalizedAdmission, localFinalizedInterface, localFinalizedHomeUnits
+  , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedCore
+  , revalidateLocalFinalizedAdmission )
 import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyModule(..), DependencyImport(..), DependencyResolution(..), renderDependencyEvidence
@@ -103,20 +110,54 @@ data CanonicalInterfaceProof = CanonicalInterfaceProof
 
 data ExactInterfaceEvidence
   = ModuleInterfaceEvidence CanonicalInterfaceProof
+  | LocalModuleInterfaceEvidence LocalFinalizedAdmission
   | LexicalJoinEvidence
   | CheckedValueEvidence
   deriving (Eq, Show)
 
 data ParsedInterfaceEvidence
   = ParsedModuleEvidence CanonicalInterfaceDescriptor
+  | ParsedLocalModuleEvidence LocalFinalizedAdmission
   | ParsedJoinEvidence
   | ParsedValueEvidence
 
-scopeCanonicalInterfaces :: ExactScope -> Map.Map (String,String) CanonicalInterfaceProof
+-- The consumer sees the same finalized facts whether their owner is this
+-- request's capture or a Rust-issued durable certificate. Only durable
+-- admissions have certificate paths; local admissions cannot cross the wire.
+data CanonicalInterfaceAdmission
+  = DurableInterfaceAdmission CanonicalInterfaceProof
+  | LocalInterfaceAdmission LocalFinalizedAdmission
+  deriving (Eq, Show)
+
+scopeCanonicalInterfaces :: ExactScope -> Map.Map (String,String) CanonicalInterfaceAdmission
 scopeCanonicalInterfaces = Map.mapMaybe select . scopeInterfaceEvidence
+  where
+    select (ModuleInterfaceEvidence proof) = Just (DurableInterfaceAdmission proof)
+    select (LocalModuleInterfaceEvidence proof) = Just (LocalInterfaceAdmission proof)
+    select _ = Nothing
+
+scopeDurableInterfaces :: ExactScope -> Map.Map (String,String) CanonicalInterfaceProof
+scopeDurableInterfaces = Map.mapMaybe select . scopeInterfaceEvidence
   where
     select (ModuleInterfaceEvidence proof) = Just proof
     select _ = Nothing
+
+admittedInterfaceHomeUnits :: CanonicalInterfaceAdmission -> Set.Set String
+admittedInterfaceHomeUnits (DurableInterfaceAdmission proof) = canonicalHomeUnits proof
+admittedInterfaceHomeUnits (LocalInterfaceAdmission proof) = localFinalizedHomeUnits proof
+
+admittedInterfaceSourceSha256 :: CanonicalInterfaceAdmission -> String
+admittedInterfaceSourceSha256 (DurableInterfaceAdmission proof) = canonicalSourceSha256 proof
+admittedInterfaceSourceSha256 (LocalInterfaceAdmission proof) = localFinalizedSourceSha256 proof
+
+admittedInterfaceRequirements :: CanonicalInterfaceAdmission -> Map.Map (String,String) String
+admittedInterfaceRequirements (DurableInterfaceAdmission proof) = canonicalRequirements proof
+admittedInterfaceRequirements (LocalInterfaceAdmission proof) = localFinalizedRequirements proof
+
+admittedInterfaceCore :: CanonicalInterfaceAdmission -> Maybe (FilePath,String)
+admittedInterfaceCore (DurableInterfaceAdmission proof) =
+  (\core -> (canonicalCorePath core,canonicalCoreSha256 core)) <$> canonicalCoreArtifact proof
+admittedInterfaceCore (LocalInterfaceAdmission proof) = localFinalizedCore proof
 
 data CanonicalModuleCertificate = CanonicalModuleCertificate
   { certificateProducer :: String
@@ -455,16 +496,32 @@ validateInterfaceEvidence
 validateInterfaceEvidence scope offered = do
   proofs <- validateCanonicalInterfaces scope
     [(key,descriptor) | (key,ParsedModuleEvidence descriptor) <- offered]
+  let interfaces = Map.fromList
+        [((exactUnit iface,exactModule iface),(iface,packages,packageSha))
+        | (iface,packages,packageSha) <- scopeInterfaces scope]
+      locals = Map.fromList [(key,proof) | (key,ParsedLocalModuleEvidence proof) <- offered]
+  forM_ (Map.toAscList locals) $ \(key,proof) -> do
+    either fail pure =<< revalidateLocalFinalizedAdmission proof
+    unless (Map.lookup key interfaces == Just (localFinalizedInterface proof))
+      (fail "local finalization differs from its captured interface")
+    let requirements = Map.map (exactSha256 . firstOfThree) interfaces
+    unless (all (\(owner,sha) -> Map.lookup owner requirements == Just sha)
+        (Map.toAscList (localFinalizedRequirements proof)))
+      (fail "local finalization requirements leave its exact closure")
   let evidence = Map.fromList [(key,case value of
         ParsedModuleEvidence _ -> ModuleInterfaceEvidence (proofs Map.! key)
+        ParsedLocalModuleEvidence proof -> LocalModuleInterfaceEvidence proof
         ParsedJoinEvidence -> LexicalJoinEvidence
         ParsedValueEvidence -> CheckedValueEvidence) | (key,value) <- offered]
   unless (Map.keysSet evidence == Set.fromList
       [(exactUnit iface,exactModule iface) | (iface,_,_) <- scopeInterfaces scope]
-      && all (\product' -> Map.member (originalUnit product',originalModule product') proofs)
+      && all (\product' -> let key = (originalUnit product',originalModule product')
+             in maybe False (isJust . canonicalCoreArtifact) (Map.lookup key proofs)
+               || maybe False (isJust . localFinalizedCore) (Map.lookup key locals))
         (scopeProducts scope))
     (fail "exact interface evidence is incomplete or lacks native module proof")
   pure evidence
+  where firstOfThree (value,_,_) = value
 
 validateCanonicalInterfaces
   :: ExactScope -> [((String,String),CanonicalInterfaceDescriptor)]
@@ -576,6 +633,7 @@ revalidateExactScope env scope = do
           ModuleInterfaceEvidence proof -> ParsedModuleEvidence
             (CanonicalInterfaceDescriptor (canonicalCertificatePath proof)
               (canonicalCertificateSha256 proof) (canonicalCoreArtifact proof))
+          LocalModuleInterfaceEvidence proof -> ParsedLocalModuleEvidence proof
           LexicalJoinEvidence -> ParsedJoinEvidence
           CheckedValueEvidence -> ParsedValueEvidence)
         | (key,value) <- Map.toAscList (scopeInterfaceEvidence scope)]

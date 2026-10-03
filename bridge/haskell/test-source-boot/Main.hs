@@ -1,6 +1,7 @@
 module Main (main) where
 
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceDecodeBenchmark, executionSourceDecodeSnapshots)
+import ExactScopeV8Test (exactScopeV8Checks)
 
 import Codec.CBOR.Encoding (encodeBool, encodeListLen, encodeString)
 import Codec.CBOR.Write (toStrictByteString)
@@ -16,7 +17,7 @@ import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
-import Data.List (isInfixOf, isPrefixOf, sortOn, stripPrefix)
+import Data.List (isInfixOf, isPrefixOf, sort, sortOn, stripPrefix)
 import Data.Maybe (catMaybes, isJust, isNothing, maybeToList)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -184,6 +185,7 @@ exactCompilationCacheSafety expectedSource bytes = do
 main :: IO ()
 main = getArgs >>= \case
   ["--finalized-core"] -> finalizedCoreChecks
+  ["--exact-scope-v8", manifest] -> exactScopeV8Checks manifest
   ["--finalized-frontend-once"] -> finalizedFrontendOnce
   ["--execution-source-decode"] -> executionSourceDecodeChecks
   "--execution-source-decode-benchmark" : iterations : files -> executionSourceDecodeBenchmark iterations files
@@ -2145,7 +2147,7 @@ freshExecutionRecipeTest = withScratch $ \work -> do
     fail "unsupported prospective recipe hid corrupt inherited advertised proof"
   let original = ExactProduct "main" "Support" sha sha sha "" []
       scope = ExactScope "" sha sha sha
-        [(ExactIfaceArtifact "main" "Support" "" sha [],"",sha)] [] [original]
+        [(ExactIfaceArtifact "main" "Support" "" sha [],"",sha)] Map.empty [] [original]
         [] [] Nothing Nothing Nothing Nothing Nothing Nothing Set.empty
       oversized = graph {executionGraphBytes=BS.replicate (executionSourceGraphBytesLimit+1) 0}
   bounded <- either (fail . show) pure
