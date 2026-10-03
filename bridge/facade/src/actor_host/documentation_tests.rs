@@ -25,6 +25,17 @@ async fn committed(
     result
 }
 
+async fn displayed(
+    campaign: &mut TestCampaign,
+    policy: &dyn exomonad_actor::ResidentToolEndpoint,
+    source: &str,
+) -> serde_json::Value {
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    campaign
+        .drive_actor_output(&store, committed(policy, source))
+        .await
+}
+
 #[tokio::test]
 async fn colon_commands_and_ghci_groups_are_rejected_as_haskell_cells() {
     let campaign = TestCampaign::start().await;
@@ -369,12 +380,15 @@ async fn notebook_cell_retains_observations_needed_by_its_suffix() {
 
 #[tokio::test]
 async fn notebook_cell_infers_response_results() {
-    let campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let response = committed(root.as_ref(), include_str!("notebook_identity_response.hs")).await;
-    let output = response["items"].as_array().unwrap().last().unwrap()["output"]
-        .as_str()
-        .unwrap();
+    let response = displayed(
+        &mut campaign,
+        root.as_ref(),
+        include_str!("notebook_identity_response.hs"),
+    )
+    .await;
+    let output = explicit_display_output(&response)["text"].as_str().unwrap();
     assert!(output.contains("Pending"), "{response:?}");
     committed(root.as_ref(), "later\npollResponse pending\n").await;
     campaign.forest.shutdown().await;
@@ -572,7 +586,12 @@ launcher <- R.start (R.withWorktree (worktreeId launcherTree) launchDefinition)"
         .await
         .unwrap();
     assert_eq!(reply["status"], "replied", "{reply}");
-    let result = committed(root.as_ref(), "R.call (readReply (R.client launcher)) ()").await;
+    let result = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "R.call (readReply (R.client launcher)) () >>= display",
+    )
+    .await;
     assert!(result.to_string().contains("review complete"), "{result}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -582,10 +601,15 @@ launcher <- R.start (R.withWorktree (worktreeId launcherTree) launchDefinition)"
 async fn invalid_label_literals_fail_before_actor_side_effects() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let me = committed(root.as_ref(), "inspectFull (agentIdentity me)").await;
+    let me = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "display (inspectFull (agentIdentity me))",
+    )
+    .await;
     let identity = campaign.root_installation.actor.identity();
     assert_eq!(
-        me["items"][0]["output"]
+        explicit_display_output(&me)["text"]
             .as_str()
             .unwrap()
             .split_whitespace()
@@ -668,8 +692,8 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
         "let beforeRequests = requestCount (agentIdentity (responseActor worker)) before",
     )
     .await;
-    let rendered = committed(root.as_ref(), "inspectFull worker").await;
-    let rendered = rendered["items"][0]["output"].as_str().unwrap();
+    let rendered = displayed(&mut campaign, root.as_ref(), "display (inspectFull worker)").await;
+    let rendered = explicit_display_output(&rendered)["text"].as_str().unwrap();
     assert!(rendered.starts_with("<response to request "), "{rendered}");
     assert!(rendered.contains(" from agent "), "{rendered}");
     assert!(rendered.contains(", path "), "{rendered}");
@@ -687,12 +711,17 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
         "{invalid_request}"
     );
     committed(root.as_ref(), "after <- listAgents").await;
-    let unchanged = committed(
+    let unchanged = displayed(
+        &mut campaign,
         root.as_ref(),
-        "requestCount (agentIdentity (responseActor worker)) after == beforeRequests",
+        "display (requestCount (agentIdentity (responseActor worker)) after == beforeRequests)",
     )
     .await;
-    assert_eq!(unchanged["items"][0]["output"], "True", "{unchanged}");
+    assert_eq!(
+        explicit_display_output(&unchanged)["text"],
+        "True",
+        "{unchanged}"
+    );
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -1873,15 +1902,15 @@ async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign 
 
 #[tokio::test]
 async fn usage_comparisons_deduplicate_resumes_and_preserve_unknown_intervals() {
-    let campaign = workspace_campaign().await;
-    let result = committed(
-        campaign.root_installation.policy.as_ref(),
+    let mut campaign = workspace_campaign().await;
+    let policy = campaign.root_installation.policy.clone();
+    let result = displayed(
+        &mut campaign,
+        policy.as_ref(),
         include_str!("fixtures/usage_comparisons.hs"),
     )
     .await;
-    let output = result["items"].as_array().unwrap().last().unwrap()["output"]
-        .as_str()
-        .unwrap();
+    let output = explicit_display_output(&result)["text"].as_str().unwrap();
     assert!(output.contains("True"), "{result}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -1889,15 +1918,16 @@ async fn usage_comparisons_deduplicate_resumes_and_preserve_unknown_intervals() 
 
 #[tokio::test]
 async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
-    let campaign = workspace_campaign().await;
-    let policy = campaign.root_installation.policy.as_ref();
-    let result = committed(
-        policy,
-        "observed <- snapshot\ninspectFull (swarmUsage observed)",
+    let mut campaign = workspace_campaign().await;
+    let policy = campaign.root_installation.policy.clone();
+    let result = displayed(
+        &mut campaign,
+        policy.as_ref(),
+        "observed <- snapshot\ndisplay (inspectFull (swarmUsage observed))",
     )
     .await;
     assert!(
-        result["items"][1]["output"]
+        explicit_display_output(&result)["text"]
             .as_str()
             .unwrap()
             .contains("unknownActors = [("),
@@ -1905,12 +1935,15 @@ async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
     );
     // Authored Display instances render workspace records with the harness's
     // own model-facing forms nested inside; Show keeps the constructor dump.
-    let candidate = committed(
-        policy,
-        "inspectFull (Candidate (GitOid \"3f2a9c\") [\"cargo test\"] [])",
+    let candidate = displayed(
+        &mut campaign,
+        policy.as_ref(),
+        "display (inspectFull (Candidate (GitOid \"3f2a9c\") [\"cargo test\"] []))",
     )
     .await;
-    let candidate = candidate["items"][0]["output"].as_str().unwrap();
+    let candidate = explicit_display_output(&candidate)["text"]
+        .as_str()
+        .unwrap();
     assert!(candidate.starts_with("Candidate {"), "{candidate}");
     assert!(
         candidate.contains("candidateCommit = 3f2a9c"),
@@ -1918,7 +1951,7 @@ async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
     );
     assert!(!candidate.contains("GitOid"), "{candidate}");
     let lookup = dispatch_lookup(
-        policy,
+        policy.as_ref(),
         &[
             "implement",
             "reviewCandidate",
