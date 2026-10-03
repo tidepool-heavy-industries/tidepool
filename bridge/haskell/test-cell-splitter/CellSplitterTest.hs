@@ -80,7 +80,7 @@ main = getArgs >>= \case
   ["--function-value-iface"] -> functionValueInterfaceCompilation >> putStrLn "function value interface: 1 passed"
   ["--session-fixities"] -> sessionFixitiesCompilation >> putStrLn "session fixities: 1 passed"
   ["--unreachable-compile-time"] -> unreachableCompileTimeCompilation >> putStrLn "unreachable compile-time: 1 passed"
-  ["--metadata-inspection"] -> metadataCompilation >> putStrLn "metadata inspection: mixed probes and dependency rejection passed"
+  ["--metadata-inspection"] -> mixedInspectionCompilation >> putStrLn "metadata inspection: mixed query order and probe ordinals passed"
   ["--checked-load-boundary"] -> checkedLoadBoundaryCompilation >> putStrLn "checked load boundary: 4 passed"
   ["--structural-display", effectsRoot] -> structuralDisplayCompilation OrdinaryDisplayTest effectsRoot >> putStrLn "structural display: 1 passed"
   ["--structural-display-exact", effectsRoot] -> structuralDisplayCompilation ExactDisplayTest effectsRoot >> putStrLn "exact structural display: 1 passed"
@@ -1268,6 +1268,35 @@ checkedLoadBoundaryCompilation = bracket temporary removeDirectoryRecursive $ \r
 
 -- Metadata compilation must not enter the target's executable pipeline.
 -- A changed dependency must still be checked on the following request.
+mixedInspectionCompilation :: IO ()
+mixedInspectionCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let target = root </> "MixedInspection.hs"
+  writeFile target $ unlines
+    [ "module MixedInspection where"
+    , "__tidepool_inspect_0 = (7 :: Int)"
+    , "__tidepool_inspect_1 = True"
+    ]
+  withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
+    checked <- runRequest $ \compiler ->
+      compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+    inspected <- runInspection
+      (crHscEnv checked) (crTargetTcGblEnv checked)
+      (crTargetRdrEnv checked) (crInspectionProbes checked)
+      [InspectTypeOf "7", InspectNameInfo "missingInspectionName", InspectTypeOf "True"]
+    case inspected of
+      [InspectionType "7" first _, InspectionNotFound "missingInspectionName", InspectionType "True" second _] -> do
+        assertContains "first query uses probe zero" "Int" first
+        assertContains "non-type query leaves the second probe ordinal unchanged" "Bool" second
+      other -> fail ("mixed inspection returned an unexpected result: " ++ show other)
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-mixed-inspection"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
 metadataCompilation :: IO ()
 metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
   let dependency = root </> "MetadataDependency.hs"
@@ -1282,8 +1311,6 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
     [ "module MetadataTarget where"
     , "import MetadataDependency"
     , "__tidepool_inspect_0 = value"
-    , "__tidepool_inspect_1 = True"
-    , "publicValue = value"
     ]
   evictions <- newIORef []
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
@@ -1297,13 +1324,12 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
         (crTargetTcGblEnv checked)
         (crTargetRdrEnv checked)
         (crInspectionProbes checked)
-        [InspectTypeOf "value", InspectModule "MetadataTarget" False, InspectTypeOf "True"]
+        [InspectTypeOf "value", InspectModule "MetadataTarget" False]
       case inspected of
-        [InspectionType "value" rendered _, InspectionBrowse "MetadataTarget" False entries, InspectionType "True" secondRendered _] -> do
-          assertContains "non-type query does not advance the type probe ordinal" "Bool" secondRendered
+        [InspectionType "value" rendered _, InspectionBrowse "MetadataTarget" False entries] -> do
           assertContains "inspection resolves a local probe without a target HPT interface"
             "Box Int" rendered
-          unless (any ((== "publicValue") . infoName) entries) $
+          unless (any ((== "__tidepool_inspect_0") . infoName) entries) $
             fail "metadata inspection could not browse the checked target module"
         _ -> fail ("metadata inspection returned an unexpected result: " ++ show inspected)
       assertEqual "exactly one checked target" 1
