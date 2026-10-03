@@ -241,13 +241,12 @@ homeInterfaceConsumers summaries = drop 1 (scanr addConsumer Map.empty summaries
         addImport (_, imported) = Map.insertWith keepNearest (unLoc imported) (ms_mod_name summary)
         keepNearest new _ = new
 
--- | A registered interface carries the tidy result that produced it. Both
--- interface construction and prepared-STG lowering need that exact result;
--- retaining it only through the immediate compile back half avoids running
--- 'hscTidy' twice without extending the memo's retained state.
-data RegisteredInterface = RegisteredInterface
-  { riHomeModInfo :: HomeModInfo
-  , riTidyGuts :: CgGuts
+-- | The interface and Core have one finalization owner. Retaining this pair
+-- permits later preparation from the exact result that supplied its interface,
+-- without replaying source or retaining a mutable compiler session.
+data FinalizedModule = FinalizedModule
+  { finalizedHomeModInfo :: HomeModInfo
+  , finalizedTidyGuts :: CgGuts
   }
 
 -- | Prepared mode keeps the ordinary typed pipeline observations alongside
@@ -1392,7 +1391,7 @@ data ModuleOutput = ModuleOutput
 -- interfaces can be elided; product mode retains them for later importers.
 data ProductInterface
   = InterfaceElided
-  | InterfaceRetained HomeModInfo
+  | InterfaceRetained FinalizedModule
 
 data ModuleProduct = ModuleProduct
   { productFacts :: ModuleFacts
@@ -1476,10 +1475,10 @@ payloadProduct (ExecutableProduct moduleProduct) = Just moduleProduct
 retainedInterface :: ModuleProduct -> Maybe HomeModInfo
 retainedInterface moduleProduct = case productInterface moduleProduct of
   InterfaceElided -> Nothing
-  InterfaceRetained hmi -> Just hmi
+  InterfaceRetained finalized -> Just (finalizedHomeModInfo finalized)
 
 requireProduct :: ModuleFacts -> ModuleOutput -> Maybe PreparedModule
-  -> Maybe HomeModInfo -> Ghc ModuleProduct
+  -> Maybe FinalizedModule -> Ghc ModuleProduct
 requireProduct facts output (Just prepared) interface = pure ModuleProduct
   { productFacts = facts
   , productOutput = output
@@ -1953,7 +1952,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                   captureProducts interfaceUse (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
                 when captureProducts $ forM_ mRegistration $ \registration -> liftIO $
                   modifyIORef' productInterfacesRef (Map.insert
-                    (ms_mod_name (mfSummary mf)) (hm_iface (riHomeModInfo registration)))
+                    (ms_mod_name (mfSummary mf)) (hm_iface (finalizedHomeModInfo registration)))
                 liftIO $ recordInterface (mfSummary mf) mInterfaceMs
                 let externalized = externalizeInternalTops simplified
                 pure
@@ -1965,15 +1964,14 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                       , moduleOutputCheckedBinderPins = mfCheckedBinderPins mf
                       , moduleOutputResultType = mfResultType mf
                       }
-                  , riHomeModInfo <$> mRegistration
-                  , riTidyGuts <$> mRegistration
+                  , mRegistration
                   )
-              prepareSelected mf simplified mRegisteredTidy = case preparation of
+              prepareSelected mf simplified mFinalized = case preparation of
                 CheckOnly -> pure Nothing
                 PrepareStg -> do
                   liftIO (modifyIORef' preparedCountRef (+ 1))
-                  cgGuts <- case mRegisteredTidy of
-                    Just tidy -> pure tidy
+                  cgGuts <- case mFinalized of
+                    Just finalized -> pure (finalizedTidyGuts finalized)
                     Nothing -> fst <$> timePhase timing "prepared_tidy" (liftIO (hscTidy (mfHscEnv mf) simplified))
                   let ownedSiblings = resolvePreparedSiblings (cg_binds cgGuts)
                       importedSiblings = resolvePreparedInterfaceSiblings (mfHscEnv mf)
@@ -2286,10 +2284,10 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                           memoMiss modSum reason
                           memoMissTrace modSum reason (Just entry)
                         mf <- compileFront modSum
-                        (simplified, r, mInterface, mRegisteredTidy) <- compileBack interfaceUse mf
-                        prepared <- prepareSelected mf simplified mRegisteredTidy
+                        (simplified, r, mFinalized) <- compileBack interfaceUse mf
+                        prepared <- prepareSelected mf simplified mFinalized
                         facts <- liftIO (frontFacts mf)
-                        moduleProduct <- requireProduct facts r prepared mInterface
+                        moduleProduct <- requireProduct facts r prepared mFinalized
                         case mMemoRef of
                           Just ref -> liftIO (modifyIORef' ref
                             (Map.insert mn (GutsMemoEntry
@@ -2385,9 +2383,9 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                     -- The reachability pass ran against load's interfaces. Recheck
                     -- against the exact prepared dependencies registered so far.
                     f <- compileFront modSum
-                    (simplified, r, mInterface, mRegisteredTidy) <- compileBack interfaceUse f
-                    prepared <- prepareSelected f simplified mRegisteredTidy
-                    rememberExecutable modSum r prepared mInterface moduleFacts
+                    (simplified, r, mFinalized) <- compileBack interfaceUse f
+                    prepared <- prepareSelected f simplified mFinalized
+                    rememberExecutable modSum r prepared mFinalized moduleFacts
                     pure [(r, prepared)]
                   validationOnly modSum moduleFacts =
                     case mMemoRef of
@@ -3552,7 +3550,7 @@ needsPreparedInterface _ = True
 
 registerPreparedInterface :: Bool -> Word64 -> InterfaceReuse -> Bool -> HomeInterfaceUse
   -> ModSummary -> TcGblEnv -> HscEnv -> ModGuts
-  -> Ghc (Maybe Integer, Maybe RegisteredInterface)
+  -> Ghc (Maybe Integer, Maybe FinalizedModule)
 registerPreparedInterface timing requestId interfaceReuse captureProducts interfaceUse modSum tcGblEnv hscEnv simplified
   | not captureProducts && not (needsPreparedInterface interfaceUse) = do
       when timing $ liftIO $ hPutStrLn stderr $
@@ -3570,7 +3568,7 @@ registerPreparedInterface timing requestId interfaceReuse captureProducts interf
       let hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
       when (needsPreparedInterface interfaceUse) $
         installPreparedInterface (ms_mod_name modSum) hmi
-      pure (Just (tidyMs + ifaceMs), Just (RegisteredInterface hmi cgGuts))
+      pure (Just (tidyMs + ifaceMs), Just (FinalizedModule hmi cgGuts))
 
 -- Keep request-local executable state out of the reusable prepared memo.
 installPreparedInterface :: ModuleName -> HomeModInfo -> Ghc ()
