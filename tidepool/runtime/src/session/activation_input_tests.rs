@@ -50,9 +50,6 @@ struct InputFixture {
     session: SessionId,
     recipe: Arc<InputRecipe>,
     producer: CompiledTurn,
-    receiver: CompiledTurn,
-    receiver_binders: Vec<BoundBinder>,
-    receiver_generation: tidepool_repr::Generation,
 }
 
 impl InputFixture {
@@ -119,32 +116,11 @@ impl InputFixture {
             .unwrap();
         let producer = compiled(compile_turn(&view, &recipe, source, &[]));
         assert_startup_origin("producer", &producer, true);
-        let TurnResult::Bind {
-            compiled: receiver,
-            bound,
-            ..
-        } = compile_turn(
-            &view,
-            &recipe,
-            include_str!("fixtures/activation-input-receiver.hs"),
-            &[],
-        )
-        else {
-            panic!("native protocol receiver is a real retained Haskell binding");
-        };
-        assert_startup_origin("receiver", &receiver, false);
-        assert_eq!(bound.len(), 2, "receiver and native Unit reply bindings");
-        for name in ["activationReceiver", "activationUnitReply"] {
-            assert_eq!(bound.iter().filter(|binder| binder.name == name).count(), 1);
-        }
         Self {
             root,
             session,
             recipe,
             producer,
-            receiver,
-            receiver_binders: bound,
-            receiver_generation: view.next_value_generation(),
         }
     }
 
@@ -169,19 +145,52 @@ impl InputFixture {
                 LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             )
             .unwrap();
+        let (bound, receiver, reservation) = compile_checked_binding(
+            &mut resident,
+            &self.recipe,
+            include_str!("fixtures/activation-input-receiver.hs"),
+            None,
+        );
+        assert_eq!(bound.len(), 2, "receiver and native Unit reply bindings");
+        for name in ["activationReceiver", "activationUnitReply"] {
+            assert_eq!(bound.iter().filter(|binder| binder.name == name).count(), 1);
+        }
+        assert!(
+            receiver.asks.is_empty(),
+            "pure receiver setup has no request sites"
+        );
+        let execution = receiver
+            .certification
+            .as_ref()
+            .and_then(|certificate| certificate.checked_execution.as_ref())
+            .expect("receiver setup has its checked native output proof");
+        assert!(execution.matches_target(&receiver.prepared));
+        let interface = execution
+            .value_interface_certificate()
+            .expect("receiver setup issued its exact value-interface certificate");
+        assert!(interface.is_checked_output());
+        assert_eq!(
+            interface.owner(),
+            tidepool_repr::SessionModule::val(reservation.generation())
+        );
         let outcome = resident
             .run_projected_bind_with_sites(
                 "nativeActivationReceiver",
-                self.receiver.code(),
-                &self.receiver_binders,
-                self.receiver_generation,
+                receiver.code(),
+                &bound,
+                reservation.generation(),
             )
-            .expect("install the actual native protocol receiver and Unit reply");
+            .expect("install the checked native protocol receiver and Unit reply");
         assert!(
             matches!(outcome, ResidentOutcome::BindingsCommitted { .. }),
             "projected native binding completion: {outcome:?}"
         );
-        for binder in &self.receiver_binders {
+        let retained = resident
+            .state
+            .retained_checked_value_artifact(interface.owner())
+            .expect("receiver settlement retained the checked value-interface proof");
+        assert!(Arc::ptr_eq(retained, &interface));
+        for binder in &bound {
             assert!(resident
                 .state
                 .bindings()
@@ -504,35 +513,30 @@ fn preview_original(
     assert_eq!(tuple[1], false);
 }
 
-fn original_value_probe(
+fn compile_checked_binding(
     resident: &mut TestSession,
     recipe: &InputRecipe,
     source: &str,
-    value: i64,
+    execution: Option<Arc<crate::session::PrivateExecutionAdmission>>,
+) -> (
+    Vec<BoundBinder>,
+    CompiledTurn,
+    Arc<crate::session::RuntimeCheckedItemAdmission>,
 ) {
     use crate::session::{CellCheckRequest, TemplateSelector};
     use tidepool_toolchain::checked_cell::CheckedCellSpecification;
 
-    let previous_context = resident.run_context();
-    let original_bindings = resident.binding_names_in(ScopeId::ROOT);
-    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
-    let private_scope = execution.private_scope();
-    resident
-        .set_run_context(SessionRunContext {
-            lexical_scope: private_scope,
-            ..previous_context
-        })
-        .unwrap();
-    let view = execution.view();
+    let scope = resident.run_context().lexical_scope;
+    let view = resident
+        .compile_view_in(scope)
+        .unwrap()
+        .with_scoped_injection();
     let imports = view.turn_imports(&SourceImports::new());
     let template = resident_cell_check_template(&recipe.preamble, &recipe.row, &imports);
     let templates = resident_workbench_templates(&recipe.preamble, &recipe.row, &imports);
-    // An authored checked bind evaluates the original input and its display;
-    // its selected value interfaces come from runtime admission.
-    let source = format!("originalInputProbe <- pure (({source}), T.pack (P.show ({source})))");
     let specification = Arc::new(CheckedCellSpecification {
         admission_digest: [0; 32],
-        cell_source: source.clone(),
+        cell_source: source.into(),
         template_source: template.clone(),
         turn_templates: templates
             .iter()
@@ -549,16 +553,25 @@ fn original_value_probe(
         injected_modules: view.injected_module_names(),
         reserved_declaration_modules: Vec::new(),
     });
-    let admission = resident
-        .admit_cell_for_execution(
-            execution.clone(),
+    let admission = match execution {
+        Some(execution) => resident.admit_cell_for_execution(
+            execution,
             0,
             specification.clone(),
             specification.specification_digest(),
             recipe.digest(),
             view.include_paths(&recipe.include),
-        )
-        .expect("admit the original-value probe with its selected checked interfaces");
+        ),
+        None => resident.admit_cell_in(
+            scope,
+            0,
+            specification.clone(),
+            specification.specification_digest(),
+            recipe.digest(),
+            view.include_paths(&recipe.include),
+        ),
+    }
+    .expect("admit checked fixture bindings with their selected interfaces");
     let view = admission.view();
     let includes = admission.include_paths().to_vec();
     let include = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
@@ -567,7 +580,7 @@ fn original_value_probe(
         CellCheckRequest {
             exact_context: view.exact_compile_context(),
             session_id: Some(view.session()),
-            cell_text: &source,
+            cell_text: source,
             template: &template,
             include: &include,
             session_root: view.session_root(),
@@ -578,7 +591,7 @@ fn original_value_probe(
         admission.clone(),
         &templates,
     )
-    .expect("check the original-value probe through runtime admission");
+    .expect("check fixture bindings through runtime admission");
     let item = checked.checked_item(0).unwrap();
     let prefix = resident
         .begin_checked_prefix(admission, item.clone())
@@ -593,7 +606,7 @@ fn original_value_probe(
         TurnRequest {
             exact_context: view.exact_compile_context(),
             session_id: Some(view.session()),
-            turn_text: &source,
+            turn_text: source,
             templates: &templates,
             include: &include,
             session_root: view.session_root(),
@@ -605,10 +618,33 @@ fn original_value_probe(
         },
         reservation.clone(),
     )
-    .expect("compile the admitted original-value probe")
+    .expect("compile admitted fixture bindings")
     else {
-        panic!("original-value probe must be a checked bind");
+        panic!("fixture setup or value probe must be a checked bind");
     };
+    (bound, compiled, reservation)
+}
+
+fn original_value_probe(
+    resident: &mut TestSession,
+    recipe: &InputRecipe,
+    source: &str,
+    value: i64,
+) {
+    let previous_context = resident.run_context();
+    let original_bindings = resident.binding_names_in(ScopeId::ROOT);
+    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    let private_scope = execution.private_scope();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: private_scope,
+            ..previous_context
+        })
+        .unwrap();
+    // The actual checked bind evaluates the original input and its display.
+    let source = format!("originalInputProbe <- pure (({source}), T.pack (P.show ({source})))");
+    let (bound, compiled, reservation) =
+        compile_checked_binding(resident, recipe, &source, Some(execution));
     assert_eq!(bound.len(), 1);
     let ResidentOutcome::Completed { result, .. } = resident
         .run_bind_with_sites(
@@ -1090,14 +1126,8 @@ fn native_input_generation_retains_original_type_owner_after_source_readers_drop
             .cloned()
             .collect(),
     });
-    let InputFixture {
-        root,
-        producer,
-        receiver,
-        ..
-    } = fixture;
+    let InputFixture { root, producer, .. } = fixture;
     drop(producer);
-    drop(receiver);
     std::fs::remove_dir_all(root.path().join("home")).unwrap();
     let retained = evidence.compile_context(None).unwrap();
     assert!(retained
