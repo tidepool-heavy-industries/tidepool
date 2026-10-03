@@ -1198,7 +1198,7 @@ impl CommandResources {
             if !started && read_counter(&directory.join("cgroup.events"), "populated")? == 0 {
                 // An empty cgroup can be removed with open join descriptors. Either
                 // removal fences the late join, or a racing join wins and is killed.
-                match std::fs::remove_dir(directory) {
+                match std::fs::remove_dir(&directory) {
                     Ok(()) => {
                         directory_removed = true;
                         released = true;
