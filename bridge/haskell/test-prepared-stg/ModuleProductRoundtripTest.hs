@@ -12,6 +12,7 @@ import Codec.CBOR.Write (toLazyByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Map.Strict qualified as Map
+import Data.Maybe (listToMaybe)
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Word (Word32)
@@ -57,6 +58,7 @@ import Tidepool.DependencyEvidence (DependencySource(..), sourceEvidence)
 import Tidepool.ModuleCandidates
   ( CandidateGroup(..), CandidateGlobal(..), ModuleCandidate(..), readModuleCandidates )
 import Tidepool.PackageWitness (encodePackageImports)
+import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
 
 -- Exercise the skinny interface retained for a prepared defining module,
 -- then import it from a new GHC session with its source absent.
@@ -384,7 +386,7 @@ verifyOriginalProductCatalogue work = do
             { candidateGlobalIdentity = Schema.globalIdentity global
             , candidateGlobalRep = Schema.globalRep global
             , candidateGlobalSignature = Schema.globalEntrySignature global >>= \(Schema.SignatureId index) ->
-                at (projectedSignatures body) (fromIntegral index)
+                listToMaybe (drop (fromIntegral index) (projectedSignatures body))
             , candidateGlobalEvaluated = Schema.globalRequiredEvaluated global
             , candidateGlobalGeneration = fromIntegral <$> Schema.globalRequiredGeneration global
             }
