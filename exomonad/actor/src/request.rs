@@ -632,9 +632,8 @@ impl RequestStateTable {
                     if record.target_state == TargetState::Settling {
                         record.target_state = TargetState::Closed;
                         if record.owner_state == OwnerState::Observing {
-                            record.owner_state = OwnerState::Unavailable(
-                                ResponseFailure::SettlementFailed(detail),
-                            );
+                            record.owner_state =
+                                OwnerState::Unavailable(ResponseFailure::SettlementFailed(detail));
                         }
                     }
                 }

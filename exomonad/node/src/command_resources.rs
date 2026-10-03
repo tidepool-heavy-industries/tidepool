@@ -638,9 +638,9 @@ impl CommandResources {
                     }
                     state.update_entry(&key, |entry| {
                         entry.directory = Some(directory.clone());
-                        entry.status.send_replace(CommandResourceStatus::Admitted {
-                            cgroup: directory,
-                        });
+                        entry
+                            .status
+                            .send_replace(CommandResourceStatus::Admitted { cgroup: directory });
                     });
                     state
                         .queue
@@ -760,9 +760,8 @@ impl CommandResources {
                 state.set_status(
                     &key,
                     CommandResourceStatus::CleanupUnconfirmed {
-                        detail:
-                            "started allocation was empty at recovery; completion is unproven"
-                                .into(),
+                        detail: "started allocation was empty at recovery; completion is unproven"
+                            .into(),
                     },
                 );
             } else {
@@ -1806,23 +1805,18 @@ mod tests {
         assert_eq!(observation.active, 1);
         assert_eq!(observation.retained_allocations, 1);
         assert_eq!(observation.cleanup_failures, 1);
-        assert!(owner
-            .state
-            .lock()
-            .entries[&(String::from("actor-1"), String::from("command-1"))]
-            .directory
-            .as_ref()
-            .is_some_and(|path| path.is_dir()));
+        assert!(
+            owner.state.lock().entries[&(String::from("actor-1"), String::from("command-1"))]
+                .directory
+                .as_ref()
+                .is_some_and(|path| path.is_dir())
+        );
         std::fs::write(
             root.join("actor-1/command-1/cgroup.events"),
             "populated 0\n",
         )
         .unwrap();
-        std::fs::write(
-            root.join("actor-1/command-1/memory.events"),
-            "oom_kill 0\n",
-        )
-        .unwrap();
+        std::fs::write(root.join("actor-1/command-1/memory.events"), "oom_kill 0\n").unwrap();
         drop(owner);
 
         let reopened = owner_with_journal(&root, journal_path);

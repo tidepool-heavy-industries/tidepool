@@ -1288,13 +1288,13 @@ async fn handle_parked_message<B: KernelBehavior>(
                     })
                     .ok();
             } else {
-                state.deferred_mailbox.push_back(
-                    KernelMessage::ReconcileWorkbenchCancellation {
+                state
+                    .deferred_mailbox
+                    .push_back(KernelMessage::ReconcileWorkbenchCancellation {
                         execution,
                         invocation,
                         reply,
-                    },
-                );
+                    });
             }
             Ok(())
         }
@@ -1306,9 +1306,9 @@ async fn handle_parked_message<B: KernelBehavior>(
                     .send(crate::WorkbenchBoundaryReconciliation::Pending)
                     .ok();
             } else {
-                state.deferred_mailbox.push_back(
-                    KernelMessage::ReconcileWorkbenchBoundary { boundary, reply },
-                );
+                state
+                    .deferred_mailbox
+                    .push_back(KernelMessage::ReconcileWorkbenchBoundary { boundary, reply });
             }
             Ok(())
         }
