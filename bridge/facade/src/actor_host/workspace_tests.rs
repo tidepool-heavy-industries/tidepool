@@ -353,6 +353,7 @@ fn owner(
         embedded_policy: None,
         launch: HostLaunchState::Published,
         pending_activations: Vec::new(),
+        embedded: None,
         terminal: None,
         retirement: Arc::new(Mutex::new(None)),
     }

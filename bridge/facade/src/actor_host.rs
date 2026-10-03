@@ -2252,6 +2252,10 @@ impl NativeForkAdmission {
 }
 
 impl InteractiveApplicationOwner {
+    fn should_retire_undeployed_native(&self, has_deployment: bool) -> bool {
+        self.embedded.is_none() && !has_deployment
+    }
+
     fn embedded() -> Self {
         Self {
             #[cfg(feature = "codex-compat")]
@@ -4836,24 +4840,25 @@ fn observed_resource_release(
     actor: ActorRef,
     owners: &InteractiveOwners,
 ) -> Option<exomonad_actor::ResourceRelease> {
-    let owners = owners.lock();
-    let Some(owner) = owners.get(&actor) else {
-        return Some(exomonad_actor::ResourceRelease::Released);
+    let retirement = {
+        let owners = owners.lock();
+        let Some(owner) = owners.get(&actor) else {
+            return Some(exomonad_actor::ResourceRelease::Released);
+        };
+        if let Some(embedded) = owner.embedded.as_ref() {
+            if embedded.live {
+                return None;
+            }
+            if let Some(error) = embedded.cleanup_failure.as_ref() {
+                return Some(embedded_resource_release(Some(error)));
+            }
+            return Some(exomonad_actor::ResourceRelease::Released);
+        }
+        Arc::clone(&owner.retirement)
     };
-    if let Some(embedded) = owner.embedded.as_ref() {
-        if embedded.live {
-            return None;
-        }
-        if let Some(error) = embedded.cleanup_failure.as_ref() {
-            return Some(embedded_resource_release(Some(error)));
-        }
-        return Some(exomonad_actor::ResourceRelease::Released);
-    }
-    owner
-        .retirement
-        .lock()
-        .as_ref()
-        .map(InteractiveCleanupReceipt::release)
+    let receipt = retirement.lock();
+    let release = receipt.as_ref().map(InteractiveCleanupReceipt::release);
+    release
 }
 
 /// Fence admission and preserve release waits already queued when shutdown wins.

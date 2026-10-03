@@ -155,6 +155,7 @@ impl Fixture {
                 embedded_policy: None,
                 launch: HostLaunchState::Pending,
                 pending_activations: Vec::new(),
+                embedded: None,
                 terminal: None,
                 retirement: Arc::new(Mutex::new(None)),
             },

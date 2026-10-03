@@ -1184,10 +1184,15 @@ pub(super) async fn run_interactive_applications(
                             owner.retired(terminal);
                         }
                         #[cfg(feature = "codex-compat")]
+                        let retire_undeployed_native = application_owners
+                            .lock()
+                            .get(&actor)
+                            .map_or(true, |owner| owner.should_retire_undeployed_native(false));
+                        #[cfg(feature = "codex-compat")]
                         if let Some(index) = deployments.iter().position(|app| app.actor == actor) {
                             let deployment = deployments.swap_remove(index);
                             spawn_owned_retirement(&mut retirements, deployment, tmux.clone(), &application_owners);
-                        } else {
+                        } else if retire_undeployed_native {
                             spawn_undeployed_hosted_retirement(
                                 &mut retirements,
                                 actor,
@@ -1255,7 +1260,7 @@ pub(super) async fn run_interactive_applications(
                                 .filter(|binding| binding.is_live()) {
                                 schedule_embedded_notification_send(
                                     command,
-                                    binding,
+                                    &binding,
                                     &mut notifications,
                                 );
                             } else {
@@ -1289,7 +1294,7 @@ pub(super) async fn run_interactive_applications(
                             .filter(|binding| binding.is_live()) {
                             schedule_embedded_notification_send(
                                 command,
-                                binding,
+                                &binding,
                                 &mut notifications,
                             );
                         } else {
@@ -1304,7 +1309,7 @@ pub(super) async fn run_interactive_applications(
                             let target = command.receipt().target();
                             let result = match embedded_binding(&application_owners, target) {
                                 Some(binding) => {
-                                    observe_embedded_notification(&command, binding, target).await
+                                    observe_embedded_notification(&command, &binding, target).await
                                 }
                                 None => Err(exomonad_actor::NotificationError::Unavailable),
                             };
@@ -1325,7 +1330,7 @@ pub(super) async fn run_interactive_applications(
                         let target = command.receipt().target();
                         let result = match embedded_binding(&application_owners, target) {
                             Some(binding) => {
-                                observe_embedded_notification(&command, binding, target).await
+                                observe_embedded_notification(&command, &binding, target).await
                             }
                             None => Err(exomonad_actor::NotificationError::Unavailable),
                         };
@@ -1945,13 +1950,13 @@ pub(super) async fn run_interactive_applications(
         while binding_discoveries.join_next().await.is_some() {}
         let undeployed = application_owners
             .lock()
-            .keys()
-            .copied()
-            .filter(|actor| {
-                !deployments
-                    .iter()
-                    .any(|deployment| deployment.actor == *actor)
+            .iter()
+            .filter(|(actor, owner)| {
+                owner.should_retire_undeployed_native(
+                    deployments.iter().any(|deployment| deployment.actor == **actor),
+                )
             })
+            .map(|(actor, _)| *actor)
             .collect::<Vec<_>>();
         for actor in undeployed {
             spawn_undeployed_hosted_retirement(&mut retirements, actor, &application_owners, &tmux);

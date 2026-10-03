@@ -99,6 +99,7 @@ fn embedded_owner_keeps_release_pending_until_task_settles_and_retains_failed_cl
     let owner = InteractiveApplicationOwner::embedded();
     let owners = Arc::new(Mutex::new(HashMap::from([(actor, owner)])));
 
+    update_embedded_state(&owners, actor, |state| state.live = true);
     assert_eq!(observed_resource_release(actor, &owners), None);
     update_embedded_state(&owners, actor, |state| state.live = false);
     assert_eq!(
@@ -117,6 +118,17 @@ fn embedded_owner_keeps_release_pending_until_task_settles_and_retains_failed_cl
         observed_resource_release(actor, &owners),
         Some(ResourceRelease::Retained(detail)) if detail.contains("claim settlement failed")
     ));
+}
+
+#[test]
+fn embedded_owner_skips_native_undeployed_retirement() {
+    let embedded = InteractiveApplicationOwner::embedded();
+    assert!(!embedded.should_retire_undeployed_native(false));
+
+    let mut native = InteractiveApplicationOwner::embedded();
+    native.embedded = None;
+    assert!(native.should_retire_undeployed_native(false));
+    assert!(!native.should_retire_undeployed_native(true));
 }
 
 #[tokio::test(start_paused = true)]

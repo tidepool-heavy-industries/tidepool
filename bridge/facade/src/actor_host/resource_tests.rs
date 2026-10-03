@@ -115,6 +115,7 @@ fn source_checkout_launch_has_process_custody_without_a_worktree_lease() {
         embedded_policy: None,
         launch: HostLaunchState::Pending,
         pending_activations: Vec::new(),
+        embedded: None,
         terminal: None,
         retirement: Arc::new(Mutex::new(None)),
     };
