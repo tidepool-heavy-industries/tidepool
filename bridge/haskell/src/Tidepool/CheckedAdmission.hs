@@ -26,9 +26,9 @@ matchesInspectionAdmission args values =
     && not (requestTurn args) && not (requestCell args) && not (requestClassify args)
     && not (requestCheckSource args) && not (requestCellPlan args)
     && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
-    && not (requestHarnessProfile args) && not (requestCellFoldTurn args)
+    && not (requestHarnessProfile args)
     && not (isJust (requestDeclarationJoin args))
-    && not (isJust (requestBindGen args)) && not (isJust (requestTurnPin args))
+    && not (isJust (requestBindGen args))
     && not (isJust (requestTarget args)) && null (requestTargets args)
     && Map.null (requestRetainedGenerations args)
     && requestInjectVals args == values

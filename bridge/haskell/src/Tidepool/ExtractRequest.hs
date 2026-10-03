@@ -501,7 +501,7 @@ pField bytes = do
     52 -> Right (CheckSource, rest)
     32 -> mapParser CellTemplate pText rest
     33 -> mapParser CellOut pText rest
-    34 -> retired 34
+    34 -> retired tag
     35 -> mapParser InspectSearch pText rest
     36 -> mapParser InspectStructuredInfo pStructuredInspection rest
     37 -> mapParser InspectStructuredType pStructuredInspection rest
@@ -514,7 +514,7 @@ pField bytes = do
     41 -> Right (ActivationPreview, rest)
     42 -> Right (InspectionStrict, rest)
     43 -> Right (InspectScopeBrowse, rest)
-    45 -> retired 45
+    45 -> retired tag
     _  -> Left ("worker request: unknown field tag " ++ show tag)
   where
     retired tag = Left ("worker request: retired field tag " ++ show tag)
