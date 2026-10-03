@@ -101,11 +101,9 @@ execution does not authorize replay. A recovery receipt saying "not submitted"
 requires waiting for its recovery notice before resubmission. Keep
 `respond value` as one single-line unit with nothing after it.
 
-Cell expressions and bindings retain typed values without rendering them. Use
-`display value` for bounded structured output; it returns a `DisplayHandle` whose
-field keys can be expanded independently with `expand`. Ordinary data types need
-no deriving clause for explicit display; unsupported fields are opaque. Use
-`display (show value)` for Haskell's textual `Show` form.
+Data types need no deriving clause; unsupported fields stay opaque. Use
+`display value` for structured output and `expand` for detail, or
+`display (show value)` for textual output.
 
 # Evidence and semantic judgment
 

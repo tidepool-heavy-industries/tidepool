@@ -6,7 +6,7 @@ text, maps, and sets. `bash`, `withMemory`, `MiB`, `GiB`, `:=`, and `:&` are in 
 Cells enable the usual extensions, including `TypeApplications`, `DataKinds`,
 `OverloadedLabels`, and `OverloadedRecordDot`; standalone modules declare theirs.
 
-Cell values are retained with their types and are not rendered automatically.
+Cell values retain their types without automatic rendering.
 Use `display value` for bounded structured output; it returns a
 `DisplayHandle value`. `expansions handle` gives opaque keys and field labels,
 and `expand handle key` displays one field independently. Use
