@@ -342,3 +342,34 @@ fn test_page(text: &str) -> CommandPage {
         trailing_fragment: false,
     }
 }
+
+pub(super) async fn backend_request(
+    campaign: &mut super::test_campaign::TestCampaign,
+) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest> {
+    loop {
+        let request = raw_backend_request(campaign).await;
+        match request.purpose {
+            exomonad_actor::command_jobs::CommandBackendPurpose::Command => return request,
+            exomonad_actor::command_jobs::CommandBackendPurpose::SourceProbe => {
+                request.supply(Ok(TestCommands::completed(
+                    "/work/tree\n0123456789abcdef0123456789abcdef01234567\nclean\n",
+                )))
+            }
+        }
+    }
+}
+
+pub(super) async fn raw_backend_request(
+    campaign: &mut super::test_campaign::TestCampaign,
+) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest> {
+    campaign
+        .next_deployment(
+            "backend request",
+            std::time::Duration::from_secs(30),
+            |event| match event {
+                exomonad_actor::LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                other => Err(other),
+            },
+        )
+        .await
+}

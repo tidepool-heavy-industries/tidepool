@@ -14,34 +14,7 @@ pub(super) async fn committed(campaign: &TestCampaign, source: &str) -> serde_js
     }
     result
 }
-pub(super) async fn backend_request(
-    campaign: &mut TestCampaign,
-) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest> {
-    loop {
-        let request = raw_backend_request(campaign).await;
-        match request.purpose {
-            CommandBackendPurpose::Command => return request,
-            CommandBackendPurpose::SourceProbe => request.supply(Ok(TestCommands::completed(
-                "/work/tree\n0123456789abcdef0123456789abcdef01234567\nclean\n",
-            ))),
-        }
-    }
-}
-
-pub(super) async fn raw_backend_request(
-    campaign: &mut TestCampaign,
-) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest> {
-    campaign
-        .next_deployment(
-            "backend request",
-            Duration::from_secs(30),
-            |event| match event {
-                LocalResidentDeployment::CommandBackend(request) => Ok(request),
-                other => Err(other),
-            },
-        )
-        .await
-}
+pub(super) use super::command_test_support::{backend_request, raw_backend_request};
 
 #[test]
 fn cargo_report_preserves_nonzero_diagnostics_and_typed_parse_errors() {

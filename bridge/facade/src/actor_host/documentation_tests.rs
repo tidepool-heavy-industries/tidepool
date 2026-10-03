@@ -1,7 +1,7 @@
 //! Focused execution of the published examples through the real resident tool.
 
 use super::test_campaign::TestCampaign;
-use super::tests::{dispatch_haskell_script, dispatch_lookup, dispatch_status};
+use super::test_campaign::{dispatch_haskell_script, dispatch_lookup, dispatch_status};
 use super::*;
 use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
@@ -900,7 +900,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     let mut campaign = TestCampaign::start_with_config(
         exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
-        super::jev_tests::pinned_jev_workspace,
+        super::test_campaign::pinned_jev_workspace,
     )
     .await;
     let root = campaign.root_installation.policy.clone();
@@ -3612,7 +3612,7 @@ fn explicit_display_identity(display: &serde_json::Value) -> (i64, i64, i64) {
 
 #[tokio::test]
 async fn explicit_display_expands_siblings_without_compilation_or_repeated_effects() {
-    use super::command_jobs_tests::backend_request;
+    use super::command_test_support::backend_request;
     use super::command_test_support::TestCommands;
 
     let mut campaign = TestCampaign::start().await;

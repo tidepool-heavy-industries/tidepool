@@ -29,7 +29,7 @@ mod context_transaction_acceptance_tests;
 mod custody_tests;
 mod delivery;
 mod display_output;
-#[cfg(all(test, feature = "codex-compat"))]
+#[cfg(test)]
 mod documentation_tests;
 #[cfg(test)]
 mod embedded_captured_unfold_tests;

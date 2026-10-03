@@ -310,4 +310,49 @@ mod tests {
         let frozen = FrozenBasePrompt::materialize(root.path()).unwrap();
         assert_eq!(std::fs::read_to_string(frozen.file()).unwrap(), base);
     }
+
+    #[test]
+    fn launch_capabilities_follow_each_admitted_notebook_profile() {
+        use super::super::orient_launch_instructions;
+        use exomonad_tool::{
+            ActorEffectKey, CustomToolDeclaration, HostedTool, ToolEffectKey, ToolImplementation,
+            ToolScheduling,
+        };
+        let notebook = |name: &str, effects: Vec<ToolEffectKey>| {
+            HostedTool::Custom(CustomToolDeclaration {
+                name: name.into(),
+                description: "test notebook".into(),
+                schedule: ToolScheduling::Async,
+                implementation: ToolImplementation::HaskellCell,
+                effect_keys: effects,
+            })
+        };
+        let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
+        let sparse = notebook("sparse_cell", vec![ActorEffectKey::Commands.into()]);
+        let lookup = notebook("lookup_cell", vec![ActorEffectKey::Lookup.into()]);
+        let shared = PromptId::ExomonadBase.body();
+        let sparse_only =
+            orient_launch_instructions(shared, &observation.snapshot(), &[sparse.clone()]);
+        assert!(sparse_only.starts_with(shared));
+        assert!(sparse_only[shared.len()..].contains("sparse_cell"));
+        assert!(sparse_only[shared.len()..].contains("Commands"));
+        assert!(!sparse_only[shared.len()..].contains("Lookup"));
+        assert!(!sparse_only[shared.len()..].contains("LookupApi.lookupRaw"));
+        let mixed = orient_launch_instructions(shared, &observation.snapshot(), &[sparse, lookup]);
+        let suffix = &mixed[shared.len()..];
+        assert!(mixed.starts_with(shared));
+        assert!(suffix.contains("sparse_cell"));
+        assert!(suffix.contains("lookup_cell"));
+        assert_eq!(suffix.matches("LookupApi.lookupRaw").count(), 1);
+        assert!(!suffix.contains("haskell"));
+        let handler = HostedTool::Custom(CustomToolDeclaration {
+            name: "lookup".into(),
+            description: "authored handler".into(),
+            schedule: ToolScheduling::Async,
+            implementation: ToolImplementation::ResidentHandler,
+            effect_keys: vec![ActorEffectKey::Lookup.into()],
+        });
+        let hosted = orient_launch_instructions(shared, &observation.snapshot(), &[handler]);
+        assert!(!hosted[shared.len()..].contains("LookupApi.lookupRaw"));
+    }
 }

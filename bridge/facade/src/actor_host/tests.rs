@@ -1887,16 +1887,9 @@ async fn dispatch_haskell(
 }
 
 pub(super) use super::test_campaign::{
-    dispatch_haskell_script, dispatch_haskell_script_result, dispatch_lookup,
+    dispatch_haskell_script, dispatch_haskell_script_result, dispatch_lookup, dispatch_status,
     dispatch_structured_tool,
 };
-
-pub(super) async fn dispatch_status(
-    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
-    view: &str,
-) -> serde_json::Value {
-    dispatch_structured_tool(endpoint, "status", serde_json::json!({ "view": view })).await
-}
 
 #[tokio::test]
 async fn idle_application_waits_for_current_host_attachment_despite_retained_binding() {
@@ -7185,48 +7178,4 @@ async fn withdrawal_without_native_evidence_is_not_retried_and_reports_no_host_r
         "{status:?}"
     );
     assert_eq!(status.next, exomonad_actor::InboundNext::NoHostRecovery);
-}
-
-#[test]
-fn launch_capabilities_follow_each_admitted_notebook_profile() {
-    use exomonad_tool::{
-        ActorEffectKey, CustomToolDeclaration, HostedTool, ToolEffectKey, ToolImplementation,
-        ToolScheduling,
-    };
-    let notebook = |name: &str, effects: Vec<ToolEffectKey>| {
-        HostedTool::Custom(CustomToolDeclaration {
-            name: name.into(),
-            description: "test notebook".into(),
-            schedule: ToolScheduling::Async,
-            implementation: ToolImplementation::HaskellCell,
-            effect_keys: effects,
-        })
-    };
-    let observation = exomonad_actor::ActorRuntimeObservationHandle::default();
-    let sparse = notebook("sparse_cell", vec![ActorEffectKey::Commands.into()]);
-    let lookup = notebook("lookup_cell", vec![ActorEffectKey::Lookup.into()]);
-    let shared = PromptId::ExomonadBase.body();
-    let sparse_only =
-        orient_launch_instructions(shared, &observation.snapshot(), &[sparse.clone()]);
-    assert!(sparse_only.starts_with(shared));
-    assert!(sparse_only[shared.len()..].contains("sparse_cell"));
-    assert!(sparse_only[shared.len()..].contains("Commands"));
-    assert!(!sparse_only[shared.len()..].contains("Lookup"));
-    assert!(!sparse_only[shared.len()..].contains("LookupApi.lookupRaw"));
-    let mixed = orient_launch_instructions(shared, &observation.snapshot(), &[sparse, lookup]);
-    let suffix = &mixed[shared.len()..];
-    assert!(mixed.starts_with(shared));
-    assert!(suffix.contains("sparse_cell"));
-    assert!(suffix.contains("lookup_cell"));
-    assert_eq!(suffix.matches("LookupApi.lookupRaw").count(), 1);
-    assert!(!suffix.contains("haskell"));
-    let handler = HostedTool::Custom(CustomToolDeclaration {
-        name: "lookup".into(),
-        description: "authored handler".into(),
-        schedule: ToolScheduling::Async,
-        implementation: ToolImplementation::ResidentHandler,
-        effect_keys: vec![ActorEffectKey::Lookup.into()],
-    });
-    let hosted = orient_launch_instructions(shared, &observation.snapshot(), &[handler]);
-    assert!(!hosted[shared.len()..].contains("LookupApi.lookupRaw"));
 }

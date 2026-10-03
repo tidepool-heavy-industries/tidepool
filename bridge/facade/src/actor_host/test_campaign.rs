@@ -574,3 +574,40 @@ pub(super) async fn dispatch_lookup(
     )
     .await
 }
+
+pub(super) async fn dispatch_status(
+    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
+    view: &str,
+) -> serde_json::Value {
+    dispatch_structured_tool(endpoint, "status", serde_json::json!({ "view": view })).await
+}
+
+/// The Jev surface is pinned source, not Tidepool library: a run reaches it
+/// through a workspace whose `flake.nix` names the jev-dsl revision and whose
+/// own `Jev/Operators.hs` fixes that library's JSON type to Tidepool's. These
+/// tests select the package this repository ships, so what they compile is
+/// what a project gets — including the pin.
+pub(super) fn pinned_jev_workspace(config: &mut ActorHostConfig) {
+    let package = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../exomonad/examples/workspace")
+        .canonicalize()
+        .expect("the Exomonad workspace package this repository ships");
+    let authored = config.workspace.join(".exomonad");
+    std::fs::create_dir_all(&authored).unwrap();
+    std::fs::write(
+        authored.join("config.toml"),
+        format!(
+            "[defaults]\nmodel = 'test-model'\n\n[haskell]\nsource_roots = ['{}']\n\n[haskell.flake_sources]\njev-dsl = ['core']\n",
+            package.join(".exomonad").display()
+        ),
+    )
+    .unwrap();
+    for name in ["flake.nix", "flake.lock"] {
+        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
+    }
+    commit_workspace(&config.workspace);
+    config.workspace_inputs = Some(
+        crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+            .expect("resolve the pinned Haskell source"),
+    );
+}

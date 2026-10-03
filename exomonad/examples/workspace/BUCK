@@ -22,3 +22,15 @@ filegroup(
     ])},
     visibility = ["PUBLIC"],
 )
+
+export_file(
+    name = "facade_task_prompt",
+    src = ".exomonad/prompts/task.md",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "facade_workbench_skill",
+    src = ".exomonad/skills/exomonad-workbench/SKILL.md",
+    visibility = ["PUBLIC"],
+)
