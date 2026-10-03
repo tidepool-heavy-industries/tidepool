@@ -105,10 +105,16 @@ async fn explicit_display_is_the_only_value_presentation() {
 
 #[tokio::test]
 async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation() {
-    let campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start().await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     let root = campaign.root_installation.policy.clone();
 
-    let setup = committed(root.as_ref(), include_str!("notebook_nominal_setup.hs")).await;
+    let setup = campaign
+        .drive_actor_output(
+            &store,
+            committed(root.as_ref(), include_str!("notebook_nominal_setup.hs")),
+        )
+        .await;
     assert_eq!(
         setup["summary"], "3 declarations, 2 statements, 1 expression",
         "{setup:?}"
@@ -151,11 +157,10 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
     );
     assert_eq!(items[1]["sourceItems"][0]["ordinal"], 3, "{setup:?}");
     assert_eq!(items[3]["status"], "committed", "{setup:?}");
-    assert!(
-        items[3]["output"]
-            .as_str()
-            .is_some_and(|output| output.contains("Nothing")),
-        "{setup:?}"
+    assert_eq!(
+        explicit_display_output(&setup)["text"],
+        "Nothing",
+        "{setup}"
     );
 
     let rejected =
@@ -221,8 +226,20 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
     }
 
     committed(root.as_ref(), "shadowed <- pure (1 :: Int)\n").await;
-    let shadowed = committed(root.as_ref(), "shadowed <- pure (2 :: Int)\nshadowed\n").await;
-    assert_eq!(shadowed["items"][1]["output"], "2", "{shadowed:?}");
+    let shadowed = campaign
+        .drive_actor_output(
+            &store,
+            committed(
+                root.as_ref(),
+                "shadowed <- pure (2 :: Int)\n_ <- display shadowed\n",
+            ),
+        )
+        .await;
+    assert_eq!(
+        explicit_display_output(&shadowed)["text"],
+        "2",
+        "{shadowed}"
+    );
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -230,22 +247,26 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
 
 #[tokio::test]
 async fn notebook_cell_prologue_applies_to_check_stage_and_execution() {
-    let campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start().await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     let root = campaign.root_installation.policy.clone();
-    let result = committed(root.as_ref(), include_str!("notebook_prologue.hs")).await;
-    assert!(
-        result["items"].as_array().unwrap().last().unwrap()["output"]
-            .as_str()
-            .unwrap()
-            .contains("True"),
-        "{result}"
-    );
-    let later = committed(
-        root.as_ref(),
-        "later <- pure (Imported.reverse [answer, 10])\nlater == [10, 7]\n",
-    )
-    .await;
-    assert!(later.to_string().contains("True"), "{later}");
+    let result = campaign
+        .drive_actor_output(
+            &store,
+            committed(root.as_ref(), include_str!("notebook_prologue.hs")),
+        )
+        .await;
+    assert_eq!(explicit_display_output(&result)["text"], "True", "{result}");
+    let later = campaign
+        .drive_actor_output(
+            &store,
+            committed(
+                root.as_ref(),
+                "later <- pure (Imported.reverse [answer, 10])\n_ <- display (later == [10, 7])\n",
+            ),
+        )
+        .await;
+    assert_eq!(explicit_display_output(&later)["text"], "True", "{later}");
     let disabled = dispatch_haskell_script(
         root.as_ref(),
         "notInstalled <- pure (let ?offset = 5 in implicitTotal 2)\nnotInstalled\n",
@@ -308,16 +329,20 @@ async fn notebook_cell_rejection_retains_its_source_plan() {
 
 #[tokio::test]
 async fn notebook_cell_preserves_old_types() {
-    let campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start().await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     let root = campaign.root_installation.policy.clone();
     committed(root.as_ref(), include_str!("notebook_identity_original.hs")).await;
-    let shadowed = committed(root.as_ref(), include_str!("notebook_identity_shadowed.hs")).await;
-    let output = shadowed["items"].as_array().unwrap().last().unwrap()["output"]
-        .as_str()
-        .unwrap();
+    let shadowed = campaign
+        .drive_actor_output(
+            &store,
+            committed(root.as_ref(), include_str!("notebook_identity_shadowed.hs")),
+        )
+        .await;
+    let output = explicit_display_output(&shadowed)["text"].as_str().unwrap();
     assert!(
         output.contains("OldVersion 1") && output.contains("NewVersion True"),
-        "{shadowed:?}"
+        "{shadowed}"
     );
 
     campaign.forest.shutdown().await;
@@ -326,19 +351,18 @@ async fn notebook_cell_preserves_old_types() {
 
 #[tokio::test]
 async fn notebook_cell_retains_observations_needed_by_its_suffix() {
-    let campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start().await;
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     let root = campaign.root_installation.policy.clone();
     let initial = committed(root.as_ref(), "(42 :: Int)\n").await;
     let saved = initial["items"][0]["installedBindings"][0]
         .as_str()
         .unwrap();
     let source = include_str!("notebook_lease_suffix.hs").replace("__SAVED__", saved);
-    let result = committed(root.as_ref(), &source).await;
-    assert_eq!(
-        result["items"].as_array().unwrap().last().unwrap()["output"],
-        "42",
-        "{result:?}"
-    );
+    let result = campaign
+        .drive_actor_output(&store, committed(root.as_ref(), &source))
+        .await;
+    assert_eq!(explicit_display_output(&result)["text"], "42", "{result}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

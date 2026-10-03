@@ -1017,7 +1017,6 @@ fn simple_cell_vertical(
     label: &str,
     source: &str,
     declarations: usize,
-    expected: &str,
     authority_checks: AuthorityChecks,
 ) -> Vec<String> {
     tidepool_testing::eval_harness::require_extract();
@@ -1057,7 +1056,6 @@ fn complete_cell_consumes_native_items_without_compiler_requests() {
         "complete_cell",
         include_str!("fixtures/compiled-cell-simple.hs"),
         0,
-        "42",
         AuthorityChecks::RefusalBranches,
     );
 }
@@ -1374,7 +1372,6 @@ fn late_record_selector_replaces_earlier_cell_value() {
         "record_selector",
         include_str!("fixtures/compiled-cell-record-selector.hs"),
         1,
-        "2",
         AuthorityChecks::Configured,
     );
     assert!(
@@ -1390,7 +1387,6 @@ fn complete_cell_preserves_exact_local_fixity() {
         "local_fixity",
         include_str!("fixtures/compiled-cell-local-fixity.hs"),
         0,
-        "8",
         AuthorityChecks::Configured,
     );
 }
