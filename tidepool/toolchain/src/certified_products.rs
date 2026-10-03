@@ -7991,13 +7991,29 @@ pub(crate) mod tests {
 
     #[test]
     fn source_only_canonical_interfaces_close_original_receipt_requirements() {
+        let package_imports = |module: &str, interface: &[u8]| {
+            let value = value_array([
+                value_text("TPPKGROOTS"),
+                value_text("2"),
+                value_array([
+                    value_text("main"),
+                    value_text(module),
+                    value_text(hex(&sha(interface))),
+                ]),
+                value_array([]),
+                value_array([]),
+            ]);
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+            bytes
+        };
         let dependency_bytes = b"source-only interface".to_vec();
         let fresh = fixture_interface_bytes(
             [3; 32],
             "main",
             "Aeson",
             dependency_bytes.clone(),
-            b"package-imports".to_vec(),
+            package_imports("Aeson", &dependency_bytes),
         );
         let inherited_bytes = b"inherited source interface".to_vec();
         let inherited = fixture_interface_bytes(
@@ -8005,7 +8021,7 @@ pub(crate) mod tests {
             "main",
             "JsonSupport",
             inherited_bytes.clone(),
-            b"inherited-package-imports".to_vec(),
+            package_imports("JsonSupport", &inherited_bytes),
         );
         let mut accepted = receipt(&[], &evidence("source"), "source");
         accepted.module = "Prelude".into();
@@ -8024,20 +8040,36 @@ pub(crate) mod tests {
 
     #[test]
     fn source_only_interface_closure_rejects_missing_changed_and_conflicting_seals() {
+        let package_imports = |interface: &[u8]| {
+            let value = value_array([
+                value_text("TPPKGROOTS"),
+                value_text("2"),
+                value_array([
+                    value_text("main"),
+                    value_text("Aeson"),
+                    value_text(hex(&sha(interface))),
+                ]),
+                value_array([]),
+                value_array([]),
+            ]);
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+            bytes
+        };
         let original_bytes = b"canonical source-only interface".to_vec();
         let canonical = fixture_interface_bytes(
             [3; 32],
             "main",
             "Aeson",
             original_bytes.clone(),
-            b"package-imports".to_vec(),
+            package_imports(&original_bytes),
         );
         let changed = fixture_interface_bytes(
             [3; 32],
             "main",
             "Aeson",
             b"different interface".to_vec(),
-            b"package-imports".to_vec(),
+            package_imports(b"different interface"),
         );
         let mut accepted = receipt(&[], &evidence("source"), "source");
         accepted.module = "Prelude".into();
