@@ -506,6 +506,7 @@ fn hosted_admission_failure(
 ) -> crate::KernelInvocationFailure {
     match failure {
         crate::KernelCallFailure::MailboxClosed(_) => crate::KernelInvocationFailure::Rejected {
+            receipts: Vec::new(),
             actor,
             detail: "actor mailbox admission is closed".into(),
         },
@@ -514,6 +515,7 @@ fn hosted_admission_failure(
             crate::KernelInvocationFailure::ActorExited(actor)
         }
         failure => crate::KernelInvocationFailure::Failed {
+            receipts: Vec::new(),
             actor,
             detail: failure.to_string(),
         },
@@ -1756,6 +1758,7 @@ mod tests {
             assert!(control.request_cancellation());
             control.acknowledge_cancellation();
             let failure = Err(crate::KernelInvocationFailure::CleanupUnconfirmed {
+                receipts: Vec::new(),
                 actor: crate::ActorRef::first(crate::ActorId(1)),
                 detail: "model invocation terminal receipt unavailable".into(),
             });
@@ -1822,6 +1825,7 @@ mod tests {
         assert!(claim.before_rename_failure());
         let execution = WorkbenchExecutionId::from_digest([8; 16]);
         control.settle(Err(crate::KernelInvocationFailure::Failed {
+            receipts: Vec::new(),
             actor: crate::ActorRef::first(crate::ActorId(1)),
             detail: "publication failed before visibility".into(),
         }));

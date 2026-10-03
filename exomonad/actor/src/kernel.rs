@@ -127,11 +127,23 @@ pub enum KernelInvocationFailure {
     #[error("actor {0} has exited")]
     ActorExited(ActorRef),
     #[error("actor {actor} rejected the invocation: {detail}")]
-    Rejected { actor: ActorRef, detail: String },
+    Rejected {
+        actor: ActorRef,
+        detail: String,
+        receipts: Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
+    },
     #[error("actor {actor} invocation failed: {detail}")]
-    Failed { actor: ActorRef, detail: String },
+    Failed {
+        actor: ActorRef,
+        detail: String,
+        receipts: Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
+    },
     #[error("actor {actor} invocation cleanup remains unconfirmed: {detail}")]
-    CleanupUnconfirmed { actor: ActorRef, detail: String },
+    CleanupUnconfirmed {
+        actor: ActorRef,
+        detail: String,
+        receipts: Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
+    },
     #[error(
         "actor {actor} accepted request {request:?}, but its terminal transfer failed: {source}"
     )]
@@ -142,6 +154,34 @@ pub enum KernelInvocationFailure {
     },
     #[error(transparent)]
     Workbench(#[from] KernelWorkbenchFailure),
+}
+
+impl KernelInvocationFailure {
+    /// Receipts retained by the admitted execution, including terminal cleanup
+    /// and transfer failures. The failure class remains independently typed.
+    pub fn receipts(&self) -> &[tidepool_runtime::session::WorkbenchItemReceipt] {
+        match self {
+            Self::Workbench(failure) => &failure.receipts,
+            Self::Rejected { receipts, .. }
+            | Self::Failed { receipts, .. }
+            | Self::CleanupUnconfirmed { receipts, .. } => receipts,
+            Self::TerminalTransferFailed { source, .. } => source.receipts(),
+            Self::ActorExited(_) => &[],
+        }
+    }
+
+    pub(crate) fn receipts_mut(
+        &mut self,
+    ) -> Option<&mut Vec<tidepool_runtime::session::WorkbenchItemReceipt>> {
+        match self {
+            Self::Workbench(failure) => Some(&mut failure.receipts),
+            Self::Rejected { receipts, .. }
+            | Self::Failed { receipts, .. }
+            | Self::CleanupUnconfirmed { receipts, .. } => Some(receipts),
+            Self::TerminalTransferFailed { source, .. } => source.receipts_mut(),
+            Self::ActorExited(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -786,7 +826,7 @@ impl LocalActorRef {
                 reply: reply.into(),
             })
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
-        receive.await.map_err(|_| KernelInvocationFailure::Failed {
+        receive.await.map_err(|_| KernelInvocationFailure::Failed { receipts: Vec::new(),
             actor: self.identity,
             detail: "replacement outcome unavailable; inspect retained actor state before further action".into(),
         })?
@@ -803,6 +843,7 @@ impl LocalActorRef {
             .await
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?
             .map_err(|error| KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
                 actor: self.identity,
                 detail: error.detail,
             })
@@ -1119,6 +1160,7 @@ mod tests {
                 warnings: Vec::new(),
                 installed_bindings: vec![format!("private{index}")],
                 operations: vec![WorkbenchOperationReceipt {
+                    display_publication: None,
                     display: None,
                     id: WorkbenchOperationId {
                         execution: tidepool_runtime::session::WorkbenchExecutionId::from_digest(

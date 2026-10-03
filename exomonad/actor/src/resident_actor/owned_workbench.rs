@@ -36,7 +36,11 @@ impl WorkbenchCompilationAuthority {
         source_layers: Option<&crate::ActorSourceLayerResolver>,
     ) -> Result<(ActorSessionContext, Arc<Self>), KernelInvocationFailure> {
         let actor = context.actor;
-        let reject = |detail| KernelInvocationFailure::Rejected { actor, detail };
+        let reject = |detail| KernelInvocationFailure::Rejected {
+            receipts: Vec::new(),
+            actor,
+            detail,
+        };
         if let Some(layers) = source_layers {
             layers
                 .validate_source_authority(&source)
@@ -198,6 +202,7 @@ impl WorkbenchPublicOwner {
         durable: Option<tidepool_runtime::session::RecoveryPublicOwner>,
     ) -> Result<Arc<Self>, KernelInvocationFailure> {
         let refuse = |detail: &str| KernelInvocationFailure::Rejected {
+            receipts: Vec::new(),
             actor: context.actor,
             detail: detail.into(),
         };
@@ -505,6 +510,7 @@ where
     if !failures.is_empty() {
         control.mark_unconfirmed();
         return Err(KernelInvocationFailure::CleanupUnconfirmed {
+            receipts: Vec::new(),
             actor: owned.state.effects.context.actor,
             detail: failures.join("; "),
         });
@@ -531,18 +537,39 @@ where
     match owners {
         Ok(()) => finalized,
         Err(error) => {
-            let (actor, mut detail) = match error {
-                KernelInvocationFailure::CleanupUnconfirmed { actor, detail } => (actor, detail),
+            let (actor, detail) = match error {
+                KernelInvocationFailure::CleanupUnconfirmed { actor, detail, .. } => {
+                    (actor, detail)
+                }
                 other => (owned.state.effects.context.actor, other.to_string()),
             };
-            if let Err(error) = finalized.result {
-                detail.push_str(&format!("; workbench finalization: {error}"));
-            }
-            WorkbenchFinalizationResult {
-                result: Err(KernelInvocationFailure::CleanupUnconfirmed { actor, detail }),
-                cleanup_confirmed: false,
-            }
+            retain_cleanup_failure(actor, detail, finalized)
         }
+    }
+}
+
+pub(super) fn retain_cleanup_failure(
+    actor: ActorRef,
+    mut detail: String,
+    finalized: WorkbenchFinalizationResult,
+) -> WorkbenchFinalizationResult {
+    let receipts = match finalized.result {
+        Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
+        | Ok(KernelStep::Stop {
+            output: response, ..
+        }) => response.items,
+        Err(error) => {
+            detail.push_str(&format!("; workbench finalization: {error}"));
+            error.receipts().to_vec()
+        }
+    };
+    WorkbenchFinalizationResult {
+        result: Err(KernelInvocationFailure::CleanupUnconfirmed {
+            actor,
+            detail,
+            receipts,
+        }),
+        cleanup_confirmed: false,
     }
 }
 
@@ -701,12 +728,14 @@ where
         });
         if inspection.is_none() && !reload && compilation_authority.is_none() {
             return terminal_task(Err(KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
                 actor: context.actor,
                 detail: "authored execution has no compilation authority".into(),
             }));
         }
         let Some(workbench) = self.active_workbench() else {
             return terminal_task(Err(KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
                 actor: context.actor,
                 detail: "actor application has no active Haskell workbench".into(),
             }));
@@ -1447,12 +1476,28 @@ where
                     owned,
                     move |owned| {
                         Box::pin(async move {
+                            let cursor = &mut owned.state.cursor;
+                            let current = cursor.running.as_mut().expect("same display fragment");
+                            let receipt = DisplayReceiptSubmission {
+                                settlement: current
+                                    .inflight_effect
+                                    .as_ref()
+                                    .expect("captured display effect")
+                                    .display_settlement
+                                    .clone(),
+                                fragment: current
+                                    .fragment
+                                    .as_mut()
+                                    .expect("display owns its fragment"),
+                                remaining: &mut cursor.unit.display_remaining,
+                            };
                             let prepared = prepare_actor_display_boundary(
                                 &environment,
                                 &context,
                                 boundary,
                                 allowance,
                                 operation,
+                                Some(receipt),
                             )
                             .await;
                             if let Ok((_, Some(display))) = &prepared {
@@ -1464,14 +1509,7 @@ where
                                     .as_mut()
                                     .expect("captured display effect")
                                     .display = Some(display.clone());
-                                let rendered = current
-                                    .fragment
-                                    .as_mut()
-                                    .expect("display owns its fragment")
-                                    .present_output(
-                                        &display.text,
-                                        &mut cursor.unit.display_remaining,
-                                    );
+                                let rendered = display.text.clone();
                                 if !rendered.is_empty() {
                                     cursor.unit.command_output.push(rendered);
                                 }

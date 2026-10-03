@@ -20,6 +20,7 @@ mod clock_wait;
 mod command_presentation;
 mod command_settlement;
 mod commands;
+mod display_settlement;
 mod drain_wait;
 #[cfg(test)]
 mod inherited_host_tests;
@@ -41,6 +42,9 @@ pub(crate) use owned_workbench::{
     ExecutionResourceOwners, WorkbenchCompilationAuthority, WorkbenchPublicOwner,
 };
 
+use display_settlement::{
+    DisplayOperationSettlement, DisplayPacketSettlement, DisplayReceiptSubmission,
+};
 use invocation_work::{
     ensure_workbench_execution_id, retain_invocation_cleanup_summary, InvocationWork,
 };
@@ -220,6 +224,7 @@ pub struct DisplayPublication {
     pub operation: Option<WorkbenchOperationId>,
     pub page: tidepool_runtime::session::WorkbenchDisplayPage,
     host_context: OnceLock<DisplayPublicationHostContext>,
+    receipt: OnceLock<Arc<DisplayPacketSettlement>>,
     was_unconfirmed: std::sync::atomic::AtomicBool,
     outcome: Mutex<Option<DisplayPublicationOutcome>>,
     reply: Mutex<Option<tokio::sync::oneshot::Sender<DisplayPublicationOutcome>>>,
@@ -265,6 +270,7 @@ impl DisplayPublication {
                 operation,
                 page,
                 host_context: OnceLock::new(),
+                receipt: OnceLock::new(),
                 was_unconfirmed: std::sync::atomic::AtomicBool::new(false),
                 outcome: Mutex::new(None),
                 reply: Mutex::new(Some(reply)),
@@ -280,8 +286,26 @@ impl DisplayPublication {
         // A refusal from a later attempt cannot establish that an earlier
         // uncertain attempt did not commit. Serialize this fence with timeout.
         let answer = match answer {
+            DisplayPublicationOutcome::Published(reference)
+                if !valid_display_reference(self, &reference) =>
+            {
+                DisplayPublicationOutcome::Unconfirmed(
+                    "host returned an invalid display output reference".into(),
+                )
+            }
             DisplayPublicationOutcome::Refused(detail) if self.was_unconfirmed() => {
                 DisplayPublicationOutcome::Unconfirmed(detail)
+            }
+            answer => answer,
+        };
+        let answer = match answer {
+            DisplayPublicationOutcome::Refused(detail) => DisplayPublicationOutcome::Refused(
+                crate::workbench_display::bounded_output(&detail, 2048),
+            ),
+            DisplayPublicationOutcome::Unconfirmed(detail) => {
+                DisplayPublicationOutcome::Unconfirmed(crate::workbench_display::bounded_output(
+                    &detail, 2048,
+                ))
             }
             answer => answer,
         };
@@ -300,6 +324,9 @@ impl DisplayPublication {
         if matches!(&answer, DisplayPublicationOutcome::Unconfirmed(_)) {
             self.was_unconfirmed
                 .store(true, std::sync::atomic::Ordering::Release);
+        }
+        if let Some(receipt) = self.receipt.get() {
+            receipt.answer(&answer);
         }
         *outcome = Some(answer.clone());
         if let Some(reply) = self.reply.lock().take() {
@@ -857,17 +884,43 @@ impl Drop for DisplayPublicationLease {
     }
 }
 
-async fn complete_display_publication<H, O>(
-    environment: &ResidentEnvironment<H, O>,
+struct DisplayPublicationSubmission {
     displays: Arc<Mutex<ActorDisplays>>,
     request: Arc<DisplayPublication>,
     answer: tokio::sync::oneshot::Receiver<DisplayPublicationOutcome>,
+    _lease: DisplayPublicationLease,
+}
+
+impl DisplayPublicationSubmission {
+    fn new(
+        displays: Arc<Mutex<ActorDisplays>>,
+        request: Arc<DisplayPublication>,
+        answer: tokio::sync::oneshot::Receiver<DisplayPublicationOutcome>,
+    ) -> Self {
+        let lease = DisplayPublicationLease {
+            displays: displays.clone(),
+            slot: request.page.identity.2,
+            request: request.clone(),
+        };
+        Self {
+            displays,
+            request,
+            answer,
+            _lease: lease,
+        }
+    }
+}
+
+async fn complete_display_publication<H, O>(
+    environment: &ResidentEnvironment<H, O>,
+    submission: DisplayPublicationSubmission,
 ) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError> {
-    let _lease = DisplayPublicationLease {
-        displays: displays.clone(),
-        slot: request.page.identity.2,
-        request: request.clone(),
-    };
+    let DisplayPublicationSubmission {
+        displays,
+        request,
+        answer,
+        _lease,
+    } = submission;
     let admitted = async {
         if environment
             .deployments
@@ -1344,14 +1397,7 @@ fn stage_actor_display<H, O>(
     update: bool,
     allowance: i64,
     operation: Option<WorkbenchOperationId>,
-) -> Result<
-    (
-        Arc<Mutex<ActorDisplays>>,
-        Arc<DisplayPublication>,
-        tokio::sync::oneshot::Receiver<DisplayPublicationOutcome>,
-    ),
-    ResidentActorWorkbenchError,
-> {
+) -> Result<DisplayPublicationSubmission, ResidentActorWorkbenchError> {
     let records = environment.actors.lock();
     let record = records
         .get(&context.actor)
@@ -1368,7 +1414,7 @@ fn stage_actor_display<H, O>(
         allowance,
         operation,
     )?;
-    Ok((displays, request, answer))
+    Ok(DisplayPublicationSubmission::new(displays, request, answer))
 }
 
 async fn publish_actor_display<H, O>(
@@ -1379,12 +1425,13 @@ async fn publish_actor_display<H, O>(
     update: bool,
     allowance: i64,
     operation: Option<WorkbenchOperationId>,
+    mut receipt: Option<DisplayReceiptSubmission<'_>>,
 ) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    let (displays, request, answer) = stage_actor_display(
+    let submission = stage_actor_display(
         environment,
         context,
         page,
@@ -1393,7 +1440,10 @@ where
         allowance,
         operation,
     )?;
-    complete_display_publication(&environment, displays, request, answer).await
+    if let Some(receipt) = &mut receipt {
+        receipt.prepare(&submission.request)?;
+    }
+    complete_display_publication(&environment, submission).await
 }
 
 async fn expand_actor_display<H, O>(
@@ -1403,6 +1453,7 @@ async fn expand_actor_display<H, O>(
     key: i64,
     allowance: i64,
     operation: Option<WorkbenchOperationId>,
+    mut receipt: Option<DisplayReceiptSubmission<'_>>,
 ) -> Result<WorkbenchDisplayOutput, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -1442,15 +1493,22 @@ where
     if let Some(request) = pending {
         // Resolve the same pending emission before interpreting another key.
         // Repeating a legal key must never remint its earlier publication.
+        validate_display_page(&request.page.text, allowance)?;
         if let Some(answer) = request.retry_channel() {
-            let output =
-                complete_display_publication(&environment, displays, request, answer).await?;
+            let submission = DisplayPublicationSubmission::new(displays, request, answer);
+            if let Some(receipt) = &mut receipt {
+                receipt.prepare(&submission.request)?;
+            }
+            let output = complete_display_publication(&environment, submission).await?;
             validate_display_page(&output.text, allowance)?;
             return Ok(output);
         }
         if let Some(DisplayPublicationOutcome::Published(output)) = request.outcome() {
             displays.lock().reconcile(identity.2)?;
             validate_display_page(&request.page.text, allowance)?;
+            if let Some(receipt) = &mut receipt {
+                receipt.prepare(&request)?;
+            }
             return Ok(WorkbenchDisplayOutput {
                 page: request.page.clone(),
                 output,
@@ -1478,6 +1536,7 @@ where
         true,
         allowance,
         operation,
+        receipt,
     )
     .await;
     drop(lease);
@@ -1490,6 +1549,7 @@ async fn prepare_actor_display_boundary<H, O>(
     boundary: ResidentActorBoundary,
     allowance: i64,
     operation: Option<WorkbenchOperationId>,
+    receipt: Option<DisplayReceiptSubmission<'_>>,
 ) -> Result<(ResidentActorBoundary, Option<WorkbenchDisplayOutput>), ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -1516,6 +1576,7 @@ where
                 false,
                 allowance,
                 operation,
+                receipt,
             )
             .await?;
             Ok((
@@ -1531,9 +1592,16 @@ where
             identity,
             key,
         } => {
-            let output =
-                expand_actor_display(environment, context, identity, key, allowance, operation)
-                    .await?;
+            let output = expand_actor_display(
+                environment,
+                context,
+                identity,
+                key,
+                allowance,
+                operation,
+                receipt,
+            )
+            .await?;
             Ok((
                 ResidentActorBoundary::DisplayExpanded {
                     continuation,
@@ -2353,6 +2421,7 @@ fn record_workbench_operation(
         return;
     };
     operations.push(WorkbenchOperationReceipt {
+        display_publication: None,
         display,
         id: WorkbenchOperationId {
             execution: execution.clone(),
@@ -2749,6 +2818,7 @@ where
                 _ => source.to_string(),
             };
             return KernelInvocationFailure::Rejected {
+                receipts: failure.receipts,
                 actor: context.actor,
                 detail,
             };
@@ -2875,6 +2945,7 @@ impl Default for WorkbenchCursor {
 
 struct WorkbenchEffectStamp {
     display: Option<WorkbenchDisplayOutput>,
+    display_settlement: Option<Arc<DisplayOperationSettlement>>,
     success_disposition: WorkbenchOperationDisposition,
     ordinal: usize,
     effect: String,
@@ -3451,6 +3522,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let installed_tools = match invocation.installed_tools {
             Some(lease) if lease.actor() != context.actor => {
                 return Err(KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
                     actor: context.actor,
                     detail: "issued tool installation belongs to another actor".into(),
                 });
@@ -3475,6 +3547,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             )
         {
             return Err(KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
                 actor: context.actor,
                 detail: "actor has no active Haskell application workbench".into(),
             });
@@ -3530,6 +3603,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     .is_some_and(|call| call.name != selected.name())
             {
                 return Err(KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
                     actor,
                     detail: "selected notebook contract differs from the issued installation"
                         .into(),
@@ -3545,6 +3619,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 }
             }) {
                 return Err(KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
                     actor,
                     detail: "selected notebook effects exceed its scheduling or actor authority"
                         .into(),
@@ -3576,6 +3651,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 .is_none_or(|key| key.invocation().model_operation().is_none()))
         {
             return Err(KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
                 actor,
                 detail: "context authority requires an exact synchronous provider invocation"
                     .into(),
@@ -3589,6 +3665,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             ) {
                 Err(failure) => {
                     return Err(KernelInvocationFailure::Rejected {
+                        receipts: Vec::new(),
                         actor: context.actor,
                         detail: match failure {
                             WorkbenchReplayFailure::DifferentInput => "one hosted call identity was retried with different Haskell input",
@@ -3611,6 +3688,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 })
         } else {
             installed_tools.as_ref().ok_or_else(|| KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
                 actor: context.actor,
                 detail: "cannot admit exact source layer: the source installation is unavailable; repair it with reload_helpers".into(),
             })?.source().clone()
@@ -3633,6 +3711,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             .is_some_and(|(_, latch)| *latch.lock() != RootStartupState::Activated)
         {
             return Err(KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
                 actor,
                 detail: "root startup is pending durable release".into(),
             });
@@ -3642,6 +3721,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             let record = records
                 .get(&actor)
                 .ok_or_else(|| KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
                     actor,
                     detail: "publication owner has no registered actor".into(),
                 })?;
@@ -3650,6 +3730,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     .public_owner
                     .ready()
                     .ok_or_else(|| KernelInvocationFailure::Rejected {
+                        receipts: Vec::new(),
                         actor,
                         detail: "durable actor public surface is not initialized".into(),
                     })?;
@@ -3660,6 +3741,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 || !owner.matches_context(&context)
             {
                 return Err(KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
                     actor,
                     detail: "publication owner differs from current actor admission".into(),
                 });
@@ -3680,6 +3762,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     tidepool_repr::PrincipalId::from(actor),
                 )
                 .map_err(|error| KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
                     actor,
                     detail: error.to_string(),
                 })?;
@@ -3723,6 +3806,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         error: impl std::fmt::Display,
     ) -> KernelInvocationFailure {
         KernelInvocationFailure::Failed {
+            receipts: Vec::new(),
             actor,
             detail: error.to_string(),
         }
@@ -4341,6 +4425,28 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let journal = self.workbench_executions.lock();
         let executions = journal.terminal_entries();
         let binding_lines = render_bindings_section(bindings, &executions);
+        let display_observations = journal
+            .display_observations()
+            .into_iter()
+            .map(|(id, publication)| {
+                format!(
+                    "  {}:{}:{} {}",
+                    id.execution,
+                    id.input_unit_index + 1,
+                    id.effect_ordinal + 1,
+                    serde_json::to_string(&publication)
+                        .expect("portable display publication metadata")
+                )
+            })
+            .collect::<Vec<_>>();
+        let display_observations = if display_observations.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\ndisplay publication settlement (current observation):\n{}",
+                display_observations.join("\n")
+            )
+        };
         let warnings = journal.cleanup_warnings();
         let cleanup_warnings = if warnings.is_empty() {
             String::new()
@@ -4378,7 +4484,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
 
         format!(
-            "actor {}@{} what-is-live\ncollectors:\n{jobs}\nbindings:\n{binding_lines}\nattachments:\n{attachments}\nsource drift:\n{source_drift}{cleanup_warnings}",
+            "actor {}@{} what-is-live\ncollectors:\n{jobs}\nbindings:\n{binding_lines}\nattachments:\n{attachments}\nsource drift:\n{source_drift}{cleanup_warnings}{display_observations}",
             actor.id.0, actor.incarnation.0,
         )
     }
@@ -5839,6 +5945,7 @@ where
             key,
             allowance,
             operation,
+            None,
         )
         .await
     }
@@ -5849,10 +5956,18 @@ where
         boundary: ResidentActorBoundary,
         allowance: i64,
         operation: Option<WorkbenchOperationId>,
+        receipt: Option<DisplayReceiptSubmission<'_>>,
     ) -> Result<(ResidentActorBoundary, Option<WorkbenchDisplayOutput>), ResidentActorWorkbenchError>
     {
-        prepare_actor_display_boundary(&self.environment, context, boundary, allowance, operation)
-            .await
+        prepare_actor_display_boundary(
+            &self.environment,
+            context,
+            boundary,
+            allowance,
+            operation,
+            receipt,
+        )
+        .await
     }
 
     async fn resolve_effect(
@@ -5865,7 +5980,13 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         let boundary = prepare_execution_effect(context, &effect_owner, boundary);
         let (boundary, display) = self
-            .prepare_display_boundary(context, boundary, DEFAULT_DISPLAY_CHARACTER_ALLOWANCE, None)
+            .prepare_display_boundary(
+                context,
+                boundary,
+                DEFAULT_DISPLAY_CHARACTER_ALLOWANCE,
+                None,
+                None,
+            )
             .await?;
         let _ = display;
         let boundary =
@@ -7889,6 +8010,7 @@ where
         release: ForkChildRelease,
     ) -> Result<crate::ActorAdvance<Self, ()>, KernelInvocationFailure> {
         let refuse = |detail: &str| KernelInvocationFailure::Failed {
+            receipts: Vec::new(),
             actor: kernel.identity(),
             detail: detail.into(),
         };
@@ -7996,6 +8118,7 @@ where
     ) -> Result<crate::ActorAdvance<Self, ()>, KernelInvocationFailure> {
         let child_initialization::PreparedChildWorkspace { frame, result } = prepared;
         let refuse = |detail: &str| KernelInvocationFailure::Failed {
+            receipts: Vec::new(),
             actor: kernel.identity(),
             detail: detail.into(),
         };
@@ -8055,6 +8178,7 @@ where
                 .is_none_or(|lease| !Arc::ptr_eq(lease, &frame.lexical))
         {
             return Err(KernelInvocationFailure::Failed {
+                receipts: Vec::new(),
                 actor: kernel.identity(),
                 detail: "child initialization no longer owns its original placement".into(),
             });
@@ -8320,6 +8444,7 @@ where
                             .initialize(&kernel, &context, boot)
                             .await
                             .map_err(|error| KernelInvocationFailure::Failed {
+                                receipts: Vec::new(),
                                 actor: context.actor,
                                 detail: error.to_string(),
                             });
@@ -9050,8 +9175,33 @@ where
                     // is what `record_workbench_operation` reports as
                     // `elapsed_ms` once the match below settles it.
                     let effect_started = std::time::Instant::now();
+                    let display_settlement = if matches!(
+                        &boundary,
+                        ResidentActorBoundary::DisplayPublish { .. }
+                            | ResidentActorBoundary::DisplayExpand { .. }
+                    ) {
+                        unit.execution.map(|execution| {
+                            Arc::new(DisplayOperationSettlement::new(
+                                WorkbenchOperationId {
+                                    execution: execution.clone(),
+                                    input_unit_index: unit.input_unit_index,
+                                    effect_ordinal: ordinal,
+                                },
+                                effect.clone(),
+                                success_disposition,
+                            ))
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(settlement) = &display_settlement {
+                        self.workbench_executions
+                            .lock()
+                            .retain_display_settlement(settlement.clone())?;
+                    }
                     current.inflight_effect = Some(WorkbenchEffectStamp {
                         display: None,
+                        display_settlement: display_settlement.clone(),
                         success_disposition,
                         ordinal,
                         effect: effect.clone(),
@@ -9107,6 +9257,11 @@ where
                                 input_unit_index: unit.input_unit_index,
                                 effect_ordinal: ordinal,
                             }),
+                            Some(DisplayReceiptSubmission {
+                                settlement: display_settlement,
+                                fragment: &mut *next_fragment,
+                                remaining: &mut *unit.display_remaining,
+                            }),
                         )
                         .await?;
                     current
@@ -9115,8 +9270,7 @@ where
                         .expect("captured display retains its effect stamp")
                         .display = display.clone();
                     if let Some(display) = &mut display {
-                        let rendered =
-                            next_fragment.present_output(&display.text, unit.display_remaining);
+                        let rendered = display.text.clone();
                         current
                             .inflight_effect
                             .as_mut()
@@ -11029,7 +11183,7 @@ where
             cleanup_confirmed,
         } = finalized;
         let mut notifications = Vec::new();
-        let result = match (result, execution_state.effects.terminal_transfer.take()) {
+        let mut result = match (result, execution_state.effects.terminal_transfer.take()) {
             (Err(source), Some(transfer)) => {
                 // Only this admitted attempt may settle its transferred program.
                 if transfer.owner == execution_state.effects.reservation_owner
@@ -11073,6 +11227,9 @@ where
         };
         let execution = execution_state.request.execution_id().cloned();
         if let Some(execution) = execution.as_ref() {
+            self.workbench_executions
+                .lock()
+                .freeze_display_receipts(execution, &mut result);
             let exit = match execution_state.effects.control.as_ref() {
                 Some(control) => control.finish_cell(execution.clone(), &result, cleanup_confirmed),
                 None => crate::CellExit::from_reply(
@@ -12023,6 +12180,7 @@ where
             let result = runner.validate_fork_child_scope(context, lexical).await;
             crate::OwnedActorCompletion::advance(move |behavior: &mut Self, kernel| {
                 result.map_err(|error| KernelInvocationFailure::Failed {
+                    receipts: Vec::new(),
                     actor: kernel.identity(),
                     detail: error.to_string(),
                 })?;
@@ -12129,6 +12287,7 @@ where
                         reply.and_then(|reply| {
                             let output = reply.items.first().ok_or_else(|| {
                                 KernelInvocationFailure::Failed {
+                                    receipts: Vec::new(),
                                     actor,
                                     detail: "retained tool reply has no result".into(),
                                 }
@@ -12136,6 +12295,7 @@ where
                             serde_json::from_str(&output.output)
                                 .map(KernelStep::Continue)
                                 .map_err(|error| KernelInvocationFailure::Failed {
+                                    receipts: Vec::new(),
                                     actor,
                                     detail: format!("retained tool result is invalid: {error}"),
                                 })
@@ -12156,6 +12316,7 @@ where
                     return crate::OwnedActorTask::new(Box::pin(async move {
                         crate::OwnedActorCompletion::new(move |_| {
                             Err(KernelInvocationFailure::Rejected {
+                                receipts: Vec::new(),
                                 actor,
                                 detail: detail.into(),
                             })
@@ -12242,6 +12403,7 @@ where
                     .is_none_or(|boundary| !boundary.is_complete())
             {
                 return Err(KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
                     actor: context.actor,
                     detail: "hosted checkpoint capture requires an exact provider invocation"
                         .into(),
@@ -12252,6 +12414,7 @@ where
                 standing => {
                     self.standing = standing;
                     return Err(KernelInvocationFailure::Rejected {
+                        receipts: Vec::new(),
                         actor: context.actor,
                         detail: "actor has no installed tool policy".into(),
                     });
@@ -12262,6 +12425,7 @@ where
             }) {
                 self.set_standing(context.actor, ResidentStanding::Tools(awaiting));
                 return Err(KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
                     actor: context.actor,
                     detail: "unknown tool or invalid argument kind".into(),
                 });
@@ -12305,6 +12469,7 @@ where
                     ResidentActorBoundary::ToolReply(reply) => {
                         if result.replace(reply.result).is_some() {
                             return Err(KernelInvocationFailure::Failed {
+                                receipts: Vec::new(),
                                 actor: context.actor,
                                 detail: "actor tool invocation replied more than once".into(),
                             });
@@ -12318,6 +12483,7 @@ where
                     }
                     ResidentActorBoundary::ToolAwait(next) => {
                         let result = result.ok_or_else(|| KernelInvocationFailure::Failed {
+                            receipts: Vec::new(),
                             actor: context.actor,
                             detail: "actor awaited another tool invocation without replying".into(),
                         })?;
@@ -12325,6 +12491,7 @@ where
                         self.set_standing(context.actor, ResidentStanding::Tools(next));
                         let output = result.into_output().map_err(|error| {
                             KernelInvocationFailure::Rejected {
+                                receipts: Vec::new(),
                                 actor: context.actor,
                                 detail: error.to_string(),
                             }
@@ -12333,6 +12500,7 @@ where
                     }
                     ResidentActorBoundary::Completed => {
                         let result = result.ok_or_else(|| KernelInvocationFailure::Failed {
+                            receipts: Vec::new(),
                             actor: context.actor,
                             detail: "actor completed a tool invocation without replying".into(),
                         })?;
@@ -12340,6 +12508,7 @@ where
                         self.set_standing(context.actor, ResidentStanding::Terminal);
                         let output = result.into_output().map_err(|error| {
                             KernelInvocationFailure::Rejected {
+                                receipts: Vec::new(),
                                 actor: context.actor,
                                 detail: error.to_string(),
                             }
@@ -12412,6 +12581,7 @@ where
                     .is_some_and(|control| control.cancellation_requested())
                 {
                     return Err(KernelInvocationFailure::Rejected {
+                        receipts: Vec::new(),
                         actor: context.actor,
                         detail: "display actor is unavailable or invocation was cancelled".into(),
                     });
@@ -12430,10 +12600,12 @@ where
                     None => expansion.await,
                 }
                 .map_err(|error| KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
                     actor: context.actor,
                     detail: error.to_string(),
                 })?;
                 let operation = WorkbenchOperationReceipt {
+                    display_publication: None,
                     id: WorkbenchOperationId {
                         execution: WorkbenchExecutionId::from_digest(
                             *uuid::Uuid::new_v4().as_bytes(),
@@ -12494,6 +12666,7 @@ where
                         .public_visibility_snapshot(context.clone())
                         .await
                         .map_err(|error| KernelInvocationFailure::Rejected {
+                            receipts: Vec::new(),
                             actor: context.actor,
                             detail: format!("cannot capture public workbench view: {error}"),
                         })?,
@@ -15729,6 +15902,7 @@ mod tests {
                     warnings: Vec::new(),
                     installed_bindings: Vec::new(),
                     operations: vec![WorkbenchOperationReceipt {
+                        display_publication: None,
                         display: None,
                         id: WorkbenchOperationId {
                             execution: WorkbenchExecutionId::from_digest([3; 16]),
@@ -16533,6 +16707,7 @@ mod tests {
             1,
             crate::ResidentActorWorkbenchError::ActorProtocol("publish failed".into()),
             vec![WorkbenchOperationReceipt {
+                display_publication: None,
                 display: None,
                 id: WorkbenchOperationId {
                     execution,

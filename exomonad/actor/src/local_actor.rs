@@ -826,6 +826,7 @@ pub trait KernelBehavior: Send + 'static {
                 Box::pin(async move {
                     let result = behavior.resume(&context).await.map_err(|error| {
                         KernelInvocationFailure::Failed {
+                            receipts: Vec::new(),
                             actor: context.identity(),
                             detail: error.to_string(),
                         }
@@ -867,6 +868,7 @@ pub trait KernelBehavior: Send + 'static {
                         .release_fork(&context, release)
                         .await
                         .map_err(|error| KernelInvocationFailure::Failed {
+                            receipts: Vec::new(),
                             actor: context.identity(),
                             detail: error.to_string(),
                         });
@@ -1001,6 +1003,7 @@ impl<B> Drop for LocalActorState<B> {
                     settle_pending_workbench(
                         pending,
                         Err(KernelInvocationFailure::Failed {
+                            receipts: Vec::new(),
                             actor: self.context.identity,
                             detail: detail.into(),
                         }),
@@ -1011,6 +1014,7 @@ impl<B> Drop for LocalActorState<B> {
                     settle_pending_tool(
                         pending,
                         Err(KernelInvocationFailure::Failed {
+                            receipts: Vec::new(),
                             actor: self.context.identity,
                             detail: detail.into(),
                         }),
@@ -1319,6 +1323,7 @@ async fn handle_parked_message<B: KernelBehavior>(
         } if can_admit_workbench_request(state, &invocation.request) => {
             if !matches!(state.hosted_admission, HostedAdmission::Open) {
                 let rejection = Err(KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
                     actor: state.context.identity,
                     detail: "hosted work admission is sealed".into(),
                 });
@@ -1562,10 +1567,12 @@ where
                 if state.replacement.is_some() {
                     let failure = match state.behavior.discard_replacement(*definition).await {
                         Ok(()) => crate::KernelInvocationFailure::Rejected {
+                            receipts: Vec::new(),
                             actor: state.context.identity,
                             detail: "actor replacement is already in progress".into(),
                         },
                         Err(error) => crate::KernelInvocationFailure::Failed {
+                            receipts: Vec::new(),
                             actor: state.context.identity,
                             detail: format!(
                                 "actor replacement is already in progress; rejected recipe cleanup unconfirmed: {error}"
@@ -1585,6 +1592,7 @@ where
                         Err(error) => {
                             reply
                                 .send(Err(crate::KernelInvocationFailure::Rejected {
+                                    receipts: Vec::new(),
                                     actor: state.context.identity,
                                     detail: error.detail,
                                 }))
@@ -1616,6 +1624,7 @@ where
                     if let Some(reply) = pending.reply.take() {
                         reply
                             .send(Err(crate::KernelInvocationFailure::Failed {
+                                receipts: Vec::new(),
                                 actor: state.context.identity,
                                 detail: error.detail,
                             }))
@@ -1793,6 +1802,7 @@ where
                 if !matches!(state.hosted_admission, HostedAdmission::Open) {
                     reply
                         .send(Err(KernelInvocationFailure::Rejected {
+                            receipts: Vec::new(),
                             actor: state.context.identity,
                             detail: "hosted work admission is sealed".into(),
                         }))
@@ -1810,6 +1820,7 @@ where
                 if !matches!(state.hosted_admission, HostedAdmission::Open) {
                     reply
                         .send(Err(KernelInvocationFailure::Rejected {
+                            receipts: Vec::new(),
                             actor: state.context.identity,
                             detail: "hosted work admission is sealed".into(),
                         }))
@@ -1848,6 +1859,7 @@ where
             } => {
                 if !matches!(state.hosted_admission, HostedAdmission::Open) {
                     let rejection = Err(KernelInvocationFailure::Rejected {
+                        receipts: Vec::new(),
                         actor: state.context.identity,
                         detail: "hosted work admission is sealed".into(),
                     });
@@ -1991,6 +2003,7 @@ fn start_workbench<B: KernelBehavior>(
     };
     let Some(generation) = state.next_task_generation.checked_add(1) else {
         let failure = Err(KernelInvocationFailure::Failed {
+            receipts: Vec::new(),
             actor: state.context.identity,
             detail: "actor step generation exhausted".into(),
         });
@@ -2196,6 +2209,7 @@ async fn apply_hosted_settlement<B: KernelBehavior>(
             if matches!(state.hosted_admission, HostedAdmission::Closing) {
                 reply
                     .send(Err(KernelInvocationFailure::Rejected {
+                        receipts: Vec::new(),
                         actor: state.context.identity,
                         detail: "hosted completion boundary is closed".into(),
                     }))
@@ -2208,6 +2222,7 @@ async fn apply_hosted_settlement<B: KernelBehavior>(
                 .await
                 .map(|()| serde_json::Value::Null)
                 .map_err(|error| KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
                     actor: state.context.identity,
                     detail: error.to_string(),
                 });
@@ -2220,6 +2235,7 @@ async fn apply_hosted_settlement<B: KernelBehavior>(
                 .await
                 .map(|()| serde_json::Value::Null)
                 .map_err(|error| KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
                     actor: state.context.identity,
                     detail: error.to_string(),
                 });
@@ -2271,6 +2287,7 @@ fn start_tool<B: KernelBehavior>(
                 hosted_cell: Arc::clone(state.mailbox_admission.hosted_cell()),
             },
             Err(KernelInvocationFailure::Failed {
+                receipts: Vec::new(),
                 actor: state.context.identity,
                 detail: "actor step generation exhausted".into(),
             }),
@@ -2664,6 +2681,7 @@ fn fail_unconfirmed_task<B: KernelBehavior>(
     detail: String,
 ) {
     let failure = KernelInvocationFailure::Failed {
+        receipts: Vec::new(),
         actor: state.context.identity,
         detail: detail.clone(),
     };
@@ -3519,6 +3537,7 @@ mod tests {
                         .spawn_child(None, FailingChild)
                         .await
                         .map_err(|error| KernelInvocationFailure::Failed {
+                            receipts: Vec::new(),
                             actor: context.identity(),
                             detail: error.to_string(),
                         })?;
@@ -3526,6 +3545,7 @@ mod tests {
                 } else if name == "spawn_queued" {
                     let Some(child_behavior) = self.pending_children.pop_front() else {
                         return Err(KernelInvocationFailure::Rejected {
+                            receipts: Vec::new(),
                             actor: context.identity(),
                             detail: "no queued child behavior".into(),
                         });
@@ -3535,6 +3555,7 @@ mod tests {
                             .spawn_child(None, child_behavior)
                             .await
                             .map_err(|error| KernelInvocationFailure::Failed {
+                                receipts: Vec::new(),
                                 actor: context.identity(),
                                 detail: error.to_string(),
                             })?;
@@ -3687,6 +3708,7 @@ mod tests {
                     behavior.calls.lock().push("workbench-end");
                     if finish_fails {
                         return Err(KernelInvocationFailure::Failed {
+                            receipts: Vec::new(),
                             actor,
                             detail: "owned completion probe failed".into(),
                         });
@@ -3803,6 +3825,7 @@ mod tests {
         ) -> BoxFuture<'a, Result<KernelStep<serde_json::Value>, KernelInvocationFailure>> {
             Box::pin(async move {
                 Err(KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
                     actor: context.identity(),
                     detail: "child has no tool policy".into(),
                 })
@@ -3817,6 +3840,7 @@ mod tests {
         ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
             Box::pin(async move {
                 Err(KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
                     actor: context.identity(),
                     detail: "child has no workbench".into(),
                 })
@@ -6672,6 +6696,7 @@ mod tests {
         ) -> BoxFuture<'a, Result<KernelStep<serde_json::Value>, KernelInvocationFailure>> {
             Box::pin(async move {
                 Err(KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
                     actor: context.identity(),
                     detail: "pausing probe has no tools".into(),
                 })
