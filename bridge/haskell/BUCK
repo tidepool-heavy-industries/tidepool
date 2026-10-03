@@ -225,7 +225,11 @@ sh_test(
 
 haskell_binary(
     name = "source_boot_product_reuse_test",
-    srcs = {"Main.hs": "test-source-boot/Main.hs"},
+    srcs = {
+        "Main.hs": "test-source-boot/Main.hs",
+        "ExecutionSourceDecodeTest.hs": "test-source-boot/ExecutionSourceDecodeTest.hs",
+        "ProgressBoundaryTest.hs": "test-source-boot/ProgressBoundaryTest.hs",
+    },
     deps = [":tidepool_extract_internal"],
     compiler_flags = extractor_binary_flags("-XOverloadedStrings", "-package", "process"),
     linker_flags = extractor_binary_link_flags() + ["-package", "process"],

@@ -1820,7 +1820,7 @@ pub(crate) enum ResidentActorBoundary {
     ProgressPublication {
         continuation: ResidentHole,
         request: crate::RequestId,
-        value: RootCustody,
+        value: tidepool_runtime::session::RuntimeProgressPublication,
     },
     ProgressPoll(ResponsePoll),
     RequestUpdate {
@@ -8321,17 +8321,13 @@ where
                             request: crate::request_effect::request_id(request_id)?,
                         }))
                     }
-                    ResidentRequest::Replies(RepliesReq::PublishProgressWith(request_id, _)) => {
-                        // Request/watch custody can outlive the publishing actor.
-                        // Arc<RootCustody> releases this shared-machine root when
-                        // the last registry or watch snapshot stops retaining it.
-                        let value = session.live_payload_handle_owned_by(hole.cont_id(), RealmId::ROOT)?
-                            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("progress publication has no live payload".into()))?;
+                    ResidentRequest::Replies(RepliesReq::PublishProgressWith(_, _, request_id)) => {
+                        let value = session.capture_progress_publication(&hole, RealmId::ROOT)?;
                         Ok(ResidentActorBoundary::ProgressPublication {
                             continuation: hole, request: crate::request_effect::request_id(request_id)?, value,
                         })
                     }
-                    ResidentRequest::Replies(RepliesReq::ObserveProgressWith(request_id)) => {
+                    ResidentRequest::Replies(RepliesReq::ObserveProgressWith(_, request_id)) => {
                         Ok(ResidentActorBoundary::ProgressPoll(ResponsePoll {
                             continuation: hole, request: crate::request_effect::request_id(request_id)?,
                         }))
@@ -8466,7 +8462,7 @@ where
                             watch: crate::request_effect::watch_id(watch_id)?,
                         }))
                     }
-                    ResidentRequest::Watches(WatchesReq::ObserveWatchProgressWith(watch, request, after)) => {
+                    ResidentRequest::Watches(WatchesReq::ObserveWatchProgressWith(_, watch, request, after)) => {
                         Ok(ResidentActorBoundary::WatchProgressPoll {
                             continuation: hole,
                             watch: crate::request_effect::watch_id(watch)?,
@@ -8806,7 +8802,7 @@ where
             | SourceEvent::ProgressClosed
             | SourceEvent::ProgressRejected(_) => matches!(
                 input,
-                ResidentRequest::Replies(RepliesReq::ObserveProgressWith(_))
+                ResidentRequest::Replies(RepliesReq::ObserveProgressWith(..))
             ),
             SourceEvent::Settled(_) => matches!(
                 input,
@@ -9473,11 +9469,28 @@ where
         hole: ResidentHole,
         observation: Result<(Option<crate::request::ProgressSnapshot>, bool), crate::ReplyError>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let expected = self
+            .access
+            .with_machine(context.clone(), {
+                let continuation = hole.cont_id().to_owned();
+                move |session, _, _| {
+                    session
+                        .progress_type_witness(&continuation)
+                        .map_err(ResidentActorWorkbenchError::Resident)
+                }
+            })
+            .await?;
+        let observation = match observation {
+            Ok((Some(snapshot), _)) if snapshot.type_witness != expected => {
+                Err(crate::ReplyError::ProgressTypeMismatch)
+            }
+            other => other,
+        };
         // A snapshot rooted on another session must be imported into this
         // observer's own machine BEFORE the resume checkout below -- the
         // borrowed export leaves the publishing session's root untouched,
         // so a later observer (or a retry of this one) can still export it.
-        // Same-session (today's only reachable case) skips this entirely.
+        // Same-session observation retains the original shared root.
         let observation = match observation {
             Ok((Some(snapshot), closed)) if snapshot.session != context.placement.session => {
                 let imported = self
@@ -9491,6 +9504,7 @@ where
                 Ok((
                     Some(crate::request::ProgressSnapshot {
                         revision: snapshot.revision,
+                        type_witness: snapshot.type_witness,
                         value: Arc::new(imported),
                         session: context.placement.session,
                     }),
@@ -14977,6 +14991,273 @@ mod request_tests {
             .expect("parent remains registered after cancelled child startup")
             .expect("independent parent custody remains evaluable");
         assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn progress_nominal_type_mismatch_preserves_snapshot_wakes_and_roots() {
+        use crate::request::{RequestRegistry, WatchRequirement};
+        use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+
+        tidepool_testing::eval_harness::require_extract();
+        let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let publisher_id = tidepool_repr::SessionId(0xCA01);
+        let observer_id = tidepool_repr::SessionId(0xCA02);
+        let (mut publisher, publisher_root) = bare_session_at(publisher_id);
+        let (mut observer, observer_root) = bare_session_at(observer_id);
+        let fixture = include_str!("fixtures/ProgressRuntime.hs");
+        std::fs::write(publisher_root.path().join("ProgressRuntime.hs"), fixture).unwrap();
+        let preamble = insert_preamble_imports(surface.preamble(), "qualified ProgressRuntime");
+        let templates = resident_workbench_templates(
+            &preamble,
+            "'[TidepoolReplies.Replies]",
+            "qualified Tidepool.Agent.Reply.Internal as TidepoolReplies",
+        );
+        let mut include = surface.include_path_refs();
+        include.push(publisher_root.path());
+        let compile = |text: &str| {
+            let TurnResult::Bind { compiled, .. } = run_turn(TurnRequest {
+                exact_context: None,
+                session_id: None,
+                turn_text: text,
+                templates: &templates,
+                include: &include,
+                session_root: publisher_root.path(),
+                inject_modules: &[],
+                gen: 1,
+                verdict: None,
+                target: None,
+                retained_imports: &[],
+            })
+            .unwrap() else {
+                panic!("typed progress fixture must compile a bind")
+            };
+            compiled
+        };
+        // Compile each immutable program once; publication retries use fresh frames.
+        let note = compile("published <- ProgressRuntime.publishNote 1");
+        let wrong = compile("published <- ProgressRuntime.publishInt 1");
+        let wrong_observer = compile("observed <- ProgressRuntime.observeInt 1");
+        let correct_observer = compile("observed <- ProgressRuntime.observeNote 1");
+        let expected = Arc::new(
+            note.asks
+                .iter()
+                .find_map(|site| site.input_type_witnesses.first().and_then(Option::as_ref))
+                .unwrap()
+                .clone(),
+        );
+        publisher.set_effect_execution(
+            EffectRunPolicy::SuspendAll,
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        );
+        observer.set_effect_execution(
+            EffectRunPolicy::SuspendAll,
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        );
+        let suspend = |outcome| match outcome {
+            ResidentOutcome::Suspended { hole, .. } => hole,
+            other => panic!("progress fixture did not suspend: {other:?}"),
+        };
+        let owner = crate::ActorRef::first(crate::ActorId(0xCA01));
+        let target = crate::ActorRef::first(crate::ActorId(0xCA02));
+        let registry = RequestRegistry::default();
+        let request = registry.reserve(owner, target);
+        assert_eq!(
+            request.0, 1,
+            "fixture names the first exact registry request"
+        );
+        registry.mark_queued(owner, target, request).unwrap();
+        registry
+            .present_with_progress_type(target, request, Some(expected))
+            .unwrap();
+        let (watch, initial) = registry
+            .register_watch_requirements(
+                owner,
+                "typed-progress".into(),
+                vec![(request, WatchRequirement::ProgressAfter(0))],
+            )
+            .unwrap();
+        assert!(initial.is_empty());
+        let baseline = publisher.value_handle_count();
+        let hole = suspend(
+            publisher
+                .run_with_sites("wrong-progress", wrong.code())
+                .unwrap(),
+        );
+        let token = publisher
+            .capture_progress_publication(&hole, RealmId::ROOT)
+            .unwrap();
+        publisher
+            .abort(hole.cont_id(), "publication fixture captured".into())
+            .unwrap();
+        assert_eq!(
+            registry
+                .publish_progress(target, request, token, publisher_id)
+                .unwrap_err(),
+            crate::ReplyError::ProgressTypeMismatch
+        );
+        assert_eq!(
+            publisher.value_handle_count(),
+            baseline,
+            "refused publication releases its private root"
+        );
+        assert!(matches!(
+            registry.observe_progress(owner, request),
+            Ok((None, false))
+        ));
+        assert!(matches!(
+            registry.observe_watch(owner, watch),
+            Ok(crate::request::WatchObservation::Pending(_))
+        ));
+        let hole = suspend(
+            publisher
+                .run_with_sites("correct-progress", note.code())
+                .unwrap(),
+        );
+        let token = publisher
+            .capture_progress_publication(&hole, RealmId::ROOT)
+            .unwrap();
+        publisher
+            .abort(hole.cont_id(), "publication fixture captured".into())
+            .unwrap();
+        let (revision, notifications) = registry
+            .publish_progress(target, request, token, publisher_id)
+            .unwrap();
+        assert_eq!(revision, 1, "refusal does not consume a revision");
+        assert_eq!(
+            notifications.len(),
+            1,
+            "only accepted publication wakes the watch"
+        );
+        let snapshot = registry
+            .observe_progress(owner, request)
+            .unwrap()
+            .0
+            .unwrap();
+        let hole = suspend(
+            publisher
+                .run_with_sites("wrong-progress-retry", wrong.code())
+                .unwrap(),
+        );
+        let token = publisher
+            .capture_progress_publication(&hole, RealmId::ROOT)
+            .unwrap();
+        publisher
+            .abort(hole.cont_id(), "publication fixture captured".into())
+            .unwrap();
+        assert_eq!(
+            registry
+                .publish_progress(target, request, token, publisher_id)
+                .unwrap_err(),
+            crate::ReplyError::ProgressTypeMismatch
+        );
+        let current = registry
+            .observe_progress(owner, request)
+            .unwrap()
+            .0
+            .unwrap();
+        assert_eq!(current.revision, snapshot.revision);
+        assert!(
+            Arc::ptr_eq(&current.value, &snapshot.value),
+            "refusal preserves the previous publication"
+        );
+        assert_eq!(publisher.value_handle_count(), baseline + 1);
+
+        let no_progress = RequestRegistry::default();
+        let request_without_progress = no_progress.reserve(owner, target);
+        no_progress
+            .mark_queued(owner, target, request_without_progress)
+            .unwrap();
+        no_progress
+            .present_with_progress_type(target, request_without_progress, None)
+            .unwrap();
+        let hole = suspend(
+            publisher
+                .run_with_sites("absent-progress-contract", note.code())
+                .unwrap(),
+        );
+        let token = publisher
+            .capture_progress_publication(&hole, RealmId::ROOT)
+            .unwrap();
+        publisher
+            .abort(hole.cont_id(), "publication fixture captured".into())
+            .unwrap();
+        assert_eq!(
+            no_progress
+                .publish_progress(target, request_without_progress, token, publisher_id)
+                .unwrap_err(),
+            crate::ReplyError::ProgressTypeMismatch,
+            "an admitted request with no progress contract cannot publish"
+        );
+        assert_eq!(publisher.value_handle_count(), baseline + 1);
+
+        // The erased representations are equal, but the observer's nominal
+        // witness differs. The common resume path must refuse BEFORE importing.
+        let observer_handles = observer.value_handle_count();
+        let observer_hole = suspend(
+            observer
+                .run_with_sites("wrong-observer", wrong_observer.code())
+                .unwrap(),
+        );
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(publisher_id, Box::new(publisher));
+        machines.insert_idle(observer_id, Box::new(observer));
+        let source = ActorWorkbenchSource::new(preamble, surface.include_paths().to_vec());
+        let runner = ResidentActorRunner::new(Arc::clone(&machines), source);
+        let context = crate::ActorDescriptor::new(
+            "progress-observer",
+            crate::ActorPlacement {
+                session: observer_id,
+                resource_scope: RealmId::ROOT,
+                lexical_scope: ScopeId::ROOT,
+            },
+        )
+        .session_context(owner);
+        runner
+            .resume_progress_observation(context, observer_hole, Ok((Some(snapshot), false)))
+            .await
+            .unwrap();
+        let after = runner
+            .access
+            .with_host_machine(
+                "count-refused-progress-import",
+                observer_id,
+                None,
+                |session, _| Ok(session.value_handle_count()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            after, observer_handles,
+            "wrong nominal observation never imports a payload root"
+        );
+        let correct_hole = runner
+            .access
+            .with_host_machine(
+                "same-session-typed-observer",
+                publisher_id,
+                None,
+                move |session, _| {
+                    session
+                        .run_with_sites("correct-observer", correct_observer.code())
+                        .map_err(Into::into)
+                },
+            )
+            .await
+            .unwrap();
+        let context = crate::ActorDescriptor::new(
+            "correct-progress-observer",
+            crate::ActorPlacement {
+                session: publisher_id,
+                resource_scope: RealmId::ROOT,
+                lexical_scope: ScopeId::ROOT,
+            },
+        )
+        .session_context(owner);
+        runner
+            .resume_progress_observation(context, suspend(correct_hole), Ok((Some(current), false)))
+            .await
+            .unwrap();
+        drop(observer_root);
     }
 
     /// [`ResidentActorRunner::import_shared_custody`]: the non-consuming,

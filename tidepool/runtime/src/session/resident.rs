@@ -382,6 +382,7 @@ pub struct RuntimeActivationInput {
     input_type: String,
     type_evidence: Arc<super::prepared::SiteTypeEvidence>,
     input_type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+    progress_type_witness: Option<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>>,
 }
 
 static_assertions::assert_not_impl_any!(RuntimeActivationInput: Clone, Copy);
@@ -395,8 +396,35 @@ impl RuntimeActivationInput {
         &self.type_evidence
     }
 
+    pub fn progress_type_witness(
+        &self,
+    ) -> Option<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>> {
+        self.progress_type_witness.clone()
+    }
+
     pub fn placeholder_source(&self) -> String {
         "sessionInput <- pure (undefined :: TidepoolActivationInput)".into()
+    }
+}
+
+/// A progress root and its canonical type captured from the same authenticated
+/// parked helper call. Callers cannot pair an arbitrary root with a witness.
+#[derive(Debug)]
+pub struct RuntimeProgressPublication {
+    custody: RootCustody,
+    type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+}
+
+static_assertions::assert_not_impl_any!(RuntimeProgressPublication: Clone, Copy);
+
+impl RuntimeProgressPublication {
+    pub fn into_parts(
+        self,
+    ) -> (
+        RootCustody,
+        Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+    ) {
+        (self.custody, self.type_witness)
     }
 }
 
@@ -3597,6 +3625,12 @@ where
             .and_then(Option::as_ref)
             .ok_or_else(missing_witness)?
             .clone();
+        let progress_type_witness = match metadata.input_type_witnesses.get(1) {
+            Some(witness) => Some(Arc::new(
+                witness.as_ref().ok_or_else(missing_witness)?.clone(),
+            )),
+            None => None,
+        };
         let type_evidence = self.request_site_type_evidence(site).ok_or_else(invalid)?;
         let custody = self
             .live_payload_handle_owned_by(hole.cont_id(), realm)?
@@ -3607,6 +3641,59 @@ where
             input_type,
             type_evidence: Arc::new(type_evidence),
             input_type_witness: Arc::new(input_type_witness),
+            progress_type_witness,
+        })
+    }
+
+    /// Read progress authority from the actual parked frame, never from a
+    /// caller-supplied site number or an erased runtime representation.
+    pub fn progress_type_witness(
+        &mut self,
+        continuation: &str,
+    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
+    {
+        let entry = self
+            .parked
+            .iter()
+            .find(|entry| entry.name == continuation)
+            .ok_or(ResidentError::InvalidActivationInput { site: 0 })?;
+        let (_, evidence) = self
+            .state
+            .prepared_mut()
+            .and_then(|engine| engine.parked(entry.id))
+            .ok_or(ResidentError::InvalidActivationInput { site: 0 })?;
+        let site = evidence.site;
+        let invalid = || ResidentError::InvalidActivationInput { site };
+        let provenance = self
+            .parked_provenance
+            .get(&entry.id)
+            .cloned()
+            .ok_or_else(invalid)?;
+        if !provenance.authenticated_inputs.contains(&site) {
+            return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
+        }
+        let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
+        if metadata.inputs.len() != 1 || metadata.input_type_witnesses.len() != 1 {
+            return Err(invalid());
+        }
+        let witness = metadata.input_type_witnesses[0]
+            .as_ref()
+            .ok_or(ResidentError::MissingActivationInputWitness { site })?;
+        Ok(Arc::new(witness.clone()))
+    }
+
+    pub fn capture_progress_publication(
+        &mut self,
+        hole: &ResidentHole,
+        realm: RealmId,
+    ) -> Result<RuntimeProgressPublication, ResidentError> {
+        let type_witness = self.progress_type_witness(hole.cont_id())?;
+        let custody = self
+            .live_payload_handle_owned_by(hole.cont_id(), realm)?
+            .ok_or(ResidentError::InvalidActivationInput { site: 0 })?;
+        Ok(RuntimeProgressPublication {
+            custody,
+            type_witness,
         })
     }
 

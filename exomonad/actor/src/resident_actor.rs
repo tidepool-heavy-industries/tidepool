@@ -6145,7 +6145,11 @@ where
         let cancellation = self
             .environment
             .requests
-            .present(context.actor, request.request)
+            .present_with_progress_type(
+                context.actor,
+                request.request,
+                input.progress_type_witness(),
+            )
             .map_err(|error| {
                 ResidentActorWorkbenchError::ActorProtocol(format!(
                     "request presentation was rejected: {error:?}"

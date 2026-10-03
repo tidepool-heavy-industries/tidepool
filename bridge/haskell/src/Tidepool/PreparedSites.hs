@@ -36,15 +36,15 @@ import GHC.Types.Unique.Supply (UniqSupply, initUs, mkSplitUniqSupply, takeUniqF
 import GHC.Core.Type
   ( mkTyConApp, mkTyConTy, splitTyConApp_maybe, coreView
   , isLiftedTypeKind, typeKind )
-import GHC.Core.TyCon (TyCon, isClassTyCon, tyConArity, tyConName)
-import GHC.Core.DataCon (DataCon, dataConOrigResTy)
+import GHC.Core.TyCon (TyCon, isClassTyCon, tyConArity, tyConName, tyConDataCons)
+import GHC.Core.DataCon (DataCon, dataConOrigResTy, dataConName, dataConWorkId, dataConWrapId_maybe)
 import GHC.Driver.Env (HscEnv, hscEPS, hsc_HPT, hsc_home_unit, lookupType)
 import GHC.Types.TyThing.Ppr (pprTyThingInContext)
 import GHC.Types.TyThing (TyThing (..))
 import GHC.Iface.Type (ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
 import GHC.Types.Literal (LitNumType (..), Literal (..))
 import GHC.Types.Name (isSystemName, nameModule_maybe, nameOccName, nameUnique)
-import GHC.Types.Name.Occurrence (mkTcOcc, occNameString)
+import GHC.Types.Name.Occurrence (mkTcOcc, mkVarOcc, occNameString)
 import GHC.Types.Id (Id, idName, mkSysLocal)
 import GHC.Utils.Fingerprint (Fingerprint (..), fingerprintString)
 import GHC.Utils.Outputable (SDocContext(sdocSuppressUniques), defaultSDocContext, ppr, renderWithContext)
@@ -76,6 +76,9 @@ data SiteAuthority = SiteAuthority
   { eitherTyCon :: Maybe TyCon
   , invocationExitTyCon :: Maybe TyCon
   , responseResultTyCon :: Maybe TyCon
+  , progressStateTyCon :: Maybe TyCon
+  , protectedProgressIds :: Set.Set Word64
+  , trustedProgressOwners :: Set.Set Word64
   , effectRequestTypeIds :: Set.Set Word64
   }
 
@@ -86,11 +89,24 @@ resolveSiteAuthority env currentInstances = do
   eitherType <- exactTyCon "GHC.Internal.Data.Either" "Either"
   invocationExit <- exactTyCon "Tidepool.Effects.Core" "InvocationExit"
   responseResult <- exactTyCon "Tidepool.Agent.Reply.Internal" "ResponseResult"
+  progressState <- exactTyCon "Tidepool.Agent.Reply.Internal" "ProgressState"
+  replies <- exactTyCon "Tidepool.Agent.Reply.Internal" "Replies"
+  watches <- exactTyCon "Tidepool.Agent.Watch.Internal" "Watches"
+  let rawIds = concatMap protectedConstructors [replies, watches]
+      helpers =
+        [ (vsSitedModule spec, vsSitedName spec)
+        | spec <- sitedVerbs, vsName spec `elem` progressVerbs ]
+  sited <- traverse (uncurry exactId) helpers
+  sourceOwners <- traverse (exactId "Tidepool.Actor.Source") ["installSource", "attachSource"]
   effectRequests <- knownEffectTypeIds
   pure SiteAuthority
     { eitherTyCon = eitherType
     , invocationExitTyCon = invocationExit
     , responseResultTyCon = responseResult
+    , progressStateTyCon = progressState
+    , protectedProgressIds = Set.fromList (map idKey (rawIds ++ [i | Just i <- sited]))
+    , trustedProgressOwners = Set.fromList
+        (map idKey (rawIds ++ [i | Just i <- sited ++ sourceOwners]))
     , effectRequestTypeIds = effectRequests
     }
  where
@@ -112,6 +128,32 @@ resolveSiteAuthority env currentInstances = do
               Succeeded (ATyCon tycon) -> Just tycon
               Succeeded _ -> Nothing
               Failed _ -> Nothing
+      _ -> pure Nothing
+
+  idKey = getKey . nameUnique . idName
+  progressVerbs = ["reportRequestProgress", "pollProgress", "awaitProgressAfter", "awaitAnyProgress", "progressSource"]
+  protectedConstructors Nothing = []
+  protectedConstructors (Just tycon) =
+    [ identifier
+    | constructor <- tyConDataCons tycon
+    , occNameString (nameOccName (dataConName constructor)) `elem`
+        ["PublishProgressWith", "ObserveProgressWith", "ObserveWatchProgressWith"]
+    , identifier <- dataConWorkId constructor : maybe [] (:[]) (dataConWrapId_maybe constructor)
+    ]
+  exactId moduleName occurrence = do
+    found <- findImportedModule env (mkModuleName moduleName) NoPkgQual
+    case found of
+      Found _ owner -> do
+        name <- initIfaceLoad env (lookupOrig owner (mkVarOcc occurrence))
+        loaded <- lookupType env name
+        case loaded of
+          Just (AnId identifier) -> pure (Just identifier)
+          Just _ -> pure Nothing
+          Nothing -> do
+            thing <- initIfaceLoad env (importDecl name)
+            pure $ case thing of
+              Succeeded (AnId identifier) -> Just identifier
+              _ -> Nothing
       _ -> pure Nothing
 
   knownEffectTypeIds = do
@@ -211,6 +253,14 @@ elaboratePreparedSites env authority siblings bindings = do
 
     rewriteExpr origin expression = case expression of
       Var surface | Just _ <- lookupPreparedVerb surface -> rewriteApplication origin expression
+      Var identifier
+        | getKey (nameUnique (idName identifier)) `Set.member` protectedProgressIds authority
+        , not (getKey (nameUnique (idName (fst origin))) `Set.member` trustedProgressOwners authority) -> do
+            modify' (\current -> current
+              { esRejections = SiteRejection (fst origin)
+                  "raw or site-aware progress operations require compiler-issued typed helper evidence"
+                  : esRejections current })
+            pure expression
       Var{} -> pure expression
       Lit{} -> pure expression
       Type{} -> pure expression
@@ -323,6 +373,10 @@ siteWireType authority spec answer = case vsWireSource spec of
     response <- maybe (Left "missing ResponseResult type authority") Right
       (responseResultTyCon authority)
     Right (mkTyConApp response [answer])
+  ProgressStateEvidence -> do
+    progress <- maybe (Left "missing ProgressState type authority") Right
+      (progressStateTyCon authority)
+    Right (mkTyConApp progress [answer])
 
 -- Only the known progress verbs expose a progress type. The shared verb table
 -- must retain their exact input and answer positions before a signature issues.

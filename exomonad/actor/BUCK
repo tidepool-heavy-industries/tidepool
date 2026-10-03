@@ -65,6 +65,7 @@ rust_filegroup(
         "src/recovery.rs": "exomonad/actor/src/recovery.rs",
         "src/reload_helpers_tool.rs": "exomonad/actor/src/reload_helpers_tool.rs",
         "src/reload_spec_tool.rs": "exomonad/actor/src/reload_spec_tool.rs",
+        "src/fixtures/ProgressRuntime.hs": "exomonad/actor/src/fixtures/ProgressRuntime.hs",
         "src/request.rs": "exomonad/actor/src/request.rs",
         "src/request/invocation.rs": "exomonad/actor/src/request/invocation.rs",
         "src/request/routes.rs": "exomonad/actor/src/request/routes.rs",

@@ -117,7 +117,8 @@ pub use resident::{
     PreparedStartupEntry, ProgramProvenance, ProgramProvenanceError, ReadyDisplayInstall,
     ReadyPreparedInstall, ResidentContinuationEvent, ResidentDisplayBundle, ResidentError,
     ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
-    RuntimeActivationInput, RuntimeActivationInputAdmission, SessionRunContext,
+    RuntimeActivationInput, RuntimeActivationInputAdmission, RuntimeProgressPublication,
+    SessionRunContext,
 };
 
 pub use view::{hide_preamble_exports, SessionCompileView, SourceImports};

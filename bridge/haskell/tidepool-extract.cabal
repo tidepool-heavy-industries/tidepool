@@ -332,6 +332,7 @@ test-suite source-boot-product-reuse-test
   main-is:          Main.hs
   hs-source-dirs:   test-source-boot
   other-modules:    ExecutionSourceDecodeTest
+                    ProgressBoundaryTest
   build-depends:
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,

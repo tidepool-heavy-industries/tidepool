@@ -3,6 +3,7 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE RoleAnnotations #-}
 
 -- | Engine-private representation of persistent-agent requests and replies.
 module Tidepool.Agent.Reply.Internal
@@ -22,7 +23,9 @@ module Tidepool.Agent.Reply.Internal
   , ProgressState (..)
   , PendingProgress (..)
   , reportRequestProgress
+  , reportRequestProgressSited
   , pollProgress
+  , pollProgressSited
   , RequestUpdate
   , RequestUpdateState (..)
   , updateRequest
@@ -133,6 +136,7 @@ instance Display (Reply result) where
 
 -- | Independent observers carry their own last-seen revision. Handles do not
 -- contain a shared read position and observing never consumes an update.
+type role Progress nominal
 newtype Progress (progress :: Type) = Progress RequestId
   deriving (Show, Eq)
 
@@ -140,6 +144,7 @@ instance Display (Progress progress) where
   displayTree (Progress (RequestId request)) = opaqueHandle ("progress of request " <> tshow request)
 
 -- | Publication authority is mounted only for the active request's target.
+type role ProgressSink nominal
 newtype ProgressSink (progress :: Type) = ProgressSink RequestId
   deriving (Show, Eq)
 
@@ -206,6 +211,7 @@ data ReplyError
   | ReplyUnauthorized
   | ReplyWrongIncarnation
   | ReplyUpdatePending
+  | ReplyProgressTypeMismatch
   | ReplySettlementCancelled
   deriving (Show, Eq)
 
@@ -327,8 +333,8 @@ data Replies a where
   ObserveReplyWith :: Int -> Replies RawReplyObservation
   AttemptAcknowledgeCancellationWith :: Int -> Replies (Either ReplyError Void)
   AcknowledgeCancellationWith :: Int -> Replies Void
-  PublishProgressWith :: Int -> progress -> Replies (Either ReplyError ())
-  ObserveProgressWith :: Int -> Replies (ProgressState progress)
+  PublishProgressWith :: Int -> progress -> Int -> Replies (Either ReplyError ())
+  ObserveProgressWith :: Int -> Int -> Replies (ProgressState progress)
   UpdateRequestWith :: Int -> Text -> Replies (Either ReplyError Int)
   ObserveRequestUpdateWith :: Int -> Int -> Replies (Either ReplyError RequestUpdateState)
 
@@ -344,19 +350,30 @@ currentRequestSited
   => Int -> Eff effs (RequestScope input result)
 currentRequestSited site = send (CurrentRequestWith site)
 
+{-# OPAQUE reportRequestProgress #-}
 reportRequestProgress
-  :: Member Replies effs
-  => ProgressSink progress
-  -> progress
-  -> Eff effs (Either ReplyError ())
-reportRequestProgress (ProgressSink (RequestId request)) value =
-  send (PublishProgressWith request value)
+  :: forall progress effs. Member Replies effs
+  => ProgressSink progress -> progress -> Eff effs (Either ReplyError ())
+reportRequestProgress = reportRequestProgressSited (-1)
 
+{-# OPAQUE reportRequestProgressSited #-}
+reportRequestProgressSited
+  :: forall progress effs. Member Replies effs
+  => Int -> ProgressSink progress -> progress -> Eff effs (Either ReplyError ())
+reportRequestProgressSited site (ProgressSink (RequestId request)) value =
+  send (PublishProgressWith site value request)
+
+{-# OPAQUE pollProgress #-}
 pollProgress
-  :: Member Replies effs
-  => Progress progress
-  -> Eff effs (ProgressState progress)
-pollProgress (Progress (RequestId request)) = send (ObserveProgressWith request)
+  :: forall progress effs. Member Replies effs
+  => Progress progress -> Eff effs (ProgressState progress)
+pollProgress = pollProgressSited (-1)
+
+{-# OPAQUE pollProgressSited #-}
+pollProgressSited
+  :: forall progress effs. Member Replies effs
+  => Int -> Progress progress -> Eff effs (ProgressState progress)
+pollProgressSited site (Progress (RequestId request)) = send (ObserveProgressWith site request)
 
 reserveRequest :: Member Replies effs => Label -> (Int, Int) -> SettlementReporting -> Eff effs RequestId
 reserveRequest label target reporting =

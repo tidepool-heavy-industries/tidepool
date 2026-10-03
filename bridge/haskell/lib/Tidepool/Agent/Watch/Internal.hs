@@ -23,7 +23,9 @@ module Tidepool.Agent.Watch.Internal
   , awaitValue
   , awaitSettled
   , awaitProgressAfter
+  , awaitProgressAfterSited
   , awaitAnyProgress
+  , awaitAnyProgressSited
   , awaitAnySettled
   , watch
   , Route
@@ -156,7 +158,7 @@ data Watches a where
   RegisterRouteGroupsWith :: Text -> (Int -> Eff effs ()) -> [[AwaitDependency]] -> Watches Int
   ObserveRouteWith :: Int -> Watches RouteState
   ListRoutesWith :: Watches [Int]
-  ObserveWatchProgressWith :: Int -> Int -> Int -> Watches (ProgressState progress)
+  ObserveWatchProgressWith :: Int -> Int -> Int -> Int -> Watches (ProgressState progress)
   ObserveWatchWith :: Int -> Watches RawWatchObservation
   AwaitWatchWith :: Int -> Watches RawWatchObservation
   -- | The completion report of a finished command job, once its settlement
@@ -195,23 +197,33 @@ awaitSettled response =
   where
     request = responseRequestId response
 
-awaitProgressAfter :: Progress progress -> ProgressCursor -> Await (ProgressState progress)
-awaitProgressAfter (Progress request@(RequestId requestId)) cursor@(ProgressCursor revision) =
+{-# OPAQUE awaitProgressAfter #-}
+awaitProgressAfter :: forall progress. Progress progress -> ProgressCursor -> Await (ProgressState progress)
+awaitProgressAfter = awaitProgressAfterSited (-1)
+
+{-# OPAQUE awaitProgressAfterSited #-}
+awaitProgressAfterSited :: forall progress. Int -> Progress progress -> ProgressCursor -> Await (ProgressState progress)
+awaitProgressAfterSited site (Progress request@(RequestId requestId)) cursor@(ProgressCursor revision) =
   Await [[AwaitProgress request cursor]] $ \watchId _ ->
-    observedProgress <$> send (ObserveWatchProgressWith watchId requestId revision)
+    observedProgress <$> send (ObserveWatchProgressWith site watchId requestId revision)
 
 -- | Wait until any supplied progress stream advances or closes. Results retain
 -- input order and are captured at the wake; unchanged sources are
 -- 'ProgressPending'.
-awaitAnyProgress :: [(Progress progress, ProgressCursor)] -> Await [ProgressState progress]
-awaitAnyProgress [] = pure []
-awaitAnyProgress sources =
+{-# OPAQUE awaitAnyProgress #-}
+awaitAnyProgress :: forall progress. [(Progress progress, ProgressCursor)] -> Await [ProgressState progress]
+awaitAnyProgress = awaitAnyProgressSited (-1)
+
+{-# OPAQUE awaitAnyProgressSited #-}
+awaitAnyProgressSited :: forall progress. Int -> [(Progress progress, ProgressCursor)] -> Await [ProgressState progress]
+awaitAnyProgressSited _ [] = pure []
+awaitAnyProgressSited site sources =
   Await [map dependency sources] $ \watchId _ ->
     traverseObservedProgress <$> mapM (observe watchId) sources
   where
     dependency (Progress request, cursor) = AwaitProgress request cursor
     observe watchId (Progress (RequestId requestId), ProgressCursor revision) =
-      send (ObserveWatchProgressWith watchId requestId revision)
+      send (ObserveWatchProgressWith site watchId requestId revision)
 
 observedProgress :: ProgressState progress -> Maybe (ProgressState progress)
 observedProgress (ProgressRejected ReplyStale) = Nothing
