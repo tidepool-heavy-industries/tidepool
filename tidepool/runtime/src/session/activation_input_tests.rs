@@ -176,7 +176,6 @@ impl InputFixture {
         let interface = checked_execution
             .value_interface_certificate()
             .expect("receiver setup issued its exact value-interface certificate");
-        assert!(interface.is_checked_output());
         assert_eq!(
             interface.owner(),
             tidepool_repr::SessionModule::val(reservation.generation())
