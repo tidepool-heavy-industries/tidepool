@@ -2657,7 +2657,24 @@ mod tests {
         )
     }
 
-    fn write_record(root: &Path, source: &Path, unit: &str, module: &str, products: Vec<u8>) {
+    fn write_record(
+        root: &Path,
+        source: &Path,
+        unit: &str,
+        module: &str,
+        products: Vec<u8>,
+    ) -> crate::recovery_artifacts::RecoveryModuleInterfaceRef {
+        write_record_with_interface(root, source, unit, module, products, vec![0x42])
+    }
+
+    fn write_record_with_interface(
+        root: &Path,
+        source: &Path,
+        unit: &str,
+        module: &str,
+        products: Vec<u8>,
+        interface: Vec<u8>,
+    ) -> crate::recovery_artifacts::RecoveryModuleInterfaceRef {
         let source = fs::canonicalize(source).unwrap();
         let source_bytes = fs::read(&source).unwrap();
         let target_source = "target".to_owned();
@@ -2697,8 +2714,8 @@ mod tests {
             module: module.into(),
             source: source.clone(),
             source_sha256: digest(&source_bytes),
-            interface: vec![0x42],
-            package_imports: package_imports(unit, module, &[0x42]),
+            interface: interface.clone(),
+            package_imports: package_imports(unit, module, &interface),
             target_source,
             version_origin: CandidateVersionOrigin::Ordinary,
             original_owner: OriginalOwner {
@@ -2744,6 +2761,7 @@ mod tests {
             )
             .unwrap(),
         );
+        let module_interface = record.module_interface.clone().unwrap();
         record.original_certification = original.certification_bytes().to_vec();
         let bytes = encode_record(&record).unwrap();
         let dir = fixture_record_dir(root);
@@ -2754,23 +2772,29 @@ mod tests {
             sha(format!("{unit}:{module}:{}", source.display()).as_bytes())
         );
         fs::write(dir.join(name), bytes).unwrap();
+        module_interface
     }
 
     pub(super) fn candidate_fixture(root: &Path, module: &str) -> Record {
         let source = root.join(format!("{module}.hs"));
         fs::write(&source, format!("module {module} where\n")).unwrap();
-        write_record(
+        let interface = format!("candidate fixture interface for {module}").into_bytes();
+        let module_interface = write_record_with_interface(
             root,
             &source,
             "u",
             module,
-            product_bytes("u", module, &[0x42]),
+            product_bytes("u", module, &interface),
+            interface,
         );
         let mut record = fs::read_dir(fixture_record_dir(root))
             .unwrap()
             .map(|entry| read_record_path(&entry.unwrap().path()).unwrap())
             .find(|r| r.module == module)
             .unwrap();
+        // The candidate fixture reuses the authenticated artifact reference
+        // that the test helper materialized; the compact disk record omits it.
+        record.module_interface = Some(module_interface);
         record.module_interface_proof = Some(
             crate::recovery_artifacts::recover_module_interface(
                 fixture_record_dir(root).parent().unwrap(),
