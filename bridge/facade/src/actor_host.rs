@@ -52,16 +52,16 @@ mod embedded_service;
 mod application_supervisor;
 mod delivery;
 use delivery::{
-    admit_notification, observe_embedded_notification, observe_notification_receipt,
-    schedule_embedded_notification_drain, schedule_embedded_notification_send,
+    observe_embedded_notification, schedule_embedded_notification_drain,
+    schedule_embedded_notification_send,
 };
 #[cfg(all(test, feature = "codex-compat"))]
 use delivery::deliver_pending;
 #[cfg(feature = "codex-compat")]
 use delivery::{
-    deliver_pending_checked, observe_inbound_delivery, remind_turn_ended_without_respond,
-    run_delivery_pump, run_periodic_observation, supervise_delivery, turn_end_reminder,
-    until_shutdown,
+    admit_notification, deliver_pending_checked, observe_inbound_delivery,
+    observe_notification_receipt, remind_turn_ended_without_respond, run_delivery_pump,
+    run_periodic_observation, supervise_delivery, turn_end_reminder, until_shutdown,
 };
 #[cfg(feature = "codex-compat")]
 mod native_launch;
