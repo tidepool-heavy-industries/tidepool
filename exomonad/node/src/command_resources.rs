@@ -184,33 +184,63 @@ struct State {
     acknowledged: HashSet<Key>,
 }
 
-fn refresh_observation_indexes(state: &mut State, key: &Key) {
-    let Some(entry) = state.entries.get(key) else {
-        state.cleanup_failures.remove(key);
-        state.retained_allocations.remove(key);
-        return;
-    };
-    if matches!(
-        entry.current(),
-        CommandResourceStatus::CleanupUnconfirmed { .. }
-    ) {
-        state.cleanup_failures.insert(key.clone());
-    } else {
-        state.cleanup_failures.remove(key);
+impl State {
+    fn refresh_observation_indexes(&mut self, key: &Key) {
+        let Some(entry) = self.entries.get(key) else {
+            self.cleanup_failures.remove(key);
+            self.retained_allocations.remove(key);
+            return;
+        };
+        if matches!(
+            entry.current(),
+            CommandResourceStatus::CleanupUnconfirmed { .. }
+        ) {
+            self.cleanup_failures.insert(key.clone());
+        } else {
+            self.cleanup_failures.remove(key);
+        }
+        if entry.directory.is_some() {
+            self.retained_allocations.insert(key.clone());
+        } else {
+            self.retained_allocations.remove(key);
+        }
     }
-    if entry.directory.is_some() {
-        state.retained_allocations.insert(key.clone());
-    } else {
-        state.retained_allocations.remove(key);
-    }
-}
 
-fn rebuild_observation_indexes(state: &mut State) {
-    state.cleanup_failures.clear();
-    state.retained_allocations.clear();
-    let keys = state.entries.keys().cloned().collect::<Vec<_>>();
-    for key in keys {
-        refresh_observation_indexes(state, &key);
+    fn insert_entry(&mut self, key: Key, entry: Entry, active: bool) {
+        self.entries.insert(key.clone(), entry);
+        if active {
+            self.active.insert(key.clone());
+        }
+        self.refresh_observation_indexes(&key);
+    }
+
+    /// Update one command and its observation indexes under the state lock.
+    /// These indexes keep periodic observations independent of retained history.
+    fn update_entry(&mut self, key: &Key, update: impl FnOnce(&mut Entry)) {
+        #[expect(
+            clippy::expect_used,
+            reason = "every state transition retains its command identity"
+        )]
+        update(
+            self.entries
+                .get_mut(key)
+                .expect("command state transition requires retained entry"),
+        );
+        self.refresh_observation_indexes(key);
+    }
+
+    fn set_status(&mut self, key: &Key, status: CommandResourceStatus) {
+        self.update_entry(key, |entry| entry.status.send_replace(status));
+    }
+
+    fn acknowledge(&mut self, key: &Key) {
+        self.set_status(key, CommandResourceStatus::Retired);
+        self.acknowledged.insert(key.clone());
+    }
+
+    fn release_active(&mut self, key: &Key) {
+        self.queue.release(key);
+        self.active.remove(key);
     }
 }
 
@@ -221,6 +251,8 @@ pub struct CommandResources {
     state: Mutex<State>,
     journal: Mutex<Journal>,
     actor_starts: Mutex<u64>,
+    #[cfg(test)]
+    fail_next_allocation_cleanup: std::sync::atomic::AtomicBool,
 }
 fn io_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
@@ -518,6 +550,8 @@ impl CommandResources {
             journal: Mutex::new(journal),
             policy,
             actor_starts: Mutex::new(0),
+            #[cfg(test)]
+            fail_next_allocation_cleanup: std::sync::atomic::AtomicBool::new(false),
         });
         owner.reconcile(events)?;
         let weak = Arc::downgrade(&owner);
@@ -555,11 +589,11 @@ impl CommandResources {
                             ));
                         }
                     } else {
-                        state.entries.insert(
+                        state.insert_entry(
                             key.clone(),
                             Entry::new(CommandResourceStatus::Queued, Some(requested_bytes)),
+                            true,
                         );
-                        state.active.insert(key.clone());
                         state.queue.push(key, requested_bytes);
                     }
                 }
@@ -575,9 +609,10 @@ impl CommandResources {
                     if state.entries.contains_key(&key) {
                         return Err(io_error("cancellation fence follows command admission"));
                     }
-                    state.entries.insert(
+                    state.insert_entry(
                         key,
                         Entry::new(CommandResourceStatus::CancelledBeforeStart, None),
+                        false,
                     );
                 }
                 JournalEvent::Allocation {
@@ -594,15 +629,17 @@ impl CommandResources {
                     let directory = journal::allocation_path(&self.root, &allocation)?;
                     let entry = state
                         .entries
-                        .get_mut(&key)
+                        .get(&key)
                         .ok_or_else(|| io_error("allocation without admission intent"))?;
                     if entry.bytes != Some(requested_bytes) {
                         return Err(io_error("allocation budget differs from admission intent"));
                     }
-                    entry.directory = Some(directory.clone());
-                    entry
-                        .status
-                        .send_replace(CommandResourceStatus::Admitted { cgroup: directory });
+                    state.update_entry(&key, |entry| {
+                        entry.directory = Some(directory.clone());
+                        entry.status.send_replace(CommandResourceStatus::Admitted {
+                            cgroup: directory,
+                        });
+                    });
                     state
                         .queue
                         .recover_active(key, requested_bytes)
@@ -616,12 +653,14 @@ impl CommandResources {
                     if producer != actor {
                         return Err(io_error("unsupported recovered producer identity"));
                     }
-                    let entry = state
-                        .entries
-                        .get_mut(&validate_key(&actor, &command)?)
-                        .ok_or_else(|| io_error("start without allocation"))?;
-                    entry.started = true;
-                    entry.status.send_replace(CommandResourceStatus::Running);
+                    let key = validate_key(&actor, &command)?;
+                    if !state.entries.contains_key(&key) {
+                        return Err(io_error("start without allocation"));
+                    }
+                    state.update_entry(&key, |entry| {
+                        entry.started = true;
+                        entry.status.send_replace(CommandResourceStatus::Running);
+                    });
                 }
                 JournalEvent::Terminal {
                     producer,
@@ -645,23 +684,27 @@ impl CommandResources {
                         ));
                     }
                     let key = validate_key(&actor, &command)?;
-                    let entry = state
-                        .entries
-                        .get_mut(&key)
-                        .ok_or_else(|| io_error("terminal disposition without admission"))?;
-                    entry.directory = None;
-                    entry.status.send_replace(disposition);
-                    state.queue.release(&key);
-                    state.active.remove(&key);
+                    if !state.entries.contains_key(&key) {
+                        return Err(io_error("terminal disposition without admission"));
+                    }
+                    state.update_entry(&key, |entry| {
+                        entry.directory = None;
+                        entry.status.send_replace(disposition);
+                    });
+                    state.release_active(&key);
                 }
                 JournalEvent::ProducerSealed { producer } => {
                     if state.active.iter().any(|key| key.0 == producer) {
                         return Err(io_error("producer was sealed with active commands"));
                     }
-                    for (key, entry) in &state.entries {
-                        if key.0 == producer {
-                            entry.status.send_replace(CommandResourceStatus::Retired);
-                        }
+                    let retired = state
+                        .entries
+                        .keys()
+                        .filter(|key| key.0 == producer)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    for key in retired {
+                        state.acknowledge(&key);
                     }
                     state.sealed_producers.insert(producer);
                 }
@@ -677,44 +720,52 @@ impl CommandResources {
                     if state.active.contains(&key) {
                         return Err(io_error("acknowledgment of active command"));
                     }
-                    let entry = state
-                        .entries
-                        .get_mut(&key)
-                        .ok_or_else(|| io_error("acknowledgment without admission"))?;
-                    entry.status.send_replace(CommandResourceStatus::Retired);
-                    state.acknowledged.insert(key);
+                    if !state.entries.contains_key(&key) {
+                        return Err(io_error("acknowledgment without admission"));
+                    }
+                    state.acknowledge(&key);
                 }
             }
         }
 
         let mut known_directories = HashSet::new();
-        for (key, entry) in &state.entries {
-            if let Some(directory) = &entry.directory {
-                known_directories.insert(directory.clone());
-                if !directory.is_dir() {
-                    entry
-                        .status
-                        .send_replace(CommandResourceStatus::CleanupUnconfirmed {
-                            detail: "recorded allocation is missing after resource-service restart"
+        let recorded = state
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                entry
+                    .directory
+                    .as_ref()
+                    .map(|directory| (key.clone(), directory.clone(), entry.started))
+            })
+            .collect::<Vec<_>>();
+        for (key, directory, started) in recorded {
+            known_directories.insert(directory.clone());
+            if !directory.is_dir() {
+                state.set_status(
+                    &key,
+                    CommandResourceStatus::CleanupUnconfirmed {
+                        detail: "recorded allocation is missing after resource-service restart"
+                            .into(),
+                    },
+                );
+                continue;
+            }
+            let populated = read_counter(&directory.join("cgroup.events"), "populated")?;
+            if populated > 0 {
+                state.set_status(&key, CommandResourceStatus::Running);
+            } else if started {
+                state.set_status(
+                    &key,
+                    CommandResourceStatus::CleanupUnconfirmed {
+                        detail:
+                            "started allocation was empty at recovery; completion is unproven"
                                 .into(),
-                        });
-                    continue;
-                }
-                let populated = read_counter(&directory.join("cgroup.events"), "populated")?;
-                if populated > 0 {
-                    entry.status.send_replace(CommandResourceStatus::Running);
-                } else if entry.started {
-                    entry
-                        .status
-                        .send_replace(CommandResourceStatus::CleanupUnconfirmed {
-                            detail:
-                                "started allocation was empty at recovery; completion is unproven"
-                                    .into(),
-                        });
-                } else {
-                    tracing::warn!(actor = %key.0, command = %key.1,
-                        "fencing unpublished command launch during recovery");
-                }
+                    },
+                );
+            } else {
+                tracing::warn!(actor = %key.0, command = %key.1,
+                    "fencing unpublished command launch during recovery");
             }
         }
 
@@ -748,7 +799,7 @@ impl CommandResources {
                 entry.directory = Some(command.path());
                 entry.started =
                     read_counter(&command.path().join("cgroup.events"), "populated")? > 0;
-                state.entries.insert(key, entry);
+                state.insert_entry(key, entry, false);
             }
         }
 
@@ -777,15 +828,17 @@ impl CommandResources {
                         command: key.1.clone(),
                         disposition: disposition.clone(),
                     })?;
-                    if let Some(entry) = state.entries.get_mut(&key) {
-                        entry.directory = None;
-                        entry.status.send_replace(disposition);
+                    if state.entries.contains_key(&key) {
+                        state.update_entry(&key, |entry| {
+                            entry.directory = None;
+                            entry.status.send_replace(disposition);
+                        });
                     }
-                    state.queue.release(&key);
-                    state.active.remove(&key);
+                    state.release_active(&key);
                 }
                 Err(error) => {
-                    state.entries[&key].status.send_replace(
+                    state.set_status(
+                        &key,
                         CommandResourceStatus::CleanupUnconfirmed {
                             detail: format!("cannot fence unpublished allocation: {error}"),
                         },
@@ -811,11 +864,9 @@ impl CommandResources {
                 command: key.1.clone(),
                 disposition: disposition.clone(),
             })?;
-            state.entries[&key].status.send_replace(disposition);
-            state.queue.release(&key);
-            state.active.remove(&key);
+            state.set_status(&key, disposition);
+            state.release_active(&key);
         }
-        rebuild_observation_indexes(&mut state);
         self.admit_waiters(&mut state);
         Ok(())
     }
@@ -906,11 +957,11 @@ impl CommandResources {
             command: id.to_owned(),
             requested_bytes: bytes,
         })?;
-        state.entries.insert(
+        state.insert_entry(
             key.clone(),
             Entry::new(CommandResourceStatus::Queued, Some(bytes)),
+            true,
         );
-        state.active.insert(key.clone());
         state.queue.push(key.clone(), bytes);
         self.admit_waiters(&mut state);
         Ok(state.entries[&key].current())
@@ -941,11 +992,7 @@ impl CommandResources {
             })
             .collect::<Vec<_>>();
         for key in retired {
-            state.entries[&key]
-                .status
-                .send_replace(CommandResourceStatus::Retired);
-            refresh_observation_indexes(&mut state, &key);
-            state.acknowledged.insert(key);
+            state.acknowledge(&key);
         }
         Ok(())
     }
@@ -969,11 +1016,7 @@ impl CommandResources {
             actor: actor.to_owned(),
             command: id.to_owned(),
         })?;
-        state.entries[&key]
-            .status
-            .send_replace(CommandResourceStatus::Retired);
-        refresh_observation_indexes(&mut state, &key);
-        state.acknowledged.insert(key);
+        state.acknowledge(&key);
         Ok(())
     }
 
@@ -1008,17 +1051,8 @@ impl CommandResources {
     }
 
     fn admit_waiters(&self, state: &mut State) {
-        let mut changed = Vec::new();
         while let Some((key, bytes)) = state.queue.next() {
             let configured = self.configure_command(&key, bytes);
-            #[expect(
-                clippy::expect_used,
-                reason = "queue admission and retained entries share this lock; entries are never removed"
-            )]
-            let entry = state
-                .entries
-                .get_mut(&key)
-                .expect("queued command has retained entry");
             match configured {
                 Ok(directory) => {
                     let allocation = format!("{}/{}", key.0, key.1);
@@ -1029,16 +1063,15 @@ impl CommandResources {
                         requested_bytes: bytes,
                         allocation,
                     }) {
-                        let cleanup = std::fs::remove_dir(&directory);
+                        let cleanup = self.remove_allocation_directory(&directory);
                         if cleanup.is_ok() {
-                            state.queue.release(&key);
-                            state.active.remove(&key);
-                        } else {
-                            entry.directory = Some(directory);
+                            state.release_active(&key);
                         }
-                        entry
-                            .status
-                            .send_replace(CommandResourceStatus::CleanupUnconfirmed {
+                        state.update_entry(&key, |entry| {
+                            if cleanup.is_err() {
+                                entry.directory = Some(directory);
+                            }
+                            entry.status.send_replace(CommandResourceStatus::CleanupUnconfirmed {
                                 detail: match cleanup {
                                     Ok(()) => format!("allocation publication failed: {error}"),
                                     Err(cleanup) => format!(
@@ -1046,29 +1079,38 @@ impl CommandResources {
                                     ),
                                 },
                             });
-                        changed.push(key);
+                        });
                         continue;
                     }
-                    entry.directory = Some(directory.clone());
-                    entry
-                        .status
-                        .send_replace(CommandResourceStatus::Admitted { cgroup: directory });
+                    state.update_entry(&key, |entry| {
+                        entry.directory = Some(directory.clone());
+                        entry
+                            .status
+                            .send_replace(CommandResourceStatus::Admitted { cgroup: directory });
+                    });
                 }
                 Err(error) => {
-                    state.queue.release(&key);
-                    state.active.remove(&key);
-                    entry
-                        .status
-                        .send_replace(CommandResourceStatus::CleanupUnconfirmed {
+                    state.release_active(&key);
+                    state.set_status(
+                        &key,
+                        CommandResourceStatus::CleanupUnconfirmed {
                             detail: error.to_string(),
-                        });
+                        },
+                    );
                 }
             }
-            changed.push(key);
         }
-        for key in changed {
-            refresh_observation_indexes(state, &key);
+    }
+
+    fn remove_allocation_directory(&self, directory: &Path) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_next_allocation_cleanup
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(io_error("injected allocation cleanup failure"));
         }
+        std::fs::remove_dir(directory)
     }
 
     fn configure_command(&self, key: &Key, bytes: u64) -> std::io::Result<PathBuf> {
@@ -1092,10 +1134,11 @@ impl CommandResources {
     }
 
     pub fn started(&self, actor: &str, id: &str) -> std::io::Result<CommandResourceStatus> {
+        let key = validate_key(actor, id)?;
         let mut state = self.state.lock();
         let entry = state
             .entries
-            .get_mut(&validate_key(actor, id)?)
+            .get(&key)
             .ok_or_else(|| io_error("unknown command"))?;
         if matches!(entry.current(), CommandResourceStatus::Admitted { .. }) {
             self.journal.lock().append(JournalEvent::Started {
@@ -1103,10 +1146,12 @@ impl CommandResources {
                 actor: actor.to_owned(),
                 command: id.to_owned(),
             })?;
-            entry.started = true;
-            entry.status.send_replace(CommandResourceStatus::Running);
+            state.update_entry(&key, |entry| {
+                entry.started = true;
+                entry.status.send_replace(CommandResourceStatus::Running);
+            });
         }
-        Ok(entry.current())
+        Ok(state.entries[&key].current())
     }
 
     pub fn status(&self, actor: &str, id: &str) -> std::io::Result<CommandResourceStatus> {
@@ -1123,8 +1168,7 @@ impl CommandResources {
         let key = validate_key(actor, id)?;
         let mut state = self.state.lock();
         // A tombstone prevents a delayed submission after cancellation from starting.
-        if let std::collections::hash_map::Entry::Vacant(vacant) = state.entries.entry(key.clone())
-        {
+        if !state.entries.contains_key(&key) {
             self.journal
                 .lock()
                 .append(JournalEvent::CancellationFence {
@@ -1132,24 +1176,29 @@ impl CommandResources {
                     actor: actor.to_owned(),
                     command: id.to_owned(),
                 })?;
-            vacant.insert(Entry::new(
-                CommandResourceStatus::CancelledBeforeStart,
-                None,
-            ));
+            state.insert_entry(
+                key,
+                Entry::new(CommandResourceStatus::CancelledBeforeStart, None),
+                false,
+            );
             return Ok(CommandResourceStatus::CancelledBeforeStart);
         }
-        let entry = state
-            .entries
-            .entry(key.clone())
-            .or_insert_with(|| Entry::new(CommandResourceStatus::CancelledBeforeStart, None));
-        let mut released = entry.current().is_queued();
-        if let Some(directory) = &entry.directory {
-            if !entry.started && read_counter(&directory.join("cgroup.events"), "populated")? == 0 {
+        let (mut released, directory, started) = {
+            let entry = &state.entries[&key];
+            (
+                entry.current().is_queued(),
+                entry.directory.clone(),
+                entry.started,
+            )
+        };
+        let mut directory_removed = false;
+        if let Some(directory) = directory {
+            if !started && read_counter(&directory.join("cgroup.events"), "populated")? == 0 {
                 // An empty cgroup can be removed with open join descriptors. Either
                 // removal fences the late join, or a racing join wins and is killed.
                 match std::fs::remove_dir(directory) {
                     Ok(()) => {
-                        entry.directory = None;
+                        directory_removed = true;
                         released = true;
                     }
                     Err(error) if error.raw_os_error() == Some(libc::EBUSY) => {
@@ -1168,12 +1217,15 @@ impl CommandResources {
                 command: id.to_owned(),
                 disposition: CommandResourceStatus::CancelledBeforeStart,
             })?;
-            entry
-                .status
-                .send_replace(CommandResourceStatus::CancelledBeforeStart);
-            state.queue.release(&key);
-            state.active.remove(&key);
-            refresh_observation_indexes(&mut state, &key);
+            state.update_entry(&key, |entry| {
+                if directory_removed {
+                    entry.directory = None;
+                }
+                entry
+                    .status
+                    .send_replace(CommandResourceStatus::CancelledBeforeStart);
+            });
+            state.release_active(&key);
             self.admit_waiters(&mut state);
         }
         Ok(state.entries[&key].current())
@@ -1183,8 +1235,8 @@ impl CommandResources {
         let mut state = self.state.lock();
         let mut released = Vec::new();
         let active = state.active.iter().cloned().collect::<Vec<_>>();
-        for key in active.iter().cloned() {
-            let Some(entry) = state.entries.get_mut(&key) else {
+        for key in &active {
+            let Some(entry) = state.entries.get(key) else {
                 tracing::error!(actor = %key.0, command = %key.1,
                     "active command has no retained ownership entry");
                 continue;
@@ -1195,14 +1247,14 @@ impl CommandResources {
             ) {
                 continue;
             }
-            let Some(dir) = entry.directory.as_ref() else {
+            let Some(dir) = entry.directory.clone() else {
                 continue;
             };
+            let started = entry.started;
             let result = (|| -> std::io::Result<bool> {
                 let populated = read_counter(&dir.join("cgroup.events"), "populated")?;
                 let oom = read_counter(&dir.join("memory.events"), "oom_kill")?;
                 if populated > 0 {
-                    entry.started = true;
                     // `memory.oom.group=1` means the kernel has already decided
                     // to kill every process in this cgroup once `oom_kill` is
                     // nonzero; it does not wait for them to be reaped. A
@@ -1213,19 +1265,22 @@ impl CommandResources {
                     // see `Running` and fall back to its raw exit status.
                     // Surface the disposition now; directory cleanup still
                     // waits for the cgroup to actually drain, below.
-                    if oom > 0
-                        && !matches!(
-                            *entry.status.borrow(),
-                            CommandResourceStatus::ResourceExhausted
-                        )
-                    {
-                        entry
-                            .status
-                            .send_replace(CommandResourceStatus::ResourceExhausted);
-                    }
+                    state.update_entry(key, |entry| {
+                        entry.started = true;
+                        if oom > 0
+                            && !matches!(
+                                *entry.status.borrow(),
+                                CommandResourceStatus::ResourceExhausted
+                            )
+                        {
+                            entry
+                                .status
+                                .send_replace(CommandResourceStatus::ResourceExhausted);
+                        }
+                    });
                     return Ok(false);
                 }
-                if !entry.started {
+                if !started {
                     return Ok(false);
                 }
                 // Removal invalidates retained join descriptors, fencing a late spawn.
@@ -1241,30 +1296,27 @@ impl CommandResources {
                     command: key.1.clone(),
                     disposition: disposition.clone(),
                 })?;
-                entry.status.send_replace(disposition);
+                state.set_status(key, disposition);
                 Ok(true)
             })();
             match result {
                 Ok(true) => {
-                    entry.directory = None;
+                    state.update_entry(key, |entry| entry.directory = None);
                     released.push(key.clone());
                 }
                 Ok(false) => {}
                 Err(error) => {
-                    entry
-                        .status
-                        .send_replace(CommandResourceStatus::CleanupUnconfirmed {
+                    state.set_status(
+                        key,
+                        CommandResourceStatus::CleanupUnconfirmed {
                             detail: error.to_string(),
-                        });
+                        },
+                    );
                 }
             }
         }
         for key in released {
-            state.queue.release(&key);
-            state.active.remove(&key);
-        }
-        for key in active {
-            refresh_observation_indexes(&mut state, &key);
+            state.release_active(&key);
         }
         self.admit_waiters(&mut state);
     }
@@ -1372,7 +1424,37 @@ mod tests {
             journal: Mutex::new(Journal::ephemeral()),
             policy,
             actor_starts: Mutex::new(0),
+            fail_next_allocation_cleanup: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    fn owner_with_journal(root: &Path, journal_path: PathBuf) -> CommandResources {
+        std::fs::create_dir_all(root).unwrap();
+        let policy = policy();
+        let (journal, events) = Journal::open(journal_path).unwrap();
+        let owner = CommandResources {
+            root: root.to_path_buf(),
+            actor_slice: root.to_path_buf(),
+            state: Mutex::new(State {
+                entries: HashMap::new(),
+                active: HashSet::new(),
+                cleanup_failures: HashSet::new(),
+                retained_allocations: HashSet::new(),
+                queue: Queue::new(
+                    policy.general_bytes,
+                    policy.protected_bytes,
+                    NATIVE_COMMAND_BYTES,
+                ),
+                sealed_producers: HashSet::new(),
+                acknowledged: HashSet::new(),
+            }),
+            journal: Mutex::new(journal),
+            policy,
+            actor_starts: Mutex::new(0),
+            fail_next_allocation_cleanup: std::sync::atomic::AtomicBool::new(false),
+        };
+        owner.reconcile(events).unwrap();
+        owner
     }
 
     fn policy() -> CommandResourcePolicy {
@@ -1507,11 +1589,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let owner = owner(root.path());
         let key = ("actor-1".into(), "command-1".into());
-        owner
-            .state
-            .lock()
-            .entries
-            .insert(key, Entry::new(CommandResourceStatus::Completed, Some(MIB)));
+        owner.state.lock().insert_entry(
+            key,
+            Entry::new(CommandResourceStatus::Completed, Some(MIB)),
+            false,
+        );
 
         owner.acknowledge("actor-1", "command-1").unwrap();
         assert_eq!(
@@ -1704,6 +1786,55 @@ mod tests {
     }
 
     #[test]
+    fn allocation_publication_and_cleanup_failure_reopen_as_retained_orphan() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("commands");
+        let journal_path = directory.path().join("ownership.jsonl");
+        let owner = owner_with_journal(&root, journal_path.clone());
+        owner.journal.lock().fail_next_allocation_append();
+        owner
+            .fail_next_allocation_cleanup
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        assert!(matches!(
+            owner.submit("actor-1", "command-1", MIB).unwrap(),
+            CommandResourceStatus::CleanupUnconfirmed { .. }
+        ));
+        let observation = owner.observation();
+        assert_eq!(observation.active, 1);
+        assert_eq!(observation.retained_allocations, 1);
+        assert_eq!(observation.cleanup_failures, 1);
+        assert!(owner
+            .state
+            .lock()
+            .entries[&(String::from("actor-1"), String::from("command-1"))]
+            .directory
+            .as_ref()
+            .is_some_and(|path| path.is_dir()));
+        std::fs::write(
+            root.join("actor-1/command-1/cgroup.events"),
+            "populated 0\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("actor-1/command-1/memory.events"),
+            "oom_kill 0\n",
+        )
+        .unwrap();
+        drop(owner);
+
+        let reopened = owner_with_journal(&root, journal_path);
+        assert!(matches!(
+            reopened.status("actor-1", "command-1").unwrap(),
+            CommandResourceStatus::CleanupUnconfirmed { .. }
+        ));
+        let observation = reopened.observation();
+        assert_eq!(observation.active, 1);
+        assert_eq!(observation.retained_allocations, 1);
+        assert_eq!(observation.cleanup_failures, 1);
+    }
+
+    #[test]
     #[ignore = "measurement harness; run explicitly at integration boundaries"]
     fn retained_history_does_not_scale_resource_polling() {
         fn rss_kib() -> u64 {
@@ -1730,12 +1861,12 @@ mod tests {
         {
             let mut state = owner.state.lock();
             for ordinal in 0..100_000 {
-                state.entries.insert(
+                state.insert_entry(
                     ("retired".into(), format!("command-{ordinal}")),
                     Entry::new(CommandResourceStatus::Completed, Some(MIB)),
+                    false,
                 );
             }
-            rebuild_observation_indexes(&mut state);
         }
         let retained_ns = poll(&owner, 2_000);
         let observation = owner.observation();

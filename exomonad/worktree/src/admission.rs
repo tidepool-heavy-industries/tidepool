@@ -8,9 +8,10 @@
 
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::MetadataExt;
 use std::time::{Duration, Instant};
+
+use rustix::fs::{FlockOperation, Mode, OFlags};
 
 const ADMISSION_DIR: &std::ffi::CStr = c"exomonad-admission";
 const LOCK_NAME: &std::ffi::CStr = c"lock";
@@ -72,28 +73,22 @@ fn open_lock(common: &File) -> io::Result<File> {
             "Git common directory is not a directory",
         ));
     }
-    // SAFETY: both names are fixed NUL-terminated constants, and `common`
-    // pins the exact metadata directory selected by the caller's view.
-    let created = unsafe { libc::mkdirat(common.as_raw_fd(), ADMISSION_DIR.as_ptr(), 0o700) };
-    if created < 0 && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
-        return Err(io::Error::last_os_error());
+    // `common` pins the exact metadata directory selected by the caller's view.
+    if let Err(error) = rustix::fs::mkdirat(common, ADMISSION_DIR, Mode::from_raw_mode(0o700)) {
+        if error != rustix::io::Errno::EXIST {
+            return Err(error.into());
+        }
     }
-    // SAFETY: openat returns a new descriptor for this exact child directory.
-    let directory = unsafe {
-        libc::openat(
-            common.as_raw_fd(),
-            ADMISSION_DIR.as_ptr(),
-            libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if directory < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: successful openat transferred descriptor ownership.
-    let directory = unsafe { File::from_raw_fd(directory) };
+    let directory = rustix::fs::openat(
+        common,
+        ADMISSION_DIR,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let directory = File::from(directory);
     let metadata = directory.metadata()?;
     if !metadata.is_dir()
-        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.uid() != rustix::process::geteuid().as_raw()
         || metadata.mode() & 0o7777 != 0o700
     {
         return Err(io::Error::new(
@@ -101,23 +96,16 @@ fn open_lock(common: &File) -> io::Result<File> {
             "Git admission directory is not private to this user",
         ));
     }
-    // SAFETY: openat returns a new descriptor for the persistent lock inode.
-    let file = unsafe {
-        libc::openat(
-            directory.as_raw_fd(),
-            LOCK_NAME.as_ptr(),
-            libc::O_CREAT | libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o600,
-        )
-    };
-    if file < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: successful openat transferred descriptor ownership.
-    let file = unsafe { File::from_raw_fd(file) };
+    let file = rustix::fs::openat(
+        &directory,
+        LOCK_NAME,
+        OFlags::CREATE | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )?;
+    let file = File::from(file);
     let metadata = file.metadata()?;
     if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.uid() != rustix::process::geteuid().as_raw()
         || metadata.nlink() != 1
         || metadata.mode() & 0o7777 != 0o600
     {
@@ -148,18 +136,15 @@ impl GitPermit {
     ) -> io::Result<Self> {
         let GitCandidate { file, backing } = candidate;
         let operation = match access {
-            GitAccess::Read => libc::LOCK_SH | libc::LOCK_NB,
-            GitAccess::Write | GitAccess::Capture => libc::LOCK_EX | libc::LOCK_NB,
+            GitAccess::Read => FlockOperation::NonBlockingLockShared,
+            GitAccess::Write | GitAccess::Capture => FlockOperation::NonBlockingLockExclusive,
         };
         let started = Instant::now();
         loop {
-            // SAFETY: flock acts on the owned persistent lock descriptor.
-            if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
-                return Ok(Self { _file: file });
-            }
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::WouldBlock {
-                return Err(error);
+            match rustix::fs::flock(&file, operation) {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(error) if io::Error::from(error).kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.into()),
             }
             if started.elapsed() >= timeout {
                 return Err(io::Error::new(

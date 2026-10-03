@@ -61,17 +61,18 @@ const RETIREMENT_GIT_WAIT: std::time::Duration = std::time::Duration::from_secs(
 
 #[cfg(target_os = "linux")]
 fn restoration_budget(layers: &[PathBuf]) -> std::io::Result<u64> {
-    let mut pending = layers.to_vec();
     let mut bytes = 0_u64;
-    while let Some(path) = pending.pop() {
-        let metadata = fs::symlink_metadata(&path)?;
-        bytes = bytes.saturating_add(4096);
-        if metadata.is_dir() {
-            for entry in fs::read_dir(path)? {
-                pending.push(entry?.path());
+    for layer in layers {
+        for entry in walkdir::WalkDir::new(layer)
+            .follow_links(false)
+            .follow_root_links(false)
+        {
+            let entry = entry.map_err(std::io::Error::other)?;
+            let metadata = entry.metadata()?;
+            bytes = bytes.saturating_add(4096);
+            if metadata.is_file() {
+                bytes = bytes.saturating_add(metadata.len());
             }
-        } else if metadata.is_file() {
-            bytes = bytes.saturating_add(metadata.len());
         }
     }
     Ok(bytes)
@@ -79,21 +80,16 @@ fn restoration_budget(layers: &[PathBuf]) -> std::io::Result<u64> {
 
 #[cfg(target_os = "linux")]
 fn sync_restored_tree(root: &Path) -> std::io::Result<()> {
-    let mut pending = vec![root.to_owned()];
-    let mut directories = Vec::new();
-    while let Some(path) = pending.pop() {
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.is_dir() {
-            directories.push(path.clone());
-            for entry in fs::read_dir(path)? {
-                pending.push(entry?.path());
-            }
-        } else if metadata.is_file() {
+    for entry in walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .follow_root_links(false)
+        .contents_first(true)
+    {
+        let entry = entry.map_err(std::io::Error::other)?;
+        let path = entry.path();
+        if entry.file_type().is_dir() || entry.file_type().is_file() {
             fs::File::open(path)?.sync_all()?;
         }
-    }
-    for directory in directories.into_iter().rev() {
-        fs::File::open(directory)?.sync_all()?;
     }
     Ok(())
 }
@@ -127,6 +123,31 @@ impl WorktreeSpec {
     pub fn allow_dirty_snapshot(mut self) -> Self {
         self.dirty_policy = DirtyPolicy::AllowDirtySnapshot;
         self
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod restoration_walk_tests {
+    use super::*;
+
+    #[test]
+    fn restoration_budget_counts_entries_and_does_not_follow_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let layer = directory.path().join("layer");
+        let nested = layer.join("nested");
+        let outside = directory.path().join("outside");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("file"), b"12345").unwrap();
+        fs::write(&outside, vec![0; 1 << 20]).unwrap();
+        std::os::unix::fs::symlink(&outside, layer.join("link")).unwrap();
+
+        assert_eq!(restoration_budget(&[layer]).unwrap(), 4 * 4096 + 5);
+    }
+
+    #[test]
+    fn restoration_sync_propagates_a_walk_error() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(sync_restored_tree(&directory.path().join("missing")).is_err());
     }
 }
 

@@ -1238,7 +1238,6 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "exomonad-node",
- "libc",
  "parking_lot",
  "rustix",
  "serde",
@@ -1248,6 +1247,7 @@ dependencies = [
  "tidepool-atomic-write",
  "tidepool-repr",
  "uuid",
+ "walkdir",
 ]
 
 [[package]]

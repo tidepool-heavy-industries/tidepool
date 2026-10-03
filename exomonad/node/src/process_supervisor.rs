@@ -576,7 +576,7 @@ pub fn run_process_supervisor(path: &Path) -> Result<(), ProcessSupervisorError>
     let metadata = file.metadata()?;
     if !metadata.is_file()
         || metadata.permissions().mode() & 0o077 != 0
-        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.uid() != rustix::process::geteuid().as_raw()
     {
         return Err(ProcessSupervisorError::UnsafeManifest);
     }
@@ -1038,7 +1038,7 @@ fn validate_private_directory(path: &Path) -> Result<(), ProcessSupervisorError>
     if metadata.file_type().is_symlink()
         || !metadata.is_dir()
         || metadata.permissions().mode() & 0o077 != 0
-        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.uid() != rustix::process::geteuid().as_raw()
         || std::fs::canonicalize(path)? != path
     {
         return Err(ProcessSupervisorError::UnsafePrivateDirectory);

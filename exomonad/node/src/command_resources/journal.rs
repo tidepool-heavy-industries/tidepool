@@ -59,6 +59,8 @@ pub(super) struct Journal {
     path: Option<PathBuf>,
     next_sequence: u64,
     uncertain: bool,
+    #[cfg(test)]
+    fail_next_allocation_append: bool,
 }
 
 impl Journal {
@@ -67,6 +69,8 @@ impl Journal {
             path: None,
             next_sequence: 1,
             uncertain: false,
+            #[cfg(test)]
+            fail_next_allocation_append: false,
         }
     }
 
@@ -101,6 +105,8 @@ impl Journal {
                 path: Some(path),
                 next_sequence: expected,
                 uncertain: false,
+                #[cfg(test)]
+                fail_next_allocation_append: false,
             },
             events,
         ))
@@ -115,6 +121,12 @@ impl Journal {
         let Some(path) = &self.path else {
             return Ok(());
         };
+        #[cfg(test)]
+        if self.fail_next_allocation_append && matches!(&event, EventKind::Allocation { .. }) {
+            self.fail_next_allocation_append = false;
+            self.uncertain = true;
+            return Err(std::io::Error::other("injected allocation append failure"));
+        }
         let row = Row {
             version: VERSION,
             sequence: self.next_sequence,
@@ -129,6 +141,11 @@ impl Journal {
         }
         self.next_sequence += 1;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn fail_next_allocation_append(&mut self) {
+        self.fail_next_allocation_append = true;
     }
 }
 

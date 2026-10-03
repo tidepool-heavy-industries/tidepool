@@ -9,7 +9,7 @@ use std::ffi::{CString, OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -46,39 +46,21 @@ fn cstring(value: &OsStr) -> io::Result<CString> {
 }
 
 fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
-    let mut pair = [0; 2];
-    // SAFETY: `pair` has room for both descriptors returned by pipe2.
-    if unsafe { libc::pipe2(pair.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: successful pipe2 transferred ownership of both descriptors.
-    Ok(unsafe { (OwnedFd::from_raw_fd(pair[0]), OwnedFd::from_raw_fd(pair[1])) })
+    rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).map_err(Into::into)
 }
 
-fn high_fd(fd: &impl AsRawFd) -> io::Result<OwnedFd> {
+fn high_fd(fd: &impl AsFd) -> io::Result<OwnedFd> {
     // Keep action sources away from targets 0..=4. Every duplicate retains
     // CLOEXEC; posix_spawn's dup2 makes only its target visible to the helper.
-    let duplicate = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 100) };
-    if duplicate < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: fcntl returned a new descriptor owned by this call.
-    Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
+    rustix::io::fcntl_dupfd_cloexec(fd, 100).map_err(Into::into)
 }
 
 fn sealed_entry(entry: &NamespaceEntry) -> io::Result<File> {
-    // SAFETY: memfd_create copies the fixed NUL-terminated name.
-    let fd = unsafe {
-        libc::memfd_create(
-            c"exomonad-view-entry".as_ptr(),
-            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: successful memfd_create returned a new owned descriptor.
-    let mut file = unsafe { File::from_raw_fd(fd) };
+    let fd = rustix::fs::memfd_create(
+        c"exomonad-view-entry",
+        rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
+    )?;
+    let mut file = File::from(fd);
     serde_json::to_writer(&mut file, entry).map_err(io::Error::other)?;
     if file.metadata()?.len() > MAX_ENTRY_BYTES as u64 {
         return Err(io::Error::new(
@@ -87,11 +69,11 @@ fn sealed_entry(entry: &NamespaceEntry) -> io::Result<File> {
         ));
     }
     file.seek(SeekFrom::Start(0))?;
-    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
-    // SAFETY: F_ADD_SEALS applies to the owned memfd after its final write.
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    let seals = rustix::fs::SealFlags::SEAL
+        | rustix::fs::SealFlags::SHRINK
+        | rustix::fs::SealFlags::GROW
+        | rustix::fs::SealFlags::WRITE;
+    rustix::fs::fcntl_add_seals(&file, seals)?;
     Ok(file)
 }
 
@@ -182,27 +164,28 @@ impl Drop for SpawnAttributes {
 }
 
 struct Child {
-    pid: libc::pid_t,
+    pid: rustix::process::Pid,
     reaped: bool,
 }
 
 impl Child {
     fn wait(&mut self) -> io::Result<ExitStatus> {
-        let mut status = 0;
         loop {
-            // SAFETY: this owner waits for the exact PID returned by spawn.
-            let result = unsafe { libc::waitpid(self.pid, &mut status, 0) };
-            if result == self.pid {
-                self.reaped = true;
-                return Ok(ExitStatus::from_raw(status));
-            }
-            if result < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() != io::ErrorKind::Interrupted {
-                    if error.raw_os_error() == Some(libc::ECHILD) {
+            match rustix::process::waitpid(Some(self.pid), rustix::process::WaitOptions::empty()) {
+                Ok(Some((pid, status))) if pid == self.pid => {
+                    self.reaped = true;
+                    return Ok(ExitStatus::from_raw(status.as_raw()));
+                }
+                Ok(Some(_)) => return Err(io::Error::other("waitpid returned a different child")),
+                Ok(None) => continue,
+                Err(error) => {
+                    if error == rustix::io::Errno::INTR {
+                        continue;
+                    }
+                    if error == rustix::io::Errno::CHILD {
                         self.reaped = true;
                     }
-                    return Err(error);
+                    return Err(error.into());
                 }
             }
         }
@@ -215,8 +198,7 @@ impl Drop for Child {
             // Match Command::output ownership: reap this exact child on a
             // failed capture. Git hooks or detached descendants are separate
             // processes and are not falsely reported as settled by this wait.
-            // SAFETY: this PID belongs to the unreaped child.
-            unsafe { libc::kill(self.pid, libc::SIGKILL) };
+            rustix::process::kill_process(self.pid, rustix::process::Signal::KILL).ok();
             let _ = self.wait();
         }
     }
@@ -337,6 +319,8 @@ pub fn output_in_view(
     if error != 0 {
         return Err(io::Error::from_raw_os_error(error));
     }
+    let pid = rustix::process::Pid::from_raw(pid)
+        .ok_or_else(|| io::Error::other("posix_spawn returned an invalid child pid"))?;
     let mut child = Child { pid, reaped: false };
     drop(actions);
     drop(entry_source);
@@ -404,14 +388,8 @@ pub fn helper_main() {
         // SAFETY: the parent maps descriptor 3 to a sealed memfd. Validate it
         // before JSON decoding so a malformed launcher cannot stream forever.
         let entry_file = unsafe { File::from_raw_fd(ENTRY_FD) };
-        let mut stat = MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: fstat initializes `stat` for this owned descriptor.
-        if unsafe { libc::fstat(entry_file.as_raw_fd(), stat.as_mut_ptr()) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: fstat succeeded.
-        let stat = unsafe { stat.assume_init() };
-        if stat.st_mode & libc::S_IFMT != libc::S_IFREG
+        let stat = rustix::fs::fstat(&entry_file)?;
+        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile
             || stat.st_size <= 0
             || stat.st_size > MAX_ENTRY_BYTES
         {
@@ -420,11 +398,11 @@ pub fn helper_main() {
                 "invalid view entry size",
             ));
         }
-        // SAFETY: F_GET_SEALS queries the owned memfd.
-        let seals = unsafe { libc::fcntl(entry_file.as_raw_fd(), libc::F_GET_SEALS) };
-        let required =
-            libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
-        if seals < 0 || seals & required != required {
+        let required = rustix::fs::SealFlags::SEAL
+            | rustix::fs::SealFlags::SHRINK
+            | rustix::fs::SealFlags::GROW
+            | rustix::fs::SealFlags::WRITE;
+        if !rustix::fs::fcntl_get_seals(&entry_file)?.contains(required) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "unsealed view entry",
@@ -434,10 +412,7 @@ pub fn helper_main() {
             serde_json::from_reader(entry_file).map_err(io::Error::other)?;
         // The command may use descriptor 4 itself. Close it on successful exec
         // but keep it live to report an `exec`/namespace-entry failure.
-        // SAFETY: F_SETFD applies to the owned setup descriptor.
-        if unsafe { libc::fcntl(setup.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        rustix::io::fcntl_setfd(&setup, rustix::io::FdFlags::CLOEXEC)?;
         let mut command = entry.command(&directory, &program)?;
         command.args(arguments);
         // SAFETY: this callback runs in the small helper immediately after

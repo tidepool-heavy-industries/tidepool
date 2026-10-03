@@ -26,8 +26,8 @@ camino.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
 parking_lot.workspace = true
-libc.workspace = true
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
+walkdir = "2.5"
 
 [[test]]
 name = "worktree"
