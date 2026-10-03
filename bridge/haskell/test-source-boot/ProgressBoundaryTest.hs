@@ -7,6 +7,7 @@ import Data.Maybe (isJust)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
+import Data.Text.IO qualified as TIO
 import GHC.Types.Name (getOccString)
 import GHC.Unit.Module (moduleName, moduleNameString)
 import System.Directory (copyFile, createDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
@@ -28,8 +29,8 @@ progressBoundaryChecks effects = bracket scratch removeDirectoryRecursive $ \wor
         "ProgressBoundary.publish" `T.isInfixOf` ysOrigin site] of
     site : _ -> pure (ysSite site)
     [] -> fail "copied-site regression has no genuine nominal publisher site"
-  source <- T.pack <$> readFile target
-  writeFile target (T.unpack (T.replace "1 {- copied-site -}" (T.pack (show issued)) source))
+  source <- TIO.readFile target
+  TIO.writeFile target (T.replace "1 {- copied-site -}" (T.pack (show issued)) source)
   result <- runPipelineSelected (PreparedProducts Nothing) target [work, "lib", effects]
   unless (any ((== issued) . ysSite) (concatMap pmYieldSites (pprModules result))) $
     fail "copied-site regression no longer names an actual concrete site"
