@@ -800,6 +800,17 @@ where
             None => ExecutionResourceOwners::for_inspection(public_owner),
         };
         let control = Some(control.unwrap_or_else(crate::WorkbenchExecutionControl::untracked));
+        let display_receipt_owner = request.execution_id().and_then(|execution| {
+            self.workbench_executions
+                .lock()
+                .display_receipt_owner(execution, invocation.as_ref())
+        });
+        if let Some(owner) = &display_receipt_owner {
+            control
+                .as_ref()
+                .expect("original execution control")
+                .bind_receipt_owner(owner.clone());
+        }
         let cleanup = workbench.continuation_cleanup_owner(
             context.clone(),
             "hosted execution abandoned before exact continuation settlement".into(),
@@ -810,11 +821,7 @@ where
             retirement: kernel.retained_exit(),
             state: WorkbenchExecutionState {
                 effects: WorkbenchEffectState {
-                    display_receipt_owner: request.execution_id().and_then(|execution| {
-                        self.workbench_executions
-                            .lock()
-                            .display_receipt_owner(execution, invocation.as_ref())
-                    }),
+                    display_receipt_owner,
                     park_effects: true,
                     context: context.clone(),
                     public_visibility: None,

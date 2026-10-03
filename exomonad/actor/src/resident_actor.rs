@@ -9211,9 +9211,6 @@ where
                                     )
                                 })?;
                         owner.retain(settlement.clone())?;
-                        if let Some(control) = &execution_state.control {
-                            control.bind_receipt_owner(owner.clone());
-                        }
                     }
                     current.inflight_effect = Some(WorkbenchEffectStamp {
                         display: None,
@@ -12713,13 +12710,17 @@ where
                 execution.as_ref(),
                 invocation.as_ref(),
             );
+            let display_receipt_owner = execution.as_ref().and_then(|execution| {
+                self.workbench_executions
+                    .lock()
+                    .display_receipt_owner(execution, invocation.as_ref())
+            });
+            if let (Some(owner), Some(control)) = (&display_receipt_owner, &control) {
+                control.bind_receipt_owner(owner.clone());
+            }
             let mut execution_state = WorkbenchExecutionState {
                 effects: WorkbenchEffectState {
-                    display_receipt_owner: execution.as_ref().and_then(|execution| {
-                        self.workbench_executions
-                            .lock()
-                            .display_receipt_owner(execution, invocation.as_ref())
-                    }),
+                    display_receipt_owner,
                     park_effects: false,
                     context: context.clone(),
                     public_visibility,

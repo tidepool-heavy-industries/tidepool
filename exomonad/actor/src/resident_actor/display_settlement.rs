@@ -579,7 +579,9 @@ mod tests {
 
     #[test]
     fn scheduler_terminal_freezes_only_the_exact_hosted_receipt_owner() {
-        for terminal_first in [false, true] {
+        for (terminal_first, transport_exit) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             let actor = ActorRef::first(crate::ActorId(37));
             let execution = WorkbenchExecutionId::from_digest([23; 16]);
             let key = |call: &str| {
@@ -647,10 +649,16 @@ mod tests {
             if !terminal_first {
                 request.answer(DisplayPublicationOutcome::Published(output.clone()));
             }
-            let fail = || KernelInvocationFailure::Failed {
-                actor,
-                detail: "scheduler worker stopped".into(),
-                receipts: Vec::new(),
+            let fail = || {
+                if transport_exit {
+                    KernelInvocationFailure::ActorExited(actor)
+                } else {
+                    KernelInvocationFailure::Failed {
+                        actor,
+                        detail: "scheduler worker stopped".into(),
+                        receipts: Vec::new(),
+                    }
+                }
             };
             let mut untouched = Err(fail());
             journal.freeze_display_receipts(&execution, Some(&second), &mut untouched);
@@ -661,6 +669,10 @@ mod tests {
             drop(journal);
             drop(owner);
             let delivered = control.settle_reply(Err(fail()));
+            assert!(matches!(
+                &delivered,
+                Err(KernelInvocationFailure::Failed { .. })
+            ));
             assert_eq!(control.terminal_reply(), Some(delivered.clone()));
             let receipt = &delivered.as_ref().unwrap_err().receipts()[0];
             if terminal_first {
@@ -696,6 +708,77 @@ mod tests {
                 Some(WorkbenchDisplayPublication::Published { .. })
             ));
         }
+    }
+
+    #[test]
+    fn terminal_control_seals_admission_before_first_display_capture() {
+        for terminal_before_binding in [false, true] {
+            let actor = ActorRef::first(crate::ActorId(37));
+            let execution = WorkbenchExecutionId::from_digest([25; 16]);
+            let input = WorkbenchRequest::from_cell_input("display value")
+                .with_execution_id(execution.clone());
+            let mut journal = WorkbenchExecutions::default();
+            journal.begin(&execution, input, None);
+            let owner = journal.display_receipt_owner(&execution, None).unwrap();
+            let control = crate::WorkbenchExecutionControl::untracked();
+            let failed = || Err(KernelInvocationFailure::ActorExited(actor));
+            let delivered = if terminal_before_binding {
+                let delivered = control.settle_reply(failed());
+                control.bind_receipt_owner(owner.clone());
+                delivered
+            } else {
+                control.bind_receipt_owner(owner.clone());
+                control.settle_reply(failed())
+            };
+            assert_eq!(delivered, Err(KernelInvocationFailure::ActorExited(actor)));
+            let operation = WorkbenchOperationId {
+                execution,
+                input_unit_index: 0,
+                effect_ordinal: 0,
+            };
+            let late_capture = Arc::new(DisplayOperationSettlement::new(
+                operation.clone(),
+                "Console.DisplayWith".into(),
+                WorkbenchOperationDisposition::Committed,
+            ));
+            assert!(owner.retain(late_capture).is_err());
+            let displays = Arc::new(Mutex::new(ActorDisplays::default()));
+            assert!(owner
+                .admit_publication(|| {
+                    let (request, answer) = displays.lock().stage(
+                        actor,
+                        WorkbenchDisplayPage {
+                            identity: (0, 0, 0),
+                            text: "visible".into(),
+                            expansions: Vec::new(),
+                            unavailable: false,
+                        },
+                        None,
+                        false,
+                        8192,
+                        Some(operation),
+                    )?;
+                    Ok(DisplayPublicationSubmission::new(
+                        displays.clone(),
+                        request,
+                        answer,
+                    ))
+                })
+                .is_err());
+            assert!(displays.lock().slots.is_empty());
+            assert_eq!(displays.lock().next_slot, 0);
+            assert_eq!(
+                control.terminal_reply(),
+                Some(delivered),
+                "late owner binding never changes a delivered terminal reply"
+            );
+        }
+        let actor = ActorRef::first(crate::ActorId(37));
+        let preadmission = crate::WorkbenchExecutionControl::untracked();
+        assert_eq!(
+            preadmission.settle_reply(Err(KernelInvocationFailure::ActorExited(actor))),
+            Err(KernelInvocationFailure::ActorExited(actor))
+        );
     }
 
     #[test]

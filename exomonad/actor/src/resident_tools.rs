@@ -280,6 +280,10 @@ impl WorkbenchExecutionControl {
     }
 
     pub(crate) fn bind_receipt_owner(&self, owner: Arc<dyn WorkbenchReceiptOwner>) {
+        // Admission and first terminal publication share this cutoff. An
+        // already terminated control closes late custody without changing its
+        // immutable reply, even before the first display boundary is captured.
+        let _terminal = self.cell_terminal.lock();
         if let Err(owner) = self.receipt_owner.set(owner) {
             assert!(
                 Arc::ptr_eq(
@@ -288,6 +292,12 @@ impl WorkbenchExecutionControl {
                 ),
                 "an execution control cannot replace its admitted receipt owner"
             );
+        }
+        if let Some(mut reply) = self.terminal_reply() {
+            self.receipt_owner
+                .get()
+                .expect("bound receipt owner")
+                .freeze(&mut reply);
         }
     }
 
@@ -308,7 +318,29 @@ impl WorkbenchExecutionControl {
                 return false;
             }
             if let Some(owner) = self.receipt_owner.get() {
-                owner.freeze(&mut reply);
+                // An exited actor carries actual display settlements through
+                // the receipt-bearing failure. A displayless owner still seals
+                // its admission while preserving the original failure class.
+                let exited = match &reply {
+                    Err(crate::KernelInvocationFailure::ActorExited(actor)) => Some(*actor),
+                    _ => None,
+                };
+                if let Some(actor) = exited {
+                    let mut projected = Err(crate::KernelInvocationFailure::Failed {
+                        actor,
+                        detail: "actor exited before its admitted workbench owner settled".into(),
+                        receipts: Vec::new(),
+                    });
+                    owner.freeze(&mut projected);
+                    if projected
+                        .as_ref()
+                        .is_err_and(|failure| !failure.receipts().is_empty())
+                    {
+                        reply = projected;
+                    }
+                } else {
+                    owner.freeze(&mut reply);
+                }
             }
             *current = Some(reply.clone());
             true
@@ -1201,12 +1233,15 @@ impl ResidentToolClient {
             Ok(reply) => reply,
             Err(_) => {
                 control.mark_unconfirmed();
-                control.settle(Err(crate::KernelInvocationFailure::ActorExited(
+                let reply = control.settle_reply(Err(crate::KernelInvocationFailure::ActorExited(
                     self.actor.identity(),
                 )));
-                return Err(ResidentToolError::Unavailable(
-                    "the actor stopped before settling the workbench invocation".into(),
-                ));
+                if matches!(&reply, Err(crate::KernelInvocationFailure::ActorExited(_))) {
+                    return Err(ResidentToolError::Unavailable(
+                        "the actor stopped before settling the workbench invocation".into(),
+                    ));
+                }
+                reply
             }
         };
         let response = reply.map_err(ResidentToolError::Invocation)?;
