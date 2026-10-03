@@ -1369,15 +1369,12 @@ async fn resident_await_watch_case(case: WatchCase) {
                     .and_then(serde_json::Value::as_str)
                     .expect("the command retain effect returns the retained binding reference");
                 assert!(!binding.contains("session_id:"), "{settled:?}");
-                assert!(
-                    installed_bindings
-                        .iter()
-                        .any(|candidate| candidate.as_str() == Some(binding)),
-                    "the host tracks the retained binding on the item that requested it: {settled:?}"
-                );
+                assert_eq!(installed_bindings.len(), 2, "{settled:?}");
+                assert_ne!(binding, observation_binding, "{settled:?}");
                 assert_eq!(
-                    settled["items"][0]["output"], "",
-                    "binding the job does not implicitly display or return it"
+                    settled["items"][0]["output"],
+                    format!("[bound {observation_binding}]"),
+                    "only the cell's automatic observation is reported"
                 );
                 let operations = settled["items"][0]["operations"]
                     .as_array()
