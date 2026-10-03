@@ -805,9 +805,10 @@ mod tests {
         .is_err());
         let wrong_version = original_witness_fixture("B", Some(retained), 8, &packages);
         assert!(admit(&[products[0].clone(), wrong_version]).is_err());
+        let legacy_before = ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get);
         admit(&legacy).unwrap();
         assert!(
-            ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get) > before,
+            ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get) > legacy_before,
             "uncaptured originals still use the full byte validator"
         );
     }
