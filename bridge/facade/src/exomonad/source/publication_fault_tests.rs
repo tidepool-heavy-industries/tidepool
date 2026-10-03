@@ -6,6 +6,7 @@
 )]
 
 use super::*;
+use crate::transport_test_support::ResidentToolEndpointTestExt;
 use exomonad_actor::{
     ActorDescriptor, ActorPlacement, ActorSourceLayers, ActorWorkbenchSource,
     LocalResidentDeployment, ResidentForest, WorkbenchCancellationOutcome,
@@ -183,7 +184,7 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
     layers.bind_run(tidepool_repr::PrincipalId::from(actor.identity()));
     let policy = installation.policy;
     let initial = policy
-        .dispatch_boxed(invocation(
+        .dispatch_json_boxed(invocation(
             "initial-probe",
             "probe",
             serde_json::json!({"number": 40}),
@@ -203,7 +204,7 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
         assert_ne!(updated, SPEC);
         std::fs::write(project.join(".exomonad/AgentSpec.hs"), updated).unwrap();
         let failure = policy
-            .dispatch_boxed(invocation(
+            .dispatch_json_boxed(invocation(
                 "uncertain-reload",
                 "reload_agent_spec",
                 serde_json::json!({}),
@@ -234,7 +235,7 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
         .unwrap();
         assert!(recovered_spec.contains("value + 200"));
         let status = policy
-            .dispatch_boxed(invocation(
+            .dispatch_json_boxed(invocation(
                 "uncertain-status",
                 "status",
                 serde_json::json!({"view": "detailed"}),
@@ -249,7 +250,7 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
             "{status}"
         );
         policy
-            .dispatch_boxed(invocation(
+            .dispatch_json_boxed(invocation(
                 "stale-probe",
                 "probe",
                 serde_json::json!({"number": 40}),

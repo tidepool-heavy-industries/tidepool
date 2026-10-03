@@ -1396,7 +1396,7 @@ async fn a_nested_shell_record_declares_its_tools_in_place_and_both_halves_answe
     let script = "echo nested-ok";
     let dispatch = {
         let policy = policy.clone();
-        tokio::spawn(policy.dispatch_boxed(ToolInvocation {
+        tokio::spawn(policy.dispatch_json_boxed(ToolInvocation {
             name: "bash".into(),
             arguments: ToolArguments::Structured(serde_json::json!({"cmd":script})),
             context: Some(ToolInvocationContext::external(

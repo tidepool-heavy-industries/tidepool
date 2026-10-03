@@ -1,5 +1,7 @@
 use super::*;
-use exomonad_actor::{ResidentToolEndpoint, ResidentToolError, ResidentToolFuture};
+use exomonad_actor::{
+    ResidentToolDispatchFuture, ResidentToolEndpoint, ResidentToolError, ResidentToolFuture,
+};
 use exomonad_agent::{
     AgentBackendError, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
     InteractiveInputError, InteractiveNativeToolPolicy, InteractivePolicyMount,

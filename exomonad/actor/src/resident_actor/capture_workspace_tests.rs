@@ -95,6 +95,8 @@ async fn run_cell_with_context(
         })
         .await
         .expect("production Haskell endpoint succeeds")
+        .into_json()
+        .expect("resident response serializes for this structured test helper")
 }
 
 fn assert_committed(reply: &serde_json::Value) {
@@ -340,6 +342,9 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
             })
             .await
             .expect("child workbench reads the original issuer checkpoint binding");
+        let reply = reply
+            .into_json()
+            .expect("resident response serializes for structured receipt assertions");
         assert_committed(&reply);
         assert_eq!(
             reply["items"]
@@ -1104,5 +1109,8 @@ async fn assert_captured_reader(child: &LocalResidentInstallation) {
     .await
     .expect("captured reader reply bounded")
     .expect("real captured native tool reply");
-    assert_eq!(reply, serde_json::json!(42), "{reply:?}");
+    assert!(
+        matches!(reply, crate::ResidentToolResponse::Value(value) if value == serde_json::json!(42)),
+        "{reply:?}"
+    );
 }

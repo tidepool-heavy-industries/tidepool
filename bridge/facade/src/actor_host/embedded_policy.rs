@@ -127,7 +127,7 @@ impl EmbeddedPolicySnapshot {
             }
             raw => raw,
         };
-        self.policy.dispatch_with_context_boxed(
+        let future = self.policy.dispatch_with_context_boxed(
             ToolInvocation {
                 context: Some(context),
                 name,
@@ -135,7 +135,13 @@ impl EmbeddedPolicySnapshot {
             },
             checkpoint_capture,
             context_binding,
-        )
+        );
+        Box::pin(async move {
+            future
+                .await?
+                .into_json()
+                .map_err(ResidentToolError::Encoding)
+        })
     }
 
     pub(super) fn implementation(&self, name: &str) -> Option<exomonad_tool::ToolImplementation> {

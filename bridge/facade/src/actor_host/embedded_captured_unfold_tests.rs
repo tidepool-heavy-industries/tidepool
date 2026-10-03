@@ -681,7 +681,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             let policy = campaign.root_installation.policy.clone();
             let public_names = tokio::time::timeout(
                 COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
-                policy.dispatch_boxed(preflight_invocation(
+                policy.dispatch_json_boxed(preflight_invocation(
                     "captured-parent-public-probe",
                     "captured-parent-public-probe",
                     "(x, getX)".into(),
@@ -693,7 +693,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             assert_committed_haskell_value(&public_names, "(41, 42)");
             let prefix = tokio::time::timeout(
                 COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
-                policy.dispatch_boxed(preflight_invocation(
+                policy.dispatch_json_boxed(preflight_invocation(
                     "captured-parent-prefix-probe",
                     "captured-parent-prefix-probe",
                     "(capturedValue, capturedGetter)".into(),
@@ -706,7 +706,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             for name in ["privateCapturedHelper", "capturedSuffix"] {
                 let private_name = tokio::time::timeout(
                     COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
-                    policy.dispatch_boxed(preflight_invocation(
+                    policy.dispatch_json_boxed(preflight_invocation(
                         &format!("captured-parent-private-probe-{name}"),
                         &format!("captured-parent-private-probe-{name}"),
                         format!("({name} :: Int)"),
@@ -733,7 +733,7 @@ async fn captured_host_scenario(scenario: CapturedScenario) {
             }
             let rebound = tokio::time::timeout(
                 COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
-                policy.dispatch_boxed(preflight_invocation(
+                policy.dispatch_json_boxed(preflight_invocation(
                     "captured-parent-rebind",
                     "captured-parent-rebind",
                     "capturedValue <- pure (99 :: Int)\nlet capturedGetter = capturedValue + 1\n(capturedValue, capturedGetter)".into(),
@@ -830,7 +830,7 @@ async fn preflight_dispatch_without_effect(
 ) -> Value {
     let policy = campaign.root_installation.policy.clone();
     tokio::select! {
-        result = policy.dispatch_boxed(invocation) => result.expect("actual admitted Haskell invocation settles"),
+        result = policy.dispatch_json_boxed(invocation) => result.expect("actual admitted Haskell invocation settles"),
         effect = campaign.next_deployment("forbidden preflight notification", Duration::from_secs(120), |event| match event {
             LocalResidentDeployment::NotificationSend(command) => Ok(command),
             other => Err(other),
@@ -883,7 +883,7 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     let actor = campaign.actor.identity();
     let policy = campaign.root_installation.policy.clone();
     let status = policy
-        .dispatch_boxed(exomonad_tool::ToolInvocation {
+        .dispatch_json_boxed(exomonad_tool::ToolInvocation {
             context: None,
             name: "status".into(),
             arguments: exomonad_tool::ToolArguments::Structured(json!({"view":"detailed"})),
@@ -979,7 +979,7 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     let valid = source.replace("pure (True :: Int)", "pure (42 :: Int)");
     let mut control = tokio::spawn(async move {
         policy
-            .dispatch_boxed(preflight_invocation(
+            .dispatch_json_boxed(preflight_invocation(
                 "valid-control-request",
                 "valid-control-call",
                 valid,

@@ -509,7 +509,7 @@ pub(super) async fn dispatch_haskell_script_result(
 ) -> Result<serde_json::Value, exomonad_actor::ResidentToolError> {
     let call_id = uuid::Uuid::new_v4().simple().to_string();
     let result = endpoint
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: Some(ToolInvocationContext::external(
                 "actor-host-vertical".into(),
                 call_id.clone(),
@@ -539,7 +539,7 @@ pub(super) async fn dispatch_structured_tool(
 ) -> serde_json::Value {
     let call_id = uuid::Uuid::new_v4().simple().to_string();
     let result = endpoint
-        .dispatch_boxed(ToolInvocation {
+        .dispatch_json_boxed(ToolInvocation {
             context: Some(ToolInvocationContext::external(
                 "actor-host-vertical".into(),
                 call_id.clone(),

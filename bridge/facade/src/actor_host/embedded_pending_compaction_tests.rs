@@ -1,7 +1,7 @@
 use super::embedded_service::{attach_actor, drive_conversation_with_transport};
 use super::test_campaign::TestCampaign;
 use async_trait::async_trait;
-use exomonad_actor::{ResidentToolEndpoint, ResidentToolError, ResidentToolFuture};
+use exomonad_actor::{ResidentToolDispatchFuture, ResidentToolEndpoint, ResidentToolError};
 use exomonad_tool::{
     CustomToolDeclaration, HostedTool, ToolArguments, ToolDeclaration, ToolInvocation, ToolKind,
 };

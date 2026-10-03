@@ -1289,7 +1289,7 @@ async fn record_operation_response(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use exomonad_actor::{ResidentToolDispatchFuture, ResidentToolFuture};
+    use exomonad_actor::ResidentToolDispatchFuture;
     use exomonad_tool::{CustomToolDeclaration, ToolDeclaration, ToolInvocationOrigin};
     use std::num::NonZeroU64;
     use std::sync::Mutex as StdMutex;
@@ -2564,14 +2564,14 @@ pub(crate) mod tests {
         assert!(cancelled_text.contains("\"pageOrdinal\":11"));
         cancelled.items[0].output = "canonical preview".into();
         let operation = &mut cancelled.items[0].operations[0];
-        let output = tidepool_runtime::session::ActorOutputReference {
+        let output_reference = tidepool_runtime::session::ActorOutputReference {
             run: "run".into(),
             sequence: 17,
         };
         operation.display_publication = Some(
             tidepool_runtime::session::WorkbenchDisplayPublication::Published {
                 publication: page,
-                output: output.clone(),
+                output: output_reference.clone(),
             },
         );
         operation.display = Some(tidepool_runtime::session::WorkbenchDisplayOutput {
@@ -2581,7 +2581,7 @@ pub(crate) mod tests {
                 expansions: vec![(1, "line\n\"label".into())],
                 unavailable: false,
             },
-            output,
+            output: output_reference,
         });
         let published_response = CallResponse::workbench(cancelled);
         let CallContent::InputText {

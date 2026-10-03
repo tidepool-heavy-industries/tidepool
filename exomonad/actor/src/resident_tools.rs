@@ -1504,7 +1504,7 @@ mod tests {
             endpoint
                 .dispatch_with_checkpoint_boxed(invocation(), None)
                 .await,
-            Ok(serde_json::Value::Null)
+            Ok(ResidentToolResponse::Value(serde_json::Value::Null))
         ));
         assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
