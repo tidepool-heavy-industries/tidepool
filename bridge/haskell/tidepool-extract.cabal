@@ -52,6 +52,7 @@ library tidepool-extract-internal
     Tidepool.FatIface
     Tidepool.FinalizedModule
     Tidepool.FinalizedModuleArtifacts
+    Tidepool.FinalizedCore
     Tidepool.GhcPipeline
     Tidepool.ExactHydration
     Tidepool.ExactScope
