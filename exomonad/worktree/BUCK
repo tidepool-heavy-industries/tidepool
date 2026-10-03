@@ -47,7 +47,7 @@ tidepool_rust_library(
         "//third-party/rust:tempfile",
         "//third-party/rust:thiserror",
         "//third-party/rust:uuid",
-        "//third-party/rust:walkdir-2",
+        "//third-party/rust:walkdir",
         "//tidepool/repr:tidepool_repr",
     ],
     visibility = ["PUBLIC"],
