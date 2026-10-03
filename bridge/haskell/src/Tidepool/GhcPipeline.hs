@@ -144,7 +144,7 @@ import Numeric (showHex)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName, takeFileName, normalise, pathSeparator, (</>))
 import System.Directory (canonicalizePath, makeAbsolute, doesFileExist, getModificationTime, getTemporaryDirectory)
-import System.IO (hPutStrLn, stderr, readFile')
+import System.IO (hPutStrLn, stderr, readFile', IOMode(ReadMode), withBinaryFile)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, forM_, when, unless, filterM)
 import Data.Data (Data, cast, gmapQ)
@@ -155,7 +155,9 @@ import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellGenericDe
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
   , NativeParsedModule, unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.FinalizedModule (FinalizedModule(..))
-import Tidepool.HomeProducts (hydrateCandidateHomeProductsWithOriginals)
+import Tidepool.HomeProducts
+  ( hydrateCandidateHomeProductsWithOriginals, hydrateCandidateExecutable
+  , validateCandidateInterfaceRequirements )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
   ( PlannedDeclarationInventory, transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted, transformProgramDeclarationImports, hydratePlannedDeclarationInventory )
@@ -201,6 +203,10 @@ import Tidepool.ExactHydration
 import Tidepool.ExactScope
   ( ExactScope(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..), readExactScope, revalidateExactScope, scopeValueInterfaces
   , writeExactCompilation, scopeExecutionNativeOwners )
+import Tidepool.ExactScope
+  ( CanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
+  , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
+  , canonicalCorePath, canonicalCoreSha256 )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceNode(..), ExecutionSourceIdentity(..)
   , ExecutionSourceFailure(..), ExecutionSourceRef(..), executionSourceClosure, executionIdentityKey )
@@ -917,6 +923,7 @@ data CanonicalFrontendFailure
   | MissingLoadedFinalization
   | UnfinishedLoadedFrontend
   | CandidateInterfaceBytesMismatch ModuleName
+  | CandidateFrontendReplayRefused ModuleName
   | MissingFinalizedFacts ModuleName
   deriving (Show)
 
@@ -1681,9 +1688,10 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
                                          pure ()
                                    _ -> liftIO $ ioError $ userError
                                      "source-selected native candidate lacks its current GHC executable"
-                           installPreparedInterface name hmi
+                           installed <- getSession
+                           setSession (hscUpdateHPT (\hpt -> addToHpt hpt name hmi) installed)
                  , cpTier = OptimizeEveryModule }
-    liftIO (emitCount timing "candidate_source_load_required"
+    liftIO (emitCount timing "candidate_executable_required"
       (toInteger (length [() | candidate <- Map.elems acceptedCandidates
         , admittedCandidateLoading candidate == CandidateLoadForExecution])))
     -- Restore the representation-affecting extraction flags before 'load''
@@ -1781,6 +1789,8 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
               unless (not (backendGeneratesCode originalBackend) || backendCanReuseLoadedCode originalBackend) $
                 throwIO UnsupportedLoadBackend
               when (isJust (hscFrontendHook (hsc_hooks phaseEnv))) (throwIO CustomLoadFrontendHook)
+              when (ms_mod_name summary `Map.member` acceptedCandidates) $
+                throwIO (CandidateFrontendReplayRefused (ms_mod_name summary))
               validateCandidateHomeInterfaces env
               -- GHC make supplies the dependency HPT for this exact phase.
               -- Never mutate or reuse the outer Ghc Session from a load hook.
@@ -2783,7 +2793,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           case [(tcg, probes) | Just (tcg, probes) <- checked] of
             [(tcg, probes)] -> do
               env <- getSession
-              valid <- liftIO (revalidateAcceptedCandidates (map admittedCandidateOriginal (Map.elems acceptedCandidates)))
+              valid <- liftIO (revalidateAcceptedCandidates (Map.elems acceptedCandidates))
               unless valid $ liftIO $ ioError $ userError
                 "accepted metadata candidate changed before checked receipt"
               forM_ exactCompilation $ \compilation -> do
@@ -2818,7 +2828,7 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
           }
       PreparedProducts _ -> do
         (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
-        valid <- liftIO $ revalidateAcceptedCandidates (map admittedCandidateOriginal (Map.elems acceptedCandidates))
+        valid <- liftIO $ revalidateAcceptedCandidates (Map.elems acceptedCandidates)
         when (not valid) $ liftIO $ ioError $ userError
           "accepted module candidate changed before artifact publication"
         pure PreparedPipelineResult
@@ -2867,6 +2877,7 @@ data AdmittedSourceCandidate = AdmittedSourceCandidate
   { admittedCandidateOriginal :: ModuleCandidate
   , admittedCandidateRoots :: PackageImportEvidence
   , admittedCandidateLoading :: CandidateLoading
+  , admittedCandidateProof :: CanonicalInterfaceProof
   }
 
 data CandidateAdmissionReason
@@ -2876,7 +2887,8 @@ data CandidateAdmissionReason
   | CandidatePreprocessor | CandidateSourcePath | CandidateSourceRead
   | CandidateSourceSha | CandidateSummaryHash | CandidateNativeRead | CandidateNativeSha
   | CandidatePackageRead | CandidatePackageSelection | CandidateClosedHome
-  | CandidateInterfaceRead | CandidateInterfaceTH | CandidateHydration | CandidateExecutionProof | CandidateAccepted
+  | CandidateInterfaceRead | CandidateInterfaceTH | CandidateHydration | CandidateExecutionProof
+  | CandidateCanonicalProof | CandidateProducerUnavailable | CandidateAccepted
   deriving (Eq, Ord, Show)
 
 certifyModuleCandidates
@@ -3108,12 +3120,10 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
           closed selected = let smaller = shrink selected in
             if Map.keysSet smaller == Map.keysSet selected then smaller else closed smaller
           admitted = closed initial
-          artifact (candidate, _, node, _) = ExactIfaceArtifact
+          artifact (candidate, _, _, _) = ExactIfaceArtifact
             (candidateUnit candidate) (candidateModule candidate)
             (candidateInterface candidate) (candidateInterfaceSha256 candidate)
-            (Set.toAscList (Set.fromList
-              ([(candidateUnit candidate, moduleNameString requirement) | requirement <- requiredHome node]
-                ++ Map.keys (provenOriginals candidate))))
+            (candidateInterfaceRequirements candidate)
       forM_ (Map.elems (Map.difference initial admitted)) $ \(candidate, _, _, _) ->
         recordCandidate candidate CandidateClosedHome Nothing
       let recordAdmitted reason detail = forM_ (Map.elems admitted) $ \(candidate, _, _, _) ->
@@ -3124,52 +3134,80 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
           let candidates' = map artifact (Map.elems admitted)
               originals = maybe [] (map (\(iface,_,_) -> iface) . scopeInterfaces) exactScope
               values = maybe [] scopeValueInterfaces exactScope
-          captured <- liftIO $ readVerifiedExactIfaceClosureWithCheckedValues env
-            (candidates' ++ originals) values
-          let loaded = captured >>= \verified -> selectVerifiedExactInterfaces verified candidates'
-              originalInterfaces = captured >>= \verified -> selectVerifiedExactInterfaces verified originals
-              installLexical candidateGraph hydrated = case (exactScope,captured,originalInterfaces) of
-                (Nothing,_,_) -> pure (Right hydrated)
-                (Just scope,Right verified,Right originalIfaces) -> case
-                    checkedValueImportAuthorityFromVerified verified values of
-                  Left reason -> pure (Left reason)
-                  Right checked -> do
-                    let byOwner = Map.fromList [((exactUnit iface,exactModule iface),iface)
-                          | (iface,_) <- originalIfaces]
-                        lexical = [(iface,imports) | (key,imports) <- scopeLexical scope
-                          , Just iface <- [Map.lookup key byOwner]]
-                    installExactLexicalGraphWithScaffold candidateGraph lexical checked
-                      noGeneratedScaffoldImports hydrated
-                _ -> pure (Left "candidate original interface closure unavailable")
-          case loaded of
-            Left reason -> recordAdmitted CandidateInterfaceRead (Just reason) >> pure Map.empty
-            Right interfaces
-              | any (mi_used_th . snd) interfaces ->
-                  recordAdmitted CandidateInterfaceTH Nothing >> pure Map.empty
-              | otherwise -> do
-                  let selectedBoots = [summary | (name,summary) <- Map.toList bootSummaries,
-                        Map.member name admitted]
-                  let canonicalLoadGraph = mapMG (\summary -> summary
-                        { ms_hspp_opts = canonicalizeRepresentationFlags (ms_hspp_opts summary) }) graph
-                      nativeGraph = mapMG (\summary -> summary
-                        { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts summary) }) (hsc_mod_graph env)
-                      nativeSummary summary = summary
-                        { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts summary) }
-                  -- Original native products use the extraction profile. GHC's
-                  -- separate source load keeps its interpreter profile and
-                  -- provisions every executable needed by a splice.
-                  hydratedResult <- hydrateCandidateHomeProductsWithOriginals env { hsc_mod_graph = nativeGraph }
-                    canonicalLoadGraph interfaces (either (const []) id originalInterfaces)
-                    installLexical
-                    [nativeSummary summary | (_,summary,_,_) <- Map.elems admitted] selectedBoots
-                  case hydratedResult of
-                    Left reason -> recordAdmitted CandidateHydration (Just reason) >> pure Map.empty
-                    Right hydrated -> do
-                      setSession hydrated { hsc_mod_graph = hsc_mod_graph env }
-                      recordAdmitted CandidateAccepted Nothing
-                      pure (Map.map (\(candidate, summary, _, roots) -> AdmittedSourceCandidate
-                        candidate roots (if backendGeneratesCode (backend (ms_hspp_opts summary))
-                          then CandidateLoadForExecution else CandidateInterfaceOnly)) admitted)
+          let canonicalRows = [(artifact tuple, candidatePackageImports candidate,
+                candidatePackageImportsSha256 candidate)
+                | tuple@(candidate,_,_,_) <- Map.elems admitted]
+                ++ maybe [] scopeInterfaces exactScope
+          proofsResult <- case exactScope of
+            Nothing -> do
+              recordAdmitted CandidateProducerUnavailable Nothing
+              pure (Left "candidate admission requires the owning compiler producer")
+            Just scope -> liftIO $ fmap (fmap Map.fromList . sequence) $
+              forM (Map.toAscList admitted) $ \(name,(candidate,_,_,_)) ->
+                fmap (fmap (\proof -> (name,proof)))
+                  (validateCandidateCanonicalInterfaceProof (scopeProducerSha256 scope) canonicalRows candidate)
+          case proofsResult of
+            Left reason -> recordAdmitted CandidateCanonicalProof (Just reason) >> pure Map.empty
+            Right proofs -> do
+              captured <- liftIO $ readVerifiedExactIfaceClosureWithCheckedValues env
+                (candidates' ++ originals) values
+              let loaded = captured >>= \verified -> selectVerifiedExactInterfaces verified candidates'
+                  originalInterfaces = captured >>= \verified -> selectVerifiedExactInterfaces verified originals
+                  installLexical candidateGraph hydrated = case (exactScope,captured,originalInterfaces) of
+                    (Nothing,_,_) -> pure (Right hydrated)
+                    (Just scope,Right verified,Right originalIfaces) -> case
+                        checkedValueImportAuthorityFromVerified verified values of
+                      Left reason -> pure (Left reason)
+                      Right checked -> do
+                        let byOwner = Map.fromList [((exactUnit iface,exactModule iface),iface)
+                              | (iface,_) <- originalIfaces]
+                            lexical = [(iface,imports) | (key,imports) <- scopeLexical scope
+                              , Just iface <- [Map.lookup key byOwner]]
+                        installExactLexicalGraphWithScaffold candidateGraph lexical checked
+                          noGeneratedScaffoldImports hydrated
+                    _ -> pure (Left "candidate original interface closure unavailable")
+              case loaded of
+                Left reason -> recordAdmitted CandidateInterfaceRead (Just reason) >> pure Map.empty
+                Right interfaces
+                  | any (mi_used_th . snd) interfaces ->
+                      recordAdmitted CandidateInterfaceTH Nothing >> pure Map.empty
+                  | otherwise -> do
+                      liftIO $ forM_ interfaces $ \(artifact',iface) ->
+                        either throwIO pure (validateCandidateInterfaceRequirements
+                          (proofs Map.! mkModuleName (exactModule artifact')) iface)
+                      let selectedBoots = [summary | (name,summary) <- Map.toList bootSummaries,
+                            Map.member name admitted]
+                      let canonicalLoadGraph = mapMG (\summary -> summary
+                            { ms_hspp_opts = canonicalizeRepresentationFlags (ms_hspp_opts summary) }) graph
+                          nativeGraph = mapMG (\summary -> summary
+                            { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts summary) }) (hsc_mod_graph env)
+                          nativeSummary summary = summary
+                            { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts summary) }
+                      -- Current source selection checks the original native
+                      -- interface profile. GHC executable demand subsequently
+                      -- consumes the same finalized Core without a frontend.
+                      hydratedResult <- hydrateCandidateHomeProductsWithOriginals env { hsc_mod_graph = nativeGraph }
+                        canonicalLoadGraph interfaces (either (const []) id originalInterfaces)
+                        installLexical
+                        [nativeSummary summary | (_,summary,_,_) <- Map.elems admitted] selectedBoots
+                      case hydratedResult of
+                        Left reason -> recordAdmitted CandidateHydration (Just reason) >> pure Map.empty
+                        Right hydrated -> do
+                          setSession hydrated { hsc_mod_graph = hsc_mod_graph env }
+                          forM_ (Map.toAscList admitted) $ \(name,(_,summary,_,_)) ->
+                            when (backendGeneratesCode (backend (ms_hspp_opts summary))) $ do
+                              current <- getSession
+                              let originalFlags = ms_hspp_opts summary
+                                  executableSummary = summary {ms_hspp_opts =
+                                    (canonicalizeDFlags originalFlags)
+                                      {backend = backend originalFlags, ghcLink = ghcLink originalFlags}}
+                              home <- liftIO $ hydrateCandidateExecutable current (proofs Map.! name) executableSummary
+                              setSession (hscUpdateHPT (\hpt -> addToHpt hpt name home) current)
+                              liftIO $ emitCount timing "candidate_finalized_core_bytecode" 1
+                          recordAdmitted CandidateAccepted Nothing
+                          pure (Map.mapWithKey (\name (candidate, summary, _, roots) -> AdmittedSourceCandidate
+                            candidate roots (if backendGeneratesCode (backend (ms_hspp_opts summary))
+                              then CandidateLoadForExecution else CandidateInterfaceOnly) (proofs Map.! name)) admitted)
   when timing $ liftIO $ do
     observed <- readIORef observations
     let counts = Map.fromListWith (+)
@@ -3182,12 +3220,19 @@ certifyModuleCandidates exactScope sourceFreeOwners manifest graph targetPath = 
     emitCount timing "candidate_admission_rows_omitted" (toInteger (max 0 (Map.size observed - 128)))
   pure result
 
-revalidateAcceptedCandidates :: [ModuleCandidate] -> IO Bool
-revalidateAcceptedCandidates candidates = and <$> forM candidates (\candidate -> do
+revalidateAcceptedCandidates :: [AdmittedSourceCandidate] -> IO Bool
+revalidateAcceptedCandidates candidates = and <$> forM candidates (\admission -> do
+  let candidate = admittedCandidateOriginal admission
+      proof = admittedCandidateProof admission
   readBack <- try $ do
     (source, _) <- sourceEvidenceWithFingerprint (candidateSource candidate)
     interface <- BS.readFile (candidateInterface candidate)
     productBytes <- BS.readFile (candidateProductPath candidate)
+    certificate <- bounded (canonicalCertificatePath proof) (4 * 1024 * 1024)
+    coreValid <- case canonicalCoreArtifact proof of
+      Nothing -> pure False
+      Just core -> (== canonicalCoreSha256 core) . hexBytes . SHA256.hash
+        <$> bounded (canonicalCorePath core) (32 * 1024 * 1024)
     packageImports <- readPackageImports (candidatePackageImports candidate)
       (candidatePackageImportsSha256 candidate)
       (ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
@@ -3195,9 +3240,16 @@ revalidateAcceptedCandidates candidates = and <$> forM candidates (\candidate ->
     pure (dependencySourceSha256 source == candidateSourceSha256 candidate
       && hexBytes (SHA256.hash interface) == candidateInterfaceSha256 candidate
       && hexBytes (SHA256.hash productBytes) == candidateProductSha256 candidate
+      && hexBytes (SHA256.hash certificate) == canonicalCertificateSha256 proof
+      && coreValid
       && either (const False) (const True) packageImports)
     :: IO (Either IOException Bool)
   pure (either (const False) id readBack))
+  where
+    bounded path' limit = withBinaryFile path' ReadMode $ \handle -> do
+      bytes <- BS.hGet handle (limit + 1)
+      unless (BS.length bytes <= limit) (ioError (userError "candidate artifact exceeds byte bound"))
+      pure bytes
 
 dependencyQualifier :: PkgQual -> DependencyQualifier
 dependencyQualifier NoPkgQual = DependencyUnqualified

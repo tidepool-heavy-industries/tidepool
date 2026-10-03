@@ -1,10 +1,14 @@
 module FinalizedCoreTest (finalizedCoreChecks) where
 
-import Control.Exception (bracket)
+import Control.Exception (bracket, try)
 import Control.Monad (forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as BS
+import Data.Set qualified as Set
+import Data.Text qualified as T
+import Codec.CBOR.Encoding
+import Codec.CBOR.Write (toStrictByteString)
 import GHC
 import GHC.Core (Bind(..), bindersOfBinds)
 import GHC.Core.InstEnv (is_dfun)
@@ -12,6 +16,10 @@ import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCon (tyConName)
 import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Driver.Main (hscTidy)
+import GHC.Driver.Backend (interpreterBackend)
+import GHC.ByteCode.Types (CompiledByteCode(..))
+import GHC.Data.FlatBag (elemsFlatBag)
+import GHC.Linker.Types (linkableBCOs, linkableModule)
 import GHC.Driver.Session (targetProfile, updOptLevel)
 import GHC.Fingerprint.Type (Fingerprint(..))
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
@@ -22,14 +30,15 @@ import GHC.Types.SptEntry (SptEntry(..))
 import GHC.Types.TyThing (TyThing(..))
 import GHC.Types.TypeEnv (lookupTypeEnv)
 import GHC.Types.Var (varName)
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), emptyHomeModInfoLinkable, lookupHpt)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, lookupHpt)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModGuts (CgGuts(..))
 import GHC.Unit.Module.ModIface
   ( ModIfaceBackend(..), mi_final_exts, mi_iface_hash, set_mi_extra_decls
-  , set_mi_final_exts, set_mi_module )
-import GHC.Unit.Types (moduleUnit, unitString)
-import GHC.Driver.Env (hsc_HPT, hsc_dflags)
+  , mi_usages, set_mi_usages, set_mi_final_exts, set_mi_module )
+import GHC.Unit.Module.Deps (Usage(..))
+import GHC.Unit.Types (moduleUnit, unitString, unitIdString, toUnitId)
+import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_dflags, hsc_all_home_unit_ids)
 import GHC.ForeignSrcLang (ForeignSrcLang(..))
 import Numeric (showHex)
 import System.Directory
@@ -42,6 +51,11 @@ import Tidepool.ExactHydration
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.FinalizedCore
 import Tidepool.FinalizedModule (FinalizedModule(..))
+import Tidepool.ExactScope (CanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof)
+import Tidepool.ModuleCandidates (readModuleCandidates)
+import Tidepool.PackageWitness (emptyPackageImports, encodePackageImports)
+import Tidepool.HomeProducts
+  ( CandidateCoreFailure(..), hydrateCandidateExecutable, validateCandidateInterfaceRequirements )
 import Tidepool.PreparedStg (PreparedModule(..), prepareModule, unelaboratedModule)
 
 -- | A new GHC session hydrates captured interface bytes after the only source
@@ -53,7 +67,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       interfacePath = work </> "captured-skinny.hi"
   copyFile "test-source-boot/fixtures/FinalizedCoreFixture.hs" source
   libdir <- getLibdir
-  (artifact, bytes, summary, groups, tyconNames, instanceNames, packages) <- runGhc (Just libdir) $ do
+  (artifact, bytes, summary, proof, groups, tyconNames, instanceNames, packages) <- runGhc (Just libdir) $ do
     configure work
     target <- guessTarget source Nothing Nothing
     setTargets [target]
@@ -88,7 +102,8 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       let owner = cg_module guts
           artifact = ExactIfaceArtifact (unitString (moduleUnit owner))
             "FinalizedCoreFixture" interfacePath (hexBytes (SHA256.hash interfaceBytes)) []
-      pure (artifact, bytes, summary {ms_hspp_buf = Nothing}, bindingGroups guts,
+      proof <- captureProof env artifact source bytes work
+      pure (artifact, bytes, summary {ms_hspp_buf = Nothing}, proof, bindingGroups guts,
         map (getOccString . tyConName) (cg_tycons guts),
         map (getOccString . is_dfun) (finalizedCoreSiteInstances finalized), cg_dep_pkgs guts)
   removeFile source
@@ -104,6 +119,30 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       Just home -> pure home
       Nothing -> fail "cold exact HPT has no original owner"
     liftIO $ do
+      let executableSummary = summary {ms_hspp_opts =
+            (ms_hspp_opts summary) {backend = interpreterBackend}}
+      executable <- hydrateCandidateExecutable env proof executableSummary
+      assert (case homeMod_bytecode (hm_linkable executable) of
+          Just linkable -> linkableModule linkable == ms_mod summary
+            && any (not . null . elemsFlatBag . bc_bcos) (linkableBCOs linkable)
+          Nothing -> False) "cold finalized Core did not supply real GHC bytecode"
+      assert (case homeMod_object (hm_linkable executable) of Nothing -> True; _ -> False)
+        "cold finalized Core unexpectedly supplied native object code"
+      let missing = mkModuleName "MissingCanonicalDependency"
+          homeUsage = UsageHomeModuleInterface missing (toUnitId (moduleUnit (ms_mod summary))) (Fingerprint 0 0)
+          packageUsage = UsagePackageModule (mkModule (moduleUnit (ms_mod summary)) missing) (Fingerprint 0 0) False
+      forM_ [homeUsage,packageUsage] $ \usage ->
+        assert (validateCandidateInterfaceRequirements proof
+          (set_mi_usages (usage : mi_usages (hm_iface home)) (hm_iface home))
+            == Left CandidateInterfaceRequirementsMismatch)
+          "native home interface usage escaped canonical requirement checks"
+      let corePath = work </> "captured.core"
+      BS.writeFile corePath (BS.take 1 bytes)
+      refusal <- try (hydrateCandidateExecutable env proof executableSummary)
+        :: IO (Either CandidateCoreFailure HomeModInfo)
+      assert (case refusal of Left CandidateCoreBytesMismatch -> True; _ -> False)
+        "changed candidate Core did not produce a typed refusal"
+      BS.writeFile corePath bytes
       finalized <- requireRight =<< decodeFinalizedCore env home (ms_location summary) bytes
       let guts = finalizedTidyGuts finalized
       assert (bindingGroups guts == groups) "canonical binding order or recursive groups changed"
@@ -144,7 +183,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       malformed <- decodeFinalizedCore env home (ms_location summary) (BS.take 1 bytes)
       assert (case malformed of Left FinalizedCoreDecodeFailure{} -> True; _ -> False)
         "truncated canonical companion did not fail closed"
-  putStrLn "finalized Core: cold source-free STG, native owner/types, Rec groups and local instances; owner/version/truncation and unsupported metadata checked"
+  putStrLn "finalized Core: cold source-free STG and GHC bytecode, native owner/types/requirements, Rec groups and local instances; Core seal, owner/version/truncation and unsupported metadata checked"
   where
     configure work = do
       flags <- getSessionDynFlags
@@ -159,6 +198,46 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       removeFile path
       createDirectory path
       pure path
+
+-- The test uses the matched candidate decoder and certificate validator rather
+-- than manufacturing the private canonical proof consumed by recovery.
+captureProof :: HscEnv -> ExactIfaceArtifact -> FilePath -> BS.ByteString -> FilePath
+  -> IO CanonicalInterfaceProof
+captureProof env artifact source core work = do
+  sourceBytes <- BS.readFile source
+  let corePath = work </> "captured.core"
+      packagePath = work </> "captured.packages"
+      certificatePath = work </> "captured.certificate"
+      manifestPath = work </> "captured.candidates"
+      productPath = work </> "descriptor.tpmod"
+      producer = replicate 64 'a'
+      text = encodeString . T.pack
+      list values = encodeListLen (fromIntegral (length values)) <> mconcat values
+      sha = hexBytes . SHA256.hash
+      homes = map unitIdString (Set.toAscList (hsc_all_home_unit_ids env))
+      packages = encodePackageImports artifact emptyPackageImports
+      certificate = toStrictByteString $ list
+        [text "TPFINALMODULE",encodeWord 1,text "tidepool-ghc-finalized-module-v1",text producer
+        ,list (map text homes),text (exactUnit artifact),text (exactModule artifact)
+        ,text (sha sourceBytes),text (exactSha256 artifact),text (sha packages)
+        ,text (sha core),list []]
+      candidate = list
+        (map text [exactUnit artifact,exactModule artifact,source,sha sourceBytes
+          ,exactPath artifact,exactSha256 artifact,replicate 64 '0',sha BS.empty,replicate 64 '0']
+        ++ [list [],list [],text packagePath,text (sha packages),text productPath,list []
+          ,list (map text ["module",certificatePath,sha certificate,corePath,sha core])])
+      manifest = toStrictByteString $ list
+        [text "TPMCAN",text "10",list [],list [],list [candidate],list [list [],list []],text producer]
+  BS.writeFile corePath core
+  BS.writeFile packagePath packages
+  BS.writeFile certificatePath certificate
+  BS.writeFile productPath BS.empty
+  BS.writeFile manifestPath manifest
+  offered <- requireRight =<< readModuleCandidates manifestPath
+  case offered of
+    [candidate'] -> requireRight =<< validateCandidateCanonicalInterfaceProof producer
+      [(artifact,packagePath,sha packages)] candidate'
+    _ -> fail "candidate Core fixture has no exact offered owner"
 
 bindingGroups :: CgGuts -> [(Bool, [String])]
 bindingGroups = map group . cg_binds
