@@ -4,7 +4,7 @@ summarize (Finding path) = prefix <> path
   where prefix = "checked: "
 paths <- pure ["src", "tests"]
 labels <- pure (map (summarize . Finding) paths)
-labels
+display labels
 ```
 
 Execute raw Haskell in the persistent notebook: declarations, `let` bindings,

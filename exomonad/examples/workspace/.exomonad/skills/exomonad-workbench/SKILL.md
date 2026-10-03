@@ -65,7 +65,7 @@ Annotate it:
 
 ```haskell
 let unreachable path = error ("no owner for " <> path) :: Text
-("annotated, and never forced" :: Text)
+display ("annotated, and never forced" :: Text)
 ```
 
 `assignment` takes a validated `Label`, not free `Text`. Static assignment
@@ -145,7 +145,7 @@ becomes a shell injection.
 
 ```haskell
 let compare' old new = Cmd.withArguments [old, new] [bash|git diff --stat "$1" "$2"|]
-Cmd.describe (compare' "HEAD~1" "HEAD")
+display (Cmd.describe (compare' "HEAD~1" "HEAD"))
 ```
 
 `Cmd.describe` inspects the intent without executing. `Cmd.argv [program, a, b]`

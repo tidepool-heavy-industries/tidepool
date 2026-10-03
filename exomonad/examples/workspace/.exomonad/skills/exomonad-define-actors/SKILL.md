@@ -43,7 +43,8 @@ joiner <- R.start joinDefinition
 let endpoints = R.client joiner
 R.send (sourceReady endpoints) "abc123"
 R.send (checksReady endpoints) 4
-R.call (joined endpoints) ()
+result <- R.call (joined endpoints) ()
+display result
 ```
 
 `State s` appears exactly once. Its definition field is the initial value; handler
@@ -64,7 +65,8 @@ let resultDefinition = coordinationActor "candidate-results" Results
       , resultCount = \() -> gets length
       }
 results <- R.start resultDefinition
-R.call (resultCount (R.client results)) ()
+count <- R.call (resultCount (R.client results)) ()
+display count
 ```
 
 This block assumes `worker :: Response (Outcome Candidate)` from the current
@@ -114,6 +116,7 @@ Keep the integration actor alive through useful repairs. When done:
 ```haskell
 joinFinal <- R.finish joiner
 resultsFinal <- R.finish results
+display (joinFinal, resultsFinal)
 ```
 
 `R.finish` drains accepted work and returns `ActorExit state`; retain that value
@@ -153,7 +156,8 @@ tallyDefinition = R.definition "tally" (Actor.Selected knownEffects) Tally
       }
 tally <- R.start tallyDefinition
 R.send (noted (R.client tally)) "first finding"
-R.call (noteCount (R.client tally)) ()
+count <- R.call (noteCount (R.client tally)) ()
+display count
 ```
 
 A record actor may hold a worktree. `R.withWorktree tree spec` starts it

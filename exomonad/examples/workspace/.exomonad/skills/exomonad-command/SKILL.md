@@ -126,7 +126,7 @@ recovery receipt. Nonzero process exits remain in the retained result.
 
 ```haskell
 let changed = T.lines <$> Cmd.stdout result
-changed
+display changed
 ```
 
 `Cmd.stdout` purely extracts complete stdout from exit zero, or an explicit issue.
@@ -169,7 +169,7 @@ variables or backticks. Bash retains ordinary exit/pipeline semantics; choose
 
 ```haskell
 let preview path = Cmd.withArguments [path] [bash|sed -n '1,20p' -- "$1"|]
-Cmd.describe (preview "a path; not shell syntax")
+display (show (Cmd.describe (preview "a path; not shell syntax")))
 ```
 
 `Cmd.argv [program,arg1,arg2]` constructs arguments without shell parsing or
@@ -219,8 +219,9 @@ navigation. Explicit reads do not consume output. Read without executing again:
 ```haskell
 page <- Cmd.output (Cmd.job result)
 let relevant = filter (T.isInfixOf "error") (T.lines (Cmd.pageText page))
-relevant
+display relevant
 next <- Cmd.next page
+display (Cmd.pageText next)
 ```
 
 `output` begins stdout at byte zero; `next` advances the page.
