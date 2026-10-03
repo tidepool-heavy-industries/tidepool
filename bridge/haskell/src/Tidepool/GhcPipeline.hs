@@ -34,7 +34,7 @@ import GHC.Data.StringBuffer (stringToStringBuffer)
 import qualified GHC.Data.Maybe as MaybeErr
 import GHC.Driver.Backend (backendGeneratesCode, backendWritesFiles, backendCanReuseLoadedCode, noBackend)
 import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit, hscSetFlags, runHsc')
-import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags, hsc_FC, hsc_targets, hsc_hooks))
+import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags, hsc_FC, hsc_targets, hsc_hooks, hsc_interp))
 import GHC.Driver.Monad (reflectGhc, reifyGhc, Session(..))
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, addToHpt, lookupHpt)
 import GHC.Unit.Module.ModDetails (ModDetails, md_types, md_insts)
@@ -46,6 +46,7 @@ import GHC.Types.Avail (availNames)
 import GHC.Iface.Load (loadInterface, WhereFrom(..))
 import GHC.Rename.Names (renameRawPkgQual)
 import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
+import qualified GHC.Linker.Loader as Linker
 import GHC.Iface.Make (mkIfaceTc, mkPartialIface, mkFullIface)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Unit.Finder (initFinderCache)
@@ -1552,6 +1553,12 @@ runCompileCycle selection mCacheInput mMemoRefInput retained incarnation timing 
       current <- getSession
       fresh <- liftIO (freshExactState current)
       setSession fresh
+    unless exactCycle $ do
+      current <- getSession
+      -- Make unloads home executables only for LinkInMemory. Extraction uses
+      -- NoLink, so this request boundary owns the same loader transition.
+      -- Immutable cached interfaces and bytecode remain available for reuse.
+      liftIO $ forM_ (hsc_interp current) $ \interp -> Linker.unload interp current []
     forM_ (pvExactScope variant) $ \scope -> do
       env <- getSession
       verified <- liftIO (revalidateExactScope env scope)
