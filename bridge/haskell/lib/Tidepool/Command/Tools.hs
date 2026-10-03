@@ -18,6 +18,7 @@ module Tidepool.Command.Tools
     CommandOptionError (..),
     CommandToolFacts (..),
     CommandToolResult (..),
+    CommandState (..),
     CommandOutcomeFact (..),
     CommandCleanupFact (..),
     observedResult,
@@ -47,7 +48,7 @@ import Tidepool.Aeson.Value (ToJSON (..))
 import qualified Tidepool.Command as Cmd
 import Tidepool.Command.Types (Job (..))
 import Tidepool.Effects.Core (Commands (..))
-import Tidepool.Inspection (Display (..))
+import Tidepool.Inspection (Display (..), DisplayTree (..), WorkbenchDisplay (..))
 
 data Execute = Execute
   { cmd :: Text,
@@ -127,12 +128,12 @@ data CommandToolFacts
       }
   | OutputPage
       { session_id :: Text,
-        stream :: Cmd.CommandStream,
+        stream :: OutputStreamFact,
         start_offset :: Int,
         end_offset :: Int,
         next_offset :: Int,
         retained_end :: Int,
-        eof :: Bool,
+        at_eof :: Bool,
         lost_bytes :: Int,
         lossy :: Bool,
         payload_lines :: Int,
@@ -148,7 +149,7 @@ data CommandToolFacts
       }
   | Rejected
       { operation :: CommandOperation,
-        session_id :: Maybe Text,
+        session_reference :: Maybe Text,
         reason :: Text,
         side_effect :: SideEffectDisposition
       }
@@ -169,7 +170,10 @@ data SideEffectDisposition = NoSideEffect | MayHaveOccurred
 data CancellationDisposition = Accepted | UnconfirmedCancellation | NotAcceptedCancellation
   deriving (Eq, Generic, FromJSON, JsonSchema, ToJSON)
 
-data CommandOperation = Bash | WriteStdin | ReadOutput | CancelCommand
+data CommandOperation = OpBash | OpWriteStdin | OpReadOutput | OpCancelCommand
+  deriving (Eq, Generic, FromJSON, JsonSchema, ToJSON)
+
+data OutputStreamFact = OutputStdout | OutputStderr
   deriving (Eq, Generic, FromJSON, JsonSchema, ToJSON)
 
 data CommandOutcomeFact
@@ -318,7 +322,7 @@ executeWith presenter
         observationWait = if inBackground then Nothing else wait
         observationLimit = if inBackground then Nothing else limit
      in case executeOptions memory terminal pipe observationWait observationLimit of
-      Left rejection -> pure (rejected Bash (renderOptionError rejection) NoSideEffect)
+      Left rejection -> pure (rejected OpBash (renderOptionError rejection) NoSideEffect)
       Right (memoryMiB, options) -> do
         let environmentVariables =
               Map.toList . Map.fromList $
@@ -338,8 +342,8 @@ executeWith presenter
         started <- if inBackground then Cmd.tryBackground reportedCommand else Cmd.tryStart command
         case started of
           Left Cmd.CommandUnauthorized ->
-            pure (rejected Bash "this actor has no command authority" NoSideEffect)
-          Left issue -> pure $ rejected Bash (T.pack (show issue)) NoSideEffect
+            pure (rejected OpBash "this actor has no command authority" NoSideEffect)
+          Left issue -> pure $ rejected OpBash (T.pack (show issue)) NoSideEffect
           Right retained@(Job key)
             | inBackground -> do
                 binding <- Cmd.retainJobBinding retained
@@ -371,7 +375,7 @@ writeInputWith presenter WriteInput {session_id = key, chars = input, close_stdi
   let text = fromMaybe "" input
       eof = fromMaybe False close
       observe = case observation 250 wait limit of
-        Left rejection -> pure (rejected WriteStdin (renderOptionError rejection) NoSideEffect)
+        Left rejection -> pure (rejected OpWriteStdin (renderOptionError rejection) NoSideEffect)
         Right options -> boundedResult (Cmd.outputBytes options) <$> presenter Nothing Nothing Nothing options (Job key)
       submit = do
         receipt <- case (T.null text, eof) of
@@ -381,7 +385,7 @@ writeInputWith presenter WriteInput {session_id = key, chars = input, close_stdi
           (False, True) -> send (CommandFinishInputWith key text)
         case receipt of
           Left (Cmd.CommandInputRejected detail) ->
-          pure $ boundedResult (outputBudget limit) (result (InputReceipt key NotAccepted 0 NotRequested) ("Rejected · input not submitted (including chars); EOF not submitted · " <> detail))
+            pure $ boundedResult (outputBudget limit) (result (InputReceipt key NotAccepted 0 NotRequested) ("Rejected · input not submitted (including chars); EOF not submitted · " <> detail))
           Left Cmd.CommandUnauthorized ->
             pure $ boundedResult (outputBudget limit) (result (InputReceipt key NotAccepted 0 NotRequested) "Rejected · input not submitted (including chars); EOF not submitted · input control is not authorized")
           Left (Cmd.CommandInputAcceptedCloseUnconfirmed detail) ->
@@ -405,7 +409,7 @@ cancelRetained = cancelRetainedWith defaultPresenter
 cancelRetainedWith :: (Member Cmd.Commands effects) => ObservationPresenter effects -> CancelCommand -> Eff effects CommandToolResult
 cancelRetainedWith _presenter CancelCommand {session_id = key, yield_time_ms = wait, max_output_bytes = limit} =
   case observation 250 wait limit of
-    Left rejection -> pure (rejected CancelCommand (renderOptionError rejection) NoSideEffect)
+    Left rejection -> pure (rejected OpCancelCommand (renderOptionError rejection) NoSideEffect)
     Right (Cmd.Observation {waitMilliseconds = waitMilliseconds, outputBytes = budget}) -> do
       receipt <- send (CommandCancelWith key)
       case receipt of
@@ -423,15 +427,15 @@ cancelRetainedWith _presenter CancelCommand {session_id = key, yield_time_ms = w
                 Right current -> (Just (commandState current), statusSuccess current, statusOutcome current, statusCleanup current)
                 Left _ -> (Nothing, Nothing, Nothing, Nothing)
               receipt = Cancellation key Accepted currentState succeeded outcome cleanup
-              prefix = case currentState of
-                Just Finished -> "Cancellation was requested; terminal outcome is recorded."
-                _ -> "Cancellation requested; terminal outcome and cleanup are not yet confirmed."
+              prefix = case status of
+                Right current -> "Cancellation requested. " <> statusText current
+                Left _ -> "Cancellation requested; terminal outcome and cleanup could not be confirmed."
           pure (boundedResult budget (result receipt prefix))
 
 readRetained :: (Member Cmd.Commands effects) => ReadOutput -> Eff effects CommandToolResult
 readRetained ReadOutput {session_id = key, stream = selected, offset = position, max_output_bytes = limit} =
   case readOptions position limit of
-    Left rejection -> pure (rejected ReadOutput (renderOptionError rejection) NoSideEffect)
+    Left rejection -> pure (rejected OpReadOutput (renderOptionError rejection) NoSideEffect)
     Right (offset, Cmd.Observation {outputBytes = budget}) -> do
       let selectedStream = case selected of
             Just Stderr -> Cmd.Stderr
@@ -441,19 +445,30 @@ readRetained ReadOutput {session_id = key, stream = selected, offset = position,
       first <- read contentBudget
       -- Replacement characters can expand invalid UTF-8. Ask the byte owner for
       -- a smaller page rather than inventing offsets from decoded text.
-      result <- case first of
+      pageResult <- case first of
         Right page | utf8Bytes (Cmd.outputText page) > contentBudget -> read (max 1 (contentBudget `div` 3))
         _ -> pure first
-      case result of
-        Left Cmd.CommandOutputPending -> pure $ boundedResult budget (result (OutputPage key selectedStream offset offset offset offset False 0 False 0 False) "No output yet; streams are starting.")
-        Left issue -> pure $ boundedResult budget (result (Rejected ReadOutput (Just key) (T.pack (show issue)) NoSideEffect) ("Output unavailable: " <> T.pack (show issue) <> "\nDo not rerun the command to recover this retained page."))
+      case pageResult of
+        Left Cmd.CommandOutputPending -> pure $ boundedResult budget (result (OutputPage key (outputStreamFact selectedStream) offset offset offset offset False 0 False 0 False) "No output yet; streams are starting.")
+        Left issue -> pure $ boundedResult budget (result (Rejected OpReadOutput (Just key) (T.pack (show issue)) NoSideEffect) ("Output unavailable: " <> T.pack (show issue) <> "\nDo not rerun the command to recover this retained page."))
         Right details -> do
           let eof = Cmd.outputFinished details && Cmd.outputEnd details == Cmd.outputAvailableEnd details
-              complete = Cmd.outputStart details == 0 && eof && not (Cmd.outputLossy details) && Cmd.outputLostBytes details == 0
+              stream = outputStreamFact selectedStream
               payload = Cmd.outputText details
-              text = streamName selectedStream <> " · " <> payload <> "\nnext_offset: " <> T.pack (show (Cmd.outputEnd details))
-              page = OutputPage key selectedStream (Cmd.outputStart details) (Cmd.outputEnd details) (Cmd.outputEnd details) (Cmd.outputAvailableEnd details) eof (Cmd.outputLostBytes details) (Cmd.outputLossy details) (lineCount payload) complete
-          pure $ boundedResult budget (result page text)
+              start = Cmd.outputStart details
+              end = Cmd.outputEnd details
+              availableEnd = Cmd.outputAvailableEnd details
+              lost = Cmd.outputLostBytes details
+              lossy = Cmd.outputLossy details
+              header = streamName selectedStream <> " · bytes " <> number start <> ".." <> number end <> " · available_end=" <> number availableEnd <> " · eof=" <> boolean eof <> " · lost_bytes=" <> number lost <> " · lossy_utf8=" <> boolean lossy <> "\n"
+              clipped = "\n[payload clipped by max_output_bytes]"
+              payloadBudget = max 0 (budget - utf8Bytes header)
+              didClip = utf8Bytes payload > payloadBudget
+              shownPayload = if didClip then utf8Prefix (max 0 (payloadBudget - utf8Bytes clipped)) payload <> clipped else payload
+              text = header <> shownPayload
+              complete = start == 0 && eof && not lossy && lost == 0 && not didClip
+              page = OutputPage key stream start end end availableEnd eof lost lossy (lineCount payload) complete
+          pure (result page text)
 
 defaultPresenter :: (Member Cmd.Commands effects) => ObservationPresenter effects
 defaultPresenter _ _ _ options retained = do
@@ -543,6 +558,17 @@ streamName :: Cmd.CommandStream -> Text
 streamName Cmd.Stdout = "stdout"
 streamName Cmd.Stderr = "stderr"
 
+outputStreamFact :: Cmd.CommandStream -> OutputStreamFact
+outputStreamFact Cmd.Stdout = OutputStdout
+outputStreamFact Cmd.Stderr = OutputStderr
+
+number :: Int -> Text
+number = T.pack . show
+
+boolean :: Bool -> Text
+boolean True = "true"
+boolean False = "false"
+
 lineCount :: Text -> Int
 lineCount text
   | T.null text = 0
@@ -560,7 +586,7 @@ boundedResult budget CommandToolResult {facts = semantic, presentation = text}
           boundedFacts = case semantic of
             ObservedCommand {session_id = key, state = currentState, successful = success, outcome = commandOutcome, cleanup = commandCleanup, stdout_end = stdoutEnd, stderr_end = stderrEnd, payload_lines = linesShown, retained_binding = binding} ->
               ObservedCommand key currentState success commandOutcome commandCleanup stdoutEnd stderrEnd linesShown False binding
-            OutputPage {session_id = key, stream = selectedStream, start_offset = start, end_offset = end, next_offset = next, retained_end = retained, eof = atEnd, lost_bytes = lost, lossy = isLossy, payload_lines = linesShown} ->
+            OutputPage {session_id = key, stream = selectedStream, start_offset = start, end_offset = end, next_offset = next, retained_end = retained, at_eof = atEnd, lost_bytes = lost, lossy = isLossy, payload_lines = linesShown} ->
               OutputPage key selectedStream start end next retained atEnd lost isLossy linesShown False
             other -> other
        in CommandToolResult boundedFacts bounded

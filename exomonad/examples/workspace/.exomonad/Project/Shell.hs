@@ -169,7 +169,7 @@ prepare focus job observed = case Cmd.presentedOutput observed of
                 pure (reply (Sift.siftedPayloadLines selected) (Sift.siftedComplete selected) (heading <> "\n" <> Sift.siftedText selected <> recoveryText))
   where
     reply linesShown complete text =
-      Cmd.observedResult job (Cmd.presentedStatus observed) (stdoutEndpoint <$> snapshotFromObservation observed) (stderrEndpoint <$> snapshotFromObservation observed) linesShown complete text
+      Command.observedResult job (Cmd.presentedStatus observed) (stdoutEndpoint <$> snapshotFromObservation observed) (stderrEndpoint <$> snapshotFromObservation observed) linesShown complete text
 
 -- The ordinary unfocused view only reads both complete streams when their
 -- frozen endpoints fit. Otherwise it requests bounded head and tail slices.

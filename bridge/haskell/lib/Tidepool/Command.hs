@@ -304,7 +304,7 @@ observeWith ::
   Job ->
   (PresentedObservation -> Eff effects a) ->
   Eff effects (CommandStatus, a)
-observeWith options@Observation {waitMilliseconds = milliseconds} retained prepare = do
+observeWith options@Observation {waitMilliseconds = milliseconds} retained@(Job key) prepare = do
   current <- send (CommandAwaitWith key milliseconds) >>= checked
   presentObserved options retained prepare current
 
@@ -315,7 +315,7 @@ presentObserved ::
   (PresentedObservation -> Eff effects a) ->
   CommandStatus ->
   Eff effects (CommandStatus, a)
-presentObserved options retained prepare current = do
+presentObserved options retained@(Job key) prepare current = do
   -- Bound the first materialized pages by the caller's display budget.  Each
   -- page still carries the frozen stream endpoints, so a presenter can make
   -- an explicit, independently bounded page request when it needs more.

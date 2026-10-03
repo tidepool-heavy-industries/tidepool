@@ -195,7 +195,7 @@ boundedEvidence text
 trivialCall :: ToolCall -> ToolResult -> Maybe Text
 trivialCall call result
   | Just command <- bashCommandText call
-  , Success (Command.ObservedCommand {state = Command.Finished, successful = Just True, payload_lines = linesShown}) <- fromJSON (toolResultValue result)
+  , Success (Command.ObservedCommand {Command.state = Command.Finished, Command.successful = Just True, Command.complete = True, Command.payload_lines = linesShown}) <- fromJSON (toolResultValue result)
   , linesShown <= Shell.rawLineThreshold
   , not (any hasDestructiveToken (map T.words (splitOnOperators command)))
   = Just "trivial call: successful bash call, short output, no destructive tokens"
