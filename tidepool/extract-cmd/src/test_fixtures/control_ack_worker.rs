@@ -20,6 +20,7 @@ fn main() {
     let mut input = std::io::stdin();
     let mut output = std::io::stdout();
     let mut command = [0; 1];
+    let mut request_count = 0;
     loop {
         if input.read_exact(&mut command).is_err() {
             break;
@@ -43,12 +44,25 @@ fn main() {
             for _ in 0..u32::from_le_bytes(argc) {
                 let _ = frame(&mut input);
             }
-            output.write_all(&[0; 12]).unwrap();
+            request_count += 1;
+            let stdout = request_count.to_string();
+            output.write_all(&0i32.to_le_bytes()).unwrap();
+            output
+                .write_all(&(stdout.len() as u32).to_le_bytes())
+                .unwrap();
+            output.write_all(stdout.as_bytes()).unwrap();
+            output.write_all(&0u32.to_le_bytes()).unwrap();
             output.flush().unwrap();
         }
         if first_worker && phase == 0 {
             std::fs::write(directory.join("stalled"), b"close").unwrap();
             std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+        if first_worker && phase == 2 && !directory.join("release").exists() {
+            std::fs::write(directory.join("stalled"), b"close").unwrap();
+            while !directory.join("release").exists() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
         output.write_all(&[1]).unwrap();
         output.flush().unwrap();
