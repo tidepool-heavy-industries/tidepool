@@ -13972,7 +13972,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             } else {
                 &templates
             };
-            let TurnResult::Bind { compiled, .. } = run_turn(TurnRequest {
+            let TurnResult::Bind {
+                compiled, bound, ..
+            } = run_turn(TurnRequest {
                 exact_context: None,
                 session_id: None,
                 turn_text: text,
@@ -13985,24 +13987,29 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 target: None,
                 retained_imports: &[],
             })
-            .unwrap() else {
+            .unwrap()
+            else {
                 panic!("typed progress fixture must compile a bind")
             };
-            compiled
+            (compiled, bound)
         };
         // Compile each immutable program once; publication retries use fresh frames.
-        let note = compile("published <- ProgressRuntime.publishNote 1", false);
-        let wrong = compile("published <- ProgressRuntime.publishInt 1", false);
-        let wrong_observer = compile("observed <- ProgressRuntime.observeInt 1", false);
-        let correct_observer = compile("observed <- ProgressRuntime.observeNote 1", false);
-        let wrong_source = compile("installed <- ProgressRuntime.installIntSource 1", true);
-        let correct_source = compile("installed <- ProgressRuntime.installNoteSource 1", true);
-        let verifier = compile("sourceVerifier <- pure ProgressRuntime.verifySource", false);
+        let (note, _) = compile("published <- ProgressRuntime.publishNote 1", false);
+        let (wrong, _) = compile("published <- ProgressRuntime.publishInt 1", false);
+        let (wrong_observer, _) = compile("observed <- ProgressRuntime.observeInt 1", false);
+        let (correct_observer, _) = compile("observed <- ProgressRuntime.observeNote 1", false);
+        let (wrong_source, _) = compile("installed <- ProgressRuntime.installIntSource 1", true);
+        let (correct_source, _) = compile("installed <- ProgressRuntime.installNoteSource 1", true);
+        let (verifier, verifier_binders) =
+            compile("sourceVerifier <- pure ProgressRuntime.verifySource", false);
+        let [verifier_binder] = verifier_binders.as_slice() else {
+            panic!("source verifier must have one compiler-issued binder")
+        };
         let verified = observer
             .run_bind_with_sites(
                 "source-verifier",
                 verifier.code(),
-                "sourceVerifier",
+                verifier_binder,
                 tidepool_repr::Generation(1),
             )
             .unwrap();
