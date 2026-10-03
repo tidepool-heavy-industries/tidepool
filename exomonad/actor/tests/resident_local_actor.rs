@@ -386,8 +386,8 @@ async fn resident_command_retain_binding_returns_reference_without_command_prese
 }
 
 #[tokio::test]
-async fn resident_command_binding_survives_presenter_observation_failure() {
-    resident_await_watch_case(WatchCase::StructuredCommandPresenterFailure).await;
+async fn resident_command_binding_is_recovered_after_later_cell_failure() {
+    resident_await_watch_case(WatchCase::PrimaryCommandRetainBindingFailure).await;
 }
 
 #[tokio::test]
@@ -921,8 +921,8 @@ enum WatchCase {
     PrimaryInterleavedPublication,
     StructuredRoundTrip,
     StructuredCommandPresentation,
-    StructuredCommandPresenterFailure,
     PrimaryCommandRetainBinding,
+    PrimaryCommandRetainBindingFailure,
     PrimaryCancellation,
     PrimarySleepCancellation,
     PrimaryCommandAwaitCancellation,
@@ -933,14 +933,11 @@ enum WatchCase {
 async fn resident_await_watch_case(case: WatchCase) {
     let interleaved = matches!(case, WatchCase::PrimaryInterleavedPublication);
     let structured_command = matches!(case, WatchCase::StructuredCommandPresentation);
-    let structured_observation_failure =
-        matches!(case, WatchCase::StructuredCommandPresenterFailure);
+    let binding_failure = matches!(case, WatchCase::PrimaryCommandRetainBindingFailure);
     let retain_command_binding = matches!(case, WatchCase::PrimaryCommandRetainBinding);
     let primary = !matches!(
         case,
-        WatchCase::StructuredRoundTrip
-            | WatchCase::StructuredCommandPresentation
-            | WatchCase::StructuredCommandPresenterFailure
+        WatchCase::StructuredRoundTrip | WatchCase::StructuredCommandPresentation
     );
     let command_observation = match case {
         WatchCase::PrimaryCommandAwaitCancellation => {
@@ -969,7 +966,7 @@ async fn resident_await_watch_case(case: WatchCase) {
 
     let session = support::process_unique_session(if retain_command_binding {
         185
-    } else if structured_observation_failure {
+    } else if binding_failure {
         186
     } else if command_observation.is_some() {
         184
@@ -1028,8 +1025,6 @@ async fn resident_await_watch_case(case: WatchCase) {
             session_id: None,
             turn_text: if structured_command {
                 include_str!("resident_local_actor/await_command_policy.hs")
-            } else if structured_observation_failure {
-                include_str!("resident_local_actor/await_command_presenter_failure_policy.hs")
             } else {
                 include_str!("resident_local_actor/await_watch_policy.hs")
             },
@@ -1136,6 +1131,11 @@ async fn resident_await_watch_case(case: WatchCase) {
                             ToolArguments::Raw(if retain_command_binding {
                                 include_str!("resident_local_actor/command_retain_binding_cell.hs")
                                     .into()
+                            } else if binding_failure {
+                                include_str!(
+                                    "resident_local_actor/command_retain_binding_failure_cell.hs"
+                                )
+                                .into()
                             } else if interleaved {
                                 include_str!("resident_local_actor/interleaved_bind_cell.hs").into()
                             } else {
@@ -1182,7 +1182,9 @@ async fn resident_await_watch_case(case: WatchCase) {
             )
             .await
             .expect("B publishes while A remains parked")
-            .expect("B publication");
+            .expect("B publication")
+            .into_json()
+            .expect("serialize B publication");
             assert_eq!(second["status"], "committed", "{second:?}");
             assert!(
                 !settled_call.is_finished(),
@@ -1208,28 +1210,20 @@ async fn resident_await_watch_case(case: WatchCase) {
         .await
         .expect("watch settles")
         .expect("watch call task");
-        if structured_observation_failure {
+        if binding_failure {
             let Err(error) = settled else {
-                panic!("the deliberately failing presenter must fail observation: {settled:?}");
+                panic!("the deliberately failing post-effect cell must fail: {settled:?}");
             };
             let exomonad_actor::ResidentToolError::Invocation(
                 exomonad_actor::KernelInvocationFailure::Workbench(failure),
             ) = error
             else {
-                panic!("presenter failure should retain a workbench receipt: {error:?}");
+                panic!("post-effect failure should retain a workbench receipt: {error:?}");
             };
-            assert!(
-                failure.detail.contains("exceeded the observation budget"),
-                "{failure:?}"
-            );
             let receipt = failure
                 .receipts
                 .last()
                 .expect("failed unit receipt is retained");
-            assert_eq!(
-                receipt.failure_layer,
-                Some(tidepool_runtime::session::WorkbenchFailureLayer::Observation)
-            );
             assert_eq!(receipt.installed_bindings.len(), 1, "{receipt:?}");
             let binding = &receipt.installed_bindings[0];
             assert!(!binding.contains("session_id:"), "{receipt:?}");
@@ -1240,11 +1234,15 @@ async fn resident_await_watch_case(case: WatchCase) {
             assert_eq!(
                 receipt.operations.len(),
                 3,
-                "start, retain binding, and await committed before presentation failed: {receipt:?}"
+                "start, retain binding, and await committed before the later cell failure: {receipt:?}"
             );
-            assert_eq!(receipt.operations[0].effect, "commandStartWith");
-            assert_eq!(receipt.operations[1].effect, "commandRetainJobWith");
-            assert_eq!(receipt.operations[2].effect, "commandWaitWith");
+            assert!(
+                receipt
+                    .operations
+                    .iter()
+                    .all(|operation| operation.effect == "command job"),
+                "all three operations belong to the Commands effect: {receipt:?}"
+            );
             for (ordinal, operation) in receipt.operations.iter().enumerate() {
                 assert_eq!(operation.id.effect_ordinal, ordinal);
                 assert_eq!(
@@ -1266,13 +1264,33 @@ async fn resident_await_watch_case(case: WatchCase) {
                     .all(|operation| operation.display.is_none()),
                 "retaining the command job produces no display output: {receipt:?}"
             );
+            let binding_read = policy
+                .dispatch_boxed(ToolInvocation {
+                    context: Some(ToolInvocationContext::external(
+                        "await-watch-test".into(),
+                        "turn-after-failure".into(),
+                        "read-retained-binding".into(),
+                        Some("read-retained-binding".into()),
+                        None,
+                    )),
+                    name: exomonad_actor::HASKELL_TOOL.into(),
+                    arguments: ToolArguments::Raw(binding.clone()),
+                })
+                .await
+                .expect("the binding remains usable after the failed cell")
+                .into_json()
+                .expect("serialize retained binding response");
+            assert_eq!(binding_read["status"], "committed", "{binding_read:?}");
             forest.shutdown().await;
             task.expect("structured actor task")
                 .await
                 .expect("actor task");
             return;
         }
-        let settled = settled.expect("watch tool call");
+        let settled = settled
+            .expect("watch tool call")
+            .into_json()
+            .expect("serialize typed response");
         if primary {
             assert_eq!(settled["status"], "committed", "{settled:?}");
             if interleaved {
@@ -1290,7 +1308,9 @@ async fn resident_await_watch_case(case: WatchCase) {
                         arguments: ToolArguments::Raw("a + b".into()),
                     })
                     .await
-                    .expect("read joined values");
+                    .expect("read joined values")
+                    .into_json()
+                    .expect("serialize joined values");
                 assert_eq!(joined["status"], "committed", "{joined:?}");
                 assert_eq!(joined["items"][0]["output"], "42", "{joined:?}");
                 forest.shutdown().await;
