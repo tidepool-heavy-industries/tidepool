@@ -25,7 +25,7 @@ import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy, intDataCon)
 import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
 import GHC.Builtin.Types (liftedTypeKind)
 import GHC.Types.Var (mkTyVar, VarBndr(..))
-import GHC.Types.Name.Occurrence (mkTyVarOcc)
+import GHC.Types.Name.Occurrence (mkTyVarOcc, mkVarOcc)
 import GHC.Types.SrcLoc (noSrcSpan)
 import Language.Haskell.Syntax.Specificity (ForAllTyFlag(..), Specificity(..))
 import GHC.Types.Id (idName, setIdName)
@@ -51,7 +51,8 @@ import Control.Monad.IO.Class (liftIO)
 import GHC.Driver.Session (targetProfile)
 import GHC.Driver.Hooks (hscCompileCoreExprHook)
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports)
+import GHC.Unit.Module.ModIface (set_mi_module, mi_module, mi_exports, mi_decls)
+import GHC.Iface.Syntax (ifaceDeclImplicitBndrs)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module (Module, mkModule, mkModuleName, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString, stringToUnit, GenWithIsBoot(..))
@@ -3084,6 +3085,45 @@ verifyRetainedPackageWitness producer evidence = do
     (identifier, _) <- resolvePackageGlobal producer identity >>= either fail pure
     unless (preparedRootIdentity identifier == identity) $
       fail "package catalog selected a noncanonical defining Name"
+  let baseOwner = mkModule (stringToUnit "ghc-internal") (mkModuleName "GHC.Internal.Base")
+      implicit = package { symbolOccurrence = "fmap" }
+  (baseInterface, _) <- readExactInterface producer baseOwner >>= either (fail . show) pure
+  unless (any (\(_, declaration) -> mkVarOcc "fmap" `elem` ifaceDeclImplicitBndrs declaration)
+      (mi_decls baseInterface)) $
+    fail "package catalog fixture does not demand an implicit class binder"
+  implicitName <- case Set.toList (Set.fromList
+      [name | available <- mi_exports baseInterface, name <- availNames available
+        , nameModule_maybe name == Just baseOwner, nameOccName name == mkVarOcc "fmap"]) of
+    [name] -> pure name
+    _ -> fail "implicit class binder lacks one canonical exported Name"
+  forM_ [identities, reverse identities] $ \ordered -> do
+    forM_ ordered $ \identity -> do
+      (identifier, _) <- resolvePackageGlobal producer identity >>= either fail pure
+      when (identity == implicit) $ unless (idName identifier == implicitName) $
+        fail "package catalog minted another Unique for an implicit class binder"
+      when (identity == wired) $ unless (idName identifier == idName (dataConWorkId intDataCon)) $
+        fail "package catalog lost the wired-in defining Name"
+  withTiming $ do
+    let repeatedImplicit = replicate 32 implicit
+        ordered = identities ++ repeatedImplicit
+    (forward, forwardLog) <- captureDiagnostics
+      (encode (map (`global` 0) ordered) >>= either fail pure)
+    (backward, backwardLog) <- captureDiagnostics
+      (encode (map (`global` 0) (reverse ordered)) >>= either fail pure)
+    forwardTerm <- decode forward
+    backwardTerm <- decode backward
+    restored <- case backwardTerm of
+      TList [magic, version, modules, TList [TList [name, TList references]], packages, globals] ->
+        pure (TList [magic, version, modules, TList [TList [name, TList (reverse references)]], packages, globals])
+      _ -> fail "package catalog fixture lacks its target reference inventory"
+    unless (forwardTerm == restored) $
+      fail "package lookup order changed canonical witness inventory or reference order"
+    forM_ [forwardLog, backwardLog] $ \diagnostics ->
+      unless (count "certified_package_global_requests" diagnostics == 37
+          && count "certified_package_owner_loads" diagnostics == 3
+          && count "certified_package_catalog_builds" diagnostics == 3
+          && count "certified_package_owner_revalidations" diagnostics == 3) $
+        fail "repeated implicit lookup escaped its certification-owned catalog capture"
   withTiming $ do
     (_, diagnostics) <- captureDiagnostics
       (encode (map (`global` 0) identities) >>= either fail pure)
@@ -3093,10 +3133,13 @@ verifyRetainedPackageWitness producer evidence = do
         && count "certified_package_owner_revalidations" diagnostics == 3) $
       fail "package catalog did not share ordinary, class, constructor and wired owner captures"
   forM_ [package { symbolModule = "GHC.Internal.Prelude" },
-      package { symbolNamespace = "type" }] $ \identity ->
+      package { symbolNamespace = "type" }] $ \identity -> do
     encode [global identity 0] >>= \case
       Left _ -> pure ()
       Right _ -> fail "package catalog admitted a reexport owner or another namespace"
+    resolvePackageGlobal producer identity >>= \case
+      Left _ -> pure ()
+      Right _ -> fail "standalone package lookup admitted a reexport owner or another namespace"
   localBytes <- encodeProgram (localProgram [constructor, synthetic]) >>= either fail pure
   retainByteOracle "local-package" localBytes
   local <- decode localBytes
@@ -3158,13 +3201,20 @@ verifyChangedPackageInterface producer identity evidence program global = withSc
       encode = encodeCertifiedProducts environment [] Nothing []
         [("target", program [global identity 0, global identity 0])] evidence "" ""
   first <- encode >>= either fail pure
+  (firstId, _) <- resolvePackageGlobal environment identity >>= either fail pure
   BS.writeFile path "invalid interface"
   encode >>= \case
     Left _ -> pure ()
     Right _ -> fail "package certification reused an owner after its interface changed"
+  resolvePackageGlobal environment identity >>= \case
+    Left _ -> pure ()
+    Right _ -> fail "standalone package lookup reused a changed interface"
   BS.writeFile path original
   restored <- encode >>= either fail pure
   unless (restored == first) $ fail "restored package interface did not recover certification"
+  (restoredId, _) <- resolvePackageGlobal environment identity >>= either fail pure
+  unless (idName restoredId == idName firstId) $
+    fail "restored standalone package lookup changed its canonical Name"
   putStrLn "package certification: changed interface refused and restored bytes recovered"
 
 withTiming :: IO a -> IO a

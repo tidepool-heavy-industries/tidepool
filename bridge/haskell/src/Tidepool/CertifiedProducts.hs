@@ -370,12 +370,21 @@ packageDeclarationCatalog owner iface = PackageDeclarationCatalog owner parents 
       , isVarOcc occurrence ]
     wired = Map.fromListWith Map.union
       [ (nameOccName name, Map.singleton name thing)
-      | available <- mi_exports iface, exported <- availNames available
-      , owned exported
-      , parent <- maybe [] pure (wiredInNameTyThing_maybe exported)
-      , thing@(AnId _) <- parent : implicitTyThings parent
-      , let name = getName thing
-      , owned name, isVarOcc (nameOccName name) ]
+      | (name, thing) <- packageWiredGlobals owner iface ]
+
+packageWiredGlobals :: Module -> ModIface -> [(Name, TyThing)]
+packageWiredGlobals owner iface =
+  [ (name, thing)
+  | available <- mi_exports iface, exported <- availNames available
+  , owned exported
+  , parent <- maybe [] pure (wiredInNameTyThing_maybe exported)
+  , thing@(AnId _) <- parent : implicitTyThings parent
+  , let name = getName thing
+  , owned name, isVarOcc (nameOccName name) ]
+  where
+    owned name = nameModule_maybe name == Just owner
+
+type PackageGlobalLookup = OccName -> IO (MaybeErr () TyThing)
 
 -- This capture belongs to one certification. A module's defining interface is
 -- checked around its read; each demanded symbol is still resolved separately.
@@ -392,16 +401,17 @@ newPackageGlobalResolver timing env = do
             loaded <- loadPackageInterface env owner
             value <- case loaded of
               Left reason -> pure (Left reason)
-              Right (catalog, witness) -> do
+              Right (iface, witness) -> do
                 unchanged <- validatePackageImportRoot env witness
-                pure ((catalog, witness) <$ unchanged)
+                let catalog = packageDeclarationCatalog owner iface
+                pure ((canonicalPackageGlobal env catalog, witness) <$ unchanged)
             modifyIORef' state (\(requests, selected) ->
               (requests, Map.insert owner value selected))
             pure value
       resolve identity = do
         when timing $ modifyIORef' state (\(requests, interfaces) ->
           let next = requests + 1 in next `seq` (next, interfaces))
-        resolvePackageGlobalUsing env load identity
+        resolvePackageGlobalUsing load identity
       counts = do
         (requests, interfaces) <- readIORef state
         pure (requests, fromIntegral (Map.size interfaces),
@@ -412,7 +422,11 @@ newPackageGlobalResolver timing env = do
 -- from the exact interface's structural declaration, including implicit tops.
 resolvePackageGlobal :: HscEnv -> PackageGlobalResolver
 resolvePackageGlobal env identity = do
-  selected <- resolvePackageGlobalUsing env (loadPackageInterface env) identity
+  let load owner = do
+        found <- loadPackageInterface env owner
+        pure $ fmap (\(iface, witness) ->
+          (canonicalPackageGlobalOnce env owner iface, witness)) found
+  selected <- resolvePackageGlobalUsing load identity
   case selected of
     Left reason -> pure (Left reason)
     Right (identifier, witness) -> do
@@ -422,7 +436,7 @@ resolvePackageGlobal env identity = do
         Right () -> Right (identifier, witness)
 
 loadPackageInterface :: HscEnv -> Module
-  -> IO (Either String (PackageDeclarationCatalog, PackageImportRoot))
+  -> IO (Either String (ModIface, PackageImportRoot))
 loadPackageInterface env owner = do
   found <- packageImportRoot env owner
   case found of
@@ -431,13 +445,12 @@ loadPackageInterface env owner = do
       exact <- readExactInterface env owner
       case exact of
         Right (iface, location) | ml_hi_file location == packagePath witness ->
-          pure (Right (packageDeclarationCatalog owner iface, witness))
+          pure (Right (iface, witness))
         _ -> pure (Left "selected package interface is unavailable or changed")
 
-resolvePackageGlobalUsing :: HscEnv
-  -> (Module -> IO (Either String (PackageDeclarationCatalog, PackageImportRoot)))
+resolvePackageGlobalUsing :: (Module -> IO (Either String (PackageGlobalLookup, PackageImportRoot)))
   -> PackageGlobalResolver
-resolvePackageGlobalUsing env load identity
+resolvePackageGlobalUsing load identity
   | symbolNamespace identity /= "value" =
       pure (Left (refusal "unsupported external global namespace"))
   | otherwise = do
@@ -445,9 +458,8 @@ resolvePackageGlobalUsing env load identity
       found <- load owner
       case found of
         Left reason -> pure (Left (refusal reason))
-        Right (catalog, witness) -> do
-          selected <- canonicalPackageGlobal env catalog
-            (mkVarOcc (T.unpack (symbolOccurrence identity)))
+        Right (lookupGlobal, witness) -> do
+          selected <- lookupGlobal (mkVarOcc (T.unpack (symbolOccurrence identity)))
           pure $ case selected of
             Succeeded (AnId identifier) -> Right (identifier, witness)
             _ -> Left (refusal "selected package global is absent from loaded interface")
@@ -464,9 +476,26 @@ packageRefusal identity reason = reason ++ ": " ++ T.unpack (symbolUnit identity
 -- Reconstructing a Name from Module/OccName can mint a different Unique.
 canonicalPackageGlobal :: HscEnv -> PackageDeclarationCatalog -> OccName
   -> IO (MaybeErr () TyThing)
-canonicalPackageGlobal env catalog wanted = do
-  let owner = catalogOwner catalog
-      declarations = Map.findWithDefault [] wanted (catalogParents catalog)
+canonicalPackageGlobal env catalog wanted = canonicalPackageCandidates env
+  (catalogOwner catalog)
+  (Map.findWithDefault [] wanted (catalogParents catalog))
+  (Map.findWithDefault Map.empty wanted (catalogWiredGlobals catalog)) wanted
+
+-- A standalone recovery lookup scans only its demanded occurrence. It has no
+-- certification owner to amortize construction of the complete catalog.
+canonicalPackageGlobalOnce :: HscEnv -> Module -> ModIface -> PackageGlobalLookup
+canonicalPackageGlobalOnce env owner iface wanted = canonicalPackageCandidates env owner
+  [ ifName declaration
+  | (_, declaration) <- mi_decls iface
+  , nameModule_maybe (ifName declaration) == Just owner
+  , nameOccName (ifName declaration) == wanted
+      || wanted `elem` ifaceDeclImplicitBndrs declaration ]
+  (Map.fromList [(name, thing) | (name, thing) <- packageWiredGlobals owner iface
+    , nameOccName name == wanted]) wanted
+
+canonicalPackageCandidates :: HscEnv -> Module -> [Name] -> Map.Map Name TyThing
+  -> PackageGlobalLookup
+canonicalPackageCandidates env owner declarations wired wanted = do
   parents <- mapM loadCanonical declarations
   let owned name = nameModule_maybe name == Just owner
       declared = Map.fromList
@@ -475,8 +504,7 @@ canonicalPackageGlobal env catalog wanted = do
         , thing@(AnId _) <- parent : implicitTyThings parent
         , let name = getName thing
         , owned name, isVarOcc (nameOccName name), nameOccName name == wanted ]
-      candidates = Map.union
-        (Map.findWithDefault Map.empty wanted (catalogWiredGlobals catalog)) declared
+      candidates = Map.union wired declared
   pure $ case Map.elems candidates of
     [thing] -> Succeeded thing
     _ -> Failed ()
