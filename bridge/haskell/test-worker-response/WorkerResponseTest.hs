@@ -14,7 +14,7 @@ import System.Environment (getArgs, getExecutablePath, setEnv)
 import System.Exit (ExitCode(..))
 import System.IO (Handle, hClose, hFlush, openTempFile, stdin, stdout, stderr)
 import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, terminateProcess, waitForProcess)
-import System.IO.Error (IOErrorType(ResourceExhausted), ioeGetErrorType)
+import System.IO.Error (isFullError)
 import System.Timeout (timeout)
 import System.Posix.Resource
   ( Resource(..), ResourceLimit(..), ResourceLimits(..), getResourceLimit, setResourceLimit )
@@ -126,6 +126,7 @@ check scratch = do
       unless (null leftovers) (fail ("capture tempfiles retained: " ++ show leftovers))
       putStrLn "worker response bounds and cleanup: 1 passed"
   checkPartialAcquisition scratch
+  putStrLn "worker partial acquisition and recovery: 1 passed"
 
 checkPartialAcquisition :: FilePath -> IO ()
 checkPartialAcquisition scratch = do
@@ -168,7 +169,7 @@ catchThreadKilled failure = throwIO failure
 
 catchResourceExhaustion :: IOException -> IO ()
 catchResourceExhaustion failure
-  | ioeGetErrorType failure == ResourceExhausted = pure ()
+  | isFullError failure = pure ()
   | otherwise = throwIO failure
 
 -- The worker child leaves exactly one descriptor slot available, so capture
@@ -177,7 +178,7 @@ withOneFreeFd :: IO a -> IO a
 withOneFreeFd action = do
   ResourceLimits oldSoft hard <- getResourceLimit ResourceOpenFiles
   testSoft <- case hard of
-    ResourceLimit maximum -> pure (ResourceLimit (min 64 maximum))
+    ResourceLimit hardMaximum -> pure (ResourceLimit (min 64 hardMaximum))
     ResourceLimitInfinity -> pure (ResourceLimit 64)
     ResourceLimitUnknown -> fail "cannot determine open-file hard limit for worker test"
   setResourceLimit ResourceOpenFiles (ResourceLimits testSoft hard)
@@ -191,7 +192,7 @@ withOneFreeFd action = do
       case result of
         Right handle -> fillUntilExhausted (handle : held)
         Left failure
-          | ioeGetErrorType failure == ResourceExhausted -> case held of
+          | isFullError failure -> case held of
               one : rest -> hClose one >> pure rest
               [] -> throwIO failure
           | otherwise -> throwIO failure
