@@ -382,6 +382,7 @@ pub struct TargetArtifact {
 /// The full output of one `tidepool-extract` invocation: a shared constructor
 /// table + warnings, and one [`TargetArtifact`] per requested target.
 pub struct CompiledArtifacts {
+    pub artifact_view: crate::artifact_inventory::ArtifactView,
     /// DataCon metadata the JIT needs to dispatch on constructors — shared by
     /// every target (they compiled in the same GHC session).
     pub table: DataConTable,
@@ -2116,6 +2117,7 @@ impl NativeTurnOutput {
 
 #[derive(Debug)]
 pub struct SealedTurnProducts {
+    pub artifact_view: crate::artifact_inventory::ArtifactView,
     pub compile_input_identity: Option<Arc<SealedCompileInputIdentity>>,
     pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     pub pending_imports: Vec<certified_products::PendingImportOwner>,
@@ -2414,6 +2416,15 @@ fn seal_turn_outputs_inner(
         } else {
             None
         };
+    let artifact_view = crate::declaration_context::certified_product_artifact_view(
+        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&offer.producer)
+            .sha256(),
+        &certified.recovery_products,
+        &certified.module_interfaces,
+        exact
+            .as_ref()
+            .map(|admission| admission.request.context.as_ref()),
+    )?;
     let checked_context = if offer.checked_item.is_some() || offer.checked_display.is_some() {
         Some(checked_output_context(
             offer,
@@ -2427,6 +2438,7 @@ fn seal_turn_outputs_inner(
         None
     };
     Ok(Some(SealedTurnProducts {
+        artifact_view,
         compile_input_identity,
         checked_display: offer
             .checked_display
@@ -3010,6 +3022,7 @@ fn compile_invocation_inner(
             certified_products::CertifiedProducts {
                 groups: Vec::new(),
                 recovery_products: Vec::new(),
+                module_interfaces: Vec::new(),
             }
         };
         let extra_products: Vec<_> = cached_receipts
@@ -3099,6 +3112,15 @@ fn compile_invocation_inner(
             0,
             receipt.targets.len(),
         );
+        artifacts.artifact_view = crate::declaration_context::certified_product_artifact_view(
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer)
+                .sha256(),
+            &certified.recovery_products,
+            &certified.module_interfaces,
+            exact_request
+                .as_ref()
+                .map(|request| request.context.as_ref()),
+        )?;
         artifacts.certified_groups = certified.groups;
         artifacts.recovery_products = certified.recovery_products;
         artifacts.exact_source_admission = exact_source;
@@ -3807,6 +3829,7 @@ pub(crate) fn assemble(
     on_stage(timing::STAGE_ASKS_PARSE, asks_start.elapsed(), 0);
 
     Ok(CompiledArtifacts {
+        artifact_view: crate::artifact_inventory::ArtifactInventory::default().empty_view(),
         table,
         warnings,
         targets,

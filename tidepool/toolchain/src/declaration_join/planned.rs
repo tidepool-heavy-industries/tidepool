@@ -751,6 +751,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
         &products,
         &interfaces,
         &joined_interfaces,
+        &sealed.artifact_view,
         baseline.map(Arc::as_ref),
     )?;
     Ok(CertifiedAuthoredDeclaration {

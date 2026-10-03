@@ -39,8 +39,8 @@ later native demand refuses instead of compiling from source.
 Paths name distinct captured files beneath the worker output directory. No
 absolute, parent, current-directory, symlink or aliased payload path is admitted.
 Digest and declared length are checked on captured bytes. Interfaces/Core are
-individually limited to32 MiB, package witnesses to4 MiB; receipt metadata is4 MiB,
-128 modules/home units, and aggregate captured finalization payload is128 MiB.
+individually limited to 32 MiB, package witnesses to 4 MiB; receipt metadata is 4 MiB,
+128 modules/home units, and aggregate captured finalization payload is 128 MiB.
 
 The profile names the matched compiler's canonical frontend rules. The Rust
 issuer pins that profile and binds its configured endpoint producer SHA; the
@@ -72,3 +72,13 @@ nodes depend on that interface and on their exact native implementation children
 No interface-to-native edge exists. Adding a native implementation leaves every
 previous interface-only root and its authority unchanged. Lexical visibility,
 native execution grants and compiler Core-recovery admission remain separate.
+
+## Exact compiler scope
+
+`TPEXACTSCOPE8` always has nine fields: the seven existing declaration/interface/native fields, execution descriptor or null, and purpose authorization or null. Request authorization retains the strict `request-types2` wrapper and its explicit helper recipe. Each interface row has eight fields: the existing seven plus null for a value/join interface or `[certificatePath, certificateSHA, corePathOrNull, coreSHAOrNull]` for a canonical module. The two Core fields are both null or both present. Core is a compiler input; it carries no lexical selection or executable lease.
+
+`TPHOMEOWNERS5` adds the exact finalized-module certificate SHA as its ninth field. A native original admitted to the inventory must have this binding and the matching validated carrier. Null is permitted only for standalone ownership encoding without canonical module custody; it cannot admit a native original. The issuer chooses the execution digest and module certificate binding before encoding once. Recovery decodes and validates both durable certificates and all selected bytes.
+
+The existing `TPMCAN10` record references the same captured canonical certificate and Core through `RecoveryModuleInterfaceRef`. Publication completes those captured files before exposing the record. Candidate selection validates the configured producer, source digest, exact native owner, canonical certificate and payloads; the candidate retains the resulting immutable typed carrier. There is no alternate cache for type-only modules.
+
+The inventory has one interface owner index and an exact native child index keyed by unit, module, version, interface SHA and product SHA. Native children point to their canonical interface. Interface projections select the canonical index and cannot reach native children. A later native admission cannot alter an earlier view's outgoing edges or broaden its roots.

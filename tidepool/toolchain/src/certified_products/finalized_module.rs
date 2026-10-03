@@ -2,7 +2,6 @@
 //! Core is retained as compiler input, never projected as execution authority.
 
 use super::*;
-use std::io::Read;
 use std::path::Component;
 
 pub(crate) const FINALIZATION_PROFILE: &str = "tidepool-ghc-finalized-module-v1";
@@ -221,8 +220,20 @@ impl CertifiedModuleInterface {
     pub(crate) fn module(&self) -> &str {
         &self.receipt.module
     }
+    pub(crate) fn home_units(&self) -> &BTreeSet<String> {
+        &self.home_units
+    }
+    pub(crate) fn source_sha256(&self) -> [u8; 32] {
+        self.receipt.source_sha256
+    }
     pub(crate) fn producer_sha256(&self) -> [u8; 32] {
         self.producer_sha256
+    }
+    pub(crate) fn interface_anchor(&self) -> Arc<[u8]> {
+        Arc::clone(&self.interface)
+    }
+    pub(crate) fn package_imports_anchor(&self) -> Arc<[u8]> {
+        Arc::clone(&self.package_imports)
     }
     pub(crate) fn interface_bytes(&self) -> &[u8] {
         &self.interface
@@ -244,7 +255,7 @@ impl CertifiedModuleInterface {
     }
     /// Materialization can retain Core without making it available through an
     /// interface capability. Preparation requires a separate admission owner.
-    pub(in crate::certified_products) fn core_bytes(&self) -> Option<&[u8]> {
+    pub(crate) fn core_bytes(&self) -> Option<&[u8]> {
         self.core.as_deref()
     }
 }
@@ -253,43 +264,17 @@ fn capture(
     root: &Path,
     descriptor: &CapturedArtifactDescriptor,
     limit: u64,
+    validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<u8>> {
-    let root = root
-        .canonicalize()
-        .map_err(|_| CertificationError::StaleEvidence)?;
-    let mut selected = root.clone();
-    for component in descriptor.relative_path.components() {
-        let Component::Normal(part) = component else {
-            return Err(CertificationError::Mismatch("captured path ownership"));
-        };
-        selected.push(part);
-        let metadata =
-            std::fs::symlink_metadata(&selected).map_err(|_| CertificationError::StaleEvidence)?;
-        if metadata.file_type().is_symlink() {
-            return Err(CertificationError::Mismatch("captured path ownership"));
-        }
-    }
-    let canonical = selected
-        .canonicalize()
-        .map_err(|_| CertificationError::StaleEvidence)?;
-    if !canonical.starts_with(&root) {
-        return Err(CertificationError::Mismatch("captured path ownership"));
-    }
-    let file = std::fs::File::open(&canonical).map_err(|_| CertificationError::StaleEvidence)?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| CertificationError::StaleEvidence)?;
-    if !metadata.is_file() || metadata.len() != descriptor.bytes || metadata.len() > limit {
-        return Err(CertificationError::Mismatch("captured payload size"));
-    }
-    let mut bytes = Vec::with_capacity(descriptor.bytes as usize);
-    file.take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| CertificationError::StaleEvidence)?;
-    if bytes.len() as u64 != descriptor.bytes || sha(&bytes) != descriptor.sha256 {
-        return Err(CertificationError::Mismatch("captured payload seal"));
-    }
-    Ok(bytes)
+    crate::recovery_artifacts::capture_module_payload(
+        root,
+        &descriptor.relative_path,
+        &descriptor.sha256,
+        Some(descriptor.bytes),
+        limit,
+        validation,
+    )
+    .map_err(|_| CertificationError::Mismatch("captured module payload"))
 }
 
 fn canonical_certificate(
@@ -375,8 +360,13 @@ pub(super) fn issue_interfaces(
                 "finalized source/interface closure",
             ));
         }
-        let interface = capture(root, &module.interface, PACKAGE_INTERFACE_LIMIT)?;
-        let package_imports = capture(root, &module.package_imports, RECEIPT_LIMIT as u64)?;
+        let interface = capture(root, &module.interface, PACKAGE_INTERFACE_LIMIT, validation)?;
+        let package_imports = capture(
+            root,
+            &module.package_imports,
+            RECEIPT_LIMIT as u64,
+            validation,
+        )?;
         crate::recovery_artifacts::validate_package_imports_with_validation(
             &package_imports,
             &module.unit,
@@ -389,7 +379,7 @@ pub(super) fn issue_interfaces(
         let core = module
             .core
             .as_ref()
-            .map(|descriptor| capture(root, descriptor, CORE_LIMIT))
+            .map(|descriptor| capture(root, descriptor, CORE_LIMIT, validation))
             .transpose()?;
         let certificate = canonical_certificate(producer, envelope, module)?;
         issued.push(CertifiedModuleInterface {
