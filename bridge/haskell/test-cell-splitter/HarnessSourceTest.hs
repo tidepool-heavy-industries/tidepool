@@ -73,8 +73,41 @@ harnessSourceChecks = withScratch $ \root -> do
   symlinked <- request [Input first, OutputDir (root </> "symlink-output")]
   expectFileFailure "symlink aliases caller source" (spliceHarnessProfilePragma symlinked)
   equal "caller bytes preserved after failures" originals =<< mapM BS.readFile [first, second]
+  crossInputAliasChecks root first
   cancellationCheck root out
   putStrLn "harness source: copying, identity, failure, and cancellation checks passed"
+
+crossInputAliasChecks :: FilePath -> FilePath -> IO ()
+crossInputAliasChecks root first = do
+  let out = root </> "cross-input"
+      ordinaryVictim = out </> "Input.hs"
+      singletonVictim = out </> "inspection-query-0" </> "Input.hs"
+      batchVictim = out </> "inspection-type-batch" </> "Input.hs"
+      victimBytes = "module Input where\nvalue = 99\n"
+      check label fields victim = do
+        before <- BS.readFile victim
+        args <- request fields
+        expectFileFailure label (spliceHarnessProfilePragma args)
+        equal (label ++ " bytes preserved") before =<< BS.readFile victim
+  createDirectoryIfMissing True out
+  writeFile ordinaryVictim victimBytes
+  check "ordinary copy aliases different input"
+    [Input first, Input ordinaryVictim, OutputDir out] ordinaryVictim
+  -- First-only modes must still ignore missing unused inputs.
+  missingUnused <- request [Input first, Input (root </> "unused-missing"), OutputDir (root </> "unused-copy")]
+  rewritten <- spliceHarnessProfilePragma missingUnused
+  equal "missing unused input preserves first-only behavior"
+    [root </> "unused-copy" </> "Input.hs", root </> "unused-missing"] (requestFiles rewritten)
+  createDirectoryIfMissing True (out </> "inspection-query-0")
+  writeFile singletonVictim victimBytes
+  check "inspection copy aliases different input"
+    [Input first, Input singletonVictim, OutputDir out, InspectInfo "value"] singletonVictim
+  check "inspection copy aliases batch source"
+    [Input first, OutputDir out, InspectInfo "value", InspectTypeBatch singletonVictim] singletonVictim
+  createDirectoryIfMissing True (out </> "inspection-type-batch")
+  writeFile batchVictim victimBytes
+  check "batch copy aliases singleton source"
+    [Input batchVictim, OutputDir out, InspectInfo "value", InspectTypeBatch first] batchVictim
 
 cancellationCheck :: FilePath -> FilePath -> IO ()
 cancellationCheck root out = do

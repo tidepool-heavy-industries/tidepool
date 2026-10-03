@@ -6,12 +6,14 @@ module Tidepool.HarnessSource
 import Control.Exception (IOException, evaluate, try)
 import Control.Monad (foldM, when)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Maybe (fromMaybe)
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
 import System.IO (IOMode(ReadMode), hGetContents, withFile)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (FileStatus, deviceID, fileID, getFileStatus)
+import System.Posix.Types (DeviceID, FileID)
 import Tidepool.ExtractRequest (WorkerRequest(..))
 
 -- | Prepend the harness language profile to scratch input copies. Inspection
@@ -23,10 +25,11 @@ spliceHarnessProfilePragma :: WorkerRequest -> IO WorkerRequest
 spliceHarnessProfilePragma args = case requestFiles args of
   [] -> pure args
   (file : rest) -> do
+    protected <- requestSourceIdentities ((file : rest) ++ maybe [] (:[]) (requestInspectTypeBatch args))
     let outDir = fromMaybe (takeDirectory file </> takeBaseName file ++ "_cbor") (requestOutDir args)
         profileCopy directory sourcePath = do
           let scratchPath = directory </> takeFileName sourcePath
-          rejectSourceAlias sourcePath scratchPath
+          rejectSourceAlias protected scratchPath
           source <- withFile sourcePath ReadMode $ \handle -> do
             contents <- hGetContents handle
             _ <- evaluate (length contents)
@@ -60,14 +63,26 @@ harnessProfilePragmaLine :: String
 harnessProfilePragmaLine =
   "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}"
 
+-- Every caller input is protected, including inputs unused by this mode.
+-- An absent unused input remains absent; it does not make preparation fail early.
+requestSourceIdentities :: [FilePath] -> IO (Set.Set (DeviceID, FileID))
+requestSourceIdentities = foldM add Set.empty
+  where
+    add identities path = do
+      status <- try (getFileStatus path) :: IO (Either IOException FileStatus)
+      case status of
+        Left exception
+          | isDoesNotExistError exception -> pure identities
+          | otherwise -> ioError exception
+        Right existing -> pure (Set.insert (deviceID existing, fileID existing) identities)
+
 -- Existing destination links must not turn scratch rewriting into caller mutation.
-rejectSourceAlias :: FilePath -> FilePath -> IO ()
-rejectSourceAlias sourcePath scratchPath = do
-  source <- getFileStatus sourcePath
+rejectSourceAlias :: Set.Set (DeviceID, FileID) -> FilePath -> IO ()
+rejectSourceAlias protected scratchPath = do
   destination <- try (getFileStatus scratchPath) :: IO (Either IOException FileStatus)
   case destination of
     Left exception
       | isDoesNotExistError exception -> pure ()
       | otherwise -> ioError exception
-    Right status -> when (deviceID source == deviceID status && fileID source == fileID status) $
+    Right status -> when (Set.member (deviceID status, fileID status) protected) $
       ioError (userError "harness profile scratch path aliases caller source")
