@@ -63,7 +63,7 @@ import Tidepool.GhcPipeline
 import Tidepool.ExecutionEncode
   ( encodeWireProgram, ModuleProductEncoding, prepareModuleProductEncoding
   , moduleProductInput, moduleProductBytes, encodeModuleProductInventory )
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), OriginalGroupOmission(..), OriginalGroupOmissionReason(..), prepareProjectionWithReachability, projectSelected, PreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedModuleProductOmissions, preparedRootIdentity, resolveTextPackageUnit)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), OriginalGroupOmission(..), prepareProjectionWithReachability, projectSelected, PreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedModuleProductOmissions, preparedRootIdentity, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)

@@ -291,7 +291,7 @@ projectOriginalHomeModuleProducts env interfaces context modules =
         [ ((pmModule prepared, projectedOriginalOrdinal projected),
             Set.fromList
               [ globalIdentity global
-              | global <- projectedGlobals projected
+              | global <- projectedGlobals (projectedBody projected)
               , globalRequiredGeneration global == Nothing ])
         | (prepared, outcomes) <- originalRows
         , (_, _, Right projected) <- outcomes ]
@@ -311,7 +311,7 @@ projectOriginalHomeModuleProducts env interfaces context modules =
                 , (pmModule prepared, ordinal) `Set.notMember` blocked ]
               unavailableDependencies projected = Set.fromList
                 [ globalIdentity global
-                | global <- projectedGlobals projected
+                | global <- projectedGlobals (projectedBody projected)
                 , globalRequiredGeneration global == Nothing
                 , (globalIdentity global `Map.lookup` groupOwners)
                     `maybeOwnedBy` blocked ]
@@ -404,9 +404,6 @@ projectPreparedModuleGroupOutcomesFor purpose context prepared selection =
            , not (skippedFromRecovery context (srBinder rejection)) ] of
         message : _ -> Left (RejectedTypedSite (Text.pack message))
         [] -> pure ()
-      first <- case topBinders binding of
-        value : _ -> Right value
-        [] -> Left (UnsupportedPreparedShape "prepared group has no binder")
       binders <- traverse (\binder -> maybe
         (Left (UnsupportedPreparedShape "prepared top has no identity")) Right
         (lookupVarEnv identities binder)) (topBinders binding)
