@@ -208,6 +208,9 @@ main = getArgs >>= \case
   ["--source-boot-reuse", work] -> withTiming $ do
     createDirectory work
     sourceBootReuseAt work
+  ["--mixed-default"] -> withTiming $ do
+    mixedGraph False 1
+    mixedGraph True 10
   ["--candidate-sited-siblings"] -> candidateSitedSiblings
   ["--candidate-sited-siblings", work] -> candidateSitedSiblingsAt work
   ["--generated-scaffold-imports"] -> generatedScaffoldImports
@@ -3801,7 +3804,7 @@ mixedGraph required count = withScratch $ \work -> do
     (work </> "CacheEntry.hs") [work] (Just (work </> "build-products"))
   unless (Set.fromList (preparedNames cold) == Set.fromList ("CacheEntry" : expected)) $
     fail "mixed SOURCE producer omitted an original module"
-  writeManifestFor expected work cold
+  writeGenuineCandidateManifestFor expected work (work </> "CacheEntry.hs") [work] cold
   withResidentPipelineSelected [work] $ \compile ->
     forM_ [1 .. 3 :: Int] $ \sample -> do
       hPutStrLn stderr ("mixed-source-start independent=" ++ show count
