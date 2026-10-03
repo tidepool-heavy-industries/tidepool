@@ -3574,7 +3574,11 @@ fn run_turn_with_admission(
     let snapshot = checked
         .as_ref()
         .map(|admission| admission.snapshot())
-        .or_else(|| display_admission.as_ref().map(|admission| admission.snapshot()));
+        .or_else(|| {
+            display_admission
+                .as_ref()
+                .map(|admission| admission.snapshot())
+        });
     let turn_path = temp.path().join("turn.txt");
     std::fs::write(&turn_path, req.turn_text)?;
     let turn_out_path = temp.path().join("turn.cbor");
@@ -3697,7 +3701,8 @@ fn run_turn_with_admission(
     }
     offer.apply_to(&mut cmd)?;
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
-    let ordinary_admitted = req.exact_context.is_none() && checked.is_none() && display.is_none();
+    let ordinary_admitted =
+        req.exact_context.is_none() && checked.is_none() && display_admission.is_none();
     enum TurnCompilerOutput {
         Admitted(tidepool_toolchain::artifacts::AdmittedTurnOutput),
         Direct(tidepool_extract_cmd::ExtractRun),
@@ -3809,7 +3814,7 @@ fn run_turn_with_admission(
         }
         certification.compile_input_identity = Some(Arc::clone(identity));
     }
-    if let Some(admission) = display {
+    if let Some(admission) = display_admission {
         let TurnResult::Bind {
             compiled, bound, ..
         } = &mut result
