@@ -686,9 +686,16 @@ mod tests {
                 packages: vec![],
                 resolutions: vec![],
             };
-            let bytes = combine_rows(names.iter().map(|name| product_bytes("u", name, &[0x42])));
-            let packages =
-                combine_rows(names.iter().map(|name| package_bundle("u", name, &[0x42])));
+            let bytes = combine_rows(
+                names
+                    .iter()
+                    .map(|name| product_bytes("u", name, name.as_bytes())),
+            );
+            let packages = combine_rows(
+                names
+                    .iter()
+                    .map(|name| package_bundle("u", name, name.as_bytes())),
+            );
             let parsed =
                 crate::certified_products::ParsedModuleProducts::decode(&bytes, &packages).unwrap();
             let include = [source.clone()];
