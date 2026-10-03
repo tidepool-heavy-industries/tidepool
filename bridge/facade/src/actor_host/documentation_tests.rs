@@ -3431,3 +3431,45 @@ async fn explicit_display_rejects_callback_effect_before_authority_input() {
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
+
+#[tokio::test]
+async fn explicit_display_respects_shared_budget_and_handles_survive_cell_failure() {
+    let campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let failed = dispatch_haskell_script(
+        policy,
+        include_str!("notebook_explicit_display_budget_failure.hs"),
+    )
+    .await;
+    assert_eq!(failed["status"], "rejected", "{failed}");
+    let displays: Vec<_> = failed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["operations"].as_array().unwrap())
+        .filter_map(|operation| operation.get("display"))
+        .collect();
+    assert_eq!(
+        displays.len(),
+        2,
+        "both publications survive the later failure"
+    );
+    assert_eq!(displays[1]["text"], "second");
+    let first = displays[0];
+    let prefix = first["text"].as_str().unwrap();
+    assert!(
+        prefix.len() < 5000,
+        "the prior console output consumes this page's budget"
+    );
+    let identity = explicit_display_identity(first);
+    let keys = first["expansions"].as_array().unwrap();
+    assert_eq!(keys.len(), 1, "the unrendered prefix remains addressable");
+    let key = keys[0][0].as_i64().unwrap();
+    tidepool_extract_cmd::reset_extract_spawn_count();
+    let expanded = policy.expand_display_boxed(identity, key).await.unwrap();
+    let suffix = explicit_display_output(&expanded)["text"].as_str().unwrap();
+    assert_eq!(format!("{prefix}{suffix}"), "v".repeat(5000));
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), 0);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
