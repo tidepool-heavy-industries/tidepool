@@ -98,7 +98,7 @@ struct DiskRecord<'a> {
 impl Serialize for DiskRecord<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let record = self.record;
-        let mut map = serializer.serialize_map(Some(17))?;
+        let mut map = serializer.serialize_map(Some(18))?;
         map.serialize_entry("tag", &record.tag)?;
         map.serialize_entry("version", &record.version)?;
         map.serialize_entry("endpoint", &ByteString(&record.endpoint))?;
@@ -118,6 +118,7 @@ impl Serialize for DiskRecord<'_> {
             "original_certification",
             &ByteString(&record.original_certification),
         )?;
+        map.serialize_entry("module_interface", &record.module_interface)?;
         map.serialize_entry("execution_source_sha256", &record.execution_source_sha256)?;
         map.end()
     }
@@ -181,7 +182,12 @@ impl ReadBudget {
         if let Some((len, evidence)) = self.evidence.get(&reference.sha256) {
             return (*len == reference.encoded_len).then(|| evidence.clone());
         }
-        let mut file = fs::File::open(evidence_path(root, &reference.sha256)).ok()?;
+        let mut file = fs::File::open(evidence_path(root, &reference.sha256))
+            .inspect_err(|_error| {
+                #[cfg(test)]
+                eprintln!("candidate record dependency proof open refused: {_error}");
+            })
+            .ok()?;
         if file.metadata().ok()?.len() != reference.encoded_len {
             return None;
         }
@@ -195,7 +201,12 @@ impl ReadBudget {
             return None;
         }
         let mut cursor = Cursor::new(bytes.as_slice());
-        let evidence: SharedEvidence = ciborium::de::from_reader(&mut cursor).ok()?;
+        let evidence: SharedEvidence = ciborium::de::from_reader(&mut cursor)
+            .inspect_err(|_error| {
+                #[cfg(test)]
+                eprintln!("candidate record dependency proof decode refused: {_error}");
+            })
+            .ok()?;
         if cursor.position() != reference.encoded_len {
             return None;
         }
@@ -215,7 +226,12 @@ pub(super) fn decode_record(
     budget: &mut ReadBudget,
 ) -> Option<Record> {
     let mut cursor = Cursor::new(payload);
-    let record: Record<EvidenceRef> = ciborium::de::from_reader(&mut cursor).ok()?;
+    let record: Record<EvidenceRef> = ciborium::de::from_reader(&mut cursor)
+        .inspect_err(|_error| {
+            #[cfg(test)]
+            eprintln!("candidate record body decode refused: {_error}");
+        })
+        .ok()?;
     if cursor.position() != payload.len() as u64
         || record.tag != "TPMCAN"
         || record.version != RECORD_VERSION
@@ -294,6 +310,24 @@ mod tests {
         assert_eq!(first.interface, record.interface);
         assert_eq!(first.package_imports, record.package_imports);
         assert_eq!(first.original_certification, record.original_certification);
+        assert!(record.module_interface.is_some());
+        assert_eq!(first.module_interface, record.module_interface);
+        assert_eq!(second.module_interface, record.module_interface);
+        assert!(first.module_interface_proof.is_none());
+        // A descriptor survives serialization, but durable proof still requires
+        // the canonical recovery owner to authenticate its certificate and Core.
+        let recovered = crate::recovery_artifacts::recover_module_interface(
+            root.path()
+                .join(RECORD_DIR)
+                .join(sha(b"endpoint"))
+                .as_path(),
+            first.module_interface.as_ref().unwrap(),
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        let original = record.module_interface_proof.as_ref().unwrap();
+        assert_eq!(recovered.certificate_bytes(), original.certificate_bytes());
+        assert_eq!(recovered.core_bytes(), original.core_bytes());
         assert_eq!(encode_record(&first), Some(payload));
     }
 

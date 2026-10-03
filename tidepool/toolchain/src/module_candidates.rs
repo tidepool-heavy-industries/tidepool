@@ -653,13 +653,23 @@ fn read_record(
 #[cfg(test)]
 fn read_record_path(path: &Path) -> Option<Record> {
     let mut file = fs::File::open(path).ok()?;
-    let header = read_header(&mut file)?;
+    let header = read_header(&mut file).or_else(|| {
+        eprintln!("candidate fixture header refused: {}", path.display());
+        None
+    })?;
     read_record(
         &mut file,
         &header,
         path.parent()?.parent()?,
         &mut shared_evidence::ReadBudget::default(),
     )
+    .or_else(|| {
+        eprintln!(
+            "candidate fixture record body or shared proof refused: {}",
+            path.display()
+        );
+        None
+    })
 }
 
 /// Conservative discovery filter for ordinary .hs/.lhs source owners. GHC
