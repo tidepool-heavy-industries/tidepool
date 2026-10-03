@@ -2,7 +2,7 @@
 
 -- Schema regressions start from a genuine producer-emitted exact context.
 -- They mutate retained evidence; this module never issues module certificates.
-module ExactScopeV8Test (exactScopeV8Checks) where
+module ExactScopeV8Test (exactScopeV8Checks, candidateCanonicalChecks) where
 
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
@@ -22,6 +22,7 @@ import System.FilePath (takeDirectory)
 import System.IO (hClose, openBinaryTempFile)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.ExactScope
+import Tidepool.ModuleCandidates
 
 exactScopeV8Checks :: FilePath -> IO ()
 exactScopeV8Checks manifest = do
@@ -128,6 +129,66 @@ exactScopeV8Checks manifest = do
   where
     -- A fixed altered seal for negative wire cases.
     differentSHA = TString (T.replicate 64 "f")
+
+-- The worker offer and exact context are both emitted by their real Rust owners.
+-- This checks durable promotion without minting or rewriting a certificate.
+candidateCanonicalChecks :: FilePath -> FilePath -> IO ()
+candidateCanonicalChecks manifest candidateManifest = do
+  scope <- readExactScope manifest >>= either fail pure
+  bytes <- BS.readFile candidateManifest
+  fields <- decode bytes >>= row 7
+  candidates <- readModuleCandidatesWithGraphs (scopeExecutionGraphs scope) candidateManifest
+    >>= either fail pure
+  when (null candidates) (fail "canonical candidate fixture must offer a native owner")
+  let keys = Set.fromList [(candidateUnit candidate,candidateModule candidate) | candidate <- candidates]
+      candidateInterfaces = [(ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
+        (candidateInterface candidate) (candidateInterfaceSha256 candidate)
+        (candidateInterfaceRequirements candidate),candidatePackageImports candidate,
+        candidatePackageImportsSha256 candidate) | candidate <- candidates]
+      selected = scope {scopeInterfaces = candidateInterfaces ++
+        [(iface,path,seal) | (iface,path,seal) <- scopeInterfaces scope
+          , (exactUnit iface,exactModule iface) `Set.notMember` keys]}
+      refusePromotion candidate = validateCandidateCanonicalInterfaceProof (scopeProducerSha256 selected) (scopeInterfaces selected) candidate >>= \result ->
+        case result of
+          Left _ -> pure ()
+          Right _ -> fail "candidate promotion admitted changed source or interface evidence"
+  forM_ candidates $ \candidate -> do
+    proof <- validateCandidateCanonicalInterfaceProof (scopeProducerSha256 selected) (scopeInterfaces selected) candidate >>= either fail pure
+    let descriptor = candidateModuleInterface candidate
+    unless (Map.keys (canonicalRequirements proof) == candidateInterfaceRequirements candidate
+        && canonicalCertificatePath proof == candidateCertificatePath descriptor
+        && canonicalCertificateSha256 proof == candidateCertificateSha256 descriptor
+        && ((\core -> (canonicalCorePath core,canonicalCoreSha256 core)) <$> canonicalCoreArtifact proof)
+          == Just (candidateCoreDescriptor descriptor))
+      (fail "candidate promotion changed its canonical descriptor or dependency map")
+    refusePromotion candidate {candidateSourceSha256 = alterSeal (candidateSourceSha256 candidate)}
+    refusePromotion candidate {candidateProducerSha256 = alterSeal (candidateProducerSha256 candidate)}
+    refusePromotion candidate {candidateInterfaceSha256 = alterSeal (candidateInterfaceSha256 candidate)}
+    refusePromotion candidate {candidatePackageImportsSha256 = alterSeal (candidatePackageImportsSha256 candidate)}
+    refusePromotion candidate {candidateInterfaceRequirements =
+      [(candidateUnit candidate,"Missing.Canonical.Dependency")]}
+  let refuseWire term = withTemporary (takeDirectory candidateManifest) "invalid-candidate.cbor" $ \path -> do
+        BS.writeFile path (encode term)
+        readModuleCandidatesWithGraphs (scopeExecutionGraphs scope) path >>= \result -> case result of
+          Left _ -> pure ()
+          Right _ -> fail "candidate decoder admitted invalid canonical framing"
+  forM_ ["2","4","6","7","8","9"] $ \version ->
+    refuseWire (TList (replace 1 (TString version) fields))
+  refuseWire (TList (take 6 fields))
+  candidateRows <- values (fields !! 4)
+  firstRow <- row 16 (head candidateRows)
+  moduleRole <- row 5 (firstRow !! 15)
+  let changedRow value = TList (replace 4 (TList (value : tail candidateRows)) fields)
+  refuseWire (changedRow (TList (take 14 firstRow)))
+  forM_ [TNull,TList [TString "join"],TList [TString "value"]
+      ,TList (replace 3 TNull moduleRole),TList (replace 4 TNull moduleRole)] $ \invalid ->
+    refuseWire (changedRow (TList (replace 15 invalid firstRow)))
+  unchanged <- BS.readFile candidateManifest
+  unless (unchanged == bytes) (fail "candidate checks changed the producer offer")
+  putStrLn "canonical candidates: genuine worker10 offer, exact promotion and legacy refusal checks passed"
+  where
+    alterSeal [] = error "genuine candidate fixture has no seal"
+    alterSeal (first:rest) = (if first == '0' then '1' else '0') : rest
 
 refuse :: FilePath -> String -> Term -> IO ()
 refuse manifest expected term = do

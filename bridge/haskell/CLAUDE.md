@@ -85,6 +85,12 @@ This is a strict matched worker/frontend migration. Earlier exact-scope versions
 2, 4, 6 and 7 are rejected. Deploy both producers and consumers together and
 regenerate fixtures through their owning producers.
 
+Candidate offers use strict `TPMCAN` version 10 with seven fields and sixteen-field
+module rows. Each native row retains its exact canonical requirements and sealed
+module certificate/Core descriptor. Offers remain cache suggestions: admission
+checks them against the request's independently admitted compiler producer and
+complete selected interface closure before promoting their durable proof.
+
 ## Checked inspection inputs
 
 Resident lookup captures reachable checked value interfaces with its immutable

@@ -8,6 +8,7 @@ module Tidepool.ExactScope
   , CanonicalInterfaceAdmission(..), scopeCanonicalInterfaces, scopeDurableInterfaces
   , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256
   , admittedInterfaceRequirements, admittedInterfaceCore
+  , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
   , canonicalRequirements
@@ -47,7 +48,9 @@ import Tidepool.CheckedCell
   ( CheckedSignature(..), RequestTypeSignatures, RequestHelperRecipe(..), decodeCheckedSignature, decodeRequestTypeSignatures )
 import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), ProjectedGroup(..), ProjectedGroupBody(..), GlobalDecl(..) )
-import Tidepool.ModuleCandidates (CandidateGroup(..), CandidateGlobal(..))
+import Tidepool.ModuleCandidates
+  ( CandidateGroup(..), CandidateGlobal(..), ModuleCandidate(..)
+  , candidateCertificatePath, candidateCertificateSha256, candidateCoreDescriptor )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
   , ExecutionSourceRef(..), ExecutionSourceNode(..), decodeExecutionSourceGraph, decodeExecutionSourceReferences
@@ -494,7 +497,7 @@ validateInterfaceEvidence
   :: ExactScope -> [((String,String),ParsedInterfaceEvidence)]
   -> IO (Map.Map (String,String) ExactInterfaceEvidence)
 validateInterfaceEvidence scope offered = do
-  proofs <- validateCanonicalInterfaces scope
+  proofs <- validateCanonicalInterfaces (scopeProducerSha256 scope) (scopeInterfaces scope)
     [(key,descriptor) | (key,ParsedModuleEvidence descriptor) <- offered]
   let interfaces = Map.fromList
         [((exactUnit iface,exactModule iface),(iface,packages,packageSha))
@@ -523,13 +526,63 @@ validateInterfaceEvidence scope offered = do
   pure evidence
   where firstOfThree (value,_,_) = value
 
+-- Candidate descriptors are optional cache suggestions until this same owner
+-- validates them against the complete selected interface closure.
+validateCanonicalInterfaceProof
+  :: ExactScope -> (String,String) -> FilePath -> String -> Maybe (FilePath,String)
+  -> IO (Either String CanonicalInterfaceProof)
+validateCanonicalInterfaceProof scope =
+  validateCanonicalProof (scopeProducerSha256 scope) (scopeInterfaces scope)
+
+validateCanonicalProof
+  :: String -> [(ExactIfaceArtifact,FilePath,String)] -> (String,String)
+  -> FilePath -> String -> Maybe (FilePath,String)
+  -> IO (Either String CanonicalInterfaceProof)
+validateCanonicalProof producer interfaces key certificatePath certificateSha core = do
+  result <- try (do
+    unless (isCanonicalDigest producer && isAbsolute certificatePath && isCanonicalDigest certificateSha
+        && maybe True (\(path,seal) -> isAbsolute path && isCanonicalDigest seal) core)
+      (fail "invalid canonical interface descriptor")
+    proofs <- validateCanonicalInterfaces producer interfaces [(key, CanonicalInterfaceDescriptor
+      certificatePath certificateSha (uncurry CanonicalCoreArtifact <$> core))]
+    maybe (fail "canonical proof has no selected owner") pure (Map.lookup key proofs))
+    :: IO (Either IOException CanonicalInterfaceProof)
+  pure (either (Left . show) Right result)
+
+-- The expected producer is admitted request configuration, never the offered
+-- producer field alone. Missing closure owners decline this cache suggestion.
+validateCandidateCanonicalInterfaceProof
+  :: String -> [(ExactIfaceArtifact,FilePath,String)] -> ModuleCandidate
+  -> IO (Either String CanonicalInterfaceProof)
+validateCandidateCanonicalInterfaceProof producer interfaces candidate = do
+  let descriptor = candidateModuleInterface candidate
+      key = (candidateUnit candidate,candidateModule candidate)
+  case [(iface,packageSha) | (iface,_,packageSha) <- interfaces
+      , (exactUnit iface,exactModule iface) == key] of
+    [(iface,packageSha)]
+      | exactSha256 iface == candidateInterfaceSha256 candidate
+      , packageSha == candidatePackageImportsSha256 candidate
+      , Set.fromList (exactRequirements iface) == Set.fromList (candidateInterfaceRequirements candidate) -> do
+          result <- validateCanonicalProof producer interfaces key (candidateCertificatePath descriptor)
+            (candidateCertificateSha256 descriptor) (Just (candidateCoreDescriptor descriptor))
+          pure $ result >>= \proof -> do
+            unless (candidateProducerSha256 candidate == producer
+                && canonicalSourceSha256 proof == candidateSourceSha256 candidate
+                && Map.keys (canonicalRequirements proof) == candidateInterfaceRequirements candidate)
+              (Left "candidate canonical proof differs from source, producer or requirements")
+            pure proof
+    _ -> pure (Left "candidate canonical proof lacks its selected exact interface")
+
 validateCanonicalInterfaces
-  :: ExactScope -> [((String,String),CanonicalInterfaceDescriptor)]
+  :: String -> [(ExactIfaceArtifact,FilePath,String)]
+  -> [((String,String),CanonicalInterfaceDescriptor)]
   -> IO (Map.Map (String,String) CanonicalInterfaceProof)
-validateCanonicalInterfaces scope descriptors = do
+validateCanonicalInterfaces producer selectedInterfaces descriptors = do
   let interfaces = Map.fromList
         [((exactUnit iface,exactModule iface),(iface,packages,packageSha))
-        | (iface,packages,packageSha) <- scopeInterfaces scope]
+        | (iface,packages,packageSha) <- selectedInterfaces]
+  unless (Map.size interfaces == length selectedInterfaces)
+    (fail "canonical proof has conflicting selected interface owners")
   proofs <- forM descriptors $ \(key,descriptor) -> do
     (iface,packages,packageSha) <- maybe (fail "canonical proof has no exact interface") pure
       (Map.lookup key interfaces)
@@ -543,7 +596,7 @@ validateCanonicalInterfaces scope descriptors = do
         | otherwise -> fail "canonical module certificate has trailing bytes"
     unless (toStrictByteString (encodeCanonicalModuleCertificate certificate) == bytes)
       (fail "noncanonical module certificate encoding")
-    unless (certificateProducer certificate == scopeProducerSha256 scope
+    unless (certificateProducer certificate == producer
         && certificateOwner certificate == key
         && certificateInterface certificate == exactSha256 iface
         && certificatePackages certificate == packageSha
@@ -615,9 +668,13 @@ encodeCanonicalModuleCertificate certificate = E.encodeListLen 12
 canonicalDigest :: Decoder s String
 canonicalDigest = do
   value <- digestField
-  unless (value /= replicate 64 '0' && all (`elem` ("0123456789abcdef" :: String)) value)
+  unless (isCanonicalDigest value)
     (fail "invalid canonical digest")
   pure value
+
+isCanonicalDigest :: String -> Bool
+isCanonicalDigest value = length value == 64 && value /= replicate 64 '0'
+  && all (`elem` ("0123456789abcdef" :: String)) value
 
 -- Recheck the entire producer-owned closure in the consuming transaction;
 -- no source file is a substitute for an admitted original interface.
