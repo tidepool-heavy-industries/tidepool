@@ -89,7 +89,7 @@ fn type_defs() -> Vec<TypeDef> {
         sum(
             "NameScope",
             vec![variant("CurrentScope", vec![]), variant("PublicModule", vec![HsType::Text])],
-            &["The executing lexical scope, or one explicitly named public module."],
+            &["The executing lexical scope, or one explicitly named public module. Generated session modules are private."],
         ),
         closed_sum(
             "NameNamespace",
